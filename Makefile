@@ -375,6 +375,9 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
+	# M134 (ADR 0102): the tenant-label VWC is created at RUNTIME (not in config/), so `kustomize delete`
+	# won't remove it — delete it explicitly so a dev cluster doesn't accumulate an orphaned fail-closed webhook.
+	-"$(KUBECTL)" delete validatingwebhookconfiguration tenant-label-validator --ignore-not-found
 
 ##@ Helm chart (deploy/helm/agent-engine — GENERATED from config/, m12.2)
 

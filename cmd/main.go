@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -32,10 +33,15 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	authnv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -135,9 +141,15 @@ const envValueTrue = "true"
 // artifact contract — the serving-cert Secret, the webhook Service (the cert SAN + the
 // VWC clientConfig target), and the default local cert dir the controller-runtime webhook
 // server reads (certwatcher hot-reload). These are GA-frozen wire contract (ADR 0102 §Consequences).
+//
+// Both the Secret and Service names are the config/default namePrefix (`agent-engine-`) DEPLOYED forms:
+// their manifests are named `webhook-server-cert` / `webhook-service` (pre-prefix) so kustomize renders
+// them to exactly these constants, keeping the shipped resource, the runtime VWC clientConfig, and the
+// cert SAN in agreement (M134: the fresh-boot proof caught the Service constant left un-prefixed while
+// its manifest gets prefixed — an un-shipped contract mismatch, corrected before first ship).
 const (
 	webhookCertSecretName = "agent-engine-webhook-server-cert"
-	webhookServiceName    = "webhook-service"
+	webhookServiceName    = "agent-engine-webhook-service"
 	defaultWebhookCertDir = "/tmp/k8s-webhook-server/serving-certs"
 )
 
@@ -160,6 +172,45 @@ func managerNamespace() string {
 		}
 	}
 	return "agent-engine-system"
+}
+
+// selfControllerUsername asks the API server for the manager's OWN identity via SelfSubjectReview
+// (authentication.k8s.io/v1) — the exact username the API server stamps into admission requests. This
+// derives the tenant-label webhook's allowed principal BY CONSTRUCTION (M134, ADR 0102), removing the
+// namePrefix-fragile TENANT_WEBHOOK_CONTROLLER_SA env literal as a wedge source. Uses a direct clientset
+// (the manager cache isn't started yet). Granted to all authenticated principals via system:basic-user.
+func selfControllerUsername(ctx context.Context, cfg *rest.Config) (string, error) {
+	cs, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return "", fmt.Errorf("build clientset for SelfSubjectReview: %w", err)
+	}
+	ssr, err := cs.AuthenticationV1().SelfSubjectReviews().Create(
+		ctx, &authnv1.SelfSubjectReview{}, metav1.CreateOptions{})
+	if err != nil {
+		return "", fmt.Errorf("SelfSubjectReview: %w", err)
+	}
+	u := strings.TrimSpace(ssr.Status.UserInfo.Username)
+	if u == "" {
+		return "", errors.New("SelfSubjectReview returned an empty username")
+	}
+	return u, nil
+}
+
+// runCleanupTenantVWC deletes the manager-owned tenant-label VWC and returns nil on success OR NotFound
+// (M134, ADR 0102 — the Helm pre-delete hook). The VWC is created at runtime, so Helm can't GC it on
+// uninstall; without this a fail-closed webhook with a dead backend would linger cluster-wide.
+func runCleanupTenantVWC(ctx context.Context) error {
+	cs, err := kubernetes.NewForConfig(ctrl.GetConfigOrDie())
+	if err != nil {
+		return fmt.Errorf("build clientset for VWC cleanup: %w", err)
+	}
+	name := enginewebhook.TenantLabelVWCName
+	err = cs.AdmissionregistrationV1().ValidatingWebhookConfigurations().Delete(ctx, name, metav1.DeleteOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete ValidatingWebhookConfiguration %q: %w", name, err)
+	}
+	setupLog.Info("tenant-label VWC cleanup complete (deleted or already absent)", "vwc", name)
+	return nil
 }
 
 // statelayerProxylessWarning returns a startup warning (and true) when the controller is proxy-less
@@ -238,6 +289,13 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	// cleanup-tenant-vwc (M134, ADR 0102): one-shot mode for the Helm pre-delete hook — delete the
+	// manager-owned tenant-label VWC and exit, so `helm uninstall` never orphans a fail-closed webhook
+	// (the VWC is created at runtime, not a Helm resource, so Helm can't GC it). Idempotent (NotFound
+	// is success); runs whether or not the webhook was ever enabled.
+	var cleanupTenantVWC bool
+	flag.BoolVar(&cleanupTenantVWC, "cleanup-tenant-vwc", false,
+		"Delete the tenant-label ValidatingWebhookConfiguration and exit (Helm pre-delete hook).")
 	// Production-safe logging by default (OTH-5): Development=true uses a console encoder +
 	// DPanic-level stacktraces meant for local dev, not the prod manager. Default to structured
 	// (JSON) production logging; an operator can still opt into dev logging via --zap-devel.
@@ -248,6 +306,15 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// M134 pre-delete hook: run the one-shot VWC cleanup BEFORE any manager wiring, then exit.
+	if cleanupTenantVWC {
+		if err := runCleanupTenantVWC(context.Background()); err != nil {
+			setupLog.Error(err, "cleanup-tenant-vwc failed")
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -682,15 +749,32 @@ func main() {
 	// needs webhook serving certs + a ValidatingWebhookConfiguration (config/webhook) — a user-gated deploy
 	// step the base install does not yet wire (no cert-manager). When enabled, only the Tenant controller's
 	// SA (TENANT_WEBHOOK_CONTROLLER_SA) may set/change the `agents.ctxmesh.ai/tenant` namespace label.
+	//
+	// signalCtx is created ONCE here (ctrl.SetupSignalHandler panics if called twice) so the webhook
+	// cert-ready goroutine below can abort on shutdown; mgr.Start blocks on the same context.
+	signalCtx := ctrl.SetupSignalHandler()
 	if os.Getenv("ENABLE_TENANT_LABEL_WEBHOOK") == envValueTrue {
-		// audit P2-2: an empty controller SA would deny EVERYONE — including the Tenant controller's own
-		// label stamping — wedging every Tenant reconcile once the VWC is applied. Refuse to start rather
-		// than ship a self-inflicted lockout.
+		// The ONLY principal the webhook allows to set/change the tenant label. Precedence (M134, ADR 0102):
+		//   1. TENANT_WEBHOOK_CONTROLLER_SA (verbatim) — the envtest/integration + exotic-identity override.
+		//   2. Self-derive via SelfSubjectReview: ask the API server for the manager's OWN username — the
+		//      EXACT string it stamps into admission.Request.UserInfo.Username — so the allow-check is an
+		//      invariant BY CONSTRUCTION (the allowed principal is definitionally the manager), not a
+		//      namePrefix-fragile env literal that can silently drift from the real SA and self-wedge every
+		//      install. SelfSubjectReview (authentication.k8s.io/v1, GA 1.28) is granted to all authenticated
+		//      principals via system:basic-user — no RBAC add.
+		// audit P2-2: an empty/unknown SA would deny EVERYONE — including the controller's own label stamping
+		// — wedging every Tenant reconcile once the VWC is applied; so refuse to start rather than self-lock.
 		controllerSA := strings.TrimSpace(os.Getenv("TENANT_WEBHOOK_CONTROLLER_SA"))
 		if controllerSA == "" {
-			setupLog.Error(errors.New("TENANT_WEBHOOK_CONTROLLER_SA is required when the webhook is enabled"),
-				"refusing to enable the tenant-label webhook without the controller SA (would deny the controller itself)")
-			os.Exit(1)
+			derived, derr := selfControllerUsername(signalCtx, mgr.GetConfig())
+			if derr != nil {
+				setupLog.Error(derr, "could not self-derive the controller SA for the tenant-label webhook "+
+					"(set TENANT_WEBHOOK_CONTROLLER_SA to override) — refusing to start (would deny the controller itself)")
+				os.Exit(1)
+			}
+			controllerSA = derived
+			setupLog.Info("tenant-label webhook: self-derived the controller principal via SelfSubjectReview",
+				"user", controllerSA)
 		}
 
 		// Platform PKI (M128/Gate E, ADR 0102): the in-process cert-controller generates + rotates
@@ -714,7 +798,33 @@ func main() {
 			os.Exit(1)
 		}
 
-		enginewebhook.SetupTenantLabelWebhook(mgr, controllerSA)
+		// M134 first-boot fix (Fable-reviewed, ADR 0102): DEFER registering the webhook handler until the
+		// serving cert is on disk. SetupTenantLabelWebhook calls mgr.GetWebhookServer(), which LAZILY adds
+		// + starts the webhook server; controller-runtime starts the Webhooks runnable group FIRST (before
+		// the caches where the cert-rotator runs), and the server's certwatcher fails HARD on a missing
+		// tls.crt → mgr.Start errors → the manager exits → CrashLoop forever (the fresh-boot wedge caught
+		// live on the M134 throwaway cluster). Gating the FIRST GetWebhookServer() call on certReady defers
+		// the server start until the projected Secret's cert exists. A plain goroutine (NOT mgr.Add) because
+		// registration must run on EVERY replica (each backs the webhook Service); a RunnableFunc would land
+		// in the leader-election group and never register on non-leaders.
+		go func() {
+			select {
+			case <-signalCtx.Done():
+				return
+			case <-certReady:
+			}
+			enginewebhook.SetupTenantLabelWebhook(mgr, controllerSA)
+			setupLog.Info("tenant-label webhook handler registered (cert ready — server starting)")
+		}()
+
+		// Keep this replica OUT of the webhook Service endpoints until it is actually serving TLS, so the
+		// API server never hits connection-refused → a spurious fail-closed denial on a tenant-label write
+		// during a rollout. Uses the LOCAL webhookServer var, never mgr.GetWebhookServer() (which would
+		// trigger the lazy pre-Start add and resurrect the crash).
+		if rerr := mgr.AddReadyzCheck("webhook-server", webhookServer.StartedChecker()); rerr != nil {
+			setupLog.Error(rerr, "unable to add the webhook-server readyz check")
+			os.Exit(1)
+		}
 
 		// The manager OWNS the tenant-label VWC (ADR 0102 §2): create it only AFTER the cert is ready,
 		// so there is no uncertified-VWC window and the namespace/exemption are correct for ANY install
@@ -749,7 +859,7 @@ func main() {
 	}
 
 	setupLog.Info("Starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(signalCtx); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
