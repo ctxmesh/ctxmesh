@@ -135,9 +135,15 @@ const envValueTrue = "true"
 // artifact contract — the serving-cert Secret, the webhook Service (the cert SAN + the
 // VWC clientConfig target), and the default local cert dir the controller-runtime webhook
 // server reads (certwatcher hot-reload). These are GA-frozen wire contract (ADR 0102 §Consequences).
+//
+// Both the Secret and Service names are the config/default namePrefix (`agent-engine-`) DEPLOYED forms:
+// their manifests are named `webhook-server-cert` / `webhook-service` (pre-prefix) so kustomize renders
+// them to exactly these constants, keeping the shipped resource, the runtime VWC clientConfig, and the
+// cert SAN in agreement (M134: the fresh-boot proof caught the Service constant left un-prefixed while
+// its manifest gets prefixed — an un-shipped contract mismatch, corrected before first ship).
 const (
 	webhookCertSecretName = "agent-engine-webhook-server-cert"
-	webhookServiceName    = "webhook-service"
+	webhookServiceName    = "agent-engine-webhook-service"
 	defaultWebhookCertDir = "/tmp/k8s-webhook-server/serving-certs"
 )
 
@@ -682,6 +688,10 @@ func main() {
 	// needs webhook serving certs + a ValidatingWebhookConfiguration (config/webhook) — a user-gated deploy
 	// step the base install does not yet wire (no cert-manager). When enabled, only the Tenant controller's
 	// SA (TENANT_WEBHOOK_CONTROLLER_SA) may set/change the `agents.ctxmesh.ai/tenant` namespace label.
+	//
+	// signalCtx is created ONCE here (ctrl.SetupSignalHandler panics if called twice) so the webhook
+	// cert-ready goroutine below can abort on shutdown; mgr.Start blocks on the same context.
+	signalCtx := ctrl.SetupSignalHandler()
 	if os.Getenv("ENABLE_TENANT_LABEL_WEBHOOK") == envValueTrue {
 		// audit P2-2: an empty controller SA would deny EVERYONE — including the Tenant controller's own
 		// label stamping — wedging every Tenant reconcile once the VWC is applied. Refuse to start rather
@@ -714,7 +724,33 @@ func main() {
 			os.Exit(1)
 		}
 
-		enginewebhook.SetupTenantLabelWebhook(mgr, controllerSA)
+		// M134 first-boot fix (Fable-reviewed, ADR 0102): DEFER registering the webhook handler until the
+		// serving cert is on disk. SetupTenantLabelWebhook calls mgr.GetWebhookServer(), which LAZILY adds
+		// + starts the webhook server; controller-runtime starts the Webhooks runnable group FIRST (before
+		// the caches where the cert-rotator runs), and the server's certwatcher fails HARD on a missing
+		// tls.crt → mgr.Start errors → the manager exits → CrashLoop forever (the fresh-boot wedge caught
+		// live on the M134 throwaway cluster). Gating the FIRST GetWebhookServer() call on certReady defers
+		// the server start until the projected Secret's cert exists. A plain goroutine (NOT mgr.Add) because
+		// registration must run on EVERY replica (each backs the webhook Service); a RunnableFunc would land
+		// in the leader-election group and never register on non-leaders.
+		go func() {
+			select {
+			case <-signalCtx.Done():
+				return
+			case <-certReady:
+			}
+			enginewebhook.SetupTenantLabelWebhook(mgr, controllerSA)
+			setupLog.Info("tenant-label webhook handler registered (cert ready — server starting)")
+		}()
+
+		// Keep this replica OUT of the webhook Service endpoints until it is actually serving TLS, so the
+		// API server never hits connection-refused → a spurious fail-closed denial on a tenant-label write
+		// during a rollout. Uses the LOCAL webhookServer var, never mgr.GetWebhookServer() (which would
+		// trigger the lazy pre-Start add and resurrect the crash).
+		if rerr := mgr.AddReadyzCheck("webhook-server", webhookServer.StartedChecker()); rerr != nil {
+			setupLog.Error(rerr, "unable to add the webhook-server readyz check")
+			os.Exit(1)
+		}
 
 		// The manager OWNS the tenant-label VWC (ADR 0102 §2): create it only AFTER the cert is ready,
 		// so there is no uncertified-VWC window and the namespace/exemption are correct for ANY install
@@ -749,7 +785,7 @@ func main() {
 	}
 
 	setupLog.Info("Starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(signalCtx); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}

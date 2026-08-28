@@ -34,10 +34,14 @@ resources:
 # until the launcher is wired to it (migration phase 1); refuses requests until the
 # capability keypair is provisioned. No-drift (capability key via optional Secret).
 - ../statelayer-proxy
-# [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
-# crd/kustomization.yaml
-#- ../webhook
-# [CERTMANAGER] To enable cert-manager, uncomment all sections with 'CERTMANAGER'. 'WEBHOOK' components are required.
+# The tenant-label ValidatingWebhook's Service (M128/Gate E, ADR 0102; ACTIVATED in M134). Its target
+# is the manager's in-process webhook TLS listener (:9443). Named `webhook-service` pre-prefix so
+# kustomize renders it to `agent-engine-webhook-service` = the cmd/main.go webhookServiceName constant
+# (the VWC clientConfig target + the cert SAN). Shipped unconditionally; inert until the webhook is
+# enabled (ENABLE_TENANT_LABEL_WEBHOOK). NO cert-manager — the manager runs its own in-process rotator.
+- ../webhook
+# [CERTMANAGER] cert-manager is NOT used — the manager's in-process cert-controller (internal/pki,
+# open-policy-agent/cert-controller) generates + rotates the CA + serving cert (ADR 0102 §1).
 #- ../certmanager
 # [PROMETHEUS] To enable prometheus monitor, uncomment all sections with 'PROMETHEUS'.
 #- ../prometheus
