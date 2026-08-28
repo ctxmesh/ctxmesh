@@ -282,6 +282,20 @@ DEV_DATA_PLANE_ENV_HELM = (
     "          value: {{ .Values.devDataPlane.enabled | quote }}"
 )
 
+# ENABLE_TENANT_LABEL_WEBHOOK (M134, ADR 0102) — DEFAULT-ON tenant-label fail-closed webhook. config/manager
+# hardcodes "true" (== the kustomize default, so the DEFAULT render matches → no drift); the chart templates
+# it from security.tenantLabelWebhook.enabled so an operator can opt OUT (with the values.yaml ack). ternary
+# (NOT Sprig `default`) because `default` treats the boolean false as empty and would flip an explicit false
+# back to true. The manager self-derives the allowed controller principal (SelfSubjectReview), so there is
+# no companion TENANT_WEBHOOK_CONTROLLER_SA to template.
+ENABLE_TENANT_LABEL_WEBHOOK_ENV_KUSTOMIZE = (
+    '        - name: ENABLE_TENANT_LABEL_WEBHOOK\n' '          value: "true"'
+)
+ENABLE_TENANT_LABEL_WEBHOOK_ENV_HELM = (
+    "        - name: ENABLE_TENANT_LABEL_WEBHOOK\n"
+    '          value: {{ ternary "true" "false" .Values.security.tenantLabelWebhook.enabled | quote }}'
+)
+
 # Resources whose `control-plane:` label marks them as the bundled DEV data
 # plane (in-cluster Valkey/MinIO). Production supplies its own — PRD §23 — so
 # these are gated behind .Values.devDataPlane.enabled.
@@ -446,6 +460,7 @@ def substitute(doc: str) -> str:
     # OPS-2 — the dev-data-plane gate -> Helm value. Default "true" renders == kustomize (no drift);
     # profile=production sets devDataPlane.enabled=false so the controller injects no dev creds.
     doc = doc.replace(DEV_DATA_PLANE_ENV_KUSTOMIZE, DEV_DATA_PLANE_ENV_HELM)
+    doc = doc.replace(ENABLE_TENANT_LABEL_WEBHOOK_ENV_KUSTOMIZE, ENABLE_TENANT_LABEL_WEBHOOK_ENV_HELM)
     # The Namespace object's own name + RoleBinding/ClusterRoleBinding subject
     # namespaces use `name:`/`namespace:` -> also parameterize the Namespace name.
     return doc

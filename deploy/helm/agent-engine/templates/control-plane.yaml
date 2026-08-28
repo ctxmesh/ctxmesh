@@ -877,6 +877,15 @@ metadata:
   namespace: {{ .Values.namespace }}
 ---
 apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    app.kubernetes.io/component: webhook-cert
+    app.kubernetes.io/name: agent-engine
+  name: agent-engine-webhook-server-cert
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: v1
 kind: Service
 metadata:
   labels:
@@ -953,6 +962,24 @@ spec:
     app.kubernetes.io/name: agent-engine
     control-plane: token-service
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agent-engine
+    control-plane: controller-manager
+  name: agent-engine-webhook-service
+  namespace: {{ .Values.namespace }}
+spec:
+  ports:
+  - port: 443
+    protocol: TCP
+    targetPort: webhook
+  selector:
+    app.kubernetes.io/name: agent-engine
+    control-plane: controller-manager
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -1014,6 +1041,8 @@ spec:
           value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default (printf "%s://agent-engine-token-service.%s.svc:8443" (ternary "https" "http" .Values.tokenService.tls.required) .Values.namespace) }}
         - name: DEV_DATA_PLANE
           value: {{ .Values.devDataPlane.enabled | quote }}
+        - name: ENABLE_TENANT_LABEL_WEBHOOK
+          value: {{ ternary "true" "false" .Values.security.tenantLabelWebhook.enabled | quote }}
         envFrom:
         - secretRef:
             name: bff-adapters
@@ -1056,6 +1085,7 @@ spec:
         volumeMounts:
         - mountPath: /tmp/k8s-webhook-server/serving-certs
           name: webhook-certs
+          readOnly: true
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -1063,8 +1093,9 @@ spec:
       serviceAccountName: agent-engine-controller-manager
       terminationGracePeriodSeconds: 10
       volumes:
-      - emptyDir: {}
-        name: webhook-certs
+      - name: webhook-certs
+        secret:
+          secretName: agent-engine-webhook-server-cert
 ---
 apiVersion: apps/v1
 kind: Deployment

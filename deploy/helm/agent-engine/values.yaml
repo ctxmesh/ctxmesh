@@ -18,16 +18,21 @@ profile: ""
 # (templates/ha-profile-guards.yaml) require an EXPLICIT operator choice so a
 # reduced/deferred security posture can never ship SILENTLY.
 security:
-  # Tenant-label admission enforcement. The tenant-label ValidatingWebhook (which
-  # forbids a non-controller principal from repointing a namespace's tenant label — a
-  # cross-tenant boundary move) needs webhook-serving-cert infra that ships in Gate E
-  # (M128, ADR 0096). Until then a production install must EXPLICITLY acknowledge that
-  # admission enforcement is off by setting this to the exact string
-  # "unenforced-UNSAFE-acknowledged". Compensating control: repointing the label
-  # requires namespace-UPDATE RBAC, which no tenant principal holds in a sane tenancy
-  # model — the webhook is defence-in-depth against RBAC misconfiguration. Empty here
-  # (dev) → the production guard is dormant; the shipped values-production.yaml sets
-  # the acknowledgment so the reduced posture is visible in the operator's own diff.
+  # Tenant-label admission enforcement (M134, ADR 0102) — DEFAULT-ON. The tenant-label
+  # ValidatingWebhook forbids a non-controller principal from set/change/remove-ing a
+  # namespace's `agents.ctxmesh.ai/tenant` label (a cross-tenant boundary move). It boots
+  # with an in-process cert-controller (NO cert-manager), is fail-closed but tightly scoped
+  # (matchConditions → only tenant-label writes; system + install namespaces exempt by the
+  # immutable name label), and was proven no-wedge FRESH on a cluster (M134: bootstrap +
+  # restart + cert-kill + uninstall). The manager SELF-DERIVES the allowed controller
+  # principal via SelfSubjectReview — there is no SA string to configure or mis-wire.
+  tenantLabelWebhook:
+    enabled: true
+  # OPT-OUT ACK. To run WITHOUT the webhook (tenantLabelWebhook.enabled=false), a
+  # `profile: production` install must ALSO set this to the exact string
+  # "unenforced-UNSAFE-acknowledged", so a reduced posture (relying only on namespace-write
+  # RBAC — defence-in-depth) can never ship SILENTLY. Ignored when the webhook is enabled
+  # (the default) and under the dev profile.
   tenantLabelEnforcement: ""
 
 # Namespace the platform installs into. MUST match the namespace baked into
