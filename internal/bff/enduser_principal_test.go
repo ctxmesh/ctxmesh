@@ -28,7 +28,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ctxmesh/agent-engine/internal/controlplane/enduseragent"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
+	"github.com/ctxmesh/agent-engine/internal/credresolve"
 	"github.com/ctxmesh/agent-engine/internal/enduseroidc"
 	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
@@ -142,4 +144,66 @@ func TestMintRunCapability_EndUserRequiresHMACKey(t *testing.T) {
 	tok, ok = s.mintRunCapability("oidc:https://i.example.com#alice", "ns", "agent", "a:ns/agent", "run-3")
 	assert.True(t, ok, "end-user capability mints once a grant HMAC key is set")
 	assert.NotEmpty(t, tok)
+}
+
+func TestHandleExtAuth_EndUser(t *testing.T) {
+	prev := grantHMACKey.Load()
+	t.Cleanup(func() {
+		if prev != nil {
+			setGrantHMACKey(*prev)
+		} else {
+			grantHMACKey.Store(nil)
+		}
+	})
+	setGrantHMACKey([]byte("cluster-key"))
+
+	pub, priv, err := runcap.GenerateKeyPair()
+	require.NoError(t, err)
+	ctx := context.Background()
+	st := namespacetenant.NewMemStore()
+	require.NoError(t, st.SetMembers(ctx, "t1", []string{"ns1"}))
+	require.NoError(t, st.SetEndUserIdentity(ctx, "t1", namespacetenant.EndUserIdentity{
+		Enabled: true, Issuer: "https://dex-eu.example.com", ClientID: "cid",
+	}))
+
+	// The agent must be EXPOSED (spec.endUserAccess → a mirror row, ADR 0107 two-key). Expose "chatbot".
+	agentStore := enduseragent.NewMemStore()
+	require.NoError(t, agentStore.Set(ctx, enduseragent.ExposedAgent{Namespace: "ns1", Agent: "chatbot", Endpoint: "u"}))
+
+	// No callerClients on the Server — an end-user request must NOT build a K8s client (structural
+	// separation). If it fell through to the K8s path it would panic; a passing test proves it didn't.
+	newServer := func() *Server {
+		return &Server{
+			capabilitySigner:     runcap.NewSigner(priv, "test-plane", nil),
+			namespaceTenantStore: st,
+			endUserAgentStore:    agentStore,
+			endUserVerifier:      fakeEndUserVerifier{id: enduseroidc.Identity{Issuer: "https://dex-eu.example.com", Subject: "alice"}},
+			log:                  logr.Discard(),
+		}
+	}
+	newReq := func(host string) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/api/extauth/invoke", nil)
+		req.Header.Set("X-Forwarded-Host", host)
+		req.Header.Set("Authorization", "Bearer end-user-oidc-token")
+		return req
+	}
+
+	// Exposed agent → 200 + a runcap carrying the end-user identity + standalone boundary.
+	rec := httptest.NewRecorder()
+	newServer().handleExtAuth(rec, newReq("chatbot.ns1.example.com"))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	tok := rec.Header().Get(runcap.HeaderName)
+	require.NotEmpty(t, tok, "an end-user runcap must be minted + injected")
+	capb, err := runcap.NewVerifier(pub, "test-plane", nil).Verify(tok)
+	require.NoError(t, err)
+	assert.Equal(t, credresolve.EndUserHash([]byte("cluster-key"), "https://dex-eu.example.com", "alice"), capb.User,
+		"the runcap subject is the end-user's EndUserHash (not a console identity)")
+	assert.Equal(t, credresolve.AgentBoundary("ns1", "chatbot"), capb.Boundary,
+		"end-user runs use the per-agent standalone boundary")
+
+	// A verified end-user hitting a NON-exposed agent in the same tenant → 403 (two-key: agent opt-in).
+	rec2 := httptest.NewRecorder()
+	newServer().handleExtAuth(rec2, newReq("internal-ops.ns1.example.com"))
+	assert.Equal(t, http.StatusForbidden, rec2.Code, "an un-exposed agent is not end-user-reachable")
+	assert.Empty(t, rec2.Header().Get(runcap.HeaderName))
 }

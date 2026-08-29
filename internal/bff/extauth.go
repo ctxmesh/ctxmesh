@@ -52,7 +52,41 @@ func (s *Server) registerExtAuthRoutes(authed *http.ServeMux) {
 // This gives a token-authenticated hit to an AGENT URL the same OBO the console front door has — the
 // agent still only RELAYS the capability (never forges it), so the ADR 0033 model holds end to end.
 func (s *Server) handleExtAuth(w http.ResponseWriter, r *http.Request) {
-	caller, ok := s.callerClient(w, r) // rejects a MISSING token (401); an invalid token is validated below
+	// Derive the target agent from the ORIGINAL request host Envoy forwards (X-Forwarded-Host, or the
+	// Host it preserved). Identity is host-derived either way.
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	agent, ns := parseAgentFromHost(host)
+
+	// M137/EU1b (ADR 0106): if the target agent's tenant has an end-user IdP and the bearer verifies
+	// against it, authenticate as an END-USER — mint the runcap with the end-user principal + the
+	// standalone boundary, WITHOUT ever building a K8s client (structural K8s-path separation: an
+	// end-user bearer never reaches a TokenReview). A console/forged bearer fails verification and falls
+	// through to the K8s path below (where a forged token 401s). The end-user's ID token is stripped
+	// upstream of the agent pod by the SecurityPolicy (it never sees a K8s or an OIDC bearer).
+	if agent != "" {
+		if principal, _, isEndUser, _ := s.resolveEndUserPrincipal(r.Context(), r, ns); isEndUser {
+			// Two-key exposure gate (ADR 0107): the agent must opt into end-user access
+			// (spec.endUserAccess → a mirror row). A verified end-user hitting a NON-exposed agent is
+			// authenticated-but-not-authorized → 403 (Envoy denies) — never fall through to the K8s path
+			// (it IS a verified end-user, not a console token).
+			if !s.endUserAgentExposed(r.Context(), ns, agent) {
+				writeError(w, http.StatusForbidden, "this agent is not available to end users")
+				return
+			}
+			if token, minted := s.mintRunCapability(principal, ns, agent, endUserAgentBoundary(ns, agent), ""); minted {
+				w.Header().Set(runcap.HeaderName, token)
+			}
+			w.WriteHeader(http.StatusOK) // allow (end-user authenticated + agent exposed)
+			return
+		}
+	}
+
+	// Console/K8s path (ADR 0039, unchanged). callerClient rejects a MISSING token (401); an invalid
+	// token is validated below.
+	caller, ok := s.callerClient(w, r)
 	if !ok {
 		return
 	}
@@ -66,15 +100,10 @@ func (s *Server) handleExtAuth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid or unresolvable caller token")
 		return
 	}
-	// Derive the target agent from the ORIGINAL request host Envoy forwards (X-Forwarded-Host, or the
-	// Host it preserved) and mint + inject the capability. If the host isn't a resolvable agent, or
-	// the (authenticated) identity has no grant for this boundary, ALLOW WITHOUT a capability — the
-	// run proceeds unattended (org/public creds only), never another user's grant (ADR 0033).
-	host := r.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = r.Host
-	}
-	if agent, ns := parseAgentFromHost(host); agent != "" {
+	// Mint + inject the capability. If the host isn't a resolvable agent, or the (authenticated)
+	// identity has no grant for this boundary, ALLOW WITHOUT a capability — the run proceeds unattended
+	// (org/public creds only), never another user's grant (ADR 0033).
+	if agent != "" {
 		boundary := agentBoundary(r.Context(), caller, ns, agent)
 		if token, minted := s.mintRunCapability(username, ns, agent, boundary, ""); minted {
 			w.Header().Set(runcap.HeaderName, token)

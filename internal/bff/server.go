@@ -36,6 +36,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/enduseragent"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
@@ -239,6 +240,10 @@ type Server struct {
 	// colliding issuer's tokens could gain K8s trust.
 	endUserVerifier endUserTokenVerifier
 	saIssuer        string
+	// endUserAgentStore is the end-user AGENT exposure mirror (M137/EU1b, ADR 0107 — the second of the
+	// two keys). Row-existence is the exposure gate: an agent not opted into endUserAccess has no row, so
+	// an end-user request for it is a uniform 404 / 403 (fail-closed). nil ⇒ no end-user agent access.
+	endUserAgentStore enduseragent.Store
 
 	// consoleURL is the canonical, browser-reachable console origin (scheme://host[:port]),
 	// e.g. "https://console.agents.example.com" — the ONE origin whose /api/mcp/oauth/callback
@@ -481,6 +486,8 @@ type Options struct {
 	// SAIssuer is the cluster service-account issuer, refused as an end-user issuer.
 	EndUserVerifier endUserTokenVerifier
 	SAIssuer        string
+	// EndUserAgentStore is the end-user AGENT exposure mirror (M137/EU1b, ADR 0107).
+	EndUserAgentStore enduseragent.Store
 	// PublishedArtifactStore is the control-plane Postgres store for published_artifacts — the
 	// snapshot-at-publish table (M74, m74.1, ADR 0068 §1). Wired from CONTROLPLANE_DSN in
 	// cmd/bff/main.go alongside NamespaceTenantStore. nil ⇒ POST/DELETE /api/templates return 501.
@@ -580,6 +587,7 @@ func NewServer(opts Options) *Server {
 		namespaceTenantStore:     opts.NamespaceTenantStore,
 		endUserVerifier:          opts.EndUserVerifier,
 		saIssuer:                 strings.TrimSpace(opts.SAIssuer),
+		endUserAgentStore:        opts.EndUserAgentStore,
 		publishedArtifactStore:   opts.PublishedArtifactStore,
 		sharedRunStore:           opts.SharedRunStore,
 		sharedRunLimiter:         newIPRateLimiter(sharedRunRatePerIP, sharedRunBurstPerIP),

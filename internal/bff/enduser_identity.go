@@ -80,6 +80,22 @@ func hmacKeyConfigured() bool {
 	return p != nil && len(*p) > 0
 }
 
+// endUserAgentExposed reports whether the agent opted into end-user access (spec.endUserAccess → a
+// mirror row, ADR 0107 — the SECOND of the two keys, after the tenant's endUserIdentity). Fail-closed: a
+// nil store, a lookup error, or no row ⇒ NOT exposed (an internal agent is never end-user-reachable just
+// because its tenant enabled end-user login).
+func (s *Server) endUserAgentExposed(ctx context.Context, ns, agent string) bool {
+	if s.endUserAgentStore == nil {
+		return false
+	}
+	_, ok, err := s.endUserAgentStore.Get(ctx, ns, agent)
+	if err != nil {
+		s.log.Error(err, "end-user agent exposure lookup failed (fail-closed)", "namespace", ns, "agent", agent)
+		return false
+	}
+	return ok
+}
+
 // resolveEndUserPrincipal attempts to authenticate the request's bearer as an END-USER of the agent in
 // ns (M137/EU1b, ADR 0106 §2-3). It resolves the target tenant's end-user IdP config and verifies the
 // bearer against it — WITHOUT ever constructing a caller-scoped K8s client (the structural separation:

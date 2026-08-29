@@ -62,6 +62,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/alertstore"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/enduseragent"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
@@ -496,6 +497,9 @@ func main() {
 		APIReader: mgr.GetAPIReader(), // uncached telemetry-Secret read (collector env stability)
 		Scheme:    mgr.GetScheme(),
 		OBOEgress: oboEgress,
+		// End-user AGENT exposure mirror (M137/EU1b, ADR 0107): the reconciler writes an endUserAccess
+		// agent's endpoint + spec here so the BFF resolves an end-user run without a K8s read.
+		EndUserAgentStore: enduseragent.NewPostgresStore(cpDB),
 		// Injected sidecar image overrides (audit OPS-1): empty ⇒ the dev.local defaults,
 		// which ImagePullBackOff off a kind cluster, so a real install sets these.
 		CollectorImage: strings.TrimSpace(os.Getenv("COLLECTOR_IMAGE")),
