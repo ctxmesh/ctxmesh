@@ -1203,6 +1203,71 @@ func TestWorkflowExecutor_OnError_RetriesTakePrecedence(t *testing.T) {
 	assert.Len(t, childrenOf(t, s, wfID), 4, "3 work attempts + 1 handler ran")
 }
 
+// ── M138: error-TYPE routing (catch) + the `error` CEL binding (ADR 0109) ────────────────────────────────
+
+// catchSpec: a guarded node `work` with an ORDERED catch list; the handler's input binds `error.type`.
+func catchSpec(catch []agentsv1beta1.WorkflowCatch) agentsv1beta1.WorkflowSpec {
+	work := stepNode("work", "work-agent")
+	work.Catch = catch
+	handler := stepNode("handler", "handler-agent")
+	handler.Input = map[string]string{"caught": "error.type", "why": "error.message"} // bind the error object
+	return agentsv1beta1.WorkflowSpec{RegistryRef: "reg", Steps: []agentsv1beta1.WorkflowStep{work, handler}}
+}
+
+// TestWorkflowExecutor_Catch_RoutesByErrorClass: a failed node (agent_error) matches the catch clause for
+// that class and routes to the handler, whose input CEL sees the bound `error` object.
+func TestWorkflowExecutor_Catch_RoutesByErrorClass(t *testing.T) {
+	s := newWorkflowServer(t)
+	spec := catchSpec([]agentsv1beta1.WorkflowCatch{
+		{Errors: []string{"timeout"}, Next: "handler"},     // does NOT match agent_error
+		{Errors: []string{"agent_error"}, Next: "handler"}, // matches — first match after the miss
+	})
+	wfID := seedWorkflowRun(t, s, spec, `{}`)
+
+	drive(t, s, wfID)
+	work := inFlightChild(t, s, wfID)
+	failNode(t, s, work.ID, "the agent blew up") // status=failed ⇒ classified agent_error
+
+	drive(t, s, wfID)
+	handler := inFlightChild(t, s, wfID)
+	assert.Equal(t, "handler-agent", handler.Agent, "the failure routes to the class-matching catcher's handler")
+	// The `error` CEL binding: the handler's input carries error.type + error.message.
+	assert.Contains(t, string(handler.Input), "agent_error", "error.type is bound into the handler's input")
+	assert.Contains(t, string(handler.Input), "the agent blew up", "error.message is bound too")
+
+	completeNode(t, s, handler.ID, "recovered")
+	drive(t, s, wfID)
+	assert.Equal(t, run.StatusSucceeded, getRun(t, s, wfID).Status, "a caught error completes the workflow succeeded")
+}
+
+// TestWorkflowExecutor_Catch_NonMatchFailFasts: a failure whose class no catcher lists fail-fasts (ADR 0109 §3).
+func TestWorkflowExecutor_Catch_NonMatchFailFasts(t *testing.T) {
+	s := newWorkflowServer(t)
+	spec := catchSpec([]agentsv1beta1.WorkflowCatch{
+		{Errors: []string{"timeout", "budget_exceeded"}, Next: "handler"}, // neither matches agent_error
+	})
+	wfID := seedWorkflowRun(t, s, spec, `{}`)
+
+	drive(t, s, wfID)
+	work := inFlightChild(t, s, wfID)
+	failNode(t, s, work.ID, "boom") // agent_error — unhandled
+
+	drive(t, s, wfID)
+	assert.Equal(t, run.StatusFailed, getRun(t, s, wfID).Status, "an unmatched failure class fail-fasts the workflow")
+}
+
+// TestWorkflowExecutor_Catch_WildcardAndOnErrorDesugar: a "*" catcher catches any class; and onError still
+// works as the trailing catch-all sugar.
+func TestWorkflowExecutor_Catch_WildcardAndOnErrorDesugar(t *testing.T) {
+	s := newWorkflowServer(t)
+	spec := catchSpec([]agentsv1beta1.WorkflowCatch{{Errors: []string{run.CatchAll}, Next: "handler"}})
+	wfID := seedWorkflowRun(t, s, spec, `{}`)
+	drive(t, s, wfID)
+	failNode(t, s, inFlightChild(t, s, wfID).ID, "anything")
+	drive(t, s, wfID)
+	assert.Equal(t, "handler-agent", inFlightChild(t, s, wfID).Agent, `a "*" catcher catches any failure class`)
+}
+
 // TestWorkflowExecutor_NoOnError_FailFastUnchanged: the SAME failing guarded node with NO onError fail-fasts
 // (workflow failed) — byte-for-byte the pre-m83.3 behavior. This is the additive-change proof (a spec with no
 // onError behaves exactly as today).
