@@ -171,6 +171,7 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// (the namespace/KB watches re-drive it). The tenant-DELETE path (above) requeues instead, since the
 	// finalizer is the one chance to clean up.
 	r.syncMembershipMirror(ctx, tenant.Name, owned)
+	r.syncEndUserIdentityMirror(ctx, tenant.Name, tenant.Spec.EndUserIdentity)
 
 	// Aggregate corpus bytes across member namespaces for the storage soft-cap check
 	// (ADR 0061 governance #7, M68 m68.12). Pure K8s list+sum — never re-queries Postgres.
@@ -488,6 +489,32 @@ func (r *TenantReconciler) syncMembershipMirror(ctx context.Context, tenantName 
 	}
 	if err := r.NamespaceTenant.SetMembers(ctx, tenantName, owned); err != nil {
 		logf.FromContext(ctx).Error(err, "membership mirror sync failed; will re-converge next reconcile",
+			"tenant", tenantName)
+	}
+}
+
+// syncEndUserIdentityMirror mirrors the tenant's spec.endUserIdentity into the control-plane store so
+// the BFF's end-user auth path (which has NO caller-scoped K8s client — an end-user is not a K8s
+// principal, ADR 0106 §3) can resolve it by namespace (M137/EU1b). Best-effort like the membership
+// mirror: a store error is logged, never rolls back the K8s converge; the next reconcile re-drives it.
+// A nil spec writes a DISABLED config (Enabled=false) so a later removal of the field propagates and is
+// never left stale.
+func (r *TenantReconciler) syncEndUserIdentityMirror(ctx context.Context, tenantName string, spec *agentsv1alpha1.TenantEndUserIdentity) {
+	if r.NamespaceTenant == nil {
+		return
+	}
+	var cfg namespacetenant.EndUserIdentity
+	if spec != nil {
+		cfg = namespacetenant.EndUserIdentity{
+			Enabled:      spec.Enabled,
+			Issuer:       spec.Issuer,
+			ClientID:     spec.ClientID,
+			Scopes:       spec.Scopes,
+			AllowedHosts: spec.AllowedHosts,
+		}
+	}
+	if err := r.NamespaceTenant.SetEndUserIdentity(ctx, tenantName, cfg); err != nil {
+		logf.FromContext(ctx).Error(err, "end-user identity mirror sync failed; will re-converge next reconcile",
 			"tenant", tenantName)
 	}
 }

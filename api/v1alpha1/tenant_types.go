@@ -184,6 +184,54 @@ type TenantSpec struct {
 	// +kubebuilder:validation:items:MaxLength=253
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	PeerTenants []string `json:"peerTenants,omitempty"`
+
+	// endUserIdentity, when enabled, configures a DISTINCT end-user OIDC IdP for this tenant's agents'
+	// standalone /chat runtime (M137/EU1b, ADR 0106): a non-console end-user logs in with THEIR OWN
+	// identity (a generic OIDC issuer the tenant runs), the BFF verifies that ID token and mints a
+	// run-capability scoped to the end-user's real (iss,sub) — security-grade per-user isolation of runs
+	// + OBO. The issuer MUST be DISTINCT from the console OIDC issuer (else an end-user token could gain
+	// K8s trust); the platform refuses an issuer equal to the console / service-account issuer. Omitted
+	// or disabled ⇒ /chat stays console-authenticated (the pre-M137 model).
+	// +optional
+	EndUserIdentity *TenantEndUserIdentity `json:"endUserIdentity,omitempty"`
+}
+
+// TenantEndUserIdentity configures a tenant's end-user OIDC IdP (M137/EU1b, ADR 0106). Generic OIDC —
+// any compliant issuer (Okta/Entra/Google/a self-run dex); the BFF verifies the end-user ID token
+// against the issuer's discovery/JWKS and mints a run-capability with the end-user's (iss,sub).
+type TenantEndUserIdentity struct {
+	// enabled turns on end-user OIDC login for this tenant's agent /chat origins. Default off.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// issuer is the OIDC issuer URL (the `iss` claim + the OIDC Discovery base). MUST be https (a
+	// loopback host is allowed for dev) and MUST NOT equal the console OIDC issuer or the cluster
+	// service-account issuer — an end-user token must never gain K8s trust (ADR 0106 §3).
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^https?://.+`
+	// +optional
+	Issuer string `json:"issuer,omitempty"`
+
+	// clientId is the OIDC client (audience) the end-user SPA authenticates as (Auth-Code + PKCE, a
+	// public client). The verified ID token's `aud` MUST contain this value.
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	ClientID string `json:"clientId,omitempty"`
+
+	// scopes are extra OIDC scopes the SPA requests beyond `openid` (e.g. `email`, `profile`,
+	// `offline_access` for refresh-token rotation). `openid` is always requested.
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=128
+	// +optional
+	Scopes []string `json:"scopes,omitempty"`
+
+	// allowedHosts are the agent origins (`<agent>.<ns>.<domain>`) enabled for end-user login under this
+	// tenant — the exact redirect-URI hosts the tenant registers with its IdP (RFC 9700 exact match, no
+	// wildcards). Informational + surfaced to the operator; empty ⇒ any of the tenant's agent origins.
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MaxLength=253
+	// +optional
+	AllowedHosts []string `json:"allowedHosts,omitempty"`
 }
 
 // TenantStatus defines the observed state of a Tenant.

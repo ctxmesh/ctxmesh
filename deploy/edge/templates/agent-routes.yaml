@@ -18,6 +18,16 @@ spec:
         - path:
             type: Exact
             value: {{ .invokePath }}
+      filters:
+        # M137/EU1b (ADR 0106 §3): strip Authorization before forwarding to the agent pod. ext-auth has
+        # already read the bearer (to verify + mint the run capability); the agent only ever RELAYS the
+        # injected capability (ADR 0033/0039) and must NEVER see the caller's bearer — a K8s console token
+        # OR an end-user OIDC ID token, which a compromised agent pod could otherwise replay for the
+        # token's full lifetime (worse in blast direction for a long-lived OIDC token).
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove:
+              - Authorization
       backendRefs:
         - name: {{ .agent.service }}
           port: {{ .agent.port }}

@@ -47,6 +47,7 @@ import (
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/enduseragent"
 	"github.com/ctxmesh/agent-engine/internal/eval"
 	"github.com/ctxmesh/agent-engine/internal/gateway"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
@@ -253,6 +254,12 @@ type AgentDeploymentReconciler struct {
 	// ⇒ no sidecar is injected and the pod template is unchanged (no drift).
 	OBOEgress OBOEgressConfig
 
+	// EndUserAgentStore is the end-user AGENT exposure mirror (M137/EU1b, ADR 0107). The reconciler
+	// writes an agent's endpoint + spec here iff spec.endUserAccess (serving-only, CEL-enforced), and
+	// prunes it otherwise / on delete, so the BFF resolves an end-user run WITHOUT a K8s read. Nil ⇒ no
+	// control-plane DB (envtest) — the mirror sync is a no-op.
+	EndUserAgentStore enduseragent.Store
+
 	// CollectorImage / DiscoveryImage override the injected OTel-collector / tool-discovery
 	// sidecar images (audit OPS-1; from COLLECTOR_IMAGE / DISCOVERY_IMAGE env, mirror of
 	// EGRESS_SIDECAR_IMAGE). Empty ⇒ the project-default constants — which are dev.local/*
@@ -369,6 +376,9 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	var deploy agentsv1alpha1.AgentDeployment
 	if err := r.Get(ctx, req.NamespacedName, &deploy); err != nil {
 		if apierrors.IsNotFound(err) {
+			// M137/EU1b (ADR 0107): prune the end-user exposure mirror for a deleted agent (the row is a
+			// Postgres mirror, not K8s-owned, so owner-ref GC doesn't reach it).
+			r.pruneEndUserAgentMirror(ctx, req.Namespace, req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching AgentDeployment: %w", err)
@@ -2367,6 +2377,14 @@ func (r *AgentDeploymentReconciler) syncStatus(
 	deploy.Status.LatestVersion = latestVersion
 	deploy.Status.ObservedGeneration = deploy.Generation
 
+	// M137/EU1b (ADR 0107): mirror end-user exposure. Endpoint = the agent URL only when Ready, so the
+	// BFF distinguishes a not-Ready exposed agent (409) from an unexposed one (404).
+	endpoint := ""
+	if readyStatus == metav1.ConditionTrue {
+		endpoint = deploy.Status.URL
+	}
+	r.syncEndUserAgentMirror(ctx, deploy, endpoint)
+
 	return r.Status().Update(ctx, deploy)
 }
 
@@ -2406,10 +2424,47 @@ func (r *AgentDeploymentReconciler) setReadyFalse(
 		ObservedGeneration: deploy.Generation,
 	})
 	deploy.Status.ObservedGeneration = deploy.Generation
+	// M137/EU1b (ADR 0107): a not-Ready agent mirrors with an EMPTY endpoint (the BFF 409s it) if it is
+	// exposed; an unexposed agent is pruned. syncEndUserAgentMirror handles both from spec.endUserAccess.
+	r.syncEndUserAgentMirror(ctx, deploy, "")
 	if err := r.Status().Update(ctx, deploy); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 	return ctrl.Result{}, nil
+}
+
+// syncEndUserAgentMirror mirrors an agent's end-user exposure into the control-plane store (M137/EU1b,
+// ADR 0107): Set (endpoint + spec) when spec.endUserAccess (serving-only, CEL-enforced), else prune. The
+// endpoint is the passed value (status.URL when Ready, "" when not) so the BFF 409s a not-Ready exposed
+// agent vs 404s an unexposed one. Best-effort — a store error is logged, never fails the reconcile.
+func (r *AgentDeploymentReconciler) syncEndUserAgentMirror(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment, endpoint string) {
+	if r.EndUserAgentStore == nil {
+		return
+	}
+	if !deploy.Spec.EndUserAccess {
+		r.pruneEndUserAgentMirror(ctx, deploy.Namespace, deploy.Name)
+		return
+	}
+	row := enduseragent.ExposedAgent{
+		Namespace: deploy.Namespace, Agent: deploy.Name, Endpoint: endpoint, RecordCapable: deploy.Spec.Record,
+	}
+	if deploy.Spec.Runtime != nil && deploy.Spec.Runtime.OutputSchema != nil {
+		row.OutputSchema = string(deploy.Spec.Runtime.OutputSchema.Raw)
+	}
+	if err := r.EndUserAgentStore.Set(ctx, row); err != nil {
+		logf.FromContext(ctx).Error(err, "end-user agent mirror sync failed; will re-converge next reconcile",
+			"agent", deploy.Namespace+"/"+deploy.Name)
+	}
+}
+
+// pruneEndUserAgentMirror removes an agent's end-user exposure row (unset endUserAccess / delete).
+func (r *AgentDeploymentReconciler) pruneEndUserAgentMirror(ctx context.Context, namespace, name string) {
+	if r.EndUserAgentStore == nil {
+		return
+	}
+	if err := r.EndUserAgentStore.Delete(ctx, namespace, name); err != nil {
+		logf.FromContext(ctx).Error(err, "end-user agent mirror prune failed", "agent", namespace+"/"+name)
+	}
 }
 
 // memoryDigest returns a short hash capturing whether the agent has session

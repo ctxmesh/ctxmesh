@@ -1142,6 +1142,51 @@ func (p *pgStore) ListWaitingApproval(ctx context.Context, namespace string, kin
 	return out, nil
 }
 
+// ListByEndUser — see the Store interface (M137/EU1c, ADR 0107). The end-user "my runs" list: a
+// `caller_username=$1 AND namespace=$2 AND agent=$3` read, newest-updated first, bounded by limit. The
+// three-part WHERE is the ownership+host isolation boundary (never a client filter); a blank
+// callerUsername/namespace/agent returns nothing (fail-closed — the server always fills all three from
+// the VERIFIED principal + the HOST, never the request body). Read-only; a query/scan error is returned.
+func (p *pgStore) ListByEndUser(ctx context.Context, callerUsername, namespace, agent string, limit int) ([]EndUserRun, error) {
+	if callerUsername == "" || namespace == "" || agent == "" {
+		return nil, nil
+	}
+	q := `SELECT id, status, conversation_id, created_at, updated_at
+		FROM runs WHERE caller_username=$1 AND namespace=$2 AND agent=$3 ORDER BY updated_at DESC`
+	args := []any{callerUsername, namespace, agent}
+	if limit > 0 {
+		q += ` LIMIT $4`
+		args = append(args, limit)
+	}
+	rows, err := p.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("run: list by end-user: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []EndUserRun
+	for rows.Next() {
+		var (
+			e       EndUserRun
+			status  string
+			created time.Time
+			updated time.Time
+		)
+		// conversation_id is NOT NULL DEFAULT '' (scanned as a plain string, as the Get path does).
+		if err := rows.Scan(&e.ID, &status, &e.ConversationID, &created, &updated); err != nil {
+			return nil, fmt.Errorf("run: list by end-user scan: %w", err)
+		}
+		e.Status = Status(status)
+		e.CreatedAt = created.UTC()
+		e.UpdatedAt = updated.UTC()
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("run: list by end-user rows: %w", err)
+	}
+	return out, nil
+}
+
 // DescendantsRequiringAction — see the Store interface (L1 surfacing, ADR 0075 §4). Reads the
 // descendant rows (root_run_id = the true root) currently in requires_action and projects the pause,
 // unmarshaling the JSON action in Go (as the store already does elsewhere). Read-only. The

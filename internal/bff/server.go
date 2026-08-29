@@ -36,6 +36,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/enduseragent"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
@@ -130,6 +131,15 @@ type Server struct {
 	// anonymous so it is not left unbounded — over budget → 429 (a non-oracle status). Always non-nil
 	// (built in NewServer); its allow() is a no-op when disabled.
 	sharedRunLimiter *ipRateLimiter
+
+	// endUserLimiter is the per-IP token-bucket that bounds the UNAUTHENTICATED end-user surfaces
+	// (M137/EU1c, ADR 0107): the tenant-IdP config probe + the token-verification entry of the end-user
+	// run create / my-runs paths. Always non-nil (built in NewServer); allow() is a no-op when disabled.
+	endUserLimiter *ipRateLimiter
+
+	// endUserCreateLimiter is the per-PRINCIPAL token-bucket that bounds run creation by a single verified
+	// end-user identity (M137/EU1c) — NAT-proof (keyed on oidc:<iss>#<sub>, not the IP). Always non-nil.
+	endUserCreateLimiter *ipRateLimiter
 
 	// docStore is the durable KB object store (M68, ADR 0061 Fork 4) used by the
 	// BFF document-upload endpoint and the m68.6 source-resolution seam. nil when
@@ -232,6 +242,17 @@ type Server struct {
 	oidcEnabled  bool
 	oidcIssuer   string
 	oidcClientID string
+
+	// endUserVerifier verifies END-USER OIDC ID tokens against a tenant issuer (M137/EU1b, ADR 0106).
+	// nil ⇒ end-user OIDC is off and /chat stays console-authenticated. saIssuer is the cluster
+	// service-account issuer — an end-user issuer equal to it (or to oidcIssuer) is refused, since a
+	// colliding issuer's tokens could gain K8s trust.
+	endUserVerifier endUserTokenVerifier
+	saIssuer        string
+	// endUserAgentStore is the end-user AGENT exposure mirror (M137/EU1b, ADR 0107 — the second of the
+	// two keys). Row-existence is the exposure gate: an agent not opted into endUserAccess has no row, so
+	// an end-user request for it is a uniform 404 / 403 (fail-closed). nil ⇒ no end-user agent access.
+	endUserAgentStore enduseragent.Store
 
 	// consoleURL is the canonical, browser-reachable console origin (scheme://host[:port]),
 	// e.g. "https://console.agents.example.com" — the ONE origin whose /api/mcp/oauth/callback
@@ -469,6 +490,13 @@ type Options struct {
 	// m73.3). Wired from CONTROLPLANE_DSN in cmd/bff/main.go alongside ToolRegistryStore. nil ⇒
 	// GET /api/catalog degrades to own-ns + public only (fail-closed), never a panic.
 	NamespaceTenantStore namespacetenant.Store
+
+	// EndUserVerifier verifies end-user OIDC ID tokens (M137/EU1b, ADR 0106); nil ⇒ end-user OIDC off.
+	// SAIssuer is the cluster service-account issuer, refused as an end-user issuer.
+	EndUserVerifier endUserTokenVerifier
+	SAIssuer        string
+	// EndUserAgentStore is the end-user AGENT exposure mirror (M137/EU1b, ADR 0107).
+	EndUserAgentStore enduseragent.Store
 	// PublishedArtifactStore is the control-plane Postgres store for published_artifacts — the
 	// snapshot-at-publish table (M74, m74.1, ADR 0068 §1). Wired from CONTROLPLANE_DSN in
 	// cmd/bff/main.go alongside NamespaceTenantStore. nil ⇒ POST/DELETE /api/templates return 501.
@@ -566,9 +594,14 @@ func NewServer(opts Options) *Server {
 		promptStore:              opts.PromptStore,
 		toolRegistryStore:        opts.ToolRegistryStore,
 		namespaceTenantStore:     opts.NamespaceTenantStore,
+		endUserVerifier:          opts.EndUserVerifier,
+		saIssuer:                 strings.TrimSpace(opts.SAIssuer),
+		endUserAgentStore:        opts.EndUserAgentStore,
 		publishedArtifactStore:   opts.PublishedArtifactStore,
 		sharedRunStore:           opts.SharedRunStore,
 		sharedRunLimiter:         newIPRateLimiter(sharedRunRatePerIP, sharedRunBurstPerIP),
+		endUserLimiter:           newIPRateLimiter(endUserRatePerIP, endUserBurstPerIP),
+		endUserCreateLimiter:     newIPRateLimiter(endUserCreateRatePerUser, endUserCreateBurstPerUser),
 		recipeOverlay:            &recipeOverlayHolder{}, // empty until StartRecipeOverlayWatcher loads it (S1)
 		agentMemoryStore:         opts.AgentMemoryStore,
 		auditStore:               opts.AuditStore,
@@ -722,6 +755,16 @@ func (s *Server) Handler() http.Handler {
 	// session. Tells the SPA whether OIDC/SSO is available (issuer + public PKCE client
 	// id) so it offers "Sign in with SSO"; token login (ADR 0012) is the fallback.
 	api.HandleFunc("GET /api/authconfig", s.handleAuthConfig)
+	// End-user OIDC config (M137/EU1b, ADR 0106 §9): the agent-origin /chat SPA reads the target
+	// tenant's issuer + public PKCE client id here to log the end-user in. Unauthenticated (like
+	// authconfig); a uniform 404 for a ns with no end-user IdP (no tenant-existence oracle).
+	api.HandleFunc("GET /api/end-user-auth-config", s.handleEndUserAuthConfig)
+	// End-user "my runs" list (M137/EU1c, ADR 0107): host-derived + principal-scoped + store-backed
+	// (NOT the Langfuse GET /api/runs, which stays absent at an agent origin). Mounted on `api` DIRECTLY
+	// (like auth-config) so it escapes requireAuth's caller-client — a verified end-user bearer must never
+	// reach a K8s TokenReview. The handler verifies the end-user token itself + scopes the query to the
+	// principal; a non-end-user request is a uniform 404.
+	api.HandleFunc("GET /api/end-user/runs", s.handleEndUserMyRuns)
 	// Shared-run public read (M75, m75.2, ADR 0069 §1/§2) — the platform's FIRST genuinely
 	// UNAUTHENTICATED read surface. Mounted on the `api` mux DIRECTLY (a more specific pattern
 	// than "/api/"), so it is NOT behind requireAuth: a logged-out visitor with only the share
@@ -792,6 +835,9 @@ func (s *Server) Handler() http.Handler {
 		// spec.longTermMemory capability directly (the tracepolicy pattern), caller-scoped.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/longtermmemory", s.handleGetLongTermMemoryConfig)
 		authed.HandleFunc("PUT /api/agents/{ns}/{name}/longtermmemory", s.handleUpdateLongTermMemory)
+		// Session-memory config (M137/EU1d, ADR 0080): the console perUser toggle for spec.sessionMemory.
+		authed.HandleFunc("GET /api/agents/{ns}/{name}/sessionmemory", s.handleGetSessionMemoryConfig)
+		authed.HandleFunc("PUT /api/agents/{ns}/{name}/sessionmemory", s.handleUpdateSessionMemory)
 		// Long-term memory viewer (m46.6, ADR 0045): list an agent's `agent`-scope memories. Caller-scoped
 		// (the caller must be able to `get` the agent) then a store read. 501 when no memory store is wired.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/memory", s.handleAgentMemory)
@@ -1608,6 +1654,8 @@ const agentChatboxHeader = "X-Ctxmesh-Agent-Chatbox"
 // cost, runs, evals, prompts, config, providers, the agents LIST, …) are absent → 404 at agent origins.
 var agentOriginAPIAllowlist = []string{
 	"GET /api/authconfig",
+	"GET /api/end-user-auth-config", // M137/EU1b: the SPA reads the tenant's end-user IdP config here
+	"GET /api/end-user/runs",        // M137/EU1c: the end-user's OWN runs at this agent (principal-scoped)
 	"GET /api/whoami",
 	"GET /api/devmode",
 	"GET /api/health",

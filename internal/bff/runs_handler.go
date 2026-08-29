@@ -252,6 +252,13 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 // capability + conversationId are minted/attached the same way, then carried onto a DETACHED
 // execution context so the run outlives the request.
 func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
+	// M137/EU1b (ADR 0107): an END-USER create is host-derived, mirror-resolved, and never builds a K8s
+	// client (structural separation). tryEndUserCreateRun serves the response for a verified end-user (or
+	// a definite end-user error); a console token / non-agent-origin request falls through to the
+	// caller-scoped path below.
+	if s.tryEndUserCreateRun(w, r) {
+		return
+	}
 	caller, ok := s.callerClient(w, r)
 	if !ok {
 		return
