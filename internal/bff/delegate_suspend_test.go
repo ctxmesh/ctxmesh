@@ -165,3 +165,41 @@ func TestSuspendOnDelegate_FanOutCeiling(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ceiling")
 }
+
+// TestSuspendOnDelegate_DepthCeiling proves the authoritative depth ceiling on the SUSPEND path (ADR 0108
+// §2): a child one deeper than the platform ceiling is denied fail-closed (no child created). Before the
+// depth>0 lift the suspend path was depth-0-only; now it must enforce the ceiling itself.
+func TestSuspendOnDelegate_DepthCeiling(t *testing.T) {
+	s := &Server{runStore: run.NewMemStore(), log: logr.Discard()}
+	parent := mkRunningParent(t, s, "deep-sup", agentsv1beta1.MaxSpawnDepthCeiling) // a supervisor AT the ceiling
+	dw := &delegateWaiting{Checkpoint: "cp", Delegates: []delegateIntent{
+		{SubAgent: "r", Endpoint: "http://r/invoke", Step: "1", CallID: "c1"},
+	}}
+	err := s.suspendOnDelegate(parent, dw, "trace-1", time.Unix(1, 0).UTC())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "depth")
+	_, gErr := s.runStore.Get(run.SpawnRunID("deep-sup", "1", "c1"))
+	assert.Error(t, gErr, "fail-closed: no child is created when the depth ceiling is exceeded")
+}
+
+// TestSuspendOnDelegate_BudgetExhausted proves the authoritative per-root-tree total-spawn budget on the
+// SUSPEND path (ADR 0108 §2): once the tree's spawn ceiling is consumed, a further suspend is denied
+// fail-closed. This closes the advisory-only gap the depth>0 lift would otherwise open.
+func TestSuspendOnDelegate_BudgetExhausted(t *testing.T) {
+	s := &Server{runStore: run.NewMemStore(), log: logr.Discard()}
+	parent := mkRunningParent(t, s, "sup-budget", 0) // a root supervisor → the tree root is itself
+	// Consume the whole per-tree total-spawn ceiling first.
+	for range agentsv1beta1.MaxTotalSpawnsCeiling {
+		ok, err := s.runStore.ReserveSpawn("sup-budget", agentsv1beta1.MaxTotalSpawnsCeiling)
+		require.NoError(t, err)
+		require.True(t, ok)
+	}
+	dw := &delegateWaiting{Checkpoint: "cp", Delegates: []delegateIntent{
+		{SubAgent: "r", Endpoint: "http://r/invoke", Step: "1", CallID: "c1"},
+	}}
+	err := s.suspendOnDelegate(parent, dw, "trace-1", time.Unix(1, 0).UTC())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "budget")
+	_, gErr := s.runStore.Get(run.SpawnRunID("sup-budget", "1", "c1"))
+	assert.Error(t, gErr, "fail-closed: no child is created when the tree budget is exhausted")
+}
