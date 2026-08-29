@@ -47,7 +47,7 @@ func eachStore(t *testing.T, fn func(t *testing.T, s namespacetenant.Store)) {
 	db, err := controlplane.OpenDB(context.Background(), dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	_, err = db.Exec(`TRUNCATE namespace_tenants`)
+	_, err = db.Exec(`TRUNCATE namespace_tenants, tenant_end_user_identity`)
 	require.NoError(t, err)
 	t.Run("postgres", func(t *testing.T) { fn(t, namespacetenant.NewPostgresStore(db)) })
 }
@@ -205,5 +205,54 @@ func TestStore_StorageHardCap_ProjectAndReadBack(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, ok)
 		assert.False(t, exceeded, "an unknown namespace must fail open (not blocked)")
+	})
+}
+
+// TestStore_EndUserIdentity_SetAndResolve is the M137/EU1b mirror contract: the tenant's end-user OIDC
+// config is written per-tenant and resolved by namespace (ns → tenant → config), fail-CLOSED when absent.
+func TestStore_EndUserIdentity_SetAndResolve(t *testing.T) {
+	eachStore(t, func(t *testing.T, s namespacetenant.Store) {
+		ctx := context.Background()
+		require.NoError(t, s.SetMembers(ctx, "team-a", []string{"ns-a1", "ns-a2"}))
+		require.NoError(t, s.SetMembers(ctx, "team-b", []string{"ns-b1"}))
+
+		// No config yet → fail-closed (zero, false, nil) for every namespace.
+		for _, ns := range []string{"ns-a1", "ns-b1", "no-such-ns"} {
+			cfg, ok, err := s.EndUserIdentityForNamespace(ctx, ns)
+			require.NoError(t, err)
+			assert.False(t, ok, "no config for %q yet", ns)
+			assert.Equal(t, namespacetenant.EndUserIdentity{}, cfg)
+		}
+
+		// Configure team-a → both of its namespaces resolve it; team-b (no config) stays fail-closed.
+		want := namespacetenant.EndUserIdentity{
+			Enabled: true, Issuer: "https://dex-eu.example.com", ClientID: "agent-engine-enduser",
+			Scopes: []string{"email", "offline_access"}, AllowedHosts: []string{"a.ns-a1.example.com"},
+		}
+		require.NoError(t, s.SetEndUserIdentity(ctx, "team-a", want))
+		for _, ns := range []string{"ns-a1", "ns-a2"} {
+			cfg, ok, err := s.EndUserIdentityForNamespace(ctx, ns)
+			require.NoError(t, err)
+			require.True(t, ok, "team-a config must resolve for %q", ns)
+			assert.Equal(t, want, cfg)
+		}
+		bcfg, bok, err := s.EndUserIdentityForNamespace(ctx, "ns-b1")
+		require.NoError(t, err)
+		assert.False(t, bok, "team-b has no config → fail-closed")
+		assert.Equal(t, namespacetenant.EndUserIdentity{}, bcfg)
+
+		// A disable propagates (kept as a row, Enabled=false) — resolves ok with Enabled=false so the
+		// BFF resolver treats it as "no end-user IdP" (never stale).
+		require.NoError(t, s.SetEndUserIdentity(ctx, "team-a", namespacetenant.EndUserIdentity{Enabled: false}))
+		cfg, ok, err := s.EndUserIdentityForNamespace(ctx, "ns-a1")
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.False(t, cfg.Enabled, "a disable must propagate")
+
+		// Deleting the tenant removes the config row → back to fail-closed.
+		require.NoError(t, s.DeleteTenant(ctx, "team-a"))
+		_, ok, err = s.EndUserIdentityForNamespace(ctx, "ns-a1")
+		require.NoError(t, err)
+		assert.False(t, ok, "tenant delete clears the end-user config")
 	})
 }
