@@ -835,6 +835,9 @@ func (s *Server) Handler() http.Handler {
 		// spec.longTermMemory capability directly (the tracepolicy pattern), caller-scoped.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/longtermmemory", s.handleGetLongTermMemoryConfig)
 		authed.HandleFunc("PUT /api/agents/{ns}/{name}/longtermmemory", s.handleUpdateLongTermMemory)
+		// Session-memory config (M137/EU1d, ADR 0080): the console perUser toggle for spec.sessionMemory.
+		authed.HandleFunc("GET /api/agents/{ns}/{name}/sessionmemory", s.handleGetSessionMemoryConfig)
+		authed.HandleFunc("PUT /api/agents/{ns}/{name}/sessionmemory", s.handleUpdateSessionMemory)
 		// Long-term memory viewer (m46.6, ADR 0045): list an agent's `agent`-scope memories. Caller-scoped
 		// (the caller must be able to `get` the agent) then a store read. 501 when no memory store is wired.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/memory", s.handleAgentMemory)

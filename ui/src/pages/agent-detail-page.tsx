@@ -53,6 +53,7 @@ import {
   type AgentRunSummary,
   type AgentMemoryEntry,
   type LongTermMemoryConfig,
+  type SessionMemoryConfig,
   type AgentScalingPolicySummary,
   type AgentSimplifiedSpec,
   type LogEventType,
@@ -2304,6 +2305,7 @@ function MemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
         />
       )}
 
+      <SessionMemoryConfigPanel ns={ns} agentName={agentName} />
       <LongTermMemoryConfigPanel ns={ns} agentName={agentName} />
       <LongTermMemoryPanel ns={ns} agentName={agentName} />
     </div>
@@ -2321,6 +2323,98 @@ type LongTermLoad =
   | { kind: "ready"; items: AgentMemoryEntry[] }
   | { kind: "unavailable" }
   | { kind: "error"; message: string; forbidden: boolean };
+
+// SessionMemoryConfigPanel (M137/EU1d, ADR 0080) — the console toggle for per-user SESSION memory. M98
+// shipped the CRD + runtime but no console affordance; an operator could only set spec.sessionMemory.perUser
+// via YAML. It patches the folded field via the BFF (the longtermmemory pattern). Read-only for viewers
+// (gated on agent-update); hides when the agent has no session memory or is unreadable. The inline help
+// states the three caveats: it isolates memory per end-user, is PRODUCT-grade (not security-grade), and it
+// BREAKS conversation handoff + share-links for the agent.
+function SessionMemoryConfigPanel({ ns, agentName }: { ns: string; agentName: string }) {
+  const { can } = useCapabilities();
+  const canUpdate = can(RES_AGENTS, "update");
+  const [config, setConfig] = React.useState<SessionMemoryConfig | null>(null);
+  const [perUser, setPerUser] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState<string | null>(null);
+
+  const apply = React.useCallback((c: SessionMemoryConfig) => {
+    setConfig(c);
+    setPerUser(c.perUser);
+  }, []);
+
+  React.useEffect(() => {
+    const controller = new AbortController();
+    api
+      .sessionMemoryConfig(ns, agentName, controller.signal)
+      .then((c) => !controller.signal.aborted && apply(c))
+      .catch(() => !controller.signal.aborted && setConfig(null));
+    return () => controller.abort();
+  }, [ns, agentName, apply]);
+
+  if (config === null) return null; // unreadable (403/404) — hide, no noise
+  if (!config.enabled) return null; // no session memory ⇒ nothing to isolate; hide the toggle
+  const shared = config.scope === "shared";
+
+  function save(next: boolean) {
+    if (!config) return;
+    setBusy(true);
+    setErr(null);
+    api
+      .setSessionMemory(ns, agentName, { enabled: true, scope: config.scope, perUser: next })
+      .then(apply)
+      .catch((e: unknown) => setErr(e instanceof Error ? e.message : "update failed"))
+      .finally(() => setBusy(false));
+  }
+
+  return (
+    <div className="mt-8 border-t pt-6" data-testid="sessionmem-config">
+      <h3 className="mb-1 text-sm font-medium">Session memory</h3>
+      <p className="mb-3 text-xs text-muted-foreground">
+        Per-user isolation for this agent&rsquo;s conversation memory (ADR 0080).
+      </p>
+      <div className="flex items-center gap-2 text-sm">
+        <Badge variant={config.perUser ? "success" : "secondary"} data-testid="sessionmem-state">
+          {config.perUser ? "per-user" : "agent-wide"}
+        </Badge>
+        <span className="text-xs text-muted-foreground">scope {config.scope}</span>
+      </div>
+      {shared ? (
+        <p className="mt-2 text-xs text-muted-foreground" data-testid="sessionmem-shared-note">
+          Per-user isolation applies only to private (&ldquo;session&rdquo;) scope. This agent uses the
+          shared team scratchpad, which is per-conversation by design.
+        </p>
+      ) : (
+        canUpdate && (
+          <div className="mt-3 space-y-2" data-testid="sessionmem-config-form">
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={perUser}
+                disabled={busy}
+                onChange={(e) => {
+                  setPerUser(e.target.checked);
+                  save(e.target.checked);
+                }}
+                data-testid="sessionmem-peruser"
+              />
+              Per-user session memory (each end-user&rsquo;s own conversation history, isolated)
+            </label>
+            <p className="text-xs text-muted-foreground" data-testid="sessionmem-caveat">
+              Product-grade isolation, not a security boundary (launcher-stamped inside the pod). Turning
+              this on breaks conversation handoff and share-links for this agent.
+            </p>
+            {err && (
+              <p className="text-sm text-destructive" data-testid="sessionmem-config-error">
+                {err}
+              </p>
+            )}
+          </div>
+        )
+      )}
+    </div>
+  );
+}
 
 // LongTermMemoryConfigPanel (m49.3) — the ENABLE surface for M46's folded long-term-memory capability. The
 // console could VIEW an agent's long-term memories (LongTermMemoryPanel) but had no way to TURN THE

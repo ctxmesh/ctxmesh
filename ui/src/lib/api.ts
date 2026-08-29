@@ -343,6 +343,15 @@ export interface LongTermMemoryConfig {
   embeddingRoute?: string;
 }
 
+// Session-memory config (M137/EU1d, ADR 0080) — the folded spec.sessionMemory toggle surface. perUser
+// isolates each end-user's conversation memory; product-grade (not security-grade) and only meaningful
+// for the private "session" scope.
+export interface SessionMemoryConfig {
+  enabled: boolean;
+  scope?: string;
+  perUser: boolean;
+}
+
 // --- Online-score (m69.11, ADR 0062 Fork 2) -----------------------------------
 // The 3-component per-version online-score aggregates served by
 // GET /api/agents/{ns}/{name}/online-score. Un-collapsed (operational / feedback
@@ -3836,6 +3845,41 @@ export const api = {
       );
     }
     return (await res.json()) as LongTermMemoryConfig;
+  },
+
+  // Session-memory config (M137/EU1d) — read + set the folded spec.sessionMemory perUser toggle.
+  sessionMemoryConfig: (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<SessionMemoryConfig> =>
+    getJSON<SessionMemoryConfig>(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/sessionmemory`,
+      signal,
+    ),
+
+  setSessionMemory: async (
+    ns: string,
+    name: string,
+    config: SessionMemoryConfig,
+    signal?: AbortSignal,
+  ): Promise<SessionMemoryConfig> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/sessionmemory`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as SessionMemoryConfig;
   },
 
   // getTracePolicy reads an agent's custom redaction detectors (m18.13). A 403 =
