@@ -18,6 +18,7 @@ package bff
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -26,6 +27,15 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 	"github.com/ctxmesh/agent-engine/internal/enduseroidc"
 )
+
+// errEndUserBearerRejected signals that a bearer WAS presented at an end-user-enabled agent origin and
+// FAILED verification (forged / expired / wrong-issuer). It is deliberately distinct from a nil-error
+// ok=false result (no bearer, or the namespace has no enabled end-user IdP → a genuine console request
+// that falls through to the caller-scoped K8s path): a rejected end-user bearer is a definite auth
+// failure the end-user path OWNS, so the caller returns 401 (re-authenticate) instead of falling through
+// to the console path — whose "agent is required" 400 an end-user chat body (carrying no agent) would
+// otherwise hit, masking the real cause and leaving the SPA no signal to re-login (ADR 0107 §3).
+var errEndUserBearerRejected = errors.New("bff: end-user bearer rejected")
 
 // endUserTokenVerifier verifies an end-user OIDC ID token against a tenant issuer (M137/EU1b). The
 // concrete impl is *enduseroidc.Verifier; the interface lets tests inject a fake.
@@ -134,9 +144,9 @@ func (s *Server) endUserAgentExposed(ctx context.Context, ns, agent string) bool
 // ns (M137/EU1b, ADR 0106 §2-3). It resolves the target tenant's end-user IdP config and verifies the
 // bearer against it — WITHOUT ever constructing a caller-scoped K8s client (the structural separation:
 // an end-user bearer never reaches a K8s TokenReview). Returns ok=false when ns has no enabled end-user
-// IdP, no verifier is configured, no bearer is present, or the bearer is not a valid token for that
-// issuer — the caller then falls through to the K8s console path (a forged end-user token fails there
-// too, so the fall-through is safe).
+// IdP or no verifier is configured or no bearer is present — the caller then falls through to the K8s
+// console path. But when a bearer IS presented against an enabled end-user IdP and fails verification,
+// it returns errEndUserBearerRejected so the caller can 401 (the end-user path owns that auth failure).
 func (s *Server) resolveEndUserPrincipal(ctx context.Context, r *http.Request, ns string) (principal string, id enduseroidc.Identity, ok bool, err error) {
 	cfg, rErr := s.resolveEndUserIdentity(ctx, ns)
 	if rErr != nil || cfg == nil {
@@ -151,10 +161,11 @@ func (s *Server) resolveEndUserPrincipal(ctx context.Context, r *http.Request, n
 	}
 	identity, vErr := s.endUserVerifier.Verify(ctx, cfg.Issuer, cfg.ClientID, tok)
 	if vErr != nil {
-		// Not a valid end-user token for this tenant (a K8s console token, or a forged/expired one) —
-		// ok=false so the caller falls through to the K8s path (which 401s a forged token). We do NOT
-		// leak the reason here; the caller decides the response.
-		return "", enduseroidc.Identity{}, false, nil
+		// A bearer was presented against this tenant's ENABLED end-user IdP and failed verification
+		// (forged / expired / wrong-issuer). The end-user path OWNS this auth failure — signal the caller
+		// to 401 (re-authenticate) rather than fall through to the console path's "agent is required" 400.
+		// We do NOT leak the specific reason (no forgery oracle); the caller decides the response.
+		return "", enduseroidc.Identity{}, false, errEndUserBearerRejected
 	}
 	return endUserPrincipal(identity.Issuer, identity.Subject), identity, true, nil
 }
