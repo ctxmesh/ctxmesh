@@ -419,13 +419,16 @@ func (s *delegateServer) handleDelegate(w http.ResponseWriter, r *http.Request) 
 	defer func() { _ = s.guard.Release(context.Background(), s.cfg.Scope, root) }()
 	_ = err // Admit returns (SpawnAdmitted, nil) here
 
-	// L7 durable suspend (ADR 0091): a depth-0 supervisor that intends to SUSPEND gets a resolve-only
-	// signal — the launcher has budget-checked (Admit above) and resolves the target endpoint, but does
-	// NOT spawn and does NOT block. The SDK collects the turn's signals and suspends ONCE (fan-out = one
-	// suspend); the BFF worker then creates the child run at this endpoint inside the suspend transaction.
-	// Nested suspension is deferred, so a depth>0 request falls THROUGH to the blocking path below —
-	// fail-closed: a non-root supervisor always blocks in v1.
-	if req.Suspend && depth == 0 {
+	// L7 durable suspend (ADR 0091), depth-agnostic (ADR 0108): a supervisor that intends to SUSPEND —
+	// at ANY delegation depth — gets a resolve-only signal. The launcher has budget-checked (Admit above)
+	// and resolves the target endpoint, but does NOT spawn and does NOT block. The SDK collects the turn's
+	// signals and suspends ONCE (fan-out = one suspend); the BFF worker then creates the child run at this
+	// endpoint inside the suspend transaction. M138 lifted the depth-0 gate — a sub-run that is itself a
+	// supervisor now suspends too (the wake machinery is depth-generic: CompleteAndWake fires only on a
+	// child's TERMINAL transition, so a mid-tree supervisor's waiting→queued churn is invisible upward).
+	// The blocking spawn+await path below STAYS: the resume re-dispatch rides it (short-circuiting on the
+	// already-terminal child), and a non-suspend delegation still blocks as before.
+	if req.Suspend {
 		writeDelegate(w, delegateResponse{OK: true, Suspend: true, Endpoint: s.targetURL(req.SubAgent)})
 		return
 	}

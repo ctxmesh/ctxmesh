@@ -1039,12 +1039,13 @@ export async function runManagedLoop(
     ? await loadHistory(client, conversationId, config.maxHistoryMessages)
     : [];
 
-  // L7 durable delegate suspension (ADR 0091): eligible only for a durable ROOT supervisor — the
-  // feature on (default), inbound spawn-depth 0 (a non-root supervisor blocks — nested suspension is
-  // v1-deferred), AND a spawn-root header present (the synchronous Playground path has none, and a
-  // marker emitted there is never enacted — so it must fall back to blocking).
+  // L7 durable delegate suspension (ADR 0091), DEPTH-AGNOSTIC (ADR 0108, M138): eligible for a durable
+  // supervisor at ANY delegation depth — the feature on (default) AND a spawn-root header present (the
+  // synchronous Playground path has none, and a marker emitted there is never enacted — so it must fall
+  // back to blocking). The `spawnDepth === 0` term is REMOVED: a sub-run that is itself a supervisor now
+  // suspends too (its wake is generic over depth), rather than parking a worker slot on the blocking path.
   const spawnRoot = spawnRootFromHeaders(headers);
-  const suspendEligible = delegateSuspendEnabled() && spawnDepth === 0 && Boolean(spawnRoot);
+  const suspendEligible = delegateSuspendEnabled() && Boolean(spawnRoot);
 
   // Restore from an L7 checkpoint when the platform re-invoked a suspended supervisor. verifyAndExtract
   // is fail-safe: a corrupt/version-skewed envelope yields null → run fresh.
@@ -1227,7 +1228,7 @@ interface DriveState {
   startStep: number;
   /** L7: the spawn-tree root relayed on the suspend-signal delegate call (guard/depth keying). */
   spawnRoot: string;
-  /** L7: whether a depth-0 delegation SUSPENDS (durable) or blocks. */
+  /** L7: whether a delegation SUSPENDS (durable) or blocks — depth-agnostic (ADR 0108, M138). */
   suspendEligible: boolean;
   /** M78 step-frame model-channel counter, restored across an L7 resume so fixture refs stay in order. */
   modelIndex: number;
@@ -1437,10 +1438,11 @@ async function driveLoop(
         }
       }
 
-      // L7 durable suspension (ADR 0091): at depth 0 (suspendEligible), RECORD each delegation as
-      // intent (ask the launcher for a suspend-signal = resolved endpoint, no spawn/await) instead of
-      // blocking. `pendingDelegates` are suspended-on; the rest (an older launcher that blocks, or a
-      // refusal) come back as normal results threaded inline — the mixed-version fallback.
+      // L7 durable suspension (ADR 0091), depth-agnostic (ADR 0108, M138): when suspendEligible (a
+      // durable supervisor at ANY depth), RECORD each delegation as intent (ask the launcher for a
+      // suspend-signal = resolved endpoint, no spawn/await) instead of blocking. `pendingDelegates` are
+      // suspended-on; the rest (an older launcher that blocks, or a refusal) come back as normal results
+      // threaded inline — the mixed-version fallback.
       const pendingDelegates: Array<{ callId: string; subAgent: string; task: string; endpoint: string }> = [];
       const suspendInline = new Map<string, string>();
       if (state.suspendEligible) {
