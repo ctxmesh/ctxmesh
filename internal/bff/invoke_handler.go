@@ -213,8 +213,17 @@ func (s *Server) mintRunCapability(username, ns, agent, boundary, runID string) 
 			return "", false
 		}
 	}
+	// Dispatch on the principal (M137/EU1b, ADR 0106 §5): an end-user (oidc:) principal hashes via the
+	// domain-separated EndUserHash and REQUIRES a grant HMAC key (an unsalted end-user hash is
+	// enumerable); a K8s username hashes via userGrantHash.
+	userHash, isEndUser := principalGrantHash(username)
+	if isEndUser && !hmacKeyConfigured() {
+		s.log.Error(fmt.Errorf("MCP_GRANT_HMAC_KEY is required for end-user identities"),
+			"run-capability: refusing to mint an end-user capability without a grant HMAC key")
+		return "", false
+	}
 	token, err := s.capabilitySigner.Mint(runcap.MintRequest{
-		User:     userGrantHash(username),
+		User:     userHash,
 		Agent:    ns + "/" + agent,
 		Boundary: boundary,
 		RunID:    runID,

@@ -233,6 +233,13 @@ type Server struct {
 	oidcIssuer   string
 	oidcClientID string
 
+	// endUserVerifier verifies END-USER OIDC ID tokens against a tenant issuer (M137/EU1b, ADR 0106).
+	// nil ⇒ end-user OIDC is off and /chat stays console-authenticated. saIssuer is the cluster
+	// service-account issuer — an end-user issuer equal to it (or to oidcIssuer) is refused, since a
+	// colliding issuer's tokens could gain K8s trust.
+	endUserVerifier endUserTokenVerifier
+	saIssuer        string
+
 	// consoleURL is the canonical, browser-reachable console origin (scheme://host[:port]),
 	// e.g. "https://console.agents.example.com" — the ONE origin whose /api/mcp/oauth/callback
 	// is registered with MCP providers (ADR 0040). MCP consent uses it as the server-controlled
@@ -469,6 +476,11 @@ type Options struct {
 	// m73.3). Wired from CONTROLPLANE_DSN in cmd/bff/main.go alongside ToolRegistryStore. nil ⇒
 	// GET /api/catalog degrades to own-ns + public only (fail-closed), never a panic.
 	NamespaceTenantStore namespacetenant.Store
+
+	// EndUserVerifier verifies end-user OIDC ID tokens (M137/EU1b, ADR 0106); nil ⇒ end-user OIDC off.
+	// SAIssuer is the cluster service-account issuer, refused as an end-user issuer.
+	EndUserVerifier endUserTokenVerifier
+	SAIssuer        string
 	// PublishedArtifactStore is the control-plane Postgres store for published_artifacts — the
 	// snapshot-at-publish table (M74, m74.1, ADR 0068 §1). Wired from CONTROLPLANE_DSN in
 	// cmd/bff/main.go alongside NamespaceTenantStore. nil ⇒ POST/DELETE /api/templates return 501.
@@ -566,6 +578,8 @@ func NewServer(opts Options) *Server {
 		promptStore:              opts.PromptStore,
 		toolRegistryStore:        opts.ToolRegistryStore,
 		namespaceTenantStore:     opts.NamespaceTenantStore,
+		endUserVerifier:          opts.EndUserVerifier,
+		saIssuer:                 strings.TrimSpace(opts.SAIssuer),
 		publishedArtifactStore:   opts.PublishedArtifactStore,
 		sharedRunStore:           opts.SharedRunStore,
 		sharedRunLimiter:         newIPRateLimiter(sharedRunRatePerIP, sharedRunBurstPerIP),
