@@ -234,6 +234,7 @@ func (s *Server) deadLetterPoison(rn *run.Run) {
 			return fmt.Errorf("already %s", r.Status)
 		}
 		r.Error = reason
+		r.FailureCode = run.FailurePlatform // ADR 0109: a poison/infra dead-letter is a platform failure
 		return r.Transition(run.StatusFailed, time.Now())
 	}); err != nil {
 		s.log.Error(err, "run-worker: dead-letter transition failed", "run", rn.ID)
