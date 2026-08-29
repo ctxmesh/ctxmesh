@@ -5,7 +5,9 @@ import {
   completeLogin,
   pkceChallenge,
   randomUrlSafe,
+  startEndUserLogin,
 } from "@/lib/oidc";
+import { api } from "@/lib/api";
 
 // OIDC Auth-Code + PKCE (ADR 0020). These pin the security-load-bearing pieces: the
 // S256 challenge (a known-answer vector), the authorize-URL shape, and the callback
@@ -54,6 +56,29 @@ describe("buildAuthorizeUrl", () => {
     expect(url.searchParams.get("code_challenge_method")).toBe("S256");
     expect(url.searchParams.get("state")).toBe("st4te");
     expect(url.searchParams.get("scope")).toContain("openid");
+  });
+
+  it("honors an explicit scope (end-user flow: no groups)", () => {
+    const url = new URL(
+      buildAuthorizeUrl("https://dex-eu.example.com/auth", {
+        clientId: "agent-engine-enduser",
+        redirectUri: "https://chatbot.ns1.example.com/auth/callback",
+        state: "s",
+        challenge: "c",
+        scope: "openid email offline_access",
+      }),
+    );
+    expect(url.searchParams.get("scope")).toBe("openid email offline_access");
+    expect(url.searchParams.get("scope")).not.toContain("groups");
+  });
+});
+
+describe("startEndUserLogin (M137/EU1b)", () => {
+  it("throws when the agent's tenant has no end-user IdP (config null)", async () => {
+    vi.spyOn(api, "endUserAuthConfig").mockResolvedValue(null);
+    await expect(startEndUserLogin("/chat/ns1/chatbot")).rejects.toThrow(
+      /no end-user identity provider/i,
+    );
   });
 });
 

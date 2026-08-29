@@ -1,5 +1,10 @@
 import { api } from "@/lib/api";
 
+// END-USER scopes (M137/EU1b): openid + email (identity) + offline_access (refresh-token
+// rotation for a chat session longer than the ID token). NOT `groups` — an end-user is not a
+// Kubernetes principal. Any tenant-configured extra scopes are appended.
+const END_USER_SCOPES = "openid email offline_access";
+
 // OIDC Auth-Code + PKCE for console login (ADR 0020). The console is a PUBLIC client:
 // no client secret in the browser — PKCE (S256) is the proof of possession. The SPA
 // reads {issuer, clientId} from GET /api/authconfig, discovers Dex's endpoints, and
@@ -72,13 +77,14 @@ export function buildAuthorizeUrl(
     redirectUri: string;
     state: string;
     challenge: string;
+    scope?: string;
   },
 ): string {
   const u = new URL(authEndpoint);
   u.searchParams.set("response_type", "code");
   u.searchParams.set("client_id", p.clientId);
   u.searchParams.set("redirect_uri", p.redirectUri);
-  u.searchParams.set("scope", SCOPES);
+  u.searchParams.set("scope", p.scope ?? SCOPES);
   u.searchParams.set("state", p.state);
   u.searchParams.set("code_challenge", p.challenge);
   u.searchParams.set("code_challenge_method", "S256");
@@ -116,6 +122,46 @@ export async function startLogin(returnTo: string): Promise<void> {
       redirectUri,
       state,
       challenge,
+    }),
+  );
+}
+
+// startEndUserLogin begins the END-USER Auth-Code+PKCE flow against the agent's TENANT IdP
+// (M137/EU1b, ADR 0106 §9), distinct from console SSO: read the tenant's end-user OIDC config
+// (GET /api/end-user-auth-config), discover, mint verifier/challenge/state, stash the transient
+// flow, and redirect. The redirect_uri is the agent's OWN origin callback (RFC 9700 exact match,
+// no cross-origin handoff). The returned ID token flows through the SAME session seam + callback
+// (completeLogin) as console login. Throws when the tenant has no end-user IdP (the caller should
+// only offer it when api.endUserAuthConfig() returned a config).
+export async function startEndUserLogin(returnTo: string): Promise<void> {
+  const cfg = await api.endUserAuthConfig();
+  if (!cfg || !cfg.issuer || !cfg.clientId) {
+    throw new Error("This agent's tenant has no end-user identity provider");
+  }
+  const disco = await discover(cfg.issuer);
+  const codeVerifier = randomUrlSafe(32);
+  const challenge = await pkceChallenge(codeVerifier);
+  const state = randomUrlSafe(16);
+  const redirectUri = window.location.origin + CALLBACK_PATH;
+  const scope = [END_USER_SCOPES, ...(cfg.scopes ?? [])].join(" ");
+
+  const pending: PendingFlow = {
+    state,
+    codeVerifier,
+    tokenEndpoint: disco.token_endpoint,
+    clientId: cfg.clientId,
+    redirectUri,
+    returnTo,
+  };
+  sessionStorage.setItem(FLOW_KEY, JSON.stringify(pending));
+
+  window.location.assign(
+    buildAuthorizeUrl(disco.authorization_endpoint, {
+      clientId: cfg.clientId,
+      redirectUri,
+      state,
+      challenge,
+      scope,
     }),
   );
 }

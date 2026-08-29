@@ -14,7 +14,12 @@ import * as oidc from "@/lib/oidc";
 
 vi.mock("@/lib/oidc", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/oidc")>();
-  return { ...actual, startLogin: vi.fn(), completeLogin: vi.fn() };
+  return {
+    ...actual,
+    startLogin: vi.fn(),
+    startEndUserLogin: vi.fn(),
+    completeLogin: vi.fn(),
+  };
 });
 
 afterEach(() => {
@@ -25,7 +30,10 @@ afterEach(() => {
 
 // stubFetch answers /api/authconfig (SSO on/off) and /api/whoami (200), everything
 // else benignly, so the pages render without unhandled rejections.
-function stubFetch(oidcEnabled: boolean) {
+function stubFetch(
+  oidcEnabled: boolean,
+  endUserCfg?: { issuer: string; clientId: string },
+) {
   vi.stubGlobal(
     "fetch",
     vi.fn((input: string | URL) => {
@@ -43,6 +51,13 @@ function stubFetch(oidcEnabled: boolean) {
                 }
               : { oidcEnabled: false },
         } as Response);
+      }
+      if (url.startsWith("/api/end-user-auth-config")) {
+        return Promise.resolve(
+          endUserCfg
+            ? ({ ok: true, status: 200, json: async () => endUserCfg } as Response)
+            : ({ ok: false, status: 404, json: async () => ({}) } as Response),
+        );
       }
       if (url.startsWith("/api/whoami")) {
         return Promise.resolve({
@@ -87,6 +102,25 @@ describe("LoginPage × SSO", () => {
       expect(screen.getByLabelText("Bearer token")).toBeInTheDocument(),
     );
     expect(screen.queryByTestId("sso-login")).not.toBeInTheDocument();
+    // Nor the end-user button (a 404 from end-user-auth-config off an agent origin).
+    expect(screen.queryByTestId("end-user-login")).not.toBeInTheDocument();
+  });
+
+  it("offers end-user login when the tenant has an end-user IdP, and starts that flow", async () => {
+    stubFetch(false, {
+      issuer: "https://dex-eu.example.com",
+      clientId: "agent-engine-enduser",
+    });
+    render(
+      <MemoryRouter initialEntries={["/login"]}>
+        <LoginPage />
+      </MemoryRouter>,
+    );
+    const btn = await screen.findByTestId("end-user-login");
+    fireEvent.click(btn);
+    await waitFor(() =>
+      expect(oidc.startEndUserLogin).toHaveBeenCalledTimes(1),
+    );
   });
 });
 
