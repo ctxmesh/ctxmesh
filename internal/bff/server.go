@@ -744,6 +744,10 @@ func (s *Server) Handler() http.Handler {
 	// session. Tells the SPA whether OIDC/SSO is available (issuer + public PKCE client
 	// id) so it offers "Sign in with SSO"; token login (ADR 0012) is the fallback.
 	api.HandleFunc("GET /api/authconfig", s.handleAuthConfig)
+	// End-user OIDC config (M137/EU1b, ADR 0106 §9): the agent-origin /chat SPA reads the target
+	// tenant's issuer + public PKCE client id here to log the end-user in. Unauthenticated (like
+	// authconfig); a uniform 404 for a ns with no end-user IdP (no tenant-existence oracle).
+	api.HandleFunc("GET /api/end-user-auth-config", s.handleEndUserAuthConfig)
 	// Shared-run public read (M75, m75.2, ADR 0069 §1/§2) — the platform's FIRST genuinely
 	// UNAUTHENTICATED read surface. Mounted on the `api` mux DIRECTLY (a more specific pattern
 	// than "/api/"), so it is NOT behind requireAuth: a logged-out visitor with only the share
@@ -1630,6 +1634,7 @@ const agentChatboxHeader = "X-Ctxmesh-Agent-Chatbox"
 // cost, runs, evals, prompts, config, providers, the agents LIST, …) are absent → 404 at agent origins.
 var agentOriginAPIAllowlist = []string{
 	"GET /api/authconfig",
+	"GET /api/end-user-auth-config", // M137/EU1b: the SPA reads the tenant's end-user IdP config here
 	"GET /api/whoami",
 	"GET /api/devmode",
 	"GET /api/health",
