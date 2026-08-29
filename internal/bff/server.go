@@ -748,6 +748,12 @@ func (s *Server) Handler() http.Handler {
 	// tenant's issuer + public PKCE client id here to log the end-user in. Unauthenticated (like
 	// authconfig); a uniform 404 for a ns with no end-user IdP (no tenant-existence oracle).
 	api.HandleFunc("GET /api/end-user-auth-config", s.handleEndUserAuthConfig)
+	// End-user "my runs" list (M137/EU1c, ADR 0107): host-derived + principal-scoped + store-backed
+	// (NOT the Langfuse GET /api/runs, which stays absent at an agent origin). Mounted on `api` DIRECTLY
+	// (like auth-config) so it escapes requireAuth's caller-client — a verified end-user bearer must never
+	// reach a K8s TokenReview. The handler verifies the end-user token itself + scopes the query to the
+	// principal; a non-end-user request is a uniform 404.
+	api.HandleFunc("GET /api/end-user/runs", s.handleEndUserMyRuns)
 	// Shared-run public read (M75, m75.2, ADR 0069 §1/§2) — the platform's FIRST genuinely
 	// UNAUTHENTICATED read surface. Mounted on the `api` mux DIRECTLY (a more specific pattern
 	// than "/api/"), so it is NOT behind requireAuth: a logged-out visitor with only the share
@@ -1635,6 +1641,7 @@ const agentChatboxHeader = "X-Ctxmesh-Agent-Chatbox"
 var agentOriginAPIAllowlist = []string{
 	"GET /api/authconfig",
 	"GET /api/end-user-auth-config", // M137/EU1b: the SPA reads the tenant's end-user IdP config here
+	"GET /api/end-user/runs",        // M137/EU1c: the end-user's OWN runs at this agent (principal-scoped)
 	"GET /api/whoami",
 	"GET /api/devmode",
 	"GET /api/health",

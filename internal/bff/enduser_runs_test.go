@@ -159,6 +159,83 @@ func TestHandleCreateRun_EndUser_Errors(t *testing.T) {
 	})
 }
 
+func TestHandleEndUserMyRuns(t *testing.T) {
+	prev := grantHMACKey.Load()
+	t.Cleanup(func() {
+		if prev != nil {
+			setGrantHMACKey(*prev)
+		} else {
+			grantHMACKey.Store(nil)
+		}
+	})
+	setGrantHMACKey([]byte("cluster-key"))
+
+	// alice (the fake verifier's identity) owns two runs at chatbot; bob owns one; alice owns one at a
+	// different agent. The list must return ONLY alice's two runs at chatbot.
+	const alice = "oidc:https://dex-eu.example.com#alice"
+	const bob = "oidc:https://dex-eu.example.com#bob"
+	seed := func(rs run.Store) {
+		mk := func(id, caller, ns, agent string) {
+			r := run.New(id, ns, agent, []byte(`{"input":"x"}`), "", time.Now())
+			r.CallerUsername = caller
+			require.NoError(t, rs.Create(r))
+		}
+		mk("a1", alice, "ns1", "chatbot")
+		mk("a2", alice, "ns1", "chatbot")
+		mk("b1", bob, "ns1", "chatbot")
+		mk("a3", alice, "ns1", "other-agent")
+	}
+
+	myRunsReq := func(host, bearer string) *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/api/end-user/runs", nil)
+		req.Header.Set("X-Forwarded-Host", host)
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		return req
+	}
+
+	t.Run("verified end-user sees ONLY their own runs at this agent", func(t *testing.T) {
+		s, rsp := newEndUserRunServer(t, "https://chatbot.ns1.example.com")
+		seed(*rsp)
+		rec := httptest.NewRecorder()
+		s.handleEndUserMyRuns(rec, myRunsReq("chatbot.ns1.example.com", "an-oidc-id-token"))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp EndUserRunsResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		ids := []string{}
+		for _, r := range resp.Runs {
+			ids = append(ids, r.ID)
+		}
+		assert.ElementsMatch(t, []string{"a1", "a2"}, ids, "only alice's chatbot runs (not bob's, not other-agent)")
+	})
+
+	t.Run("rejected bearer → 401", func(t *testing.T) {
+		s, rsp := newEndUserRunServer(t, "https://chatbot.ns1.example.com")
+		seed(*rsp)
+		s.endUserVerifier = fakeEndUserVerifier{err: errors.New("bad token")}
+		rec := httptest.NewRecorder()
+		s.handleEndUserMyRuns(rec, myRunsReq("chatbot.ns1.example.com", "forged"))
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	})
+
+	t.Run("no end-user IdP for the host ns → uniform 404", func(t *testing.T) {
+		s, rsp := newEndUserRunServer(t, "https://chatbot.ns1.example.com")
+		seed(*rsp)
+		rec := httptest.NewRecorder()
+		s.handleEndUserMyRuns(rec, myRunsReq("chatbot.orphan-ns.example.com", "an-oidc-id-token"))
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("no bearer → uniform 404 (no oracle)", func(t *testing.T) {
+		s, rsp := newEndUserRunServer(t, "https://chatbot.ns1.example.com")
+		seed(*rsp)
+		rec := httptest.NewRecorder()
+		s.handleEndUserMyRuns(rec, myRunsReq("chatbot.ns1.example.com", ""))
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+}
+
 func TestAuthorizeRunAccess_EndUser(t *testing.T) {
 	ctx := context.Background()
 	rs := run.NewMemStore()

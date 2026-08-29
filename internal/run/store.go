@@ -186,6 +186,27 @@ type Store interface {
 	// paused descendant), and CallerUsername (the BFF's inline-workflow owner filter — never sent to a
 	// client). Read-only; a nil/empty `kinds` returns nothing.
 	ListWaitingApproval(ctx context.Context, namespace string, kinds []ActionKind, limit int) ([]WaitingApproval, error)
+
+	// ListByEndUser returns the runs OWNED by callerUsername at (namespace, agent), most-recently-updated
+	// first — the end-user "my runs" list (M137/EU1c, ADR 0107). The mandatory
+	// `WHERE caller_username=$1 AND namespace=$2 AND agent=$3` is the ISOLATION BOUNDARY, not a
+	// client-supplied filter: a verified end-user principal (oidc:<iss>#<sub>) can never see another
+	// principal's runs, and the (namespace, agent) is HOST-derived so they cannot enumerate their runs on
+	// a different agent. A blank callerUsername returns nothing (fail-CLOSED — never a list-all). limit>0
+	// bounds the page. Read-only; a query/scan error is returned.
+	ListByEndUser(ctx context.Context, callerUsername, namespace, agent string, limit int) ([]EndUserRun, error)
+}
+
+// EndUserRun is the projection for an end-user's "my runs" list (M137/EU1c, ADR 0107): a run the verified
+// end-user principal OWNS at a specific (namespace, agent). Just enough to render the list and deep-link
+// into a run they already own — deliberately NO Input/Messages (that is the run-detail read, itself
+// ownership-gated). Ordered most-recently-updated first.
+type EndUserRun struct {
+	ID             string    `json:"id"`
+	Status         Status    `json:"status"`
+	ConversationID string    `json:"conversationId,omitempty"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 // DescendantAction is the L1-surfacing projection of a descendant sub-run paused in requires_action
@@ -669,6 +690,31 @@ func (m *memStore) ListWaitingApproval(_ context.Context, namespace string, kind
 	for _, rw := range rows {
 		out = append(out, rw.wa)
 	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// ListByEndUser — see the Store interface (M137/EU1c, ADR 0107). Ownership-scoped my-runs list.
+func (m *memStore) ListByEndUser(_ context.Context, callerUsername, namespace, agent string, limit int) ([]EndUserRun, error) {
+	if callerUsername == "" || namespace == "" || agent == "" {
+		return nil, nil // fail-closed: a blank identity/host never lists runs
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []EndUserRun
+	for _, e := range m.entries {
+		r := e.run
+		if r.CallerUsername != callerUsername || r.Namespace != namespace || r.Agent != agent {
+			continue
+		}
+		out = append(out, EndUserRun{
+			ID: r.ID, Status: r.Status, ConversationID: r.ConversationID,
+			CreatedAt: r.CreatedAt.UTC(), UpdatedAt: r.UpdatedAt.UTC(),
+		})
+	}
+	slices.SortFunc(out, func(a, b EndUserRun) int { return b.UpdatedAt.Compare(a.UpdatedAt) }) // newest first
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}
