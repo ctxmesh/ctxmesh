@@ -97,11 +97,13 @@ func TestResolveEndUserPrincipal(t *testing.T) {
 	assert.Equal(t, "oidc:https://dex-eu.example.com#alice", principal)
 	assert.Equal(t, "alice", id.Subject)
 
-	// A token that fails verification (a K8s console token, or a forged one) → ok=false (fall through).
+	// A bearer that fails verification against an ENABLED end-user IdP → ok=false AND
+	// errEndUserBearerRejected, so the create path can 401 (the end-user path owns that auth failure)
+	// rather than fall through to the console path's "agent is required" 400 (ADR 0107 §3).
 	sBad := &Server{namespaceTenantStore: st, log: logr.Discard(), endUserVerifier: fakeEndUserVerifier{err: errors.New("bad token")}}
 	_, _, ok, err = sBad.resolveEndUserPrincipal(ctx, req, "ns1")
-	require.NoError(t, err)
-	assert.False(t, ok, "a verify failure must fall through to the K8s path")
+	assert.False(t, ok, "a rejected end-user bearer is not a verified end-user")
+	assert.ErrorIs(t, err, errEndUserBearerRejected, "a presented-but-invalid end-user bearer must signal a 401")
 
 	// A namespace with no end-user IdP → ok=false.
 	_, _, ok, err = s.resolveEndUserPrincipal(ctx, req, "orphan-ns")

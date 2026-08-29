@@ -21,7 +21,24 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 )
+
+// splitNonEmpty splits a newline-joined string (from array_to_string) into its non-empty fields;
+// "" → nil (an empty array). Used to read text[] columns the pgx stdlib driver can't Scan directly.
+func splitNonEmpty(joined string) []string {
+	if joined == "" {
+		return nil
+	}
+	parts := strings.Split(joined, "\n")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 // pgStore is the Postgres-backed Store. The schema (namespace_tenants — migration 0012) is applied by
 // the control-plane goose migrations (controlplane.Migrate), not here; the store assumes the table exists.
@@ -201,16 +218,23 @@ func (s *pgStore) SetEndUserIdentity(ctx context.Context, tenant string, cfg End
 // (zero, false, nil) — fail-CLOSED for end-user auth: an unresolved namespace has NO end-user IdP.
 func (s *pgStore) EndUserIdentityForNamespace(ctx context.Context, namespace string) (EndUserIdentity, bool, error) {
 	var cfg EndUserIdentity
+	// scopes/allowed_hosts are text[] — the pgx stdlib driver BINDS a []string but does NOT Scan a
+	// text[] back into a []string. Read them via array_to_string(...,'\n') into a plain text column and
+	// split in Go (portable, no array codec). '\n' avoids clashing with any ',' inside a scope/host.
+	var scopesJoined, hostsJoined string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT e.enabled, e.issuer, e.client_id, e.scopes, e.allowed_hosts
+		`SELECT e.enabled, e.issuer, e.client_id,
+		        array_to_string(e.scopes, E'\n'), array_to_string(e.allowed_hosts, E'\n')
 		 FROM namespace_tenants nt JOIN tenant_end_user_identity e ON e.tenant = nt.tenant
 		 WHERE nt.namespace = $1`, namespace).
-		Scan(&cfg.Enabled, &cfg.Issuer, &cfg.ClientID, &cfg.Scopes, &cfg.AllowedHosts)
+		Scan(&cfg.Enabled, &cfg.Issuer, &cfg.ClientID, &scopesJoined, &hostsJoined)
 	if errors.Is(err, sql.ErrNoRows) {
 		return EndUserIdentity{}, false, nil
 	}
 	if err != nil {
 		return EndUserIdentity{}, false, fmt.Errorf("namespacetenant: end-user identity for %q: %w", namespace, err)
 	}
+	cfg.Scopes = splitNonEmpty(scopesJoined)
+	cfg.AllowedHosts = splitNonEmpty(hostsJoined)
 	return cfg, true, nil
 }

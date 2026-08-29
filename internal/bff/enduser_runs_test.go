@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -144,6 +145,17 @@ func TestHandleCreateRun_EndUser_Errors(t *testing.T) {
 		rec := httptest.NewRecorder()
 		s.handleCreateRun(rec, endUserCreateReq(t, "chatbot.ns1.example.com", `{"input":"x","namespace":"other-tenant","agent":"chatbot"}`))
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("rejected end-user bearer at an agent origin → 401 (owns the auth failure)", func(t *testing.T) {
+		// The tenant has end-user login enabled; the bearer fails verification (forged/expired). An
+		// end-user chat body carries NO agent — before ADR 0107 §3 this fell through to the console path's
+		// "agent is required" 400, leaving the SPA no signal to re-login. Now the end-user path owns it 401.
+		s, _ := newEndUserRunServer(t, "https://chatbot.ns1.example.com")
+		s.endUserVerifier = fakeEndUserVerifier{err: errors.New("bad token")}
+		rec := httptest.NewRecorder()
+		s.handleCreateRun(rec, endUserCreateReq(t, "chatbot.ns1.example.com", `{"input":"hi"}`))
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
 	})
 }
 

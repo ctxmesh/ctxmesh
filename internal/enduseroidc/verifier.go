@@ -76,7 +76,7 @@ type Verifier struct {
 	mu        sync.Mutex
 	providers map[string]*oidc.Provider // issuer → provider (discovery cached; keyset self-refreshes)
 	client    *http.Client              // SSRF-guarded; used for discovery + JWKS
-	allowLB   bool
+	allowHTTP bool                      // permit an http issuer (dev: a private/loopback in-cluster IdP)
 	now       func() time.Time
 }
 
@@ -93,7 +93,9 @@ func NewVerifier(opts Options) *Verifier {
 	return &Verifier{
 		providers: make(map[string]*oidc.Provider),
 		client:    ssrfGuardedClient(opts.AllowPrivateIssuer, opts.AllowLoopback, timeout),
-		allowLB:   opts.AllowLoopback,
+		// http is allowed only under a DEV posture (a private/in-cluster or loopback IdP); production
+		// (no dev flags) requires https. The SSRF dial guard still enforces the IP restrictions.
+		allowHTTP: opts.AllowLoopback || opts.AllowPrivateIssuer,
 		now:       now,
 	}
 }
@@ -185,8 +187,8 @@ func (v *Verifier) validateIssuerURL(issuer string) error {
 	if u.Scheme == "https" {
 		return nil
 	}
-	if u.Scheme == "http" && v.allowLB && isLoopbackHost(u.Hostname()) {
-		return nil
+	if u.Scheme == "http" && v.allowHTTP {
+		return nil // dev posture: a private/in-cluster or loopback IdP over http (dial guard still applies)
 	}
 	return fmt.Errorf("enduseroidc: issuer must be https (got scheme %q)", u.Scheme)
 }
@@ -274,12 +276,4 @@ func deniedIP(ip net.IP, allowPrivate, allowLoopback bool) string {
 		return "private"
 	}
 	return ""
-}
-
-func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }

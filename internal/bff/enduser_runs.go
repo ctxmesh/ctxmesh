@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -53,6 +54,13 @@ func (s *Server) tryEndUserCreateRun(w http.ResponseWriter, r *http.Request) (ha
 
 	principal, _, isEndUser, err := s.resolveEndUserPrincipal(r.Context(), r, ns)
 	if err != nil {
+		if errors.Is(err, errEndUserBearerRejected) {
+			// A bearer was presented at this end-user-enabled agent origin and failed verification. The
+			// end-user path OWNS this auth failure: 401 so the SPA re-authenticates — never fall through
+			// to the console path's "agent is required" 400 (which the agent-less end-user body hits).
+			writeError(w, http.StatusUnauthorized, "invalid or expired credentials")
+			return true
+		}
 		writeError(w, http.StatusInternalServerError, "could not resolve end-user identity")
 		return true
 	}
