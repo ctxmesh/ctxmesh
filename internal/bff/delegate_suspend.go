@@ -18,6 +18,7 @@ package bff
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -72,29 +73,63 @@ func parseDelegateWaiting(resp []byte) *delegateWaiting {
 // (executeRun transitioned it); the freshly-locked parent is re-read inside the TX, so `parent` here is
 // used only for its immutable lineage.
 //
-// Fail-closed: a malformed marker (a bad field, an unsupported depth, an over-ceiling fan-out) returns an
-// error and the caller fails the run — never a silent block and never a swallowed success.
+// Fail-closed: a malformed marker (a bad field, an over-ceiling fan-out) returns an error and the caller
+// fails the run — never a silent block and never a swallowed success.
 func (s *Server) suspendOnDelegate(parent *run.Run, dw *delegateWaiting, traceID string, now time.Time) error {
-	// v1 supports suspension only at the ROOT of a delegation (depth 0). A depth>0 supervisor's launcher
-	// stays blocking (ADR 0091 — nested suspension deferred), so a delegate_waiting marker arriving on a
-	// depth>0 run is a contract violation; fail closed rather than park an unsupported nested suspension.
-	if parent.SpawnDepth > 0 {
-		return fmt.Errorf("delegate suspension unsupported at depth %d (v1: a non-root supervisor blocks)", parent.SpawnDepth)
-	}
+	// Suspension is DEPTH-AGNOSTIC (ADR 0108, M138): a supervisor suspends at ANY delegation depth. The
+	// depth-0-only gate (ADR 0091's fork-5 fail-closed reject) is lifted — the SuspendOnDelegate machinery
+	// is generic over depth (CompleteAndWake commits the child terminal + the parent wake atomically in one
+	// tx, at every level), so a sub-run that is itself a supervisor parks in `waiting` on its own children
+	// instead of parking a worker slot. The child's SpawnDepth is still parent.SpawnDepth+1 (below), so the
+	// spawn-depth ceiling (32) continues to bound the tree.
+	//
 	// Defense-in-depth fan-out cap (C19/ADR 0088): the launcher is the budget authority, but the BFF never
 	// mints an unbounded child set from an agent-controlled marker.
 	if len(dw.Delegates) > agentsv1beta1.MaxFanOutCeiling {
 		return fmt.Errorf("delegate fan-out %d exceeds ceiling %d", len(dw.Delegates), agentsv1beta1.MaxFanOutCeiling)
 	}
 
+	s.metrics.observeCheckpoint(len(dw.Checkpoint)) // ADR 0108 §3: checkpoint-size visibility
 	cursor, err := run.NewSupervisorCheckpoint(dw.Checkpoint)
 	if err != nil {
+		if errors.Is(err, run.ErrCheckpointTooLarge) {
+			s.metrics.checkpointRejected() // fail-closed: an over-cap checkpoint fails the suspend
+		}
 		return fmt.Errorf("checkpoint envelope: %w", err)
 	}
 
 	root := parent.RootRunID
 	if root == "" {
 		root = parent.ID // a root supervisor roots the delegation tree at itself
+	}
+
+	// Authoritative per-root-tree budget on the SUSPEND path (ADR 0108 §2, M138). Before m138.1 the
+	// suspend path was depth-0-only and leaned on the launcher's ADVISORY guard; now that depth>0
+	// suspends, deep nesting would grow with advisory-only enforcement (blocking used to be accidental
+	// backpressure). Enforce the platform ceilings here, fail-closed, keyed on the VERIFIED tree root:
+	//   - depth ceiling (32): a child one deeper than the ceiling is denied;
+	//   - total-spawn ceiling (1024): reserve one slot per child (ReserveSpawn is monotonic per tree).
+	// The launcher keeps enforcing the tighter TEAM budget advisorily; making the team budget
+	// server-authoritative on this path is a follow-up (m52.I2d). Idempotency: the resume re-dispatch
+	// through the blocking /delegate short-circuits an EXISTING child before reserving (spawn_handler
+	// step 5), so a woken supervisor re-materializing the same deterministic child ids does not
+	// re-consume budget. A crash BETWEEN this reserve and the suspend commit re-runs the turn and
+	// conservatively re-reserves (the ADR 0091 at-least-once tradeoff) — fail-closed-safe: it only
+	// tightens the tree's budget, never loosens it.
+	childDepth := parent.SpawnDepth + 1
+	if childDepth > agentsv1beta1.MaxSpawnDepthCeiling {
+		return fmt.Errorf("delegate suspension denied: depth %d exceeds the platform ceiling %d",
+			childDepth, agentsv1beta1.MaxSpawnDepthCeiling)
+	}
+	for range dw.Delegates {
+		ok, rErr := s.runStore.ReserveSpawn(root, agentsv1beta1.MaxTotalSpawnsCeiling)
+		if rErr != nil {
+			return fmt.Errorf("delegate suspension denied: spawn budget check failed: %w", rErr) // fail closed
+		}
+		if !ok {
+			return fmt.Errorf("delegate suspension denied: the tree's total spawn budget (%d) is exhausted",
+				agentsv1beta1.MaxTotalSpawnsCeiling)
+		}
 	}
 
 	children := make([]*run.Run, 0, len(dw.Delegates))

@@ -20,6 +20,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 )
 
 // The L7 supervisor checkpoint envelope (ADR 0091). A supervisor that suspends on a delegate_to call
@@ -39,7 +41,17 @@ const (
 	// checkpointEnvelopeVersion is the current envelope schema version. A resume rejects any other
 	// version (fail-safe → full re-invoke), so a new version must roll the SDKs first (ADR 0091).
 	checkpointEnvelopeVersion = 1
+	// MaxCheckpointPayloadBytes caps a supervisor-loop checkpoint payload (ADR 0108 §3, M138). A
+	// checkpoint is rewritten in full on every suspend; an unbounded blob would bloat the run row (and,
+	// under nested depth>0 suspension, do so at every level). Over-cap → ErrCheckpointTooLarge, which
+	// fails the suspend loudly (a typed error) rather than persisting an unbounded cursor. The SDK also
+	// falls back to blocking above this size; this is the fail-closed BFF backstop.
+	MaxCheckpointPayloadBytes = 4 << 20 // 4 MiB
 )
+
+// ErrCheckpointTooLarge is returned by NewSupervisorCheckpoint when the payload exceeds
+// MaxCheckpointPayloadBytes (ADR 0108 §3). The caller fails the suspend with this typed error.
+var ErrCheckpointTooLarge = errors.New("run: supervisor checkpoint payload exceeds the size cap")
 
 // CheckpointEnvelope wraps the SDK's opaque loop-state blob with a version, a kind, and a content hash.
 type CheckpointEnvelope struct {
@@ -52,6 +64,9 @@ type CheckpointEnvelope struct {
 // NewSupervisorCheckpoint wraps an opaque SDK payload in a versioned, hashed envelope and returns its
 // JSON (to store in Run.Cursor). An empty payload is valid (an envelope with an empty blob).
 func NewSupervisorCheckpoint(payload string) (string, error) {
+	if len(payload) > MaxCheckpointPayloadBytes {
+		return "", fmt.Errorf("%w: %d bytes (cap %d)", ErrCheckpointTooLarge, len(payload), MaxCheckpointPayloadBytes)
+	}
 	sum := sha256.Sum256([]byte(payload))
 	env := CheckpointEnvelope{
 		Version: checkpointEnvelopeVersion,

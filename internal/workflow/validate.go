@@ -34,6 +34,7 @@ import (
 	celast "github.com/google/cel-go/common/ast"
 
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	"github.com/ctxmesh/agent-engine/internal/run"
 )
 
 // Result is the richer outcome of a validation pass. Err is nil iff the spec is valid; when non-nil it is the
@@ -174,6 +175,20 @@ func (r *Result) checkStep(s *agentsv1beta1.WorkflowStep, names map[string]bool)
 	if s.OnError != "" && (s.Map != nil || s.Loop != nil) {
 		r.add(fmt.Errorf("step %q sets onError on a map/loop node; onError is route-only on plain (sequential/conditional) nodes (m83.3)", s.Name))
 	}
+	// catch (M138, ADR 0109): ordered error-class catchers on a PLAIN node. Each `next` must name an
+	// existing step, and each error code must be a platform-reserved code or the "*" wildcard (an unknown
+	// code would silently never match — reject it at validation, not discover it at runtime).
+	if len(s.Catch) > 0 && (s.Map != nil || s.Loop != nil) {
+		r.add(fmt.Errorf("step %q sets catch on a map/loop node; catch is route-only on plain nodes (ADR 0109)", s.Name))
+	}
+	for ci := range s.Catch {
+		edgeRef(fmt.Sprintf("catch[%d].next", ci), s.Catch[ci].Next)
+		for _, code := range s.Catch[ci].Errors {
+			if !run.IsPlatformFailureCode(code) {
+				r.add(fmt.Errorf("step %q catch[%d] has unknown error code %q (use a platform failure code or \"*\")", s.Name, ci, code))
+			}
+		}
+	}
 	if s.Map != nil {
 		edgeRef("map.do", s.Map.Do)
 		edgeRef("map.join", s.Map.Join)
@@ -275,6 +290,8 @@ func (r *Result) checkExpressions(spec agentsv1beta1.WorkflowSpec, names map[str
 //	input : dyn  — the workflow input (typed conceptually by inputSchema; a dynamic map here).
 //	steps : map(string, dyn) — steps.<name>.output for each prior step (each output is dyn until its
 //	                           outputSchema pins it; the referenced-output rule enforces that a pin exists).
+//	error : dyn  — the failure object {node, message, type} in a CATCH handler (M138, ADR 0109); an empty
+//	               map in any other node, so a reference is an honest no-such-field.
 //
 // Kept dyn on purpose: synthesizing a CEL struct type from an arbitrary JSON Schema is a v1c concern; v1
 // guarantees typedness via the outputSchema rule, not via CEL type synthesis. Compile still catches unknown
@@ -283,6 +300,7 @@ func newCELEnv() (*cel.Env, error) {
 	return cel.NewEnv(
 		cel.Variable("input", cel.DynType),
 		cel.Variable("steps", cel.MapType(cel.StringType, cel.DynType)),
+		cel.Variable("error", cel.DynType),
 	)
 }
 
