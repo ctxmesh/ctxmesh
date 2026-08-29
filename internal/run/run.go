@@ -118,6 +118,21 @@ func (r *Run) IsSpawned() bool {
 	return r.ParentRunID != ""
 }
 
+// Failure projects a terminal-failed run into a structured, type-safe Failure (M138, ADR 0109): the
+// classified code (from the stamped FailureCode or, failing that, the Status), the display Message
+// (Error), and the failing node/agent. `node` names the workflow step (or "" — the caller passes the
+// agent name for a plain run). A non-failed run yields a zero Failure (empty Code).
+func (r *Run) Failure(node string) Failure {
+	if node == "" {
+		node = r.Agent
+	}
+	return Failure{
+		Code:    ClassifyFailure(r.Status, r.FailureCode),
+		Message: r.Error,
+		Node:    node,
+	}
+}
+
 // IsTerminal reports whether the status admits no further transition.
 func (s Status) IsTerminal() bool {
 	switch s {
@@ -194,8 +209,13 @@ type Run struct {
 	// RequiresAction, when Status == requires_action, names what the run is waiting on — e.g.
 	// the MCP servers needing consent (the m25.9 consent_required set), generalised.
 	RequiresAction *Action `json:"requiresAction,omitempty"`
-	// Error, when Status == failed, is the honest failure reason.
+	// Error, when Status == failed, is the honest failure reason (the display string).
 	Error string `json:"error,omitempty"`
+	// FailureCode, when set, is the CLASSIFIED failure class stamped at the failure site (M138, ADR
+	// 0109) — a specific denial path (budget/guardrail/tool/poison) records its code here so a workflow
+	// `catch` can route on it WITHOUT parsing Error. Empty ⇒ derive the class from Status (see
+	// Failure()). Persisted; never a secret.
+	FailureCode FailureCode `json:"failureCode,omitempty"`
 	// CreatedAt / UpdatedAt bound the run's timeline.
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
