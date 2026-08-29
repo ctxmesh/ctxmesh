@@ -15,7 +15,7 @@ import { Label } from "@/components/ui/label";
 import { login } from "@/lib/session";
 import { useSession } from "@/lib/use-session";
 import { api } from "@/lib/api";
-import { startLogin } from "@/lib/oidc";
+import { startEndUserLogin, startLogin } from "@/lib/oidc";
 
 // LoginPage — the token login (ADR 0012), realized from the approved
 // auth-shell wireframe (design/wireframes/auth-shell.tsx `LoginCard`). The user
@@ -77,6 +77,14 @@ export function LoginPage() {
   );
   const [ssoError, setSsoError] = React.useState<string | null>(null);
   const [ssoRedirecting, setSsoRedirecting] = React.useState(false);
+  // End-user IdP availability (M137/EU1b) — probed from /api/end-user-auth-config, which is
+  // host-derived: present ONLY at an agent origin whose tenant configured an end-user IdP,
+  // null everywhere else. undefined = still probing.
+  const [endUserAuth, setEndUserAuth] = React.useState<boolean | undefined>(
+    undefined,
+  );
+  const [endUserError, setEndUserError] = React.useState<string | null>(null);
+  const [endUserRedirecting, setEndUserRedirecting] = React.useState(false);
 
   // Already signed in (e.g. hit /login with a live session) → go to the console.
   React.useEffect(() => {
@@ -92,6 +100,34 @@ export function LoginPage() {
       .catch(() => setSsoEnabled(false));
     return () => ctrl.abort();
   }, []);
+
+  // Probe end-user IdP availability once (M137/EU1b). A 404 / failure ⇒ not available (the
+  // safe default: this isn't an agent origin with an end-user IdP).
+  React.useEffect(() => {
+    const ctrl = new AbortController();
+    api
+      .endUserAuthConfig(ctrl.signal)
+      .then((cfg) => setEndUserAuth(!!cfg))
+      .catch(() => setEndUserAuth(false));
+    return () => ctrl.abort();
+  }, []);
+
+  const onEndUserSso = async () => {
+    if (endUserRedirecting) return;
+    setEndUserError(null);
+    setEndUserRedirecting(true);
+    try {
+      // Redirects the browser to the tenant's IdP; the callback route completes the login.
+      await startEndUserLogin(target);
+    } catch (err) {
+      setEndUserRedirecting(false);
+      setEndUserError(
+        err instanceof Error
+          ? err.message
+          : "Could not start sign-in with your identity provider.",
+      );
+    }
+  };
 
   const onSso = async () => {
     if (ssoRedirecting) return;
@@ -151,6 +187,39 @@ export function LoginPage() {
         </div>
 
         <div className="space-y-4">
+          {endUserAuth && (
+            <div className="space-y-2">
+              <Button
+                type="button"
+                className="w-full"
+                onClick={onEndUserSso}
+                disabled={endUserRedirecting}
+                data-testid="end-user-login"
+              >
+                {endUserRedirecting ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Redirecting to your identity provider…
+                  </>
+                ) : (
+                  <>
+                    <LogIn className="h-4 w-4" />
+                    Log in with your identity provider
+                  </>
+                )}
+              </Button>
+              {endUserError && (
+                <p role="alert" className="text-xs text-destructive">
+                  {endUserError}
+                </p>
+              )}
+              <div className="flex items-center gap-2 pt-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+                <span className="h-px flex-1 bg-border" />
+                or use a token
+                <span className="h-px flex-1 bg-border" />
+              </div>
+            </div>
+          )}
           {ssoEnabled && (
             <div className="space-y-2">
               <Button
