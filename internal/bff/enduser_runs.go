@@ -149,3 +149,58 @@ func (s *Server) endUserConversationID(principal, convID string) string {
 	sum := sha256.Sum256([]byte(principal + "\x00" + convID))
 	return "eu-conv-" + hex.EncodeToString(sum[:])[:32]
 }
+
+// endUserMyRunsLimit bounds a "my runs" page (a sane cap; the SPA paginates by recency, not offset).
+const endUserMyRunsLimit = 100
+
+// EndUserRunsResponse is the GET /api/end-user/runs body: the verified end-user's OWN runs at this agent.
+type EndUserRunsResponse struct {
+	Runs []run.EndUserRun `json:"runs"`
+}
+
+// handleEndUserMyRuns serves GET /api/end-user/runs — the end-user "my runs" list (M137/EU1c, ADR 0107).
+// It is HOST-derived + PRINCIPAL-scoped + STORE-backed (NOT the Langfuse GET /api/runs, which stays absent
+// at an agent origin): the agent is taken from the request host, the caller from the VERIFIED end-user
+// bearer, and the store query is `WHERE caller_username=<principal> AND namespace=<host-ns> AND
+// agent=<host-agent>` — the ownership+host isolation boundary, never a client filter. It builds NO K8s
+// client (the structural end-user/K8s separation of ADR 0106 §3). A rejected bearer is 401 (re-auth); a
+// request that is not a verified end-user is a uniform 404 (no end-user-tenant oracle).
+func (s *Server) handleEndUserMyRuns(w http.ResponseWriter, r *http.Request) {
+	if s.endUserVerifier == nil || s.runStore == nil {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	agent, ns := parseAgentFromHost(host)
+	if agent == "" || ns == "" {
+		writeError(w, http.StatusNotFound, "not found") // only meaningful at an agent origin
+		return
+	}
+	principal, _, isEndUser, err := s.resolveEndUserPrincipal(r.Context(), r, ns)
+	if err != nil {
+		if errors.Is(err, errEndUserBearerRejected) {
+			writeError(w, http.StatusUnauthorized, "invalid or expired credentials")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not resolve end-user identity")
+		return
+	}
+	if !isEndUser {
+		// No verified end-user (no/absent IdP, or no bearer) — a uniform 404 (no tenant-existence oracle).
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	runs, lErr := s.runStore.ListByEndUser(r.Context(), principal, ns, agent, endUserMyRunsLimit)
+	if lErr != nil {
+		s.log.Error(lErr, "list end-user runs failed", "agent", agent, "namespace", ns)
+		writeError(w, http.StatusInternalServerError, "failed to list runs")
+		return
+	}
+	if runs == nil {
+		runs = []run.EndUserRun{} // a stable empty array, never null
+	}
+	writeJSON(w, http.StatusOK, EndUserRunsResponse{Runs: runs})
+}
