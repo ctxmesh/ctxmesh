@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -144,4 +145,42 @@ func TestHandleCreateRun_EndUser_Errors(t *testing.T) {
 		s.handleCreateRun(rec, endUserCreateReq(t, "chatbot.ns1.example.com", `{"input":"x","namespace":"other-tenant","agent":"chatbot"}`))
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
+}
+
+func TestAuthorizeRunAccess_EndUser(t *testing.T) {
+	ctx := context.Background()
+	rs := run.NewMemStore()
+	rn := run.New("run-1", "ns1", "chatbot", nil, "", time.Now())
+	rn.CallerUsername = "oidc:https://dex-eu.example.com#alice"
+	require.NoError(t, rs.Create(rn))
+
+	st := namespacetenant.NewMemStore()
+	require.NoError(t, st.SetMembers(ctx, "t1", []string{"ns1"}))
+	require.NoError(t, st.SetEndUserIdentity(ctx, "t1", namespacetenant.EndUserIdentity{
+		Enabled: true, Issuer: "https://dex-eu.example.com", ClientID: "cid",
+	}))
+
+	server := func(sub string) *Server {
+		return &Server{
+			runStore:             rs,
+			namespaceTenantStore: st,
+			endUserVerifier:      fakeEndUserVerifier{id: enduseroidc.Identity{Issuer: "https://dex-eu.example.com", Subject: sub}},
+			log:                  logr.Discard(),
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/run-1", nil)
+	req.Header.Set("Authorization", "Bearer end-user-token")
+
+	// The owner (alice) reads her own run → authorized, WITHOUT any K8s client (caller is nil — if the
+	// K8s path were reached it would panic; passing proves the structural separation).
+	rec := httptest.NewRecorder()
+	got, ok := server("alice").authorizeRunAccess(rec, req, nil, "run-1", true)
+	require.True(t, ok)
+	assert.Equal(t, "run-1", got.ID)
+
+	// A DIFFERENT end-user (bob) reading alice's run → uniform 404 (no oracle), never leaked.
+	rec2 := httptest.NewRecorder()
+	_, ok = server("bob").authorizeRunAccess(rec2, req, nil, "run-1", true)
+	assert.False(t, ok)
+	assert.Equal(t, http.StatusNotFound, rec2.Code)
 }

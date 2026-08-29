@@ -184,6 +184,19 @@ func (s *Server) authorizeRunAccess(w http.ResponseWriter, r *http.Request, call
 			return nil, false
 		}
 	}
+	// M137/EU1b (ADR 0107 Q3): a verified END-USER is authorized ONLY by ownership — NEVER a K8s client
+	// (structural separation: an end-user bearer must never reach a SelfSubjectReview/TokenReview).
+	// Classify against the RUN's namespace/tenant, before touching the (lazy, still-inert) caller client:
+	// a non-owner — or a token that isn't a valid end-user for the run's tenant — gets a uniform 404 (no
+	// oracle). A console token is not a valid end-user here, so it falls through to the K8s path below.
+	if principal, _, isEndUser, _ := s.resolveEndUserPrincipal(r.Context(), r, rn.Namespace); isEndUser {
+		if allowOwner && rn.CallerUsername != "" && rn.CallerUsername == principal {
+			return rn, true
+		}
+		writeError(w, http.StatusNotFound, "run not found")
+		return nil, false
+	}
+
 	// Caller-scoped authz (ADR 0011) — two gates, both on the CALLER's own token (never the BFF SA):
 	//
 	// (1) Ownership. callerUsername issues a SelfSubjectReview, which BOTH validates the token AND yields the
