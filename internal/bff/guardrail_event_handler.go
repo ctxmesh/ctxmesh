@@ -70,6 +70,23 @@ type guardrailEventRequest struct {
 // never needs more than 4 KiB; a larger body is rejected to prevent abuse.
 const maxGuardrailEventBytes = 4 << 10 // 4 KiB
 
+// namespaceFromAgentBoundary extracts the namespace from an AGENT trust boundary ("a:<ns>/<agent>",
+// credresolve.AgentBoundary) so a guardrail-block audit row can be namespace-scoped (m52.G11c). A
+// registry boundary ("r:<registry>") or an empty/legacy-unscoped boundary yields "" (unscoped, as
+// before). The boundary comes from the VERIFIED run capability — never a client-supplied field.
+func namespaceFromAgentBoundary(boundary string) string {
+	const agentPrefix = "a:"
+	if !strings.HasPrefix(boundary, agentPrefix) {
+		return "" // not an agent boundary (registry / unscoped) — no namespace to scope by
+	}
+	nsAndAgent := strings.TrimPrefix(boundary, agentPrefix)
+	ns, _, found := strings.Cut(nsAndAgent, "/")
+	if !found {
+		return ""
+	}
+	return ns
+}
+
 // registerGuardrailEventRoute wires POST /api/internal/guardrail-event onto the UNAUTHENTICATED
 // api mux alongside the spawn edge. Both are capability-authorized internal endpoints not behind
 // requireAuth — the launcher relays a run capability, not a browser bearer token. Only wired when
@@ -156,7 +173,11 @@ func (s *Server) handleGuardrailEvent(w http.ResponseWriter, r *http.Request) {
 		Action:       auditActionGuardrailBlock,
 		ResourceKind: "GuardrailPolicy",
 		ResourceName: req.Agent,
-		Outcome:      auditOutcomeDenied,
+		// Stamp the agent's namespace so a NAMESPACED audit-reader (GET /api/audit?namespace=) sees the
+		// block (m52.G11c, M139) — before, the row had an empty ns, visible only to an unscoped cluster
+		// read. Derived from the VERIFIED capability's boundary ("a:<ns>/<agent>"), never a client claim.
+		Namespace: namespaceFromAgentBoundary(capab.Boundary),
+		Outcome:   auditOutcomeDenied,
 		Detail: map[string]any{
 			"detector":      req.Detector,
 			"scan_point":    req.ScanPoint,
