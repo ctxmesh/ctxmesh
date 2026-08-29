@@ -60,3 +60,11 @@ func TestAgentBoundary(t *testing.T) {
 	assert.Equal(t, credresolve.AgentBoundary("team", "ghost"), agentBoundary(ctx, c, "team", "ghost"))
 	assert.NotEmpty(t, agentBoundary(ctx, c, "team", "ghost"))
 }
+
+// TestEndUserAgentBoundary (M137/EU1b): the end-user boundary is the per-agent standalone boundary,
+// computed with NO K8s client (no registry read → no BFF-SA grant), and never the legacy unscoped "".
+func TestEndUserAgentBoundary(t *testing.T) {
+	assert.Equal(t, credresolve.AgentBoundary("team", "chatbot"), endUserAgentBoundary("team", "chatbot"))
+	assert.Equal(t, "a:team/chatbot", endUserAgentBoundary("team", "chatbot"))
+	assert.NotEmpty(t, endUserAgentBoundary("team", "chatbot"), "never the legacy unscoped boundary")
+}
