@@ -147,6 +147,19 @@ func TestHandleCreateRun_EndUser_Errors(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 
+	t.Run("per-principal create rate limit → 429", func(t *testing.T) {
+		// A single verified end-user identity is bounded (NAT-proof, keyed on the principal): the first
+		// create is admitted (202), the next is over budget → 429 (M137/EU1c).
+		s, _ := newEndUserRunServer(t, "https://chatbot.ns1.example.com")
+		s.endUserCreateLimiter = newIPRateLimiter(0.0001, 1) // burst 1, negligible refill
+		rec1 := httptest.NewRecorder()
+		s.handleCreateRun(rec1, endUserCreateReq(t, "chatbot.ns1.example.com", `{"input":"hi"}`))
+		require.Equal(t, http.StatusAccepted, rec1.Code, rec1.Body.String())
+		rec2 := httptest.NewRecorder()
+		s.handleCreateRun(rec2, endUserCreateReq(t, "chatbot.ns1.example.com", `{"input":"hi"}`))
+		assert.Equal(t, http.StatusTooManyRequests, rec2.Code)
+	})
+
 	t.Run("rejected end-user bearer at an agent origin → 401 (owns the auth failure)", func(t *testing.T) {
 		// The tenant has end-user login enabled; the bearer fails verification (forged/expired). An
 		// end-user chat body carries NO agent — before ADR 0107 §3 this fell through to the console path's
@@ -233,6 +246,20 @@ func TestHandleEndUserMyRuns(t *testing.T) {
 		rec := httptest.NewRecorder()
 		s.handleEndUserMyRuns(rec, myRunsReq("chatbot.ns1.example.com", ""))
 		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("per-IP pre-auth rate limit → 429", func(t *testing.T) {
+		s, rsp := newEndUserRunServer(t, "https://chatbot.ns1.example.com")
+		seed(*rsp)
+		s.endUserLimiter = newIPRateLimiter(0.0001, 2) // burst 2, negligible refill
+		for i := 0; i < 2; i++ {
+			rec := httptest.NewRecorder()
+			s.handleEndUserMyRuns(rec, myRunsReq("chatbot.ns1.example.com", "an-oidc-id-token"))
+			require.Equal(t, http.StatusOK, rec.Code, "burst admits the first requests")
+		}
+		rec := httptest.NewRecorder()
+		s.handleEndUserMyRuns(rec, myRunsReq("chatbot.ns1.example.com", "an-oidc-id-token"))
+		assert.Equal(t, http.StatusTooManyRequests, rec.Code, "over budget from one IP → 429")
 	})
 }
 

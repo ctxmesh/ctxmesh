@@ -83,6 +83,23 @@ const (
 	// whether the token was valid).
 	sharedRunRatePerIP  = 5.0
 	sharedRunBurstPerIP = 20.0
+
+	// endUserRatePerIP / endUserBurstPerIP bound the UNAUTHENTICATED end-user surfaces per client IP
+	// (M137/EU1c, ADR 0107): the tenant-IdP config probe (GET /api/end-user-auth-config) and the token
+	// VERIFICATION entry of the run create + my-runs paths — where an attacker-supplied bearer forces an
+	// OIDC verify (signature crypto + a possible JWKS refetch) before any identity exists. A generous
+	// 10/s refill with a 60 burst never throttles real human chat (even dozens of users behind one NAT),
+	// while bounding a single-IP flood. Over budget → 429 (a non-oracle status).
+	endUserRatePerIP  = 10.0
+	endUserBurstPerIP = 60.0
+
+	// endUserCreateRatePerUser / endUserCreateBurstPerUser bound how fast a SINGLE verified end-user
+	// identity can spawn runs (M137/EU1c, ADR 0107). Keyed on the end-user PRINCIPAL (oidc:<iss>#<sub>) —
+	// NAT-proof, unlike the per-IP guard, so many users behind one IP are never collectively throttled and
+	// one identity cannot flood run creation (each run is a durable worker dispatch + tenant spend). A
+	// 2/s refill with a 30 burst is generous for human chat + rapid retries. Over budget → 429.
+	endUserCreateRatePerUser  = 2.0
+	endUserCreateBurstPerUser = 30.0
 )
 
 // durableRunStore is the OPTIONAL capability a run.Store implements to declare whether it survives a pod

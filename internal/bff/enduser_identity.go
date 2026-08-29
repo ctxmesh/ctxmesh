@@ -104,6 +104,9 @@ type EndUserAuthConfigResponse struct {
 // a `?ns=` query is the fallback for a direct call. A uniform 404 when the ns has no enabled end-user IdP
 // (or does not exist) — no tenant-existence oracle (ADR 0106 §9), no secret emitted.
 func (s *Server) handleEndUserAuthConfig(w http.ResponseWriter, r *http.Request) {
+	if s.endUserThrottled(w, r) {
+		return
+	}
 	host := r.Header.Get("X-Forwarded-Host")
 	if host == "" {
 		host = r.Host
@@ -138,6 +141,18 @@ func (s *Server) endUserAgentExposed(ctx context.Context, ns, agent string) bool
 		return false
 	}
 	return ok
+}
+
+// endUserThrottled applies the per-IP pre-auth limiter to an UNAUTHENTICATED end-user surface. It returns
+// true (and writes a non-oracle 429) when the client IP is over budget — bounding a flood of tenant-IdP
+// config probes or attacker-supplied token-verification attempts (M137/EU1c, ADR 0107). It reveals
+// nothing about tenants or tokens. A nil/disabled limiter always admits.
+func (s *Server) endUserThrottled(w http.ResponseWriter, r *http.Request) bool {
+	if s.endUserLimiter.allow(clientIP(r)) {
+		return false
+	}
+	writeError(w, http.StatusTooManyRequests, "too many requests")
+	return true
 }
 
 // resolveEndUserPrincipal attempts to authenticate the request's bearer as an END-USER of the agent in

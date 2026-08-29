@@ -51,6 +51,12 @@ func (s *Server) tryEndUserCreateRun(w http.ResponseWriter, r *http.Request) (ha
 	if agent == "" || ns == "" {
 		return false // not an agent origin → the console path (body-addressed, caller-scoped)
 	}
+	// Per-IP pre-auth throttle BEFORE the OIDC verify — bound an attacker flooding token-verification
+	// attempts at an agent origin (M137/EU1c). We OWN the response once we've decided this is an
+	// agent-origin end-user create attempt (a 429 is a non-oracle status).
+	if s.endUserThrottled(w, r) {
+		return true
+	}
 
 	principal, _, isEndUser, err := s.resolveEndUserPrincipal(r.Context(), r, ns)
 	if err != nil {
@@ -69,8 +75,16 @@ func (s *Server) tryEndUserCreateRun(w http.ResponseWriter, r *http.Request) (ha
 	}
 
 	// It IS a verified end-user — from here we OWN the response (a verified end-user must never fall
-	// through to the K8s path). Two-key exposure gate + readiness (ADR 0107): a uniform 404 for an
-	// un-opted-in agent (no tenant-existence oracle), 409 while it is still coming up.
+	// through to the K8s path). Per-PRINCIPAL create throttle (M137/EU1c): bound how fast one identity can
+	// spawn durable runs (each is a worker dispatch + tenant spend). Keyed on the principal, so it is
+	// NAT-proof and cannot be shared/evaded across IPs. Over budget → 429 (a non-oracle status).
+	if !s.endUserCreateLimiter.allow(principal) {
+		writeError(w, http.StatusTooManyRequests, "too many requests")
+		return true
+	}
+
+	// Two-key exposure gate + readiness (ADR 0107): a uniform 404 for an un-opted-in agent (no
+	// tenant-existence oracle), 409 while it is still coming up.
 	row, exposed, gErr := s.endUserAgentStore.Get(r.Context(), ns, agent)
 	if gErr != nil {
 		writeError(w, http.StatusInternalServerError, "could not resolve the agent")
@@ -168,6 +182,9 @@ type EndUserRunsResponse struct {
 func (s *Server) handleEndUserMyRuns(w http.ResponseWriter, r *http.Request) {
 	if s.endUserVerifier == nil || s.runStore == nil {
 		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if s.endUserThrottled(w, r) {
 		return
 	}
 	host := r.Header.Get("X-Forwarded-Host")
