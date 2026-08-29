@@ -19,6 +19,7 @@ package credresolve
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -92,6 +93,41 @@ func UserHash(hmacKey []byte, username string) string {
 	}
 	sum := sha256.Sum256([]byte(username))
 	return "u-" + hex.EncodeToString(sum[:])[:40]
+}
+
+// EndUserHash derives the run-capability subject for an END-USER identity keyed on (issuer, subject)
+// (M137/EU1b, ADR 0106 §5). It is domain-separated from UserHash TWO ways so an end-user subject can
+// never share an identity with a K8s console user:
+//   - a distinct "eu-" prefix (UserHash is always "u-"), so the two output spaces never overlap as
+//     strings — an end-user's grant/memory key can never equal a K8s username's; AND
+//   - a distinct HMAC message with a domain tag + LENGTH-PREFIXED (issuer, subject) fields, so two
+//     different (iss,sub) pairs can never canonicalize to the same input (the "https://a"+"b" vs
+//     "https://ab"+"" concatenation collision) and the input can never equal UserHash's bare username.
+//
+// The identity KEY is (iss, sub) — never email (mutable/reassignable ⇒ account takeover). When hmacKey
+// is empty this falls back to an unsalted SHA-256; callers minting an END-USER capability MUST require a
+// key (an unsalted end-user hash is enumerable — ADR 0106 §5).
+func EndUserHash(hmacKey []byte, issuer, subject string) string {
+	msg := make([]byte, 0, 32+len(issuer)+len(subject))
+	msg = append(msg, "ctxmesh-end-user-v1\x00"...)
+	msg = appendLenPrefixed(msg, issuer)
+	msg = appendLenPrefixed(msg, subject)
+	if len(hmacKey) > 0 {
+		mac := hmac.New(sha256.New, hmacKey)
+		_, _ = mac.Write(msg)
+		return "eu-" + hex.EncodeToString(mac.Sum(nil))[:40]
+	}
+	sum := sha256.Sum256(msg)
+	return "eu-" + hex.EncodeToString(sum[:])[:40]
+}
+
+// appendLenPrefixed writes an 8-byte big-endian length followed by the bytes of s — unambiguous framing
+// so concatenated fields can never be confused across a field boundary.
+func appendLenPrefixed(dst []byte, s string) []byte {
+	var lenBuf [8]byte
+	binary.BigEndian.PutUint64(lenBuf[:], uint64(len(s)))
+	dst = append(dst, lenBuf[:]...)
+	return append(dst, s...)
 }
 
 // RegistryBoundary is the trust boundary for an agent that belongs to a registry — the
