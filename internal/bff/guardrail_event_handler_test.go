@@ -60,7 +60,9 @@ func newGuardrailEventServer(t *testing.T) (*Server, *runcap.Signer, auditlog.St
 func mintGuardrailCap(t *testing.T, signer *runcap.Signer) string {
 	t.Helper()
 	tok, err := signer.Mint(runcap.MintRequest{
-		User: "uhash-alice", Agent: "guarded-agent", Boundary: "r:team", RunID: "run-g1", TTL: time.Hour,
+		// An AGENT boundary ("a:<ns>/<agent>") — a guardrail block is on a deployed agent, so the audit
+		// row is namespace-scoped from the verified capability (m52.G11c, M139).
+		User: "uhash-alice", Agent: "guarded-agent", Boundary: "a:prod/guarded-agent", RunID: "run-g1", TTL: time.Hour,
 	})
 	require.NoError(t, err)
 	return tok
@@ -113,6 +115,7 @@ func TestGuardrailEvent_ValidCapabilityWritesAuditRow(t *testing.T) {
 	assert.Equal(t, "uhash-alice", row.Actor, "actor must be the capability's User (already-hashed)")
 	assert.Equal(t, "user", row.ActorKind)
 	assert.Equal(t, "bff", row.Source, "source is stamped by appendAudit")
+	assert.Equal(t, "prod", row.Namespace, "the agent's namespace is stamped (G11c) so a namespaced audit-reader sees the block")
 	assert.Equal(t, "denied", row.Outcome, "a block is a denial")
 	assert.Equal(t, "GuardrailPolicy", row.ResourceKind)
 	assert.Equal(t, "guarded-agent", row.ResourceName)
