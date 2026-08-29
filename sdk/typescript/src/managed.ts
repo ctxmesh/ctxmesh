@@ -1417,16 +1417,12 @@ async function driveLoop(
             continue;
           }
           if (rule === "require-approval") {
-            if (state.spawnDepth > 0) {
-              blocked.set(
-                id,
-                `tool ${JSON.stringify(name)} requires human approval and cannot be used ` +
-                  `inside a delegated sub-run`,
-              );
-              continue;
-            }
-            // Top-level: gate on human approval. An unapproved key throws here (before
-            // any dispatch) — the outer handler turns it into approvalRequired.
+            // Gate on human approval at ANY delegation depth (M138, ADR 0110). The ADR 0058 ban (deny in
+            // a delegated sub-run) is LIFTED: a sub-run now SUSPENDS durably (ADR 0108) and its pause
+            // SURFACES on the root via descendant-requires-action (M108) — neither hung nor invisible; and
+            // every sub-run inherits the parent's OBO identity, so root-run approval is the correct human.
+            // An unapproved key throws here (before any dispatch) — the outer handler turns it into
+            // approvalRequired, which the BFF parks in requires_action.
             const args = parseArguments(call.function?.arguments);
             pauseForApproval(`tool:${name}`, `Run tool ${JSON.stringify(name)} with args ${JSON.stringify(args)}?`);
           }

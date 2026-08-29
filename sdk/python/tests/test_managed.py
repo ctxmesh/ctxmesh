@@ -1711,15 +1711,15 @@ def test_tool_policy_require_approval_top_level_granted(monkeypatch):
     assert result.output.startswith("POLICY_FINAL")
 
 
-def test_tool_policy_require_approval_in_sub_run_fails_closed(monkeypatch):
-    """require-approval INSIDE a delegated sub-run (X-Ctxmesh-Spawn-Depth: 1) → FAIL-CLOSED:
-    pause_for_approval is NEVER called (proven by a spy), the tool is NOT dispatched, and the
-    model receives the sub-run-denial message. This is the ADR 0058 fifth-issue rule: pausing a
-    sub-run hangs the supervisor's synchronous await, so the loop must deny honestly instead."""
+def test_tool_policy_require_approval_in_sub_run_pauses(monkeypatch):
+    """require-approval INSIDE a delegated sub-run (X-Ctxmesh-Spawn-Depth: 1) now PAUSES for approval
+    (M138, ADR 0110 — the ADR 0058 ban is LIFTED). pause_for_approval IS called (proven by a spy), the
+    run becomes an approval_required outcome, and the tool is NOT dispatched. A sub-run suspends durably
+    (ADR 0108) and its pause surfaces on the root (M108), so it neither hangs the supervisor nor is
+    invisible; every sub-run inherits the parent's OBO identity, so root-run approval is the right human."""
     import ctxmesh.managed as managed_mod
 
-    # Spy on pause_for_approval AS THE LOOP CALLS IT: the loop resolves the name from the
-    # ctxmesh.managed module namespace, so patch it there and assert it is never invoked.
+    # Spy on pause_for_approval AS THE LOOP CALLS IT (resolved from the ctxmesh.managed namespace).
     pause_calls: List[tuple] = []
     real_pause = managed_mod.pause_for_approval
 
@@ -1739,17 +1739,12 @@ def test_tool_policy_require_approval_in_sub_run_fails_closed(monkeypatch):
         )
         result = run_managed_loop(client, config, "go", headers={"X-Ctxmesh-Spawn-Depth": "1"})
 
-    # THE load-bearing assertion: pause_for_approval was NOT called at all inside the sub-run.
-    assert pause_calls == [], "a sub-run must NOT pause for approval (fail-closed)"
-    # The run did NOT become an approval_required outcome, and the tool never dispatched.
-    assert result.approval_required is None
+    # THE load-bearing change: a delegated sub-run now pauses for approval, exactly like a top-level run.
+    assert pause_calls != [], "a delegated sub-run must now pause for approval (ADR 0110 lifts the ban)"
+    assert result.approval_required is not None, "the sub-run becomes an approval_required outcome"
+    # The tool is NOT dispatched while the sub-run awaits approval.
     assert dispatched == []
     assert result.tools_called == []
-    # The model got the honest sub-run denial as the tool result.
-    follow_up = json.loads(gw.requests[-1].body)
-    tool_msgs = [m for m in follow_up["messages"] if m.get("role") == "tool"]
-    assert len(tool_msgs) == 1
-    assert "cannot be used inside a delegated sub-run" in tool_msgs[0]["content"]
 
 
 @pytest.mark.parametrize(
