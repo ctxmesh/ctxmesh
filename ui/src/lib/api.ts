@@ -33,6 +33,17 @@ export interface AuthConfigResponse {
   clientId?: string;
 }
 
+// EndUserAuthConfigResponse mirrors the BFF's EndUserAuthConfigResponse (M137/EU1b, ADR
+// 0106 §9): the target tenant's END-USER OIDC issuer + public PKCE client id for the
+// standalone /chat SPA to log an end-user in against the tenant's own IdP (distinct from
+// the console SSO). Served at GET /api/end-user-auth-config; a 404 ⇒ this agent's tenant
+// has no end-user IdP (the SPA then falls back to console/token login). No secret is sent.
+export interface EndUserAuthConfigResponse {
+  issuer: string;
+  clientId: string;
+  scopes?: string[];
+}
+
 // WhoAmI mirrors the BFF's WhoAmIResponse (internal/bff/dto.go): the caller's
 // identity from a SelfSubjectReview. `groups` is never null on the wire.
 export interface WhoAmI {
@@ -330,6 +341,15 @@ export interface LongTermMemoryConfig {
   enabled: boolean;
   perUser: boolean;
   embeddingRoute?: string;
+}
+
+// Session-memory config (M137/EU1d, ADR 0080) — the folded spec.sessionMemory toggle surface. perUser
+// isolates each end-user's conversation memory; product-grade (not security-grade) and only meaningful
+// for the private "session" scope.
+export interface SessionMemoryConfig {
+  enabled: boolean;
+  scope?: string;
+  perUser: boolean;
 }
 
 // --- Online-score (m69.11, ADR 0062 Fork 2) -----------------------------------
@@ -2930,6 +2950,22 @@ export const api = {
   // issuer/clientId to start Auth-Code+PKCE. Unauthenticated (read on the login page).
   authConfig: (signal?: AbortSignal) =>
     getJSON<AuthConfigResponse>("/api/authconfig", signal),
+  // endUserAuthConfig reports the target tenant's END-USER OIDC config (M137/EU1b) for the
+  // agent-origin /chat SPA, or null when this agent's tenant has no end-user IdP (a 404 —
+  // the SPA then keeps console/token login). Unauthenticated, host-derived on the server.
+  endUserAuthConfig: async (
+    signal?: AbortSignal,
+  ): Promise<EndUserAuthConfigResponse | null> => {
+    try {
+      return await getJSON<EndUserAuthConfigResponse>(
+        "/api/end-user-auth-config",
+        signal,
+      );
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) return null;
+      throw err;
+    }
+  },
   whoami: (signal?: AbortSignal) => whoami({ signal }),
 
   // listAgents reads one page window through the list contract (§4): it returns
@@ -3809,6 +3845,41 @@ export const api = {
       );
     }
     return (await res.json()) as LongTermMemoryConfig;
+  },
+
+  // Session-memory config (M137/EU1d) — read + set the folded spec.sessionMemory perUser toggle.
+  sessionMemoryConfig: (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<SessionMemoryConfig> =>
+    getJSON<SessionMemoryConfig>(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/sessionmemory`,
+      signal,
+    ),
+
+  setSessionMemory: async (
+    ns: string,
+    name: string,
+    config: SessionMemoryConfig,
+    signal?: AbortSignal,
+  ): Promise<SessionMemoryConfig> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/sessionmemory`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as SessionMemoryConfig;
   },
 
   // getTracePolicy reads an agent's custom redaction detectors (m18.13). A 403 =

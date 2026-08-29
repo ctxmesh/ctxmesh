@@ -125,6 +125,18 @@ spec:
                     minimum: 1
                     type: integer
                 type: object
+              endUserAccess:
+                description: |-
+                  endUserAccess opts THIS agent into being reachable by END-USERS via the standalone /chat runtime
+                  (M137/EU1b, ADR 0107 — the second of the two keys). End-user access requires BOTH the agent's
+                  tenant to enable an end-user IdP (Tenant.spec.endUserIdentity.enabled — WHO may log in) AND this
+                  flag (WHAT they may reach). Default false ⇒ the agent is invisible to end-users (an internal agent
+                  is never exposed just because its tenant turned on end-user login). When true, the controller
+                  mirrors the agent's endpoint + spec into the control-plane `end_user_agents` table so the BFF
+                  resolves an end-user run WITHOUT a K8s read; row-existence is the exposure gate (fail-closed). Only
+                  valid on a `serving` execution model (rejected at validation for eventing/job) — end-user chat is
+                  interactive request-driven.
+                type: boolean
               env:
                 description: |-
                   env is an optional list of environment variables injected directly into
@@ -799,6 +811,11 @@ spec:
             required:
             - image
             type: object
+            x-kubernetes-validations:
+            - message: endUserAccess is only valid on a serving execution model —
+                end-user chat is interactive request-driven (M137/ADR 0107)
+              rule: '!(has(self.endUserAccess) && self.endUserAccess && (self.executionModel
+                == ''job'' || self.executionModel == ''eventing''))'
           status:
             description: status defines the observed state of the AgentDeployment.
             properties:
@@ -1118,6 +1135,18 @@ spec:
                     minimum: 1
                     type: integer
                 type: object
+              endUserAccess:
+                description: |-
+                  endUserAccess opts THIS agent into being reachable by END-USERS via the standalone /chat runtime
+                  (M137/EU1b, ADR 0107 — the second of the two keys). End-user access requires BOTH the agent's
+                  tenant to enable an end-user IdP (Tenant.spec.endUserIdentity.enabled — WHO may log in) AND this
+                  flag (WHAT they may reach). Default false ⇒ the agent is invisible to end-users (an internal agent
+                  is never exposed just because its tenant turned on end-user login). When true, the controller
+                  mirrors the agent's endpoint + spec into the control-plane `end_user_agents` table so the BFF
+                  resolves an end-user run WITHOUT a K8s read; row-existence is the exposure gate (fail-closed). Only
+                  valid on a `serving` execution model (rejected at validation for eventing/job) — end-user chat is
+                  interactive request-driven.
+                type: boolean
               env:
                 description: |-
                   env is an optional list of environment variables injected directly into
@@ -1792,6 +1821,11 @@ spec:
             required:
             - image
             type: object
+            x-kubernetes-validations:
+            - message: endUserAccess is only valid on a serving execution model —
+                end-user chat is interactive request-driven (M137/ADR 0107)
+              rule: '!(has(self.endUserAccess) && self.endUserAccess && (self.executionModel
+                == ''job'' || self.executionModel == ''eventing''))'
           status:
             description: AgentDeploymentStatus defines the observed state of AgentDeployment.
             properties:
@@ -3388,6 +3422,18 @@ spec:
                         minimum: 1
                         type: integer
                     type: object
+                  endUserAccess:
+                    description: |-
+                      endUserAccess opts THIS agent into being reachable by END-USERS via the standalone /chat runtime
+                      (M137/EU1b, ADR 0107 — the second of the two keys). End-user access requires BOTH the agent's
+                      tenant to enable an end-user IdP (Tenant.spec.endUserIdentity.enabled — WHO may log in) AND this
+                      flag (WHAT they may reach). Default false ⇒ the agent is invisible to end-users (an internal agent
+                      is never exposed just because its tenant turned on end-user login). When true, the controller
+                      mirrors the agent's endpoint + spec into the control-plane `end_user_agents` table so the BFF
+                      resolves an end-user run WITHOUT a K8s read; row-existence is the exposure gate (fail-closed). Only
+                      valid on a `serving` execution model (rejected at validation for eventing/job) — end-user chat is
+                      interactive request-driven.
+                    type: boolean
                   env:
                     description: |-
                       env is an optional list of environment variables injected directly into
@@ -4063,6 +4109,11 @@ spec:
                 required:
                 - image
                 type: object
+                x-kubernetes-validations:
+                - message: endUserAccess is only valid on a serving execution model
+                    — end-user chat is interactive request-driven (M137/ADR 0107)
+                  rule: '!(has(self.endUserAccess) && self.endUserAccess && (self.executionModel
+                    == ''job'' || self.executionModel == ''eventing''))'
             required:
             - deploymentName
             - snapshot
@@ -4168,6 +4219,18 @@ spec:
                         minimum: 1
                         type: integer
                     type: object
+                  endUserAccess:
+                    description: |-
+                      endUserAccess opts THIS agent into being reachable by END-USERS via the standalone /chat runtime
+                      (M137/EU1b, ADR 0107 — the second of the two keys). End-user access requires BOTH the agent's
+                      tenant to enable an end-user IdP (Tenant.spec.endUserIdentity.enabled — WHO may log in) AND this
+                      flag (WHAT they may reach). Default false ⇒ the agent is invisible to end-users (an internal agent
+                      is never exposed just because its tenant turned on end-user login). When true, the controller
+                      mirrors the agent's endpoint + spec into the control-plane `end_user_agents` table so the BFF
+                      resolves an end-user run WITHOUT a K8s read; row-existence is the exposure gate (fail-closed). Only
+                      valid on a `serving` execution model (rejected at validation for eventing/job) — end-user chat is
+                      interactive request-driven.
+                    type: boolean
                   env:
                     description: |-
                       env is an optional list of environment variables injected directly into
@@ -4843,6 +4906,11 @@ spec:
                 required:
                 - image
                 type: object
+                x-kubernetes-validations:
+                - message: endUserAccess is only valid on a serving execution model
+                    — end-user chat is interactive request-driven (M137/ADR 0107)
+                  rule: '!(has(self.endUserAccess) && self.endUserAccess && (self.executionModel
+                    == ''job'' || self.executionModel == ''eventing''))'
             required:
             - deploymentName
             - snapshot
@@ -8880,6 +8948,53 @@ spec:
           spec:
             description: spec defines the desired tenant state.
             properties:
+              endUserIdentity:
+                description: |-
+                  endUserIdentity, when enabled, configures a DISTINCT end-user OIDC IdP for this tenant's agents'
+                  standalone /chat runtime (M137/EU1b, ADR 0106): a non-console end-user logs in with THEIR OWN
+                  identity (a generic OIDC issuer the tenant runs), the BFF verifies that ID token and mints a
+                  run-capability scoped to the end-user's real (iss,sub) — security-grade per-user isolation of runs
+                  K8s trust); the platform refuses an issuer equal to the console / service-account issuer. Omitted
+                  or disabled ⇒ /chat stays console-authenticated (the pre-M137 model).
+                properties:
+                  allowedHosts:
+                    description: |-
+                      allowedHosts are the agent origins (`<agent>.<ns>.<domain>`) enabled for end-user login under this
+                      tenant — the exact redirect-URI hosts the tenant registers with its IdP (RFC 9700 exact match, no
+                      wildcards). Informational + surfaced to the operator; empty ⇒ any of the tenant's agent origins.
+                    items:
+                      maxLength: 253
+                      type: string
+                    maxItems: 256
+                    type: array
+                  clientId:
+                    description: |-
+                      clientId is the OIDC client (audience) the end-user SPA authenticates as (Auth-Code + PKCE, a
+                      public client). The verified ID token's `aud` MUST contain this value.
+                    maxLength: 256
+                    type: string
+                  enabled:
+                    description: enabled turns on end-user OIDC login for this tenant's
+                      agent /chat origins. Default off.
+                    type: boolean
+                  issuer:
+                    description: |-
+                      issuer is the OIDC issuer URL (the `iss` claim + the OIDC Discovery base). MUST be https (a
+                      loopback host is allowed for dev) and MUST NOT equal the console OIDC issuer or the cluster
+                      service-account issuer — an end-user token must never gain K8s trust (ADR 0106 §3).
+                    maxLength: 512
+                    pattern: ^https?://.+
+                    type: string
+                  scopes:
+                    description: |-
+                      scopes are extra OIDC scopes the SPA requests beyond `openid` (e.g. `email`, `profile`,
+                      `offline_access` for refresh-token rotation). `openid` is always requested.
+                    items:
+                      maxLength: 128
+                      type: string
+                    maxItems: 32
+                    type: array
+                type: object
               model:
                 description: |-
                   model is the model-usage ceiling (budget + rate + concurrency) enforced in
@@ -9155,6 +9270,53 @@ spec:
           spec:
             description: spec defines the desired tenant state.
             properties:
+              endUserIdentity:
+                description: |-
+                  endUserIdentity, when enabled, configures a DISTINCT end-user OIDC IdP for this tenant's agents'
+                  standalone /chat runtime (M137/EU1b, ADR 0106): a non-console end-user logs in with THEIR OWN
+                  identity (a generic OIDC issuer the tenant runs), the BFF verifies that ID token and mints a
+                  run-capability scoped to the end-user's real (iss,sub) — security-grade per-user isolation of runs
+                  K8s trust); the platform refuses an issuer equal to the console / service-account issuer. Omitted
+                  or disabled ⇒ /chat stays console-authenticated (the pre-M137 model).
+                properties:
+                  allowedHosts:
+                    description: |-
+                      allowedHosts are the agent origins (`<agent>.<ns>.<domain>`) enabled for end-user login under this
+                      tenant — the exact redirect-URI hosts the tenant registers with its IdP (RFC 9700 exact match, no
+                      wildcards). Informational + surfaced to the operator; empty ⇒ any of the tenant's agent origins.
+                    items:
+                      maxLength: 253
+                      type: string
+                    maxItems: 256
+                    type: array
+                  clientId:
+                    description: |-
+                      clientId is the OIDC client (audience) the end-user SPA authenticates as (Auth-Code + PKCE, a
+                      public client). The verified ID token's `aud` MUST contain this value.
+                    maxLength: 256
+                    type: string
+                  enabled:
+                    description: enabled turns on end-user OIDC login for this tenant's
+                      agent /chat origins. Default off.
+                    type: boolean
+                  issuer:
+                    description: |-
+                      issuer is the OIDC issuer URL (the `iss` claim + the OIDC Discovery base). MUST be https (a
+                      loopback host is allowed for dev) and MUST NOT equal the console OIDC issuer or the cluster
+                      service-account issuer — an end-user token must never gain K8s trust (ADR 0106 §3).
+                    maxLength: 512
+                    pattern: ^https?://.+
+                    type: string
+                  scopes:
+                    description: |-
+                      scopes are extra OIDC scopes the SPA requests beyond `openid` (e.g. `email`, `profile`,
+                      `offline_access` for refresh-token rotation). `openid` is always requested.
+                    items:
+                      maxLength: 128
+                      type: string
+                    maxItems: 32
+                    type: array
+                type: object
               model:
                 description: |-
                   model is the model-usage ceiling (budget + rate + concurrency) enforced in

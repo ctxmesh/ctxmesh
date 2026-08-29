@@ -21,7 +21,24 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 )
+
+// splitNonEmpty splits a newline-joined string (from array_to_string) into its non-empty fields;
+// "" → nil (an empty array). Used to read text[] columns the pgx stdlib driver can't Scan directly.
+func splitNonEmpty(joined string) []string {
+	if joined == "" {
+		return nil
+	}
+	parts := strings.Split(joined, "\n")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 // pgStore is the Postgres-backed Store. The schema (namespace_tenants — migration 0012) is applied by
 // the control-plane goose migrations (controlplane.Migrate), not here; the store assumes the table exists.
@@ -83,11 +100,16 @@ func (s *pgStore) SetMembers(ctx context.Context, tenant string, namespaces []st
 	return nil
 }
 
-// DeleteTenant removes every row attributed to the tenant (the tenant-deletion path).
+// DeleteTenant removes every row attributed to the tenant (the tenant-deletion path) — its membership
+// rows AND its end-user OIDC config (M137/EU1b).
 func (s *pgStore) DeleteTenant(ctx context.Context, tenant string) error {
 	if _, err := s.db.ExecContext(ctx,
 		`DELETE FROM namespace_tenants WHERE tenant = $1`, tenant); err != nil {
 		return fmt.Errorf("namespacetenant: delete tenant %q: %w", tenant, err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM tenant_end_user_identity WHERE tenant = $1`, tenant); err != nil {
+		return fmt.Errorf("namespacetenant: delete tenant end-user identity %q: %w", tenant, err)
 	}
 	return nil
 }
@@ -162,4 +184,57 @@ func (s *pgStore) StorageHardCapExceededFor(ctx context.Context, namespace strin
 		return false, false, fmt.Errorf("namespacetenant: storage hard-cap for %q: %w", namespace, err)
 	}
 	return exceeded, true, nil
+}
+
+// SetEndUserIdentity upserts the tenant's end-user OIDC config mirror (M137/EU1b, ADR 0106), keyed on
+// tenant. Idempotent per reconcile. A zero-value cfg records a disabled config (kept as a row so a
+// later disable propagates). Nil slices are normalized to empty (the column is NOT NULL DEFAULT '{}').
+func (s *pgStore) SetEndUserIdentity(ctx context.Context, tenant string, cfg EndUserIdentity) error {
+	if tenant == "" {
+		return fmt.Errorf("namespacetenant: tenant is required")
+	}
+	scopes := cfg.Scopes
+	if scopes == nil {
+		scopes = []string{}
+	}
+	hosts := cfg.AllowedHosts
+	if hosts == nil {
+		hosts = []string{}
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO tenant_end_user_identity (tenant, enabled, issuer, client_id, scopes, allowed_hosts, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, now())
+		 ON CONFLICT (tenant) DO UPDATE SET
+		   enabled = EXCLUDED.enabled, issuer = EXCLUDED.issuer, client_id = EXCLUDED.client_id,
+		   scopes = EXCLUDED.scopes, allowed_hosts = EXCLUDED.allowed_hosts, updated_at = now()`,
+		tenant, cfg.Enabled, cfg.Issuer, cfg.ClientID, scopes, hosts); err != nil {
+		return fmt.Errorf("namespacetenant: set end-user identity for %q: %w", tenant, err)
+	}
+	return nil
+}
+
+// EndUserIdentityForNamespace resolves namespace → tenant → the tenant's end-user OIDC config in one
+// join. A missing row (the namespace maps to no tenant, or the tenant has no config row) returns
+// (zero, false, nil) — fail-CLOSED for end-user auth: an unresolved namespace has NO end-user IdP.
+func (s *pgStore) EndUserIdentityForNamespace(ctx context.Context, namespace string) (EndUserIdentity, bool, error) {
+	var cfg EndUserIdentity
+	// scopes/allowed_hosts are text[] — the pgx stdlib driver BINDS a []string but does NOT Scan a
+	// text[] back into a []string. Read them via array_to_string(...,'\n') into a plain text column and
+	// split in Go (portable, no array codec). '\n' avoids clashing with any ',' inside a scope/host.
+	var scopesJoined, hostsJoined string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT e.enabled, e.issuer, e.client_id,
+		        array_to_string(e.scopes, E'\n'), array_to_string(e.allowed_hosts, E'\n')
+		 FROM namespace_tenants nt JOIN tenant_end_user_identity e ON e.tenant = nt.tenant
+		 WHERE nt.namespace = $1`, namespace).
+		Scan(&cfg.Enabled, &cfg.Issuer, &cfg.ClientID, &scopesJoined, &hostsJoined)
+	if errors.Is(err, sql.ErrNoRows) {
+		return EndUserIdentity{}, false, nil
+	}
+	if err != nil {
+		return EndUserIdentity{}, false, fmt.Errorf("namespacetenant: end-user identity for %q: %w", namespace, err)
+	}
+	cfg.Scopes = splitNonEmpty(scopesJoined)
+	cfg.AllowedHosts = splitNonEmpty(hostsJoined)
+	return cfg, true, nil
 }

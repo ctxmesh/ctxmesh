@@ -31,11 +31,18 @@ type memStore struct {
 	// hardCap tracks the per-tenant at-storage-hard-cap flag (m80.3). Only tenants at their hard cap
 	// have an entry (true); a tenant under cap / with no hard cap has no entry (⇒ not exceeded).
 	hardCap map[string]bool // tenant → at-hard-cap
+	// endUser tracks the per-tenant end-user OIDC config (M137/EU1b). A tenant with no entry has no
+	// end-user IdP (fail-closed for end-user auth).
+	endUser map[string]EndUserIdentity // tenant → config
 }
 
 // NewMemStore returns an in-memory Store (thread-safe; data is lost when the process exits).
 func NewMemStore() Store {
-	return &memStore{data: make(map[string]string), hardCap: make(map[string]bool)}
+	return &memStore{
+		data:    make(map[string]string),
+		hardCap: make(map[string]bool),
+		endUser: make(map[string]EndUserIdentity),
+	}
 }
 
 func (s *memStore) SetMembers(_ context.Context, tenant string, namespaces []string) error {
@@ -72,6 +79,7 @@ func (s *memStore) DeleteTenant(_ context.Context, tenant string) error {
 		}
 	}
 	delete(s.hardCap, tenant)
+	delete(s.endUser, tenant)
 	return nil
 }
 
@@ -117,4 +125,28 @@ func (s *memStore) StorageHardCapExceededFor(_ context.Context, namespace string
 		return false, false, nil // no row for this namespace → fail-open (not blocked).
 	}
 	return s.hardCap[tenant], true, nil
+}
+
+func (s *memStore) SetEndUserIdentity(_ context.Context, tenant string, cfg EndUserIdentity) error {
+	if tenant == "" {
+		return fmt.Errorf("namespacetenant: tenant is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.endUser[tenant] = cfg
+	return nil
+}
+
+func (s *memStore) EndUserIdentityForNamespace(_ context.Context, namespace string) (EndUserIdentity, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tenant, ok := s.data[namespace]
+	if !ok {
+		return EndUserIdentity{}, false, nil // namespace maps to no tenant → fail-closed (no end-user IdP).
+	}
+	cfg, ok := s.endUser[tenant]
+	if !ok {
+		return EndUserIdentity{}, false, nil // tenant has no config → fail-closed.
+	}
+	return cfg, true, nil
 }

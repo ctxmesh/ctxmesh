@@ -58,4 +58,27 @@ type Store interface {
 	// mirror not yet converged, must never be wedged by the hard-cap guard). The controller's next
 	// reconcile projects the true state.
 	StorageHardCapExceededFor(ctx context.Context, namespace string) (exceeded bool, ok bool, err error)
+
+	// SetEndUserIdentity upserts the tenant's end-user OIDC config mirror (M137/EU1b, ADR 0106). The
+	// Tenant controller writes spec.endUserIdentity here each reconcile so the BFF's end-user auth path
+	// (no K8s client) resolves it by namespace. A zero-value cfg (Enabled=false) records "no end-user
+	// IdP" as a row so a disable propagates (not left stale).
+	SetEndUserIdentity(ctx context.Context, tenant string, cfg EndUserIdentity) error
+
+	// EndUserIdentityForNamespace resolves namespace → tenant → the tenant's end-user OIDC config in one
+	// read (M137/EU1b). Returns (cfg, true, nil) when a config row exists for the owning tenant; (zero,
+	// false, nil) when the namespace maps to no tenant or the tenant has no config row — fail-CLOSED for
+	// end-user auth: an unresolved namespace has NO end-user IdP, so /chat stays console-authenticated
+	// and never silently trusts an unconfigured issuer.
+	EndUserIdentityForNamespace(ctx context.Context, namespace string) (cfg EndUserIdentity, ok bool, err error)
+}
+
+// EndUserIdentity is a tenant's end-user OIDC IdP config, mirrored from Tenant.spec.endUserIdentity
+// (M137/EU1b, ADR 0106) so the BFF end-user path resolves it without a K8s read.
+type EndUserIdentity struct {
+	Enabled      bool
+	Issuer       string
+	ClientID     string
+	Scopes       []string
+	AllowedHosts []string
 }

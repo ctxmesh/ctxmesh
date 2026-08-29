@@ -36,6 +36,7 @@ interface DetailOpts {
   longTermMemory?: unknown[] | null; // null → 501 (no control-plane store), m46.6
   longTermMemoryError?: boolean; // true → 500 (store read failed), m46.6
   longTermConfig?: { enabled: boolean; perUser: boolean; embeddingRoute?: string }; // m49.3 enable surface
+  sessionMemoryConfig?: { enabled: boolean; perUser: boolean; scope?: string }; // M137/EU1d toggle surface
   updateResult?: { ok: boolean; status?: number; body?: unknown };
   deleteResult?: { ok: boolean; status?: number; body?: unknown };
   // m17.11 additions: memory + scaling panels
@@ -191,6 +192,13 @@ function installFetch(opts: DetailOpts = {}) {
           return j(init?.body ? JSON.parse(init.body as string) : {}, true, 200);
         }
         return j(opts.longTermConfig ?? { enabled: false, perUser: false }, true, 200);
+      }
+      // M137/EU1d: session-memory config (GET/PUT .../sessionmemory) — the perUser toggle.
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/sessionmemory/)) {
+        if (method === "PUT") {
+          return j(init?.body ? JSON.parse(init.body as string) : {}, true, 200);
+        }
+        return j(opts.sessionMemoryConfig ?? { enabled: false, perUser: false }, true, 200);
       }
       // m46.6: long-term memory (GET .../memory)
       if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) {
@@ -1025,6 +1033,37 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
       expect(put).toBeTruthy();
       expect(JSON.parse(put!.body)).toMatchObject({ enabled: true, perUser: true });
     });
+  });
+
+  it("session memory: toggles perUser via the config panel (M137/EU1d)", async () => {
+    const calls = installFetch({ sessionMemoryConfig: { enabled: true, perUser: false, scope: "session" } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-memory"));
+
+    await screen.findByTestId("sessionmem-config");
+    expect(screen.getByTestId("sessionmem-state")).toHaveTextContent("agent-wide");
+    // The product-grade + handoff/share caveat is shown.
+    expect(screen.getByTestId("sessionmem-caveat")).toBeInTheDocument();
+    // Toggle perUser on → a PUT patches spec.sessionMemory.perUser.
+    fireEvent.click(screen.getByTestId("sessionmem-peruser"));
+
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.includes("/sessionmemory") && c.method === "PUT");
+      expect(put).toBeTruthy();
+      expect(JSON.parse(put!.body)).toMatchObject({ enabled: true, perUser: true });
+    });
+  });
+
+  it("session memory: the shared scope shows the not-applicable note, no toggle", async () => {
+    installFetch({ sessionMemoryConfig: { enabled: true, perUser: false, scope: "shared" } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-memory"));
+
+    await screen.findByTestId("sessionmem-config");
+    expect(screen.getByTestId("sessionmem-shared-note")).toBeInTheDocument();
+    expect(screen.queryByTestId("sessionmem-peruser")).toBeNull();
   });
 });
 

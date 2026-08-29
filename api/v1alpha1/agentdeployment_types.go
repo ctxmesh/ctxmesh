@@ -184,6 +184,7 @@ type LongTermMemorySpec struct {
 }
 
 // AgentDeploymentSpec defines the desired state of an AgentDeployment.
+// +kubebuilder:validation:XValidation:rule="!(has(self.endUserAccess) && self.endUserAccess && (self.executionModel == 'job' || self.executionModel == 'eventing'))",message="endUserAccess is only valid on a serving execution model — end-user chat is interactive request-driven (M137/ADR 0107)"
 type AgentDeploymentSpec struct {
 	// image is the fully-qualified container image for the agent,
 	// e.g. "ghcr.io/ctxmesh/echo-agent:latest". Required.
@@ -355,6 +356,18 @@ type AgentDeploymentSpec struct {
 	// is not record-capable and the gateway interposition is byte-for-byte unchanged.
 	// +optional
 	Record bool `json:"record,omitempty"`
+
+	// endUserAccess opts THIS agent into being reachable by END-USERS via the standalone /chat runtime
+	// (M137/EU1b, ADR 0107 — the second of the two keys). End-user access requires BOTH the agent's
+	// tenant to enable an end-user IdP (Tenant.spec.endUserIdentity.enabled — WHO may log in) AND this
+	// flag (WHAT they may reach). Default false ⇒ the agent is invisible to end-users (an internal agent
+	// is never exposed just because its tenant turned on end-user login). When true, the controller
+	// mirrors the agent's endpoint + spec into the control-plane `end_user_agents` table so the BFF
+	// resolves an end-user run WITHOUT a K8s read; row-existence is the exposure gate (fail-closed). Only
+	// valid on a `serving` execution model (rejected at validation for eventing/job) — end-user chat is
+	// interactive request-driven.
+	// +optional
+	EndUserAccess bool `json:"endUserAccess,omitempty"`
 
 	// mountServiceAccountToken opts THIS agent into auto-mounting the default kube-API
 	// ServiceAccount token at /var/run/secrets/kubernetes.io/serviceaccount/ (m79.4, m52 C10).

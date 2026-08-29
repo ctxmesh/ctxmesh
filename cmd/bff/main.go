@@ -55,6 +55,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/enduseragent"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
@@ -65,6 +66,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 	"github.com/ctxmesh/agent-engine/internal/dbpool"
+	"github.com/ctxmesh/agent-engine/internal/enduseroidc"
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
 	"github.com/ctxmesh/agent-engine/internal/preflight"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
@@ -267,6 +269,17 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 			"issuer", oidcIssuer, "clientID", oidcClientID)
 	}
 
+	// End-user OIDC (M137/EU1b, ADR 0106): a distinct per-tenant IdP for the standalone /chat runtime.
+	// The verifier is ALWAYS constructed — it does nothing until a request targets a tenant with
+	// spec.endUserIdentity.enabled. SSRF posture on issuer/JWKS fetches: a private/loopback issuer IP is
+	// denied unless opted in (in-cluster / dev IdPs). SERVICE_ACCOUNT_ISSUER is refused as an end-user
+	// issuer (a K8s-trust collision — an end-user token must never gain K8s trust).
+	endUserVerifier := enduseroidc.NewVerifier(enduseroidc.Options{
+		AllowPrivateIssuer: envTrue(os.Getenv("END_USER_OIDC_ALLOW_PRIVATE_ISSUER")),
+		AllowLoopback:      envTrue(os.Getenv("END_USER_OIDC_ALLOW_LOOPBACK")),
+	})
+	saIssuer := strings.TrimSpace(os.Getenv("SERVICE_ACCOUNT_ISSUER"))
+
 	// SPI write path (ADR 0032): when TOKEN_SERVICE_URL is set, the OAuth callback DELEGATES
 	// grant persistence to the central token-service so grants land in the config-selected
 	// backend and DB/vault creds stay out of this user-facing BFF. mTLS engages when the
@@ -426,6 +439,9 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		PromptResolver:              prompt.NewHTTPResolver(strings.TrimSpace(os.Getenv("PROMPT_GIT_TOKEN"))),
 		ToolRegistryStore:           toolStore,
 		NamespaceTenantStore:        nsTenantStore,
+		EndUserVerifier:             endUserVerifier,
+		SAIssuer:                    saIssuer,
+		EndUserAgentStore:           enduseragent.NewPostgresStore(cpDB),
 		PublishedArtifactStore:      publishedArtifactStore,
 		SharedRunStore:              sharedRunStore,
 		AgentMemoryStore:            agentmemory.NewPostgresStore(cpDB),

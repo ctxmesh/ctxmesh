@@ -70,3 +70,15 @@ func agentBoundary(ctx context.Context, c client.Client, ns, agentName string) s
 	}
 	return standalone
 }
+
+// endUserAgentBoundary returns the OBO trust boundary for an END-USER run (M137/EU1b, ADR 0106 §6).
+// End-users have NO caller-scoped K8s client, so — unlike agentBoundary — it does NOT read the
+// AgentDeployment/AgentRegistry (which would force a new BFF-SA read grant). It returns the per-agent
+// STANDALONE boundary: an end-user of a standalone /chat agent gets per-agent OBO grant scoping, which
+// is both correct (registry-sharing is a console/A2A collaboration concept) and MORE isolated. Because
+// the end-user mint AND the end-user consent grant-write both use THIS boundary, a stored grant resolves
+// (the invariant agentBoundary documents). Registry-scoped end-user OBO — if ever needed — is the reopen
+// trigger that would justify a bounded BFF-SA agent read; carded, not built (no gate need).
+func endUserAgentBoundary(ns, agentName string) string {
+	return credresolve.AgentBoundary(ns, agentName)
+}
