@@ -58,6 +58,10 @@ type Activation struct {
 	Input any
 	// Outputs maps a prior node name to its decoded output value. Bound to `steps`, each as `{output: <v>}`.
 	Outputs map[string]any
+	// Error is the failure object {node, message, type} bound as `error` in a CATCH-reached handler node
+	// (M138, ADR 0109 §4) — nil for any other node (where `error` binds to an empty map, so a stray
+	// reference is an honest no-such-field, not a panic). Routing matches only on `error.type`.
+	Error any
 }
 
 // vars renders the activation as the CEL variable bindings the shared env declares: `input` and `steps`
@@ -72,7 +76,11 @@ func (a Activation) vars() map[string]any {
 	if in == nil {
 		in = map[string]any{}
 	}
-	return map[string]any{"input": in, "steps": steps}
+	errVal := a.Error
+	if errVal == nil {
+		errVal = map[string]any{} // `error` is always bound so a reference is an honest no-such-field, not a CEL unbound-var error
+	}
+	return map[string]any{"input": in, "steps": steps, "error": errVal}
 }
 
 // EvalBool compiles + evaluates a CEL boolean predicate (a branch `when`) against the activation. A non-bool

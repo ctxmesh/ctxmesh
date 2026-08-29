@@ -74,6 +74,18 @@ type Failure struct {
 	Node    string      `json:"node,omitempty"`
 }
 
+// CELMap projects the failure into the map a workflow catch handler binds as the `error` CEL variable
+// (M138, ADR 0109 §4): {type, message, node}. The message is truncated to maxMessageBytes (0 ⇒ no cap)
+// so a pathological tool error can't bloat CEL evaluation or a downstream prompt. Routing matches only
+// `type`; message/node are display data.
+func (f Failure) CELMap(maxMessageBytes int) map[string]any {
+	msg := f.Message
+	if maxMessageBytes > 0 && len(msg) > maxMessageBytes {
+		msg = msg[:maxMessageBytes]
+	}
+	return map[string]any{"type": string(f.Code), "message": msg, "node": f.Node}
+}
+
 // ClassifyFailure maps a terminal run to its failure code FROM THE PATH (ADR 0109 §1), total over all
 // inputs. A code STAMPED at the failure site (the specific denial paths — budget/guardrail/tool/poison)
 // wins; otherwise it is derived from the terminal STATUS (itself a structured path signal, never the

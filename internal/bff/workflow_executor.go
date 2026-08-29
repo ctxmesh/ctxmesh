@@ -135,6 +135,11 @@ type workflowCursor struct {
 	// PlanApproval, when non-nil, carries the plan-approval gate's state (m67.7). Seeded at instance-create
 	// when requireApproval; nil ⇒ no gate (the graph runs immediately, the m67.3 behavior).
 	PlanApproval *planApproval `json:"planApproval,omitempty"`
+	// PendingErrors maps a CATCH handler node → the failure object that routed to it (M138, ADR 0109 §4).
+	// The handler binds it as the `error` CEL variable. Persisted in the cursor so a reclaim after routing
+	// re-derives the binding; kept keyed by node (not on nodeProgress) so it survives however the handler's
+	// progress is (re)created at launch.
+	PendingErrors map[string]run.Failure `json:"pendingErrors,omitempty"`
 
 	// workflowInput is the workflow run's Input, carried for the CEL activation. It is NOT serialized into the
 	// cursor JSON (the run already persists its Input) — the executor sets it from the loaded run before
@@ -329,10 +334,10 @@ func (s *Server) resumePlainNode(
 			if s.retryNode(runID, rn, cursor, cur, prog) {
 				return nil, false, true // re-launched a retry attempt + re-suspended.
 			}
-			// Retries exhausted. An onError handler ROUTES the workflow to that handler step instead of
-			// fail-fasting (AWS Step Functions Catch / Temporal); no onError ⇒ fail-fast exactly as before.
-			if cur.OnError != "" {
-				return s.routeOnError(runID, spec, cursor, cur, child)
+			// Retries exhausted. A `catch` (or the `onError` sugar) ROUTES to a handler matching the failure
+			// CLASS (AWS Step Functions Catch); no matching catcher ⇒ fail-fast exactly as before (ADR 0109).
+			if len(cur.Catch) > 0 || cur.OnError != "" {
+				return s.routeCatch(runID, spec, cursor, cur, prog, child)
 			}
 			s.failExhaustedNode(runID, cur, prog, child)
 			return nil, false, true // retries exhausted, no handler → fail-fasted.
@@ -343,32 +348,66 @@ func (s *Server) resumePlainNode(
 	return s.advanceFrom(runID, spec, cursor, cur)
 }
 
-// routeOnError transfers control from a plain node whose sub-run FAILED (retries exhausted) to its onError
-// handler step, so the workflow CONTINUES instead of fail-fasting (m83.3, route-only v1). It records the
-// guarded node as `done` (its output is null — v1 injects NO $error binding; the handler runs like any node
-// over the workflow input + prior node outputs) and returns the handler as the next node. This reuses the
-// SAME advance machinery: recording the node done + clearing Current is exactly what a normal advance does, so
-// the transition is as crash-safe as any other — a reclaim after routing re-derives cleanly (the node is
-// `done`, none in flight) and re-enters at the handler via nodeSuccessor→cursor, never double-launching or
-// re-failing. onError names an existing step (a validation invariant, defended here via stepIndex).
-func (s *Server) routeOnError(
+// routeCatch transfers control from a plain node whose sub-run FAILED (retries exhausted) to the handler
+// of the FIRST catcher matching the failure's CLASS (M138, ADR 0109 §3 — AWS Step Functions Catch): the
+// ordered `catch` list first, then `onError` as the trailing catch-all sugar. No catcher matches ⇒
+// fail-fast (unchanged). The matched handler binds the failure `{node, message, type}` as the `error` CEL
+// variable (recorded in cursor.PendingErrors, keyed by the handler node). It records the guarded node
+// `done` (null output) + clears Current — the same crash-safe checkpoint a normal advance makes, so a
+// reclaim after routing re-derives cleanly and re-enters at the handler. Routing matches only the
+// classified CODE, never the free-text message. Catcher `next`/`onError` name existing steps (a validation
+// invariant, defended here via stepIndex).
+func (s *Server) routeCatch(
 	runID string, spec *agentsv1beta1.WorkflowSpec, cursor *workflowCursor,
-	cur *agentsv1beta1.WorkflowStep, failed *run.Run,
+	cur *agentsv1beta1.WorkflowStep, prog *nodeProgress, failed *run.Run,
 ) (next *agentsv1beta1.WorkflowStep, done, consumed bool) {
-	idx := stepIndex(spec, cur.OnError)
-	if idx < 0 {
-		// A dangling onError target cannot occur for a validated spec; defend it honestly rather than panic.
-		s.failWorkflow(runID, fmt.Sprintf("workflow node %q references unknown onError handler %q", cur.Name, cur.OnError))
+	failure := failed.Failure(cur.Name)
+	code := string(failure.Code)
+
+	// First-match over the ordered catch list; then onError as the trailing catch-all (the sugar).
+	handler := ""
+	for i := range cur.Catch {
+		if catchMatches(cur.Catch[i].Errors, code) {
+			handler = cur.Catch[i].Next
+			break
+		}
+	}
+	if handler == "" && cur.OnError != "" {
+		handler = cur.OnError
+	}
+	if handler == "" {
+		// No catcher matched this failure class → fail-fast (ADR 0109 §3).
+		s.failExhaustedNode(runID, cur, prog, failed)
 		return nil, false, true
 	}
-	prog := cursor.Nodes[cur.Name]
-	// Record the guarded node `done` with a null output (no $error binding in v1) — the same checkpoint a
-	// normal completion makes, so advanceFrom leaves the cursor crash-safe (node done, Current cleared next).
-	// Emit node-error-routed (NOT node-completed): the node failed, then routed to its handler.
+
+	idx := stepIndex(spec, handler)
+	if idx < 0 {
+		// A dangling catcher target cannot occur for a validated spec; defend it honestly rather than panic.
+		s.failWorkflow(runID, fmt.Sprintf("workflow node %q references unknown catch/onError handler %q", cur.Name, handler))
+		return nil, false, true
+	}
+
+	// Bind the failure object for the handler's `error` CEL, and record the guarded node done (null output).
+	if cursor.PendingErrors == nil {
+		cursor.PendingErrors = map[string]run.Failure{}
+	}
+	cursor.PendingErrors[handler] = failure
 	markNodeDone(prog, json.RawMessage(`null`))
-	_ = s.runStore.AppendEvent(runID, run.EventStep, fmt.Sprintf("node-error-routed:%s:%s:%s", cur.Name, cur.OnError, failed.ID))
+	_ = s.runStore.AppendEvent(runID, run.EventStep, fmt.Sprintf("node-error-routed:%s:%s:%s:%s", cur.Name, handler, code, failed.ID))
 	cursor.Current = ""
 	return &spec.Steps[idx], false, false
+}
+
+// catchMatches reports whether a catcher's error list matches the failure code (the wildcard "*" matches
+// any). Matching is on the classified CODE — never the free-text message (ADR 0109 §1/§4).
+func catchMatches(errorsList []string, code string) bool {
+	for _, e := range errorsList {
+		if e == run.CatchAll || e == code {
+			return true
+		}
+	}
+	return false
 }
 
 // failExhaustedNode fail-fasts the workflow after a plain node's retries are exhausted and it has NO onError
@@ -500,7 +539,7 @@ func (s *Server) evalNextNode(step *agentsv1beta1.WorkflowStep, cursor *workflow
 		if err != nil {
 			return "", err
 		}
-		act, err := cursor.activation()
+		act, err := cursor.activationForNode(step.Name) // a catch handler may branch on error.type (ADR 0109 §4)
 		if err != nil {
 			return "", err
 		}
@@ -1060,7 +1099,7 @@ func (s *Server) buildNodeInput(node *agentsv1beta1.WorkflowStep, cursor *workfl
 	if err != nil {
 		return nil, err
 	}
-	act, err := cursor.activation()
+	act, err := cursor.activationForNode(node.Name) // a catch handler's input may reference error.{type,message,node}
 	if err != nil {
 		return nil, err
 	}
@@ -1400,6 +1439,25 @@ func (c *workflowCursor) activation() (workflow.Activation, error) {
 			return act, fmt.Errorf("decoding node %q output for CEL: %w", name, err)
 		}
 		act.Outputs[name] = out
+	}
+	return act, nil
+}
+
+// maxErrorMessageBytes bounds the `error.message` the CEL binding carries (ADR 0109 §4) so a pathological
+// tool error can't bloat CEL evaluation or a downstream prompt.
+const maxErrorMessageBytes = 4 << 10 // 4 KiB
+
+// activationForNode is activation() plus the `error` binding for a CATCH-reached handler (ADR 0109 §4):
+// when nodeName has a pending inbound failure, `error` is bound to {node, message(truncated), type};
+// otherwise `error` is an empty map (an honest no-such-field on a stray reference). Routing matches only
+// `error.type`.
+func (c *workflowCursor) activationForNode(nodeName string) (workflow.Activation, error) {
+	act, err := c.activation()
+	if err != nil {
+		return act, err
+	}
+	if f, ok := c.PendingErrors[nodeName]; ok {
+		act.Error = f.CELMap(maxErrorMessageBytes)
 	}
 	return act, nil
 }

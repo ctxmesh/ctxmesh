@@ -80,6 +80,45 @@ func TestValidate_DanglingEdge(t *testing.T) {
 	}
 }
 
+// TestValidate_Catch — a catch clause with a valid code + existing handler passes; an unknown code, a
+// dangling handler, or catch on a map node are all validation errors (M138, ADR 0109).
+func TestValidate_Catch(t *testing.T) {
+	base := func(errors []string, next string) agentsv1beta1.WorkflowSpec {
+		return agentsv1beta1.WorkflowSpec{
+			RegistryRef: "support",
+			Steps: []agentsv1beta1.WorkflowStep{
+				{Name: "work", AgentRef: "a", Catch: []agentsv1beta1.WorkflowCatch{{Errors: errors, Next: next}}},
+				{Name: "handler", AgentRef: "h"},
+			},
+		}
+	}
+	// Valid: a platform code + "*", routing to an existing handler.
+	if err := Validate(base([]string{"agent_error", "*"}, "handler")); err != nil {
+		t.Fatalf("a valid catch must pass: %v", err)
+	}
+	// Unknown code → error naming the code.
+	err := Validate(base([]string{"no_such_code"}, "handler"))
+	if err == nil || !strings.Contains(err.Error(), "no_such_code") {
+		t.Errorf("an unknown catch code must be a validation error naming it; got: %v", err)
+	}
+	// Dangling handler → error.
+	if err := Validate(base([]string{"timeout"}, "ghost")); err == nil || !strings.Contains(err.Error(), "ghost") {
+		t.Errorf("a dangling catch handler must be a validation error; got: %v", err)
+	}
+	// Catch on a map node → rejected.
+	mapSpec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "support",
+		Steps: []agentsv1beta1.WorkflowStep{
+			{Name: "work", AgentRef: "a", Map: &agentsv1beta1.WorkflowMap{As: "x", Do: "handler", Over: "input.items"},
+				Catch: []agentsv1beta1.WorkflowCatch{{Errors: []string{"*"}, Next: "handler"}}},
+			{Name: "handler", AgentRef: "h"},
+		},
+	}
+	if err := Validate(mapSpec); err == nil || !strings.Contains(err.Error(), "catch") {
+		t.Errorf("catch on a map node must be rejected; got: %v", err)
+	}
+}
+
 // TestValidate_BadCEL — an uncompilable CEL expression (references an unknown top-level variable) is an error.
 func TestValidate_BadCEL(t *testing.T) {
 	spec := agentsv1beta1.WorkflowSpec{
