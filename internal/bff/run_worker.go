@@ -138,6 +138,7 @@ func (s *Server) sweepWaitingLoop(ctx context.Context) {
 				continue
 			}
 			if len(woke) > 0 {
+				s.metrics.observeSweepRescued(len(woke)) // ADR 0108 §5: the monitored no-stranded-waiter invariant
 				s.log.Info("run-worker: SweepWaiting re-queued waiting runs (crash-window reconciler)",
 					"count", len(woke), "runIDs", woke)
 			}

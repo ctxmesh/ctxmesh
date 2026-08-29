@@ -46,6 +46,14 @@ type Metrics struct {
 	// workerActive is the number of live claim loops in THIS process (set on pool
 	// start, zeroed on drain) — the dead-worker-pool alert reads `== 0`.
 	workerActive prometheus.Gauge
+	// sweepRescued counts runs the no-stranded-waiter reconciler (SweepWaiting) re-queued — a
+	// nonzero rate means the transactional wake missed and the belt-and-braces path caught it
+	// (ADR 0108 §5: the monitored at-least-once-wake invariant; alert on `rate(...) > 0`).
+	sweepRescued prometheus.Counter
+	// checkpointBytes observes a supervisor-loop checkpoint payload size at suspend (ADR 0108 §3);
+	// checkpointRejects counts suspends failed for an over-cap checkpoint (the fail-closed backstop).
+	checkpointBytes   prometheus.Histogram
+	checkpointRejects prometheus.Counter
 }
 
 // newMetrics builds the exporter with its own registry + the standard go/process
@@ -70,9 +78,23 @@ func newMetrics(queued queuedCounter) *Metrics {
 			Name: "agentengine_run_worker_active",
 			Help: "Number of live run-worker claim loops in this process (0 ⇒ the pool is dead).",
 		}),
+		sweepRescued: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "agentengine_run_sweep_rescued_total",
+			Help: "Waiting runs re-queued by the no-stranded-waiter reconciler (a nonzero rate ⇒ a missed transactional wake).",
+		}),
+		checkpointBytes: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "agentengine_supervisor_checkpoint_bytes",
+			Help:    "Supervisor-loop checkpoint payload size at suspend (bytes).",
+			Buckets: []float64{1 << 10, 1 << 12, 1 << 14, 1 << 16, 1 << 18, 1 << 20, 4 << 20},
+		}),
+		checkpointRejects: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "agentengine_supervisor_checkpoint_rejects_total",
+			Help: "Suspends failed because the checkpoint payload exceeded the size cap (fail-closed).",
+		}),
 	}
 	reg.MustRegister(
 		m.runDuration, m.runOutcomes, m.workerActive,
+		m.sweepRescued, m.checkpointBytes, m.checkpointRejects,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
@@ -116,6 +138,30 @@ func (m *Metrics) decWorkerActive() {
 		return
 	}
 	m.workerActive.Dec()
+}
+
+// observeSweepRescued records that the no-stranded-waiter reconciler re-queued n runs (ADR 0108 §5).
+func (m *Metrics) observeSweepRescued(n int) {
+	if m == nil || n <= 0 {
+		return
+	}
+	m.sweepRescued.Add(float64(n))
+}
+
+// observeCheckpoint records a supervisor checkpoint payload size at suspend (ADR 0108 §3).
+func (m *Metrics) observeCheckpoint(bytes int) {
+	if m == nil {
+		return
+	}
+	m.checkpointBytes.Observe(float64(bytes))
+}
+
+// checkpointRejected records a suspend failed for an over-cap checkpoint (ADR 0108 §3).
+func (m *Metrics) checkpointRejected() {
+	if m == nil {
+		return
+	}
+	m.checkpointRejects.Inc()
 }
 
 func normalizeOutcome(s string) string {

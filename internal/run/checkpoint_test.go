@@ -35,6 +35,19 @@ func TestSupervisorCheckpoint_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestSupervisorCheckpoint_SizeCap: a payload over the cap is rejected typed (ADR 0108 §3), so the
+// suspend fails loudly rather than persisting an unbounded cursor; a payload AT the cap still wraps.
+func TestSupervisorCheckpoint_SizeCap(t *testing.T) {
+	atCap, err := NewSupervisorCheckpoint(string(make([]byte, MaxCheckpointPayloadBytes)))
+	require.NoError(t, err, "a payload exactly at the cap is accepted")
+	_, ok := ParseSupervisorCheckpoint(atCap)
+	require.True(t, ok)
+
+	_, err = NewSupervisorCheckpoint(string(make([]byte, MaxCheckpointPayloadBytes+1)))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCheckpointTooLarge, "an over-cap checkpoint fails with the typed error")
+}
+
 // TestSupervisorCheckpoint_RejectsCorruptAndForeign is the fail-safe contract (ADR 0091 fork 3): a
 // tampered hash, a truncated/garbage cursor, a foreign kind, or an unknown version all reject (ok=false)
 // so resume falls back to a full re-invoke rather than feeding the SDK a bad checkpoint.
