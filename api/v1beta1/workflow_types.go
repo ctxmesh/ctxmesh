@@ -43,6 +43,25 @@ type WorkflowBranch struct {
 	To string `json:"to"`
 }
 
+// WorkflowCatch is one ordered error-class catcher of a step (M138, ADR 0109 §3 — AWS Step Functions
+// `Catch`/`ErrorEquals`): when the step's sub-run FAILS (after retries) with a failure code IN `errors`,
+// control transfers to step `next` (the handler), which binds the failure as the `error` CEL variable
+// (`{node, message, type}`). Catchers are evaluated in ORDER, FIRST match wins; `"*"` is the catch-all.
+// The single `onError: <step>` is sugar for `catch: [{errors: ["*"], next: <step>}]`.
+type WorkflowCatch struct {
+	// errors is the set of failure CODES this catcher matches — the closed platform vocabulary
+	// (timeout, cancelled, budget_exceeded, guardrail_denied, tool_error, agent_error, platform_error)
+	// or the wildcard "*" (all). Matching is on the CLASSIFIED code, never the free-text message.
+	// +kubebuilder:validation:MinItems=1
+	Errors []string `json:"errors"`
+
+	// next is the handler step to run when a matching failure occurs. It MUST reference an existing step.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9\-]*[a-z0-9])?$`
+	Next string `json:"next"`
+}
+
 // WorkflowMap is a fan-out node: evaluate the CEL list `over`, bind each element to `as`, run step `do`
 // per element (bounded by `parallelism`), then optionally reduce via step `join`. Defined here; executed
 // in v1b. Bounded by construction (parallelism >= 1) — no unbounded fan-out.
@@ -175,11 +194,19 @@ type WorkflowStep struct {
 	// onError names a handler step this node routes to if its sub-run FAILS after exhausting its retry
 	// budget — the workflow continues at the handler instead of fail-fasting (AWS Step Functions Catch /
 	// Temporal). Empty ⇒ fail-fast (the default). The handler must be an existing step; it runs like any
-	// node. Not supported on map/loop nodes.
+	// node. Not supported on map/loop nodes. onError is sugar for a single catch-all `catch` clause; when
+	// both are set, onError is the trailing catch-all after the ordered `catch` list.
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^([a-z0-9]([a-z0-9\-]*[a-z0-9])?)?$`
 	// +optional
 	OnError string `json:"onError,omitempty"`
+
+	// catch is an ORDERED list of error-class catchers (M138, ADR 0109 §3): the first catcher whose
+	// `errors` contains the node's classified failure code (or "*") routes to its `next` handler, which
+	// binds the failure as the `error` CEL variable. Evaluated only after retries exhaust; no match ⇒
+	// fail-fast. Routes on the CLASSIFIED code, never the free-text message. Not supported on map/loop nodes.
+	// +optional
+	Catch []WorkflowCatch `json:"catch,omitempty"`
 
 	// mapNode makes this a map/fan-out node (defined here; executed v1b). Set instead of next/branches.
 	// +optional

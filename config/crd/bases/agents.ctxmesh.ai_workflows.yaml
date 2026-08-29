@@ -157,6 +157,41 @@ spec:
                       maxItems: 64
                       type: array
                       x-kubernetes-list-type: atomic
+                    catch:
+                      description: |-
+                        catch is an ORDERED list of error-class catchers (M138, ADR 0109 §3): the first catcher whose
+                        `errors` contains the node's classified failure code (or "*") routes to its `next` handler, which
+                        binds the failure as the `error` CEL variable. Evaluated only after retries exhaust; no match ⇒
+                        fail-fast. Routes on the CLASSIFIED code, never the free-text message. Not supported on map/loop nodes.
+                      items:
+                        description: |-
+                          WorkflowCatch is one ordered error-class catcher of a step (M138, ADR 0109 §3 — AWS Step Functions
+                          `Catch`/`ErrorEquals`): when the step's sub-run FAILS (after retries) with a failure code IN `errors`,
+                          control transfers to step `next` (the handler), which binds the failure as the `error` CEL variable
+                          (`{node, message, type}`). Catchers are evaluated in ORDER, FIRST match wins; `"*"` is the catch-all.
+                          The single `onError: <step>` is sugar for `catch: [{errors: ["*"], next: <step>}]`.
+                        properties:
+                          errors:
+                            description: |-
+                              errors is the set of failure CODES this catcher matches — the closed platform vocabulary
+                              (timeout, cancelled, budget_exceeded, guardrail_denied, tool_error, agent_error, platform_error)
+                              or the wildcard "*" (all). Matching is on the CLASSIFIED code, never the free-text message.
+                            items:
+                              type: string
+                            minItems: 1
+                            type: array
+                          next:
+                            description: next is the handler step to run when a matching
+                              failure occurs. It MUST reference an existing step.
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[a-z0-9]([a-z0-9\-]*[a-z0-9])?$
+                            type: string
+                        required:
+                        - errors
+                        - next
+                        type: object
+                      type: array
                     default:
                       description: |-
                         default is the fallthrough step when no branch's `when` matches. Only meaningful with `branches`;
@@ -279,7 +314,8 @@ spec:
                         onError names a handler step this node routes to if its sub-run FAILS after exhausting its retry
                         budget — the workflow continues at the handler instead of fail-fasting (AWS Step Functions Catch /
                         Temporal). Empty ⇒ fail-fast (the default). The handler must be an existing step; it runs like any
-                        node. Not supported on map/loop nodes.
+                        node. Not supported on map/loop nodes. onError is sugar for a single catch-all `catch` clause; when
+                        both are set, onError is the trailing catch-all after the ordered `catch` list.
                       maxLength: 63
                       pattern: ^([a-z0-9]([a-z0-9\-]*[a-z0-9])?)?$
                       type: string

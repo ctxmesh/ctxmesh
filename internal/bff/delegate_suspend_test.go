@@ -107,22 +107,35 @@ func TestSuspendOnDelegate_BuildsChildrenAndSuspends(t *testing.T) {
 	assert.Equal(t, run.StatusQueued, child.Status)
 }
 
-// TestSuspendOnDelegate_DepthGuard proves the v1 fail-closed invariant: a delegate_waiting marker on a
-// depth>0 supervisor (nested suspension, deferred) is rejected — never parked as an unsupported suspend.
-func TestSuspendOnDelegate_DepthGuard(t *testing.T) {
+// TestSuspendOnDelegate_SuspendsAtDepth proves the DEPTH-AGNOSTIC suspend (ADR 0108, M138): a
+// delegate_waiting marker on a depth>0 supervisor (a sub-run that is itself a supervisor) now SUSPENDS
+// — it builds the child, parks the parent in `waiting` on it (checkpoint stamped), and the child
+// inherits SpawnDepth = parent.SpawnDepth+1. The old fail-closed depth>0 reject (ADR 0091 fork 5) is
+// lifted; the spawn-depth ceiling still bounds the tree.
+func TestSuspendOnDelegate_SuspendsAtDepth(t *testing.T) {
 	s := &Server{runStore: run.NewMemStore(), log: logr.Discard()}
-	parent := mkRunningParent(t, s, "sub-sup", 1) // a supervisor that is itself a sub-agent
+	parent := mkRunningParent(t, s, "sub-sup", 2) // a supervisor that is itself a depth-2 sub-agent
 
-	dw := &delegateWaiting{Checkpoint: "cp", Delegates: []delegateIntent{
+	dw := &delegateWaiting{Checkpoint: `{"step":1}`, Delegates: []delegateIntent{
 		{SubAgent: "r", Endpoint: "http://r/invoke", Step: "1", CallID: "c1"},
 	}}
 	err := s.suspendOnDelegate(parent, dw, "trace-1", time.Unix(1, 0).UTC())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "depth")
+	require.NoError(t, err, "a depth>0 supervisor now suspends (nested suspend lifted)")
 
 	got, err := s.runStore.Get("sub-sup")
 	require.NoError(t, err)
-	assert.Equal(t, run.StatusRunning, got.Status, "a rejected depth>0 delegate leaves the run running (the caller fails it)")
+	assert.Equal(t, run.StatusWaiting, got.Status, "the depth>0 supervisor parks in `waiting` on its child")
+	childID := run.SpawnRunID("sub-sup", "1", "c1")
+	assert.Equal(t, []string{childID}, got.WaitOn)
+	payload, ok := run.ParseSupervisorCheckpoint(got.Cursor)
+	require.True(t, ok, "the checkpoint envelope is stamped + verifies at depth>0")
+	assert.Equal(t, `{"step":1}`, payload)
+
+	child, err := s.runStore.Get(childID)
+	require.NoError(t, err)
+	assert.Equal(t, run.StatusQueued, child.Status)
+	assert.Equal(t, 3, child.SpawnDepth, "the child is one deeper than its depth-2 supervisor parent")
+	assert.Equal(t, "sub-sup", child.ParentRunID)
 }
 
 // TestSuspendOnDelegate_MissingField proves a malformed intent fails closed (no partial spawn).
@@ -151,4 +164,42 @@ func TestSuspendOnDelegate_FanOutCeiling(t *testing.T) {
 	err := s.suspendOnDelegate(parent, &delegateWaiting{Checkpoint: "cp", Delegates: over}, "trace-1", time.Unix(1, 0).UTC())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ceiling")
+}
+
+// TestSuspendOnDelegate_DepthCeiling proves the authoritative depth ceiling on the SUSPEND path (ADR 0108
+// §2): a child one deeper than the platform ceiling is denied fail-closed (no child created). Before the
+// depth>0 lift the suspend path was depth-0-only; now it must enforce the ceiling itself.
+func TestSuspendOnDelegate_DepthCeiling(t *testing.T) {
+	s := &Server{runStore: run.NewMemStore(), log: logr.Discard()}
+	parent := mkRunningParent(t, s, "deep-sup", agentsv1beta1.MaxSpawnDepthCeiling) // a supervisor AT the ceiling
+	dw := &delegateWaiting{Checkpoint: "cp", Delegates: []delegateIntent{
+		{SubAgent: "r", Endpoint: "http://r/invoke", Step: "1", CallID: "c1"},
+	}}
+	err := s.suspendOnDelegate(parent, dw, "trace-1", time.Unix(1, 0).UTC())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "depth")
+	_, gErr := s.runStore.Get(run.SpawnRunID("deep-sup", "1", "c1"))
+	assert.Error(t, gErr, "fail-closed: no child is created when the depth ceiling is exceeded")
+}
+
+// TestSuspendOnDelegate_BudgetExhausted proves the authoritative per-root-tree total-spawn budget on the
+// SUSPEND path (ADR 0108 §2): once the tree's spawn ceiling is consumed, a further suspend is denied
+// fail-closed. This closes the advisory-only gap the depth>0 lift would otherwise open.
+func TestSuspendOnDelegate_BudgetExhausted(t *testing.T) {
+	s := &Server{runStore: run.NewMemStore(), log: logr.Discard()}
+	parent := mkRunningParent(t, s, "sup-budget", 0) // a root supervisor → the tree root is itself
+	// Consume the whole per-tree total-spawn ceiling first.
+	for range agentsv1beta1.MaxTotalSpawnsCeiling {
+		ok, err := s.runStore.ReserveSpawn("sup-budget", agentsv1beta1.MaxTotalSpawnsCeiling)
+		require.NoError(t, err)
+		require.True(t, ok)
+	}
+	dw := &delegateWaiting{Checkpoint: "cp", Delegates: []delegateIntent{
+		{SubAgent: "r", Endpoint: "http://r/invoke", Step: "1", CallID: "c1"},
+	}}
+	err := s.suspendOnDelegate(parent, dw, "trace-1", time.Unix(1, 0).UTC())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "budget")
+	_, gErr := s.runStore.Get(run.SpawnRunID("sup-budget", "1", "c1"))
+	assert.Error(t, gErr, "fail-closed: no child is created when the tree budget is exhausted")
 }

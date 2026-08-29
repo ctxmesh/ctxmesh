@@ -101,6 +101,9 @@ CREATE TABLE IF NOT EXISTS run_events (
 -- Idempotent migration for a runs table created before the worker execution record (m32.2):
 -- add the columns (defaults = an unclaimed run with no OBO re-mint material) so old rows load.
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS caller_username  text NOT NULL DEFAULT '';
+-- Typed failure class (M138, ADR 0109): a specific denial path stamps its code here so a workflow catch
+-- can route on it without parsing the free-text error. '' ⇒ derive the class from status (see Failure()).
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS failure_code     text NOT NULL DEFAULT '';
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS boundary         text NOT NULL DEFAULT '';
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS endpoint         text NOT NULL DEFAULT '';
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS worker_id        text NOT NULL DEFAULT '';
@@ -334,7 +337,7 @@ func runRowColumns(cursorExpr string) string {
 		parent_run_id, root_run_id, spawn_depth, output_schema, record,
 		workflow_ref, spec_snapshot, ` + cursorExpr + ` AS cursor, wait_on, wait_mode, handed_off_to, handoff_source_run_id,
 		node_endpoints, ingestion_ref, ingestion_spec, outcome, export_ref, export_spec,
-		handoff_skip_history_replay, attempts, version, created_at, updated_at`
+		handoff_skip_history_replay, attempts, version, created_at, updated_at, failure_code`
 }
 
 // scanRunRow scans one full run row (columns in runRowColumns order) into a Run + its OCC version. A list
@@ -356,6 +359,7 @@ func scanRunRow(sc runRowScanner) (*Run, int64, error) {
 		version       int64
 		created       time.Time
 		updated       time.Time
+		failureCode   string
 	)
 	err := sc.Scan(
 		&r.ID, &r.Namespace, &r.Agent, &input, &r.ConversationID, &r.TraceID, &status,
@@ -363,7 +367,7 @@ func scanRunRow(sc runRowScanner) (*Run, int64, error) {
 		&r.ParentRunID, &r.RootRunID, &r.SpawnDepth, &outputSchema, &r.Record,
 		&r.WorkflowRef, &r.SpecSnapshot, &r.Cursor, &waitOn, &waitMode, &r.HandedOffTo, &r.HandoffSourceRunID,
 		&nodeEndpoints, &r.IngestionRef, &r.IngestionSpec, &r.Outcome, &r.ExportRef, &r.ExportSpec,
-		&r.HandoffSkipHistoryReplay, &r.Attempts, &version, &created, &updated)
+		&r.HandoffSkipHistoryReplay, &r.Attempts, &version, &created, &updated, &failureCode)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, 0, err // bare — the single-row caller maps this to ErrNotFound
@@ -371,6 +375,7 @@ func scanRunRow(sc runRowScanner) (*Run, int64, error) {
 		return nil, 0, fmt.Errorf("run: scan run row: %w", err)
 	}
 	r.Status = Status(status)
+	r.FailureCode = FailureCode(failureCode)
 	r.CreatedAt = created.UTC()
 	r.UpdatedAt = updated.UTC()
 	if lease.Valid {
@@ -479,13 +484,13 @@ func (p *pgStore) tryUpdate(ctx context.Context, id string, fn func(*Run) error)
 	const upd = `UPDATE runs SET
 			trace_id=$2, status=$3, messages=$4, requires_action=$5, error=$6,
 			worker_id=$7, lease_expires_at=$8, cursor=$9, wait_on=$10, wait_mode=$11, handed_off_to=$12,
-			outcome=$13, version=version+1, updated_at=$14
+			outcome=$13, failure_code=$16, version=version+1, updated_at=$14
 		WHERE id=$1 AND version=$15`
 	res, err := tx.ExecContext(ctx, upd,
 		id, working.TraceID, string(working.Status), msgs, action, working.Error,
 		working.WorkerID, nullableTime(working.LeaseExpiresAt),
 		working.Cursor, waitOn, string(working.WaitMode), working.HandedOffTo,
-		working.Outcome, working.UpdatedAt.UTC(), version)
+		working.Outcome, working.UpdatedAt.UTC(), version, string(working.FailureCode))
 	if err != nil {
 		return nil, fmt.Errorf("run: update: %w", err)
 	}
@@ -530,12 +535,12 @@ func (p *pgStore) writeRunTx(ctx context.Context, tx *sql.Tx, r *Run, version in
 	const upd = `UPDATE runs SET
 			trace_id=$2, status=$3, messages=$4, requires_action=$5, error=$6,
 			worker_id=$7, lease_expires_at=$8, cursor=$9, wait_on=$10, wait_mode=$11, handed_off_to=$12,
-			outcome=$13, version=version+1, updated_at=$14
+			outcome=$13, failure_code=$16, version=version+1, updated_at=$14
 		WHERE id=$1 AND version=$15`
 	res, err := tx.ExecContext(ctx, upd,
 		r.ID, r.TraceID, string(r.Status), msgs, action, r.Error,
 		r.WorkerID, nullableTime(r.LeaseExpiresAt), r.Cursor, waitOn, string(r.WaitMode), r.HandedOffTo,
-		r.Outcome, r.UpdatedAt.UTC(), version)
+		r.Outcome, r.UpdatedAt.UTC(), version, string(r.FailureCode))
 	if err != nil {
 		return fmt.Errorf("run: update: %w", err)
 	}
