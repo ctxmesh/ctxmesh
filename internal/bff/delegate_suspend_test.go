@@ -107,22 +107,35 @@ func TestSuspendOnDelegate_BuildsChildrenAndSuspends(t *testing.T) {
 	assert.Equal(t, run.StatusQueued, child.Status)
 }
 
-// TestSuspendOnDelegate_DepthGuard proves the v1 fail-closed invariant: a delegate_waiting marker on a
-// depth>0 supervisor (nested suspension, deferred) is rejected — never parked as an unsupported suspend.
-func TestSuspendOnDelegate_DepthGuard(t *testing.T) {
+// TestSuspendOnDelegate_SuspendsAtDepth proves the DEPTH-AGNOSTIC suspend (ADR 0108, M138): a
+// delegate_waiting marker on a depth>0 supervisor (a sub-run that is itself a supervisor) now SUSPENDS
+// — it builds the child, parks the parent in `waiting` on it (checkpoint stamped), and the child
+// inherits SpawnDepth = parent.SpawnDepth+1. The old fail-closed depth>0 reject (ADR 0091 fork 5) is
+// lifted; the spawn-depth ceiling still bounds the tree.
+func TestSuspendOnDelegate_SuspendsAtDepth(t *testing.T) {
 	s := &Server{runStore: run.NewMemStore(), log: logr.Discard()}
-	parent := mkRunningParent(t, s, "sub-sup", 1) // a supervisor that is itself a sub-agent
+	parent := mkRunningParent(t, s, "sub-sup", 2) // a supervisor that is itself a depth-2 sub-agent
 
-	dw := &delegateWaiting{Checkpoint: "cp", Delegates: []delegateIntent{
+	dw := &delegateWaiting{Checkpoint: `{"step":1}`, Delegates: []delegateIntent{
 		{SubAgent: "r", Endpoint: "http://r/invoke", Step: "1", CallID: "c1"},
 	}}
 	err := s.suspendOnDelegate(parent, dw, "trace-1", time.Unix(1, 0).UTC())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "depth")
+	require.NoError(t, err, "a depth>0 supervisor now suspends (nested suspend lifted)")
 
 	got, err := s.runStore.Get("sub-sup")
 	require.NoError(t, err)
-	assert.Equal(t, run.StatusRunning, got.Status, "a rejected depth>0 delegate leaves the run running (the caller fails it)")
+	assert.Equal(t, run.StatusWaiting, got.Status, "the depth>0 supervisor parks in `waiting` on its child")
+	childID := run.SpawnRunID("sub-sup", "1", "c1")
+	assert.Equal(t, []string{childID}, got.WaitOn)
+	payload, ok := run.ParseSupervisorCheckpoint(got.Cursor)
+	require.True(t, ok, "the checkpoint envelope is stamped + verifies at depth>0")
+	assert.Equal(t, `{"step":1}`, payload)
+
+	child, err := s.runStore.Get(childID)
+	require.NoError(t, err)
+	assert.Equal(t, run.StatusQueued, child.Status)
+	assert.Equal(t, 3, child.SpawnDepth, "the child is one deeper than its depth-2 supervisor parent")
+	assert.Equal(t, "sub-sup", child.ParentRunID)
 }
 
 // TestSuspendOnDelegate_MissingField proves a malformed intent fails closed (no partial spawn).

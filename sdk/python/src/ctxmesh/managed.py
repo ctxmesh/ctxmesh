@@ -593,7 +593,8 @@ class ManagedResult:
     #: conversation and its turn ENDED here (a handoff is terminal for the agent's turn — it does
     #: not produce a further answer; the target agent continues with the user). ``None`` = none.
     handoff: Optional[Dict[str, str]] = None
-    #: When a depth-0 supervisor delegated and SUSPENDED (L7, ADR 0091), ``{"checkpoint": <opaque
+    #: When a supervisor (at ANY depth — ADR 0108) delegated and SUSPENDED (L7, ADR 0091),
+    #: ``{"checkpoint": <opaque
     #: payload>, "delegates": [{sub_agent, endpoint, input, step, call_id}]}``. Non-None ⇒ the run
     #: is
     #: NOT terminal: the BFF worker creates the sub-run(s) and parks this run ``waiting`` on them,
@@ -888,14 +889,13 @@ def run_managed_loop(
         else []
     )
 
-    # L7 durable delegate suspension (ADR 0091): eligible only for a durable ROOT supervisor — the
-    # feature on (default), the inbound spawn-depth 0 (a non-root supervisor blocks — nested
-    # suspension
-    # is v1-deferred), AND a spawn-root header present (the synchronous Playground path has none,
-    # and a
-    # marker emitted there is never enacted — so it must fall back to blocking).
+    # L7 durable delegate suspension (ADR 0091), DEPTH-AGNOSTIC (ADR 0108, M138): eligible for a
+    # durable supervisor at ANY delegation depth: the feature on (default) AND a spawn-root header
+    # present (the synchronous Playground path has none, and a marker there is never enacted, so it
+    # must fall back to blocking). The depth==0 term is REMOVED: a sub-run that is itself a
+    # supervisor now suspends too (its wake is generic over depth), not parking a worker to block.
     spawn_root = _spawn_root_from_headers(headers)
-    suspend_eligible = _delegate_suspend_enabled() and spawn_depth == 0 and bool(spawn_root)
+    suspend_eligible = _delegate_suspend_enabled() and bool(spawn_root)
 
     # Restore from an L7 checkpoint (ADR 0091) when the platform re-invoked a suspended supervisor.
     # verify_and_extract is fail-safe: a corrupt/version-skewed envelope yields None → run fresh.
@@ -1021,7 +1021,8 @@ def run_managed_loop(
                 tool_index=start_tool_index,
             )
         except DelegateWaitingError as exc:
-            # L7 (ADR 0091): a depth-0 supervisor delegated and SUSPENDED. Surface the
+            # L7 (ADR 0091), depth-agnostic (ADR 0108): a supervisor at any depth delegated and
+            # SUSPENDED. Surface the
             # durable-suspend
             # marker — the BFF worker creates the sub-run(s), parks this run `waiting` on them, and
             # re-invokes it with the checkpoint when they finish. NOT a terminal outcome (no
@@ -1616,9 +1617,10 @@ def _drive_loop(
     ``start_step`` (L7, ADR 0091) is the first step number — 1 on a fresh run, or the resumed step
     on a checkpoint restore. It bounds the loop as ``range(start_step, max_steps+1)`` so a resumed
     supervisor keeps the SAME runaway budget (ADR 0013) rather than refreshing it each cycle.
-    ``suspend_eligible`` gates whether a depth-0 delegation SUSPENDS (durable) or blocks;
-    ``spawn_root`` is relayed on the suspend-signal delegate call. ``model_index``/``tool_index``
-    are the M78 step-frame channel counters, restored across a resume so fixture refs stay put."""
+    ``suspend_eligible`` gates whether a delegation SUSPENDS (durable) or blocks (depth-agnostic,
+    ADR 0108); ``spawn_root`` is relayed on the suspend-signal delegate call.
+    ``model_index``/``tool_index`` are the M78 step-frame channel counters, restored across a resume
+    so fixture refs stay put."""
     # Structured-output repair counter (m65.5): counts corrective re-asks after a
     # final-answer schema violation; bounded by _MAX_SCHEMA_REPAIR. Kept SEPARATE from
     # the max_steps budget so repair turns have a clear, explicit allowance of their own.
@@ -1857,7 +1859,8 @@ def _drive_loop(
                 for c in resp.tool_calls
                 if _call_name(c) == DELEGATE_TOOL_NAME and c.get("id", "") not in blocked
             ]
-            # L7 durable suspension (ADR 0091): at depth 0 (suspend_eligible), RECORD each
+            # L7 durable suspension (ADR 0091), depth-agnostic (ADR 0108): when suspend_eligible (a
+            # durable supervisor at ANY depth), RECORD each
             # delegation as
             # intent (ask the launcher for a suspend-signal = resolved endpoint, no spawn/await)
             # instead

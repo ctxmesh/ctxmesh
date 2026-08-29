@@ -207,10 +207,11 @@ func TestDelegate_SuspendSignalDepth0(t *testing.T) {
 	assert.Equal(t, 0, fc.spawned, "the suspend path never spawns or blocks — the BFF creates the child")
 }
 
-// TestDelegate_SuspendAtDepthBlocks — a Suspend request at depth>0 falls THROUGH to the blocking path
-// (nested suspension is v1-deferred, fail-closed): the sub-run is spawned + awaited inline.
-func TestDelegate_SuspendAtDepthBlocks(t *testing.T) {
-	fc := &fakeSpawnClient{awaitRes: spawnedRunResult{Status: "succeeded", Answer: "inline answer"}}
+// TestDelegate_SuspendSignalAtDepth — depth-agnostic suspend (ADR 0108, M138): a Suspend request at
+// depth>0 now returns a suspend-SIGNAL too (the depth-0 gate was lifted). A sub-run that is itself a
+// supervisor budget-checks + resolves the endpoint and suspends — it does NOT spawn or block inline.
+func TestDelegate_SuspendSignalAtDepth(t *testing.T) {
+	fc := &fakeSpawnClient{}
 	ds := newDelegate(t, fc, openBudget)
 	body := delegBody()
 	body.Suspend = true
@@ -218,9 +219,10 @@ func TestDelegate_SuspendAtDepthBlocks(t *testing.T) {
 	resp := callDelegate(t, ds, "cap", body, map[string]string{headerSpawnDepth: "1"}) // depth>0
 
 	assert.True(t, resp.OK)
-	assert.False(t, resp.Suspend, "a non-root supervisor never suspends in v1")
-	assert.Equal(t, "inline answer", resp.Answer)
-	assert.Equal(t, 1, fc.spawned, "depth>0 blocks: it spawns + awaits inline")
+	assert.True(t, resp.Suspend, "a supervisor suspends at ANY depth now (nested suspend lifted)")
+	assert.Equal(t, "http://researcher.team-ns.svc.cluster.local", resp.Endpoint, "roster endpoint resolved")
+	assert.Empty(t, resp.Answer)
+	assert.Equal(t, 0, fc.spawned, "the suspend path never spawns or blocks — the BFF creates the child")
 }
 
 // TestDelegate_SuspendStillGuarded — the suspend path is gated by the SAME admission guard: a depth-0

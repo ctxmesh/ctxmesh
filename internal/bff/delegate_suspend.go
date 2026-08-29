@@ -72,15 +72,16 @@ func parseDelegateWaiting(resp []byte) *delegateWaiting {
 // (executeRun transitioned it); the freshly-locked parent is re-read inside the TX, so `parent` here is
 // used only for its immutable lineage.
 //
-// Fail-closed: a malformed marker (a bad field, an unsupported depth, an over-ceiling fan-out) returns an
-// error and the caller fails the run — never a silent block and never a swallowed success.
+// Fail-closed: a malformed marker (a bad field, an over-ceiling fan-out) returns an error and the caller
+// fails the run — never a silent block and never a swallowed success.
 func (s *Server) suspendOnDelegate(parent *run.Run, dw *delegateWaiting, traceID string, now time.Time) error {
-	// v1 supports suspension only at the ROOT of a delegation (depth 0). A depth>0 supervisor's launcher
-	// stays blocking (ADR 0091 — nested suspension deferred), so a delegate_waiting marker arriving on a
-	// depth>0 run is a contract violation; fail closed rather than park an unsupported nested suspension.
-	if parent.SpawnDepth > 0 {
-		return fmt.Errorf("delegate suspension unsupported at depth %d (v1: a non-root supervisor blocks)", parent.SpawnDepth)
-	}
+	// Suspension is DEPTH-AGNOSTIC (ADR 0108, M138): a supervisor suspends at ANY delegation depth. The
+	// depth-0-only gate (ADR 0091's fork-5 fail-closed reject) is lifted — the SuspendOnDelegate machinery
+	// is generic over depth (CompleteAndWake commits the child terminal + the parent wake atomically in one
+	// tx, at every level), so a sub-run that is itself a supervisor parks in `waiting` on its own children
+	// instead of parking a worker slot. The child's SpawnDepth is still parent.SpawnDepth+1 (below), so the
+	// spawn-depth ceiling (32) continues to bound the tree.
+	//
 	// Defense-in-depth fan-out cap (C19/ADR 0088): the launcher is the budget authority, but the BFF never
 	// mints an unbounded child set from an agent-controlled marker.
 	if len(dw.Delegates) > agentsv1beta1.MaxFanOutCeiling {

@@ -176,6 +176,33 @@ def test_depth0_delegate_suspends_and_emits_the_marker():
     ]
 
 
+def test_depth_gt0_delegate_also_suspends():
+    """Depth-agnostic suspend (ADR 0108, M138): a supervisor that is ITSELF a sub-run (spawn-depth
+    2) now SUSPENDS on its delegation too. The depth==0 eligibility term was lifted. A spawn-root
+    header is still required (an enacted marker needs a durable tree), so eligibility is feature-on
+    AND spawn-root, regardless of depth."""
+    depth_headers = {"X-Ctxmesh-Spawn-Root": "root-1", "X-Ctxmesh-Spawn-Depth": "2"}
+    model = _FakeModel([_delegate_turn()])
+    tools = _FakeTools(
+        lambda *_a, suspend=False, **_k: (
+            {"ok": True, "suspend": True, "endpoint": "http://researcher.ns/invoke"}
+            if suspend
+            else {"ok": True, "answer": "should-not-block"}
+        )
+    )
+    result = run_managed_loop(
+        _FakeClient(model, tools), _cfg(), "research X", headers=depth_headers
+    )
+
+    assert result.output == "", "a nested supervisor suspends at depth>0 too (no terminal answer)"
+    assert result.delegate_waiting is not None
+    assert result.delegate_waiting["delegates"][0]["call_id"] == "c1"
+    # The delegate was asked to SUSPEND (not dispatched/awaited) even though depth == 2.
+    assert tools.delegate_calls == [
+        {"sub_agent": "researcher", "step": "1", "call_id": "c1", "suspend": True}
+    ]
+
+
 # ── resume ──────────────────────────────────────────────────────────────────────
 def test_resume_rethreads_the_result_and_continues():
     """Re-invoking with the checkpoint restores the loop, re-dispatches the delegation through the
