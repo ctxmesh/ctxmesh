@@ -18,6 +18,8 @@ package bff
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -91,4 +93,30 @@ func TestResolveEndUserIdentity(t *testing.T) {
 		require.NoError(t, err)
 		assert.Nil(t, got)
 	})
+}
+
+func TestHandleEndUserAuthConfig(t *testing.T) {
+	ctx := context.Background()
+	st := namespacetenant.NewMemStore()
+	require.NoError(t, st.SetMembers(ctx, "t1", []string{"ns1"}))
+	require.NoError(t, st.SetEndUserIdentity(ctx, "t1", namespacetenant.EndUserIdentity{
+		Enabled: true, Issuer: "https://dex-eu.example.com", ClientID: "cid", Scopes: []string{"email"},
+	}))
+	s := &Server{namespaceTenantStore: st, log: logr.Discard()}
+
+	// Host-derived ns with an enabled IdP → 200 + issuer/clientId (no secret).
+	req := httptest.NewRequest(http.MethodGet, "/api/end-user-auth-config", nil)
+	req.Header.Set("X-Forwarded-Host", "chatbot.ns1.example.com")
+	rec := httptest.NewRecorder()
+	s.handleEndUserAuthConfig(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "https://dex-eu.example.com")
+	assert.Contains(t, rec.Body.String(), "cid")
+
+	// A ns with no end-user IdP → uniform 404 (no oracle).
+	req2 := httptest.NewRequest(http.MethodGet, "/api/end-user-auth-config", nil)
+	req2.Header.Set("X-Forwarded-Host", "x.other-ns.example.com")
+	rec2 := httptest.NewRecorder()
+	s.handleEndUserAuthConfig(rec2, req2)
+	assert.Equal(t, http.StatusNotFound, rec2.Code)
 }

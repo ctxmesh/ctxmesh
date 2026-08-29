@@ -80,6 +80,40 @@ func hmacKeyConfigured() bool {
 	return p != nil && len(*p) > 0
 }
 
+// EndUserAuthConfigResponse advertises a tenant's end-user OIDC config for the standalone /chat SPA to
+// start Auth-Code+PKCE (M137/EU1b, ADR 0106 §9). No secret — a public PKCE client id only.
+type EndUserAuthConfigResponse struct {
+	Issuer   string   `json:"issuer"`
+	ClientID string   `json:"clientId"`
+	Scopes   []string `json:"scopes,omitempty"`
+}
+
+// handleEndUserAuthConfig serves GET /api/end-user-auth-config (unauthenticated, M137/EU1b): the target
+// tenant's end-user OIDC issuer + public PKCE client id, so the agent-origin SPA can log the end-user in
+// against the tenant's IdP. The namespace is HOST-derived (the SPA is served on the agent's own origin);
+// a `?ns=` query is the fallback for a direct call. A uniform 404 when the ns has no enabled end-user IdP
+// (or does not exist) — no tenant-existence oracle (ADR 0106 §9), no secret emitted.
+func (s *Server) handleEndUserAuthConfig(w http.ResponseWriter, r *http.Request) {
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	_, ns := parseAgentFromHost(host)
+	if ns == "" {
+		ns = strings.TrimSpace(r.URL.Query().Get("ns"))
+	}
+	cfg, err := s.resolveEndUserIdentity(r.Context(), ns)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not resolve end-user auth config")
+		return
+	}
+	if cfg == nil {
+		writeError(w, http.StatusNotFound, "not found") // uniform — no oracle for a non-enabled/nonexistent ns
+		return
+	}
+	writeJSON(w, http.StatusOK, EndUserAuthConfigResponse{Issuer: cfg.Issuer, ClientID: cfg.ClientID, Scopes: cfg.Scopes})
+}
+
 // endUserAgentExposed reports whether the agent opted into end-user access (spec.endUserAccess → a
 // mirror row, ADR 0107 — the SECOND of the two keys, after the tenant's endUserIdentity). Fail-closed: a
 // nil store, a lookup error, or no row ⇒ NOT exposed (an internal agent is never end-user-reachable just
