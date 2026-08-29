@@ -132,6 +132,15 @@ type Server struct {
 	// (built in NewServer); its allow() is a no-op when disabled.
 	sharedRunLimiter *ipRateLimiter
 
+	// endUserLimiter is the per-IP token-bucket that bounds the UNAUTHENTICATED end-user surfaces
+	// (M137/EU1c, ADR 0107): the tenant-IdP config probe + the token-verification entry of the end-user
+	// run create / my-runs paths. Always non-nil (built in NewServer); allow() is a no-op when disabled.
+	endUserLimiter *ipRateLimiter
+
+	// endUserCreateLimiter is the per-PRINCIPAL token-bucket that bounds run creation by a single verified
+	// end-user identity (M137/EU1c) — NAT-proof (keyed on oidc:<iss>#<sub>, not the IP). Always non-nil.
+	endUserCreateLimiter *ipRateLimiter
+
 	// docStore is the durable KB object store (M68, ADR 0061 Fork 4) used by the
 	// BFF document-upload endpoint and the m68.6 source-resolution seam. nil when
 	// OBJECT_STORE_ADDR is unset — the upload endpoint returns 501 honestly rather
@@ -591,6 +600,8 @@ func NewServer(opts Options) *Server {
 		publishedArtifactStore:   opts.PublishedArtifactStore,
 		sharedRunStore:           opts.SharedRunStore,
 		sharedRunLimiter:         newIPRateLimiter(sharedRunRatePerIP, sharedRunBurstPerIP),
+		endUserLimiter:           newIPRateLimiter(endUserRatePerIP, endUserBurstPerIP),
+		endUserCreateLimiter:     newIPRateLimiter(endUserCreateRatePerUser, endUserCreateBurstPerUser),
 		recipeOverlay:            &recipeOverlayHolder{}, // empty until StartRecipeOverlayWatcher loads it (S1)
 		agentMemoryStore:         opts.AgentMemoryStore,
 		auditStore:               opts.AuditStore,
