@@ -55,6 +55,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/enduseragent"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
@@ -440,6 +441,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		NamespaceTenantStore:        nsTenantStore,
 		EndUserVerifier:             endUserVerifier,
 		SAIssuer:                    saIssuer,
+		EndUserAgentStore:           enduseragent.NewPostgresStore(cpDB),
 		PublishedArtifactStore:      publishedArtifactStore,
 		SharedRunStore:              sharedRunStore,
 		AgentMemoryStore:            agentmemory.NewPostgresStore(cpDB),
