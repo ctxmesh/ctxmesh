@@ -808,7 +808,8 @@ func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	}
 	// Caller-scoped authz (ADR 0011): scores hang off a trace, so gate them the same as the trace detail —
 	// resolve trace→run→agent and prove the caller can read that agent through their own RBAC.
-	if _, ok := s.authorizeRunAccess(w, r, caller, traceID, true); !ok {
+	rn, ok := s.authorizeRunAccess(w, r, caller, traceID, true)
+	if !ok {
 		return
 	}
 
@@ -821,6 +822,9 @@ func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	if scores == nil {
 		scores = []FeedbackScore{}
 	}
+	// Attribute each score to the source declared by the agent's FeedbackStore, if bound (M139, ADR 0112).
+	// Best-effort: an unbound/unreadable ref leaves scores unattributed (the raw data still returns).
+	s.attributeFeedback(r, caller, rn, scores)
 	writeJSON(w, http.StatusOK, FeedbackResponse{Scores: scores})
 }
 

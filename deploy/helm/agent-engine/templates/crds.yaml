@@ -91,6 +91,14 @@ spec:
                 maxItems: 64
                 type: array
                 x-kubernetes-list-type: atomic
+              approvalPolicyRef:
+                description: |-
+                  approvalPolicyRef optionally names an ApprovalPolicy (same namespace) that declaratively requires
+                  human approval for named tool calls (and optionally narrows who may approve) — M139, ADR 0111. The
+                  controller merges its require-approval requirements into this agent's effective tool policy
+                  (reusing the pause/resume/voucher runtime); a dangling ref sets a NotReady condition on the agent.
+                maxLength: 253
+                type: string
               budget:
                 description: |-
                   budget optionally sets USD cost-governance caps for this agent (PRD §14).
@@ -322,6 +330,14 @@ spec:
                 - eventing
                 - job
                 type: string
+              feedbackStoreRef:
+                description: |-
+                  feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
+                  multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
+                  gates ingestion by the declared score names and the read path attributes scores to their source;
+                  Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
+                maxLength: 253
+                type: string
               guardrailPolicyRef:
                 description: |-
                   guardrailPolicyRef optionally names a GuardrailPolicy (same namespace) that governs this
@@ -508,6 +524,57 @@ spec:
                   deferred and the agent falls back to promote-all/hold. Shadow rollout is rejected
                   (double side-effects) and auto-progression is deferred.
                 properties:
+                  autoProgress:
+                    description: |-
+                      autoProgress optionally enables OPT-IN automatic canary PROGRESSION (M139/N4, ADR 0113): a healthy
+                      candidate (RegressionDetected=False — an evidence-backed non-inferiority verdict with a per-window
+                      sample floor) auto-advances through a step schedule and auto-promotes at 100%, instead of holding at
+                      canaryPercent for a human. Absent (the default) ⇒ hold-for-human, byte-for-byte unchanged. Fail-safe:
+                      an Unknown verdict (dev without cpDB / sparse data) HOLDS, one step per reconcile (never fast-forward),
+                      and a human promote/abort always wins. Only consulted when strategy == "canary".
+                    properties:
+                      dwellSeconds:
+                        default: 3600
+                        description: |-
+                          dwellSeconds is the minimum soak per step before an advance is considered (M139/N4). Default 3600 —
+                          one aggregate window, so each step sees fresh online-score evidence; a shorter dwell would advance
+                          multiple steps on one window's data.
+                        format: int32
+                        minimum: 60
+                        type: integer
+                      enabled:
+                        default: false
+                        description: enabled, when true, arms auto-advance + auto-promote
+                          on a healthy online-score verdict. Default false.
+                        type: boolean
+                      steps:
+                        description: |-
+                          steps is the percent ladder the canary auto-advances through (intended ascending, each > canaryPercent).
+                          A step element is a STRUCT so future per-step knobs are additive. Default [{percent: 100}] ⇒ soak at
+                          canaryPercent then auto-promote. A schedule MAY top out below 100 (machine advances that far, then holds
+                          for a human) — a useful safety dial. Ordering is NOT enforced by admission (a strict-ascending CEL on a
+                          list-of-structs is fragile and a malformed rule breaks the whole CRD); the controller treats steps as a
+                          SET — the next rung is the minimum percent strictly greater than the current one — so a mis-ordered
+                          schedule is harmless (monotone, never regresses traffic), just cosmetically odd.
+                        items:
+                          description: |-
+                            CanaryStep is one rung of the auto-progression ladder (ADR 0113). A struct (not a bare percent) so
+                            per-step knobs (dwell, min-samples) are future non-breaking adds.
+                          properties:
+                            percent:
+                              description: percent is the candidate-arm traffic percent
+                                at this rung (> canaryPercent, ≤ 100).
+                              format: int32
+                              maximum: 100
+                              minimum: 2
+                              type: integer
+                          required:
+                          - percent
+                          type: object
+                        maxItems: 10
+                        type: array
+                        x-kubernetes-list-type: atomic
+                    type: object
                   autoRollback:
                     description: |-
                       autoRollback optionally enables OPT-IN automatic rollback to the last-healthy
@@ -966,11 +1033,13 @@ spec:
                 properties:
                   frozenUntilAck:
                     description: |-
-                      frozenUntilAck, when true, freezes further AUTO-actions on this deployment
-                      until a human acknowledges (ADR 0062 Fork 4 damping (d)). In v1 (human-only
-                      rollback) it is DEFINED and HONORED but never set — no auto-path exists to set
-                      it (the auto-rollback trigger is deferred, PRD §17.4). A future auto-action sets
-                      it; a human rollback is always permitted regardless (a human ack IS the human).
+                      frozenUntilAck, when true, freezes further actions on this deployment until a human
+                      acknowledges (ADR 0062 Fork 4 damping (d)) — the anti-runaway guard. An auto-action
+                      (auto-rollback) SETS it; the human ACKS by CLEARING it (agents.ctxmesh.ai/rollback-ack),
+                      which then permits the next action. NOTE: while frozen, `rollbackGuards` refuses ALL
+                      rollbacks including a human-driven one — the human must clear the freeze first, THEN roll
+                      back (the ack is the human's deliberate resume). Auto-progression (ADR 0113) RESPECTS this
+                      freeze (holds) but never SETS it (forward motion is already bounded).
                     type: boolean
                   history:
                     description: |-
@@ -1020,6 +1089,36 @@ spec:
                       rolledBackTo is the AgentVersion the serving spec was last reverted to by a
                       human rollback. Empty until the first successful rollback.
                     maxLength: 253
+                    type: string
+                type: object
+              rollout:
+                description: |-
+                  rollout reports the auto-progression actuator state (M139/N4, ADR 0113). Nil when
+                  autoProgress is off / no canary. Keyed by candidateRevision (a new candidate resets
+                  progression) + currentPercent (the live step, not an index — survives spec edits).
+                properties:
+                  candidateRevision:
+                    description: |-
+                      candidateRevision pins this progression to a specific candidate Knative revision. When it no longer
+                      matches the current candidate (a new push mid-canary), the controller resets progression to step 0.
+                    maxLength: 253
+                    type: string
+                  currentPercent:
+                    description: |-
+                      currentPercent is the candidate-arm traffic percent auto-progression has advanced to. 0/absent ⇒
+                      spec.canaryPercent (the implicit step 0). The controller converges the ksvc split to this level.
+                    format: int32
+                    type: integer
+                  lastAdvanceAt:
+                    description: lastAdvanceAt is when the controller last advanced
+                      a step (or opened the canary) — the dwell clock.
+                    format: date-time
+                    type: string
+                  reason:
+                    description: |-
+                      reason is the most recent auto-progression outcome for operator visibility (e.g. Advanced,
+                      AutoProgressHeld, InsufficientData, Frozen, AutoPromoted).
+                    maxLength: 256
                     type: string
                 type: object
               url:
@@ -1101,6 +1200,14 @@ spec:
                 maxItems: 64
                 type: array
                 x-kubernetes-list-type: atomic
+              approvalPolicyRef:
+                description: |-
+                  approvalPolicyRef optionally names an ApprovalPolicy (same namespace) that declaratively requires
+                  human approval for named tool calls (and optionally narrows who may approve) — M139, ADR 0111. The
+                  controller merges its require-approval requirements into this agent's effective tool policy
+                  (reusing the pause/resume/voucher runtime); a dangling ref sets a NotReady condition on the agent.
+                maxLength: 253
+                type: string
               budget:
                 description: |-
                   budget optionally sets USD cost-governance caps for this agent (PRD §14).
@@ -1332,6 +1439,14 @@ spec:
                 - eventing
                 - job
                 type: string
+              feedbackStoreRef:
+                description: |-
+                  feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
+                  multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
+                  gates ingestion by the declared score names and the read path attributes scores to their source;
+                  Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
+                maxLength: 253
+                type: string
               guardrailPolicyRef:
                 description: |-
                   guardrailPolicyRef optionally names a GuardrailPolicy (same namespace) that governs this
@@ -1518,6 +1633,57 @@ spec:
                   deferred and the agent falls back to promote-all/hold. Shadow rollout is rejected
                   (double side-effects) and auto-progression is deferred.
                 properties:
+                  autoProgress:
+                    description: |-
+                      autoProgress optionally enables OPT-IN automatic canary PROGRESSION (M139/N4, ADR 0113): a healthy
+                      candidate (RegressionDetected=False — an evidence-backed non-inferiority verdict with a per-window
+                      sample floor) auto-advances through a step schedule and auto-promotes at 100%, instead of holding at
+                      canaryPercent for a human. Absent (the default) ⇒ hold-for-human, byte-for-byte unchanged. Fail-safe:
+                      an Unknown verdict (dev without cpDB / sparse data) HOLDS, one step per reconcile (never fast-forward),
+                      and a human promote/abort always wins. Only consulted when strategy == "canary".
+                    properties:
+                      dwellSeconds:
+                        default: 3600
+                        description: |-
+                          dwellSeconds is the minimum soak per step before an advance is considered (M139/N4). Default 3600 —
+                          one aggregate window, so each step sees fresh online-score evidence; a shorter dwell would advance
+                          multiple steps on one window's data.
+                        format: int32
+                        minimum: 60
+                        type: integer
+                      enabled:
+                        default: false
+                        description: enabled, when true, arms auto-advance + auto-promote
+                          on a healthy online-score verdict. Default false.
+                        type: boolean
+                      steps:
+                        description: |-
+                          steps is the percent ladder the canary auto-advances through (intended ascending, each > canaryPercent).
+                          A step element is a STRUCT so future per-step knobs are additive. Default [{percent: 100}] ⇒ soak at
+                          canaryPercent then auto-promote. A schedule MAY top out below 100 (machine advances that far, then holds
+                          for a human) — a useful safety dial. Ordering is NOT enforced by admission (a strict-ascending CEL on a
+                          list-of-structs is fragile and a malformed rule breaks the whole CRD); the controller treats steps as a
+                          SET — the next rung is the minimum percent strictly greater than the current one — so a mis-ordered
+                          schedule is harmless (monotone, never regresses traffic), just cosmetically odd.
+                        items:
+                          description: |-
+                            CanaryStep is one rung of the auto-progression ladder (ADR 0113). A struct (not a bare percent) so
+                            per-step knobs (dwell, min-samples) are future non-breaking adds.
+                          properties:
+                            percent:
+                              description: percent is the candidate-arm traffic percent
+                                at this rung (> canaryPercent, ≤ 100).
+                              format: int32
+                              maximum: 100
+                              minimum: 2
+                              type: integer
+                          required:
+                          - percent
+                          type: object
+                        maxItems: 10
+                        type: array
+                        x-kubernetes-list-type: atomic
+                    type: object
                   autoRollback:
                     description: |-
                       autoRollback optionally enables OPT-IN automatic rollback to the last-healthy
@@ -1976,11 +2142,13 @@ spec:
                 properties:
                   frozenUntilAck:
                     description: |-
-                      frozenUntilAck, when true, freezes further AUTO-actions on this deployment
-                      until a human acknowledges (ADR 0062 Fork 4 damping (d)). In v1 (human-only
-                      rollback) it is DEFINED and HONORED but never set — no auto-path exists to set
-                      it (the auto-rollback trigger is deferred, PRD §17.4). A future auto-action sets
-                      it; a human rollback is always permitted regardless (a human ack IS the human).
+                      frozenUntilAck, when true, freezes further actions on this deployment until a human
+                      acknowledges (ADR 0062 Fork 4 damping (d)) — the anti-runaway guard. An auto-action
+                      (auto-rollback) SETS it; the human ACKS by CLEARING it (agents.ctxmesh.ai/rollback-ack),
+                      which then permits the next action. NOTE: while frozen, `rollbackGuards` refuses ALL
+                      rollbacks including a human-driven one — the human must clear the freeze first, THEN roll
+                      back (the ack is the human's deliberate resume). Auto-progression (ADR 0113) RESPECTS this
+                      freeze (holds) but never SETS it (forward motion is already bounded).
                     type: boolean
                   history:
                     description: |-
@@ -2030,6 +2198,36 @@ spec:
                       rolledBackTo is the AgentVersion the serving spec was last reverted to by a
                       human rollback. Empty until the first successful rollback.
                     maxLength: 253
+                    type: string
+                type: object
+              rollout:
+                description: |-
+                  rollout reports the auto-progression actuator state (M139/N4, ADR 0113). Nil when
+                  autoProgress is off / no canary. Keyed by candidateRevision (a new candidate resets
+                  progression) + currentPercent (the live step, not an index — survives spec edits).
+                properties:
+                  candidateRevision:
+                    description: |-
+                      candidateRevision pins this progression to a specific candidate Knative revision. When it no longer
+                      matches the current candidate (a new push mid-canary), the controller resets progression to step 0.
+                    maxLength: 253
+                    type: string
+                  currentPercent:
+                    description: |-
+                      currentPercent is the candidate-arm traffic percent auto-progression has advanced to. 0/absent ⇒
+                      spec.canaryPercent (the implicit step 0). The controller converges the ksvc split to this level.
+                    format: int32
+                    type: integer
+                  lastAdvanceAt:
+                    description: lastAdvanceAt is when the controller last advanced
+                      a step (or opened the canary) — the dwell clock.
+                    format: date-time
+                    type: string
+                  reason:
+                    description: |-
+                      reason is the most recent auto-progression outcome for operator visibility (e.g. Advanced,
+                      AutoProgressHeld, InsufficientData, Frozen, AutoPromoted).
+                    maxLength: 256
                     type: string
                 type: object
               url:
@@ -3388,6 +3586,14 @@ spec:
                     maxItems: 64
                     type: array
                     x-kubernetes-list-type: atomic
+                  approvalPolicyRef:
+                    description: |-
+                      approvalPolicyRef optionally names an ApprovalPolicy (same namespace) that declaratively requires
+                      human approval for named tool calls (and optionally narrows who may approve) — M139, ADR 0111. The
+                      controller merges its require-approval requirements into this agent's effective tool policy
+                      (reusing the pause/resume/voucher runtime); a dangling ref sets a NotReady condition on the agent.
+                    maxLength: 253
+                    type: string
                   budget:
                     description: |-
                       budget optionally sets USD cost-governance caps for this agent (PRD §14).
@@ -3620,6 +3826,14 @@ spec:
                     - eventing
                     - job
                     type: string
+                  feedbackStoreRef:
+                    description: |-
+                      feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
+                      multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
+                      gates ingestion by the declared score names and the read path attributes scores to their source;
+                      Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
+                    maxLength: 253
+                    type: string
                   guardrailPolicyRef:
                     description: |-
                       guardrailPolicyRef optionally names a GuardrailPolicy (same namespace) that governs this
@@ -3806,6 +4020,57 @@ spec:
                       deferred and the agent falls back to promote-all/hold. Shadow rollout is rejected
                       (double side-effects) and auto-progression is deferred.
                     properties:
+                      autoProgress:
+                        description: |-
+                          autoProgress optionally enables OPT-IN automatic canary PROGRESSION (M139/N4, ADR 0113): a healthy
+                          candidate (RegressionDetected=False — an evidence-backed non-inferiority verdict with a per-window
+                          sample floor) auto-advances through a step schedule and auto-promotes at 100%, instead of holding at
+                          canaryPercent for a human. Absent (the default) ⇒ hold-for-human, byte-for-byte unchanged. Fail-safe:
+                          an Unknown verdict (dev without cpDB / sparse data) HOLDS, one step per reconcile (never fast-forward),
+                          and a human promote/abort always wins. Only consulted when strategy == "canary".
+                        properties:
+                          dwellSeconds:
+                            default: 3600
+                            description: |-
+                              dwellSeconds is the minimum soak per step before an advance is considered (M139/N4). Default 3600 —
+                              one aggregate window, so each step sees fresh online-score evidence; a shorter dwell would advance
+                              multiple steps on one window's data.
+                            format: int32
+                            minimum: 60
+                            type: integer
+                          enabled:
+                            default: false
+                            description: enabled, when true, arms auto-advance + auto-promote
+                              on a healthy online-score verdict. Default false.
+                            type: boolean
+                          steps:
+                            description: |-
+                              steps is the percent ladder the canary auto-advances through (intended ascending, each > canaryPercent).
+                              A step element is a STRUCT so future per-step knobs are additive. Default [{percent: 100}] ⇒ soak at
+                              canaryPercent then auto-promote. A schedule MAY top out below 100 (machine advances that far, then holds
+                              for a human) — a useful safety dial. Ordering is NOT enforced by admission (a strict-ascending CEL on a
+                              list-of-structs is fragile and a malformed rule breaks the whole CRD); the controller treats steps as a
+                              SET — the next rung is the minimum percent strictly greater than the current one — so a mis-ordered
+                              schedule is harmless (monotone, never regresses traffic), just cosmetically odd.
+                            items:
+                              description: |-
+                                CanaryStep is one rung of the auto-progression ladder (ADR 0113). A struct (not a bare percent) so
+                                per-step knobs (dwell, min-samples) are future non-breaking adds.
+                              properties:
+                                percent:
+                                  description: percent is the candidate-arm traffic
+                                    percent at this rung (> canaryPercent, ≤ 100).
+                                  format: int32
+                                  maximum: 100
+                                  minimum: 2
+                                  type: integer
+                              required:
+                              - percent
+                              type: object
+                            maxItems: 10
+                            type: array
+                            x-kubernetes-list-type: atomic
+                        type: object
                       autoRollback:
                         description: |-
                           autoRollback optionally enables OPT-IN automatic rollback to the last-healthy
@@ -4185,6 +4450,14 @@ spec:
                     maxItems: 64
                     type: array
                     x-kubernetes-list-type: atomic
+                  approvalPolicyRef:
+                    description: |-
+                      approvalPolicyRef optionally names an ApprovalPolicy (same namespace) that declaratively requires
+                      human approval for named tool calls (and optionally narrows who may approve) — M139, ADR 0111. The
+                      controller merges its require-approval requirements into this agent's effective tool policy
+                      (reusing the pause/resume/voucher runtime); a dangling ref sets a NotReady condition on the agent.
+                    maxLength: 253
+                    type: string
                   budget:
                     description: |-
                       budget optionally sets USD cost-governance caps for this agent (PRD §14).
@@ -4417,6 +4690,14 @@ spec:
                     - eventing
                     - job
                     type: string
+                  feedbackStoreRef:
+                    description: |-
+                      feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
+                      multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
+                      gates ingestion by the declared score names and the read path attributes scores to their source;
+                      Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
+                    maxLength: 253
+                    type: string
                   guardrailPolicyRef:
                     description: |-
                       guardrailPolicyRef optionally names a GuardrailPolicy (same namespace) that governs this
@@ -4603,6 +4884,57 @@ spec:
                       deferred and the agent falls back to promote-all/hold. Shadow rollout is rejected
                       (double side-effects) and auto-progression is deferred.
                     properties:
+                      autoProgress:
+                        description: |-
+                          autoProgress optionally enables OPT-IN automatic canary PROGRESSION (M139/N4, ADR 0113): a healthy
+                          candidate (RegressionDetected=False — an evidence-backed non-inferiority verdict with a per-window
+                          sample floor) auto-advances through a step schedule and auto-promotes at 100%, instead of holding at
+                          canaryPercent for a human. Absent (the default) ⇒ hold-for-human, byte-for-byte unchanged. Fail-safe:
+                          an Unknown verdict (dev without cpDB / sparse data) HOLDS, one step per reconcile (never fast-forward),
+                          and a human promote/abort always wins. Only consulted when strategy == "canary".
+                        properties:
+                          dwellSeconds:
+                            default: 3600
+                            description: |-
+                              dwellSeconds is the minimum soak per step before an advance is considered (M139/N4). Default 3600 —
+                              one aggregate window, so each step sees fresh online-score evidence; a shorter dwell would advance
+                              multiple steps on one window's data.
+                            format: int32
+                            minimum: 60
+                            type: integer
+                          enabled:
+                            default: false
+                            description: enabled, when true, arms auto-advance + auto-promote
+                              on a healthy online-score verdict. Default false.
+                            type: boolean
+                          steps:
+                            description: |-
+                              steps is the percent ladder the canary auto-advances through (intended ascending, each > canaryPercent).
+                              A step element is a STRUCT so future per-step knobs are additive. Default [{percent: 100}] ⇒ soak at
+                              canaryPercent then auto-promote. A schedule MAY top out below 100 (machine advances that far, then holds
+                              for a human) — a useful safety dial. Ordering is NOT enforced by admission (a strict-ascending CEL on a
+                              list-of-structs is fragile and a malformed rule breaks the whole CRD); the controller treats steps as a
+                              SET — the next rung is the minimum percent strictly greater than the current one — so a mis-ordered
+                              schedule is harmless (monotone, never regresses traffic), just cosmetically odd.
+                            items:
+                              description: |-
+                                CanaryStep is one rung of the auto-progression ladder (ADR 0113). A struct (not a bare percent) so
+                                per-step knobs (dwell, min-samples) are future non-breaking adds.
+                              properties:
+                                percent:
+                                  description: percent is the candidate-arm traffic
+                                    percent at this rung (> canaryPercent, ≤ 100).
+                                  format: int32
+                                  maximum: 100
+                                  minimum: 2
+                                  type: integer
+                              required:
+                              - percent
+                              type: object
+                            maxItems: 10
+                            type: array
+                            x-kubernetes-list-type: atomic
+                        type: object
                       autoRollback:
                         description: |-
                           autoRollback optionally enables OPT-IN automatic rollback to the last-healthy
@@ -5250,6 +5582,209 @@ spec:
             type: object
         required:
         - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
+  name: approvalpolicies.agents.ctxmesh.ai
+spec:
+  group: agents.ctxmesh.ai
+  names:
+    categories:
+    - agents
+    kind: ApprovalPolicy
+    listKind: ApprovalPolicyList
+    plural: approvalpolicies
+    shortNames:
+    - apr
+    singular: approvalpolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Validated')].status
+      name: Validated
+      type: string
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ApprovalPolicy is a namespaced, reusable human-in-the-loop policy referenced by
+          AgentDeployment.spec.approvalPolicyRef (M139, ADR 0111). It declaratively requires human approval for
+          named tool calls (reusing the existing pause/resume/voucher runtime — the controller merges its
+          requirements into the agent's effective tool policy) and optionally narrows WHO may approve. A
+          SINGLE-version CRD born directly in v1beta1.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ApprovalPolicySpec is a namespaced, reusable HITL policy referenced by AgentDeployment.spec
+              .approvalPolicyRef (M139, ADR 0111). It is STRICTLY MONOTONIC: the controller merges its requirements
+              into the agent's effective tool policy under max-strictness (allow < require-approval < deny), so it can
+              only ADD approval requirements — an inline toolPolicy can never weaken a requirement the policy demands.
+              v1 is TOOL-scoped (the only gate with an existing runtime — pause_for_approval).
+            properties:
+              approvers:
+                description: |-
+                  approvers optionally NARROWS who may approve a pause to these subjects, AND-ed with RBAC: a resume
+                  caller must hold resume RBAC AND match an entry. Empty ⇒ any caller with resume RBAC may approve
+                  (the pre-M139 behavior, unchanged — a semantic callers depend on, so it is fixed). Matched against
+                  the caller's OWN verified identity (username + groups, from a SelfSubjectReview) — never a client claim.
+                items:
+                  description: |-
+                    ApprovalSubject identifies WHO may approve — a Kubernetes User or Group (matching rbacv1.Subject
+                    capitalization), matched at the resume endpoint against the caller's OWN verified identity (username +
+                    groups from a SelfSubjectReview). It is AND-ed with RBAC: a subject listed here must ALSO hold resume
+                    RBAC on the run's agent — the policy NARROWS who may approve, it never grants approval rights to someone
+                    without RBAC (ADR 0111 §4). A ServiceAccount approver works today via its string forms (User
+                    "system:serviceaccount:<ns>:<name>" / Group "system:serviceaccounts:<ns>"); a first-class kind is a
+                    future non-breaking enum widening.
+                  properties:
+                    kind:
+                      description: 'kind is the subject kind: "User" (a K8s username)
+                        or "Group" (a K8s group the caller is a member of).'
+                      enum:
+                      - User
+                      - Group
+                      type: string
+                    name:
+                      description: name is the User username or the Group name to
+                        match against the caller's verified identity.
+                      maxLength: 316
+                      minLength: 1
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                maxItems: 64
+                type: array
+                x-kubernetes-list-type: atomic
+              rules:
+                description: rules select which tool calls require approval (union
+                  across rules). At least one.
+                items:
+                  description: |-
+                    ApprovalRule selects tool calls that require human approval (M139, ADR 0111). A rule is the extension
+                    point — future compatible adds (per-rule approvers, a RunStart phase, workflow steps) become fields here
+                    rather than parallel flat fields. An ApprovalPolicy carries ONLY approval requirements — never allow/deny
+                    (that is ToolPolicy's job); this is what keeps the max-strictness merge coherent.
+                  properties:
+                    allTools:
+                      description: |-
+                        allTools requires approval for EVERY tool the referencing agent may call (a coarse gate). Set this
+                        OR tools, never both empty (a rule that gates nothing is rejected by the CEL rule below).
+                      type: boolean
+                    tools:
+                      description: |-
+                        tools lists the EXACT tool names whose calls require approval (matching ToolPolicyOverride.Name
+                        semantics — exact, no globs). Union across rules.
+                      items:
+                        type: string
+                      maxItems: 128
+                      type: array
+                      x-kubernetes-list-type: set
+                  type: object
+                maxItems: 64
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: atomic
+                x-kubernetes-validations:
+                - message: each rule must set tools or allTools
+                  rule: self.all(r, size(r.tools) > 0 || r.allTools)
+            required:
+            - rules
+            type: object
+          status:
+            description: ApprovalPolicyStatus is the observed state, populated by
+              the ApprovalPolicyReconciler (validate-only).
+            properties:
+              conditions:
+                description: |-
+                  conditions reflect reconciliation: Validated=True when the spec is coherent; Invalid=True (Validated
+                  False) when it is not (e.g. a rule that sets neither tools nor allTools, so it gates nothing).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+            type: object
         type: object
     served: true
     storage: true
@@ -7066,6 +7601,251 @@ metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
     helm.sh/resource-policy: keep
+  name: feedbackstores.agents.ctxmesh.ai
+spec:
+  group: agents.ctxmesh.ai
+  names:
+    categories:
+    - agents
+    kind: FeedbackStore
+    listKind: FeedbackStoreList
+    plural: feedbackstores
+    shortNames:
+    - fs
+    singular: feedbackstore
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Validated')].status
+      name: Validated
+      type: string
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          FeedbackStore is a namespaced, reusable, DECLARATIVE multi-source feedback model referenced by
+          AgentDeployment.spec.feedbackStoreRef (M139, ADR 0112, PRD §17.3). It declares which score names belong
+          to which source (human / external) so the BFF write path can GATE ingestion and the read path can
+          ATTRIBUTE scores to sources — Langfuse remains the store of record (ADR 0008). CONFIG only: deleting a
+          FeedbackStore stops gating/attribution; the raw feedback in Langfuse is retained. A SINGLE-version CRD
+          born directly in v1beta1.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              FeedbackStoreSpec is a namespaced, reusable, DECLARATIVE feedback model referenced by
+              AgentDeployment.spec.feedbackStoreRef (M139, ADR 0112). It stores NO feedback data — raw scores live in
+              Langfuse (ADR 0008), the derived rollup in the control-plane fold; this CRD is CONFIG. Deleting it stops
+              gating/attribution; the raw feedback in Langfuse is retained. At least one source (human or external)
+              must be declared. The LLM-as-judge source is deferred (ADR 0112 §Consequences) — it ships with its runner.
+            properties:
+              external:
+                description: external declares the external-signal channels.
+                items:
+                  description: |-
+                    ExternalSource declares one external-signal channel — a webhook/API rating, completion, or business
+                    metric (PRD §17.3). One declared score per named channel.
+                  properties:
+                    name:
+                      description: name is the external channel name (the allowlisted
+                        signal source, e.g. "csat-webhook").
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                    score:
+                      description: score is the dimension this channel writes.
+                      properties:
+                        categories:
+                          description: categories is the allowed label set for a CATEGORICAL
+                            score (informational in v1). Ignored otherwise.
+                          items:
+                            type: string
+                          maxItems: 64
+                          type: array
+                          x-kubernetes-list-type: set
+                        dataType:
+                          default: NUMERIC
+                          description: |-
+                            dataType is the score's Langfuse dataType. NUMERIC/BOOLEAN carry a numeric value; CATEGORICAL carries
+                            a string label. Defaults to NUMERIC (the dominant feedback path, ADR 0008).
+                          enum:
+                          - NUMERIC
+                          - BOOLEAN
+                          - CATEGORICAL
+                          type: string
+                        name:
+                          description: |-
+                            name is the Langfuse score name this dimension binds to (e.g. "thumbs", "accuracy", "nps"). Unique
+                            across the whole FeedbackStore.
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      type: object
+                  required:
+                  - name
+                  - score
+                  type: object
+                maxItems: 32
+                type: array
+                x-kubernetes-list-type: atomic
+              human:
+                description: human declares the human-annotation scores (optional
+                  singleton).
+                properties:
+                  scores:
+                    description: scores are the human-annotation dimensions.
+                    items:
+                      description: |-
+                        ScoreDecl declares ONE feedback score dimension (M139, ADR 0112). The `name` is the correlation +
+                        attribution key: it is UNIQUE across the whole store (all sources) so a Langfuse score's name maps to
+                        exactly one declared source (Langfuse stamps every API-written score `Source=API`, so it cannot itself
+                        tell human from external — the CRD's name→source map IS the attribution).
+                      properties:
+                        categories:
+                          description: categories is the allowed label set for a CATEGORICAL
+                            score (informational in v1). Ignored otherwise.
+                          items:
+                            type: string
+                          maxItems: 64
+                          type: array
+                          x-kubernetes-list-type: set
+                        dataType:
+                          default: NUMERIC
+                          description: |-
+                            dataType is the score's Langfuse dataType. NUMERIC/BOOLEAN carry a numeric value; CATEGORICAL carries
+                            a string label. Defaults to NUMERIC (the dominant feedback path, ADR 0008).
+                          enum:
+                          - NUMERIC
+                          - BOOLEAN
+                          - CATEGORICAL
+                          type: string
+                        name:
+                          description: |-
+                            name is the Langfuse score name this dimension binds to (e.g. "thumbs", "accuracy", "nps"). Unique
+                            across the whole FeedbackStore.
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    maxItems: 64
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: atomic
+                required:
+                - scores
+                type: object
+              mode:
+                default: Enforce
+                description: |-
+                  mode selects whether a bound store GATES ingestion: Enforce rejects an undeclared score name, Monitor
+                  accepts + counts it (migration). Defaults to Enforce.
+                enum:
+                - Enforce
+                - Monitor
+                type: string
+            type: object
+          status:
+            description: FeedbackStoreStatus is the observed state, populated by the
+              FeedbackStoreReconciler (validate-only).
+            properties:
+              conditions:
+                description: |-
+                  conditions reflect reconciliation: Validated=True when the spec is coherent; Validated=False (reason
+                  InvalidSpec) when it is not (no source, or a duplicate score name across sources).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
   name: guardrailpolicies.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai
@@ -7418,6 +8198,35 @@ spec:
                   type: string
                 type: array
                 x-kubernetes-list-type: atomic
+              streaming:
+                description: |-
+                  streaming reports the EFFECTIVE streaming mode a guarded agent runs under (M139/K10, ADR 0086),
+                  computed by the SAME shared decision the launcher enforces with (no drift). Nil until first reconcile.
+                properties:
+                  effectiveMode:
+                    description: |-
+                      effectiveMode is "Streaming" (opted in AND stream-safe AND no blocking semanticJudge — span-
+                      suppression behind a hold-window) or "Buffered" (the default: not opted in, a semanticJudge is
+                      present, or an output detector is not stream-safe).
+                    enum:
+                    - Streaming
+                    - Buffered
+                    type: string
+                  reason:
+                    description: |-
+                      reason explains the effectiveMode — especially WHY a streaming opt-in was downgraded to Buffered (the
+                      disqualifying detector + construct, or a semanticJudge). Operator-visible.
+                    maxLength: 512
+                    type: string
+                  window:
+                    description: |-
+                      window is the rolling hold-window (runes) the streaming scanner requires — the max output-detector
+                      match length. 0 when Buffered or when there are no output detectors.
+                    format: int32
+                    type: integer
+                required:
+                - effectiveMode
+                type: object
             type: object
         type: object
     served: true

@@ -329,6 +329,22 @@ type AgentDeploymentSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	GuardrailPolicyRef string `json:"guardrailPolicyRef,omitempty"`
 
+	// approvalPolicyRef optionally names an ApprovalPolicy (same namespace) that declaratively requires
+	// human approval for named tool calls (and optionally narrows who may approve) — M139, ADR 0111. The
+	// controller merges its require-approval requirements into this agent's effective tool policy
+	// (reusing the pause/resume/voucher runtime); a dangling ref sets a NotReady condition on the agent.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	ApprovalPolicyRef string `json:"approvalPolicyRef,omitempty"`
+
+	// feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
+	// multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
+	// gates ingestion by the declared score names and the read path attributes scores to their source;
+	// Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	FeedbackStoreRef string `json:"feedbackStoreRef,omitempty"`
+
 	// rollout optionally selects a progressive-delivery strategy for a GATED serving
 	// agent (ADR 0062 Fork 3, M69). Absent (or strategy "") ⇒ today's promote-all/hold
 	// behavior, byte-for-byte unchanged — a no-rollout deployment's Knative Service is
@@ -427,6 +443,53 @@ type RolloutSpec struct {
 	// (the anti-runaway guard). A subsequent auto-attempt while frozen is refused.
 	// +optional
 	AutoRollback *AutoRollbackConfig `json:"autoRollback,omitempty"`
+
+	// autoProgress optionally enables OPT-IN automatic canary PROGRESSION (M139/N4, ADR 0113): a healthy
+	// candidate (RegressionDetected=False — an evidence-backed non-inferiority verdict with a per-window
+	// sample floor) auto-advances through a step schedule and auto-promotes at 100%, instead of holding at
+	// canaryPercent for a human. Absent (the default) ⇒ hold-for-human, byte-for-byte unchanged. Fail-safe:
+	// an Unknown verdict (dev without cpDB / sparse data) HOLDS, one step per reconcile (never fast-forward),
+	// and a human promote/abort always wins. Only consulted when strategy == "canary".
+	// +optional
+	AutoProgress *AutoProgressConfig `json:"autoProgress,omitempty"`
+}
+
+// AutoProgressConfig configures OPT-IN automatic canary progression (M139/N4, ADR 0113). It is the ONLY
+// switch that arms auto-advance; every deployment without it holds the canary at canaryPercent for a human.
+type AutoProgressConfig struct {
+	// enabled, when true, arms auto-advance + auto-promote on a healthy online-score verdict. Default false.
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+
+	// steps is the percent ladder the canary auto-advances through (intended ascending, each > canaryPercent).
+	// A step element is a STRUCT so future per-step knobs are additive. Default [{percent: 100}] ⇒ soak at
+	// canaryPercent then auto-promote. A schedule MAY top out below 100 (machine advances that far, then holds
+	// for a human) — a useful safety dial. Ordering is NOT enforced by admission (a strict-ascending CEL on a
+	// list-of-structs is fragile and a malformed rule breaks the whole CRD); the controller treats steps as a
+	// SET — the next rung is the minimum percent strictly greater than the current one — so a mis-ordered
+	// schedule is harmless (monotone, never regresses traffic), just cosmetically odd.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=10
+	Steps []CanaryStep `json:"steps,omitempty"`
+
+	// dwellSeconds is the minimum soak per step before an advance is considered (M139/N4). Default 3600 —
+	// one aggregate window, so each step sees fresh online-score evidence; a shorter dwell would advance
+	// multiple steps on one window's data.
+	// +optional
+	// +kubebuilder:default=3600
+	// +kubebuilder:validation:Minimum=60
+	DwellSeconds int32 `json:"dwellSeconds,omitempty"`
+}
+
+// CanaryStep is one rung of the auto-progression ladder (ADR 0113). A struct (not a bare percent) so
+// per-step knobs (dwell, min-samples) are future non-breaking adds.
+type CanaryStep struct {
+	// percent is the candidate-arm traffic percent at this rung (> canaryPercent, ≤ 100).
+	// +kubebuilder:validation:Minimum=2
+	// +kubebuilder:validation:Maximum=100
+	Percent int32 `json:"percent"`
 }
 
 // AutoRollbackConfig configures OPT-IN automatic rollback for a gated serving agent
@@ -714,13 +777,41 @@ type RollbackStatus struct {
 	// +kubebuilder:validation:MaxItems=16
 	History []RollbackEvent `json:"history,omitempty"`
 
-	// frozenUntilAck, when true, freezes further AUTO-actions on this deployment
-	// until a human acknowledges (ADR 0062 Fork 4 damping (d)). In v1 (human-only
-	// rollback) it is DEFINED and HONORED but never set — no auto-path exists to set
-	// it (the auto-rollback trigger is deferred, PRD §17.4). A future auto-action sets
-	// it; a human rollback is always permitted regardless (a human ack IS the human).
+	// frozenUntilAck, when true, freezes further actions on this deployment until a human
+	// acknowledges (ADR 0062 Fork 4 damping (d)) — the anti-runaway guard. An auto-action
+	// (auto-rollback) SETS it; the human ACKS by CLEARING it (agents.ctxmesh.ai/rollback-ack),
+	// which then permits the next action. NOTE: while frozen, `rollbackGuards` refuses ALL
+	// rollbacks including a human-driven one — the human must clear the freeze first, THEN roll
+	// back (the ack is the human's deliberate resume). Auto-progression (ADR 0113) RESPECTS this
+	// freeze (holds) but never SETS it (forward motion is already bounded).
 	// +optional
 	FrozenUntilAck bool `json:"frozenUntilAck,omitempty"`
+}
+
+// RolloutStatus reports the auto-progression actuator state for a canary (M139/N4, ADR 0113). It is keyed
+// by candidateRevision (a new candidate resets progression) and stores the LIVE currentPercent (not a step
+// index — survives a spec `steps` edit; the next step is the first schedule entry > currentPercent).
+type RolloutStatus struct {
+	// candidateRevision pins this progression to a specific candidate Knative revision. When it no longer
+	// matches the current candidate (a new push mid-canary), the controller resets progression to step 0.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	CandidateRevision string `json:"candidateRevision,omitempty"`
+
+	// currentPercent is the candidate-arm traffic percent auto-progression has advanced to. 0/absent ⇒
+	// spec.canaryPercent (the implicit step 0). The controller converges the ksvc split to this level.
+	// +optional
+	CurrentPercent int32 `json:"currentPercent,omitempty"`
+
+	// lastAdvanceAt is when the controller last advanced a step (or opened the canary) — the dwell clock.
+	// +optional
+	LastAdvanceAt *metav1.Time `json:"lastAdvanceAt,omitempty"`
+
+	// reason is the most recent auto-progression outcome for operator visibility (e.g. Advanced,
+	// AutoProgressHeld, InsufficientData, Frozen, AutoPromoted).
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	Reason string `json:"reason,omitempty"`
 }
 
 // AgentDeploymentStatus defines the observed state of AgentDeployment.
@@ -744,6 +835,12 @@ type AgentDeploymentStatus struct {
 	// (PRD §17.4); this records only human-actuated rollbacks + their damping state.
 	// +optional
 	Rollback *RollbackStatus `json:"rollback,omitempty"`
+
+	// rollout reports the auto-progression actuator state (M139/N4, ADR 0113). Nil when
+	// autoProgress is off / no canary. Keyed by candidateRevision (a new candidate resets
+	// progression) + currentPercent (the live step, not an index — survives spec edits).
+	// +optional
+	Rollout *RolloutStatus `json:"rollout,omitempty"`
 
 	// url is the public HTTP endpoint assigned to the agent, copied verbatim from
 	// the Knative Service status once it becomes ready.

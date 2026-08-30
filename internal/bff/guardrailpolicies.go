@@ -55,6 +55,14 @@ type GuardrailPolicySummary struct {
 	// ReferencingAgents mirrors status.referencingAgents — the AgentDeployments in the same namespace
 	// that reference this policy, so an operator can see the blast radius before editing.
 	ReferencingAgents []string `json:"referencingAgents"`
+	// StreamingMode mirrors status.streaming.effectiveMode ("Streaming" or "Buffered") — the mode a guarded
+	// agent ACTUALLY runs under (M139/K10, ADR 0086). Empty until the first reconcile.
+	StreamingMode string `json:"streamingMode,omitempty"`
+	// StreamingWindow mirrors status.streaming.window (runes) — the hold-window when streaming.
+	StreamingWindow int `json:"streamingWindow,omitempty"`
+	// StreamingReason explains the streaming mode — especially why a streaming opt-in was downgraded to
+	// Buffered (a non-streamable detector, or a semanticJudge).
+	StreamingReason string `json:"streamingReason,omitempty"`
 }
 
 // GuardrailPolicyListResponse is the guardrailpolicies-list payload.
@@ -89,6 +97,14 @@ func newGuardrailPolicySummary(gp *agentsv1beta1.GuardrailPolicy) GuardrailPolic
 		referencingAgents = []string{}
 	}
 
+	var streamMode, streamReason string
+	var streamWindow int
+	if gp.Status.Streaming != nil {
+		streamMode = gp.Status.Streaming.EffectiveMode
+		streamWindow = int(gp.Status.Streaming.Window)
+		streamReason = gp.Status.Streaming.Reason
+	}
+
 	return GuardrailPolicySummary{
 		Name:              gp.Name,
 		Namespace:         gp.Namespace,
@@ -101,6 +117,9 @@ func newGuardrailPolicySummary(gp *agentsv1beta1.GuardrailPolicy) GuardrailPolic
 		Reason:            reason,
 		PolicyHash:        gp.Status.PolicyHash,
 		ReferencingAgents: referencingAgents,
+		StreamingMode:     streamMode,
+		StreamingWindow:   streamWindow,
+		StreamingReason:   streamReason,
 	}
 }
 

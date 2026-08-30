@@ -20,6 +20,8 @@ resources:
 - bases/agents.ctxmesh.ai_agentteams.yaml
 - bases/agents.ctxmesh.ai_agentscalingpolicies.yaml
 - bases/agents.ctxmesh.ai_guardrailpolicies.yaml
+- bases/agents.ctxmesh.ai_approvalpolicies.yaml
+- bases/agents.ctxmesh.ai_feedbackstores.yaml
 - bases/agents.ctxmesh.ai_workflows.yaml
 - bases/agents.ctxmesh.ai_evalsuites.yaml
 - bases/agents.ctxmesh.ai_credentialstores.yaml

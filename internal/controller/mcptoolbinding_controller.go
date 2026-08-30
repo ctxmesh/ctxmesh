@@ -236,7 +236,17 @@ func (r *MCPToolBindingReconciler) syncAgent(
 	var tp resolvedToolPolicy
 	var agent agentsv1alpha1.AgentDeployment
 	if getErr := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: agentName}, &agent); getErr == nil {
-		if tp, err = resolveToolPolicy(&agent); err != nil {
+		// Merge the agent's ApprovalPolicy (M139, ADR 0111) so this manifest drops the SAME tools the
+		// pod does. A dangling approvalPolicyRef holds the AgentDeployment NotReady (no pod → this
+		// manifest has no reader), so reflect the inline policy only rather than erroring the binding.
+		ap, aerr := resolveApprovalPolicy(ctx, r.Client, &agent)
+		if aerr != nil {
+			if _, ok := asApprovalPolicyResolveError(aerr); !ok {
+				return ctrl.Result{}, fmt.Errorf("resolving approval policy for agent %s/%s: %w", namespace, agentName, aerr)
+			}
+			ap = nil
+		}
+		if tp, err = resolveToolPolicy(&agent, ap); err != nil {
 			return ctrl.Result{}, fmt.Errorf("resolving tool policy for agent %s/%s: %w", namespace, agentName, err)
 		}
 	} else if !apierrors.IsNotFound(getErr) {

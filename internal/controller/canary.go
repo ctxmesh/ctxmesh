@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -217,7 +218,8 @@ func (r *AgentDeploymentReconciler) reconcileCanary(
 		}
 		return r.recordCanaryPhase(ctx, deploy, versionName, candidateRev, score, threshold,
 			eval.PhaseAborted, eval.DecisionBlocked, "CanaryAborted", metav1.ConditionFalse,
-			fmt.Sprintf("canary aborted: traffic on 100%% of the old revision %q; candidate %q withdrawn (change the spec to roll a new candidate)", oldRev, candidateRev))
+			fmt.Sprintf("canary aborted: traffic on 100%% of the old revision %q; candidate %q withdrawn (change the spec to roll a new candidate)", oldRev, candidateRev),
+			nil, ctrl.Result{})
 	}
 
 	// ── Completion: human promote of THIS candidate → 100% candidate ──────────
@@ -228,7 +230,8 @@ func (r *AgentDeploymentReconciler) reconcileCanary(
 		}
 		return r.recordCanaryPhase(ctx, deploy, versionName, candidateRev, score, threshold,
 			eval.PhasePromoted, eval.DecisionPromoted, "CanaryPromoted", metav1.ConditionTrue,
-			fmt.Sprintf("canary completed: candidate %q promoted to 100%% of traffic", candidateRev))
+			fmt.Sprintf("canary completed: candidate %q promoted to 100%% of traffic", candidateRev),
+			nil, ctrl.Result{})
 	}
 
 	// ── Abort: explicit human signal → 100% old (candidate withdrawn) ─────────
@@ -242,19 +245,246 @@ func (r *AgentDeploymentReconciler) reconcileCanary(
 		}
 		return r.recordCanaryPhase(ctx, deploy, versionName, candidateRev, score, threshold,
 			eval.PhaseAborted, eval.DecisionBlocked, "CanaryAborted", metav1.ConditionFalse,
-			fmt.Sprintf("canary aborted: traffic returned to 100%% of the old revision %q; candidate %q withdrawn", oldRev, candidateRev))
+			fmt.Sprintf("canary aborted: traffic returned to 100%% of the old revision %q; candidate %q withdrawn", oldRev, candidateRev),
+			nil, ctrl.Result{})
 	}
 
-	// ── Hold at the split: {old: 100-N, candidate: N%} ────────────────────────
-	pct := canaryPercent(deploy)
-	if err := r.setCanaryTraffic(ctx, deploy, hash, namedSplitTraffic(oldRev, candidateRev, pct)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("canary hold: setting split traffic: %w", err)
+	// ── Hold or auto-progress at the split ────────────────────────────────────
+	basePct := canaryPercent(deploy)
+	apCfg := autoProgressConfig(deploy)
+	if apCfg == nil {
+		// No auto-progression (the default): hold the split for a human, exactly as M69. Pass a nil
+		// rollout so any stale progression state is cleared (auto-progress was turned off).
+		if err := r.setCanaryTraffic(ctx, deploy, hash, namedSplitTraffic(oldRev, candidateRev, basePct)); err != nil {
+			return ctrl.Result{}, fmt.Errorf("canary hold: setting split traffic: %w", err)
+		}
+		log.Info("Canary split active", "old", oldRev, "candidate", candidateRev, "candidatePercent", basePct)
+		return r.recordCanaryPhase(ctx, deploy, versionName, candidateRev, score, threshold,
+			eval.PhaseCanary, eval.DecisionPromoted, "CanaryInProgress", metav1.ConditionUnknown,
+			fmt.Sprintf("canary in progress: %d%% of traffic on candidate %q, %d%% on old %q; promote=%s to complete or annotate %s to abort",
+				basePct, candidateRev, 100-basePct, oldRev, candidateRev, rolloutAbortAnnotation),
+			nil, ctrl.Result{})
 	}
-	log.Info("Canary split active", "old", oldRev, "candidate", candidateRev, "candidatePercent", pct)
+
+	// Auto-progression is enabled — run the PURE state machine (ADR 0113), then actuate. The detector
+	// stays a pure sensor (the RegressionDetected condition); this is the sole traffic/progression writer.
+	regStatus := regressionVerdict(deploy)
+	frozen := deploy.Status.Rollback != nil && deploy.Status.Rollback.FrozenUntilAck
+	dwell := autoProgressDwell(apCfg)
+	dec := decideAutoProgress(deploy.Status.Rollout, candidateRev, int32(basePct), apCfg.Steps, dwell, regStatus, frozen, time.Now())
+
+	if dec.promote {
+		// Auto-promote at 100% reuses the human promote path verbatim (full-candidate traffic +
+		// PhasePromoted) so AgentVersion/gate bookkeeping stays single-pathed; the freeze is NOT set —
+		// autoRollback must stay armed at 100%.
+		log.Info("Canary auto-promoted", "candidate", candidateRev)
+		if err := r.setCanaryTraffic(ctx, deploy, hash, namedFullTraffic(candidateRev)); err != nil {
+			return ctrl.Result{}, fmt.Errorf("canary auto-promote: setting full-candidate traffic: %w", err)
+		}
+		return r.recordCanaryPhase(ctx, deploy, versionName, candidateRev, score, threshold,
+			eval.PhasePromoted, eval.DecisionPromoted, "CanaryPromoted", metav1.ConditionTrue,
+			fmt.Sprintf("canary auto-promoted: candidate %q advanced through the step schedule on a passing eval and now serves 100%% of traffic", candidateRev),
+			dec.rollout, ctrl.Result{})
+	}
+
+	// Hold or a single-step advance: converge the ksvc to the effective percent + persist the rollout,
+	// then requeue on the dwell clock — the drive shaft (a status-only condition write won't wake the
+	// generation-predicate watch). One step per reconcile; a crash before the traffic write self-heals.
+	effPct := int64(dec.effectivePercent)
+	if err := r.setCanaryTraffic(ctx, deploy, hash, namedSplitTraffic(oldRev, candidateRev, effPct)); err != nil {
+		return ctrl.Result{}, fmt.Errorf("canary auto-progress: setting split traffic: %w", err)
+	}
+	requeue := clampAutoProgressRequeue(dec.requeue)
+	log.Info("Canary auto-progressing", "old", oldRev, "candidate", candidateRev,
+		"candidatePercent", effPct, "reason", dec.reason, "requeueAfter", requeue)
 	return r.recordCanaryPhase(ctx, deploy, versionName, candidateRev, score, threshold,
 		eval.PhaseCanary, eval.DecisionPromoted, "CanaryInProgress", metav1.ConditionUnknown,
-		fmt.Sprintf("canary in progress: %d%% of traffic on candidate %q, %d%% on old %q; promote=%s to complete or annotate %s to abort",
-			pct, candidateRev, 100-pct, oldRev, candidateRev, rolloutAbortAnnotation))
+		fmt.Sprintf("canary auto-progressing (%s): %d%% of traffic on candidate %q, %d%% on old %q; advances one step per dwell on a passing eval — promote=%s or annotate %s to intervene",
+			dec.reason, effPct, candidateRev, 100-effPct, oldRev, candidateRev, rolloutAbortAnnotation),
+		dec.rollout, ctrl.Result{RequeueAfter: requeue})
+}
+
+// autoProgress reason strings — surfaced on status.rollout.reason + the Ready condition message for
+// operator visibility into WHY the canary advanced or is holding (ADR 0113 §4).
+const (
+	reasonCanaryOpened          = "CanaryOpened"     // progression (re)started at step 0 for this candidate
+	reasonAutoAdvanced          = "Advanced"         // advanced one step on a soaked, passing eval
+	reasonAutoPromoted          = "AutoPromoted"     // reached 100% — auto-promote fires
+	reasonAutoProgressSoaking   = "Soaking"          // healthy, but the step's dwell has not elapsed
+	reasonAutoProgressRegressed = "Regressed"        // RegressionDetected=True — hold (autoRollback reverts if armed)
+	reasonAutoProgressInsuffic  = "InsufficientData" // RegressionDetected=Unknown — hold (never advance on absence)
+	reasonAutoProgressFrozen    = "Frozen"           // healthy but frozenUntilAck — hold until a human acks
+	reasonAutoProgressTopped    = "ScheduleComplete" // schedule tops out below 100 — hold for the human last mile
+)
+
+// autoProgressDecision is the pure output of the auto-progression state machine.
+type autoProgressDecision struct {
+	rollout          *agentsv1alpha1.RolloutStatus // the status.rollout to persist
+	effectivePercent int32                         // candidate-arm traffic to converge to (ignored when promote)
+	promote          bool                          // true ⇒ auto-promote to 100% candidate
+	requeue          time.Duration                 // RequeueAfter for the split path (dwell-driven)
+	reason           string                        // human-facing reason (status + condition)
+}
+
+// decideAutoProgress is the PURE auto-progression state machine (ADR 0113) — no cluster reads, unit-tested
+// directly. It advances a canary ONE step per call on a soaked, explicitly-healthy eval verdict, holds on
+// anything else (Unknown, regressed, frozen, mid-dwell), and auto-promotes at 100%. Fail-safe by
+// construction: monotone, one step per reconcile (never fast-forward), hold on absence of evidence.
+func decideAutoProgress(
+	prior *agentsv1alpha1.RolloutStatus,
+	candidateRev string,
+	basePercent int32,
+	steps []agentsv1alpha1.CanaryStep,
+	dwell time.Duration,
+	regression metav1.ConditionStatus,
+	frozen bool,
+	now time.Time,
+) autoProgressDecision {
+	// (Re)start progression when it is absent OR pinned to a stale candidate (a new push mid-canary): a
+	// new candidate must EARN its percent from step 0, never inherit the prior candidate's earned percent.
+	if prior == nil || prior.CandidateRevision != candidateRev {
+		return autoProgressDecision{
+			rollout: &agentsv1alpha1.RolloutStatus{
+				CandidateRevision: candidateRev,
+				CurrentPercent:    basePercent,
+				LastAdvanceAt:     &metav1.Time{Time: now},
+				Reason:            reasonCanaryOpened,
+			},
+			effectivePercent: basePercent,
+			requeue:          dwell,
+			reason:           reasonCanaryOpened,
+		}
+	}
+
+	current := prior.CurrentPercent
+	if current <= 0 {
+		current = basePercent
+	}
+	// hold carries the live percent + dwell clock forward unchanged, only updating the reason.
+	hold := func(reason string, requeue time.Duration) autoProgressDecision {
+		return autoProgressDecision{
+			rollout: &agentsv1alpha1.RolloutStatus{
+				CandidateRevision: candidateRev,
+				CurrentPercent:    current,
+				LastAdvanceAt:     prior.LastAdvanceAt,
+				Reason:            reason,
+			},
+			effectivePercent: current,
+			requeue:          requeue,
+			reason:           reason,
+		}
+	}
+
+	// Gate ADVANCE on an EXPLICIT healthy verdict only. ConditionFalse ⇒ ≥30 samples/window/component,
+	// both arms present, no breach (the detector's bar). Unknown ⇒ hold (never advance on absence of
+	// evidence); True ⇒ hold (autoRollback reverts + freezes if armed).
+	if regression != metav1.ConditionFalse {
+		if regression == metav1.ConditionTrue {
+			return hold(reasonAutoProgressRegressed, dwell)
+		}
+		return hold(reasonAutoProgressInsuffic, dwell)
+	}
+	// Healthy — but a freeze (auto-rollback fired) HOLDS forward motion until a human acks. Auto-progress
+	// respects the freeze but never sets it (forward motion is already bounded).
+	if frozen {
+		return hold(reasonAutoProgressFrozen, dwell)
+	}
+	// Soak each step for its full dwell so a FRESH aggregate window backs each advance.
+	if elapsed := now.Sub(prior.LastAdvanceAt.Time); elapsed < dwell {
+		return hold(reasonAutoProgressSoaking, dwell-elapsed)
+	}
+	// Ready: the next step is the first scheduled percent strictly greater than current.
+	next := nextCanaryStep(current, steps)
+	if next == 0 {
+		// Schedule tops out below 100 (e.g. [{25},{50}]) — hold for a human to take the last mile.
+		return hold(reasonAutoProgressTopped, dwell)
+	}
+	if next >= 100 {
+		return autoProgressDecision{
+			rollout: &agentsv1alpha1.RolloutStatus{
+				CandidateRevision: candidateRev,
+				CurrentPercent:    100,
+				LastAdvanceAt:     &metav1.Time{Time: now},
+				Reason:            reasonAutoPromoted,
+			},
+			effectivePercent: 100,
+			promote:          true,
+			reason:           reasonAutoPromoted,
+		}
+	}
+	// Advance EXACTLY ONE step: bump currentPercent + reset the dwell clock atomically (the forward
+	// anti-runaway — never fast-forward multiple steps after controller downtime).
+	return autoProgressDecision{
+		rollout: &agentsv1alpha1.RolloutStatus{
+			CandidateRevision: candidateRev,
+			CurrentPercent:    next,
+			LastAdvanceAt:     &metav1.Time{Time: now},
+			Reason:            reasonAutoAdvanced,
+		},
+		effectivePercent: next,
+		requeue:          dwell,
+		reason:           reasonAutoAdvanced,
+	}
+}
+
+// nextCanaryStep returns the MINIMUM scheduled percent strictly greater than current, or 0 when the
+// schedule has topped out. Taking the minimum (not the first in slice order) makes progression
+// order-independent: a mis-ordered schedule still advances monotonically one rung at a time and never
+// regresses traffic (admission does not enforce ordering — see AutoProgressConfig.Steps). An empty
+// schedule is the implicit single 100% step (enabled-alone = soak then auto-promote).
+func nextCanaryStep(current int32, steps []agentsv1alpha1.CanaryStep) int32 {
+	if len(steps) == 0 {
+		if current < 100 {
+			return 100
+		}
+		return 0
+	}
+	var next int32 // 0 = none found (topped out)
+	for i := range steps {
+		p := steps[i].Percent
+		if p > current && (next == 0 || p < next) {
+			next = p
+		}
+	}
+	return next
+}
+
+// autoProgressConfig returns the auto-progression config when it is opt-in enabled, else nil (the M69
+// hold-for-human default). Nil-safe against a partial spec.
+func autoProgressConfig(deploy *agentsv1alpha1.AgentDeployment) *agentsv1alpha1.AutoProgressConfig {
+	ro := deploy.Spec.Rollout
+	if ro == nil || ro.AutoProgress == nil || !ro.AutoProgress.Enabled {
+		return nil
+	}
+	return ro.AutoProgress
+}
+
+// autoProgressDwell is the per-step soak, defaulting to one aggregate window (3600s) and flooring a
+// hand-built spec that bypassed admission (the CRD enforces min 60).
+func autoProgressDwell(cfg *agentsv1alpha1.AutoProgressConfig) time.Duration {
+	secs := cfg.DwellSeconds
+	if secs < 60 {
+		secs = 3600
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// regressionVerdict reads the candidate's RegressionDetected verdict (the detector sets it against
+// status.latestVersion = the candidate during a canary). Absent ⇒ Unknown (no verdict yet ⇒ hold).
+func regressionVerdict(deploy *agentsv1alpha1.AgentDeployment) metav1.ConditionStatus {
+	if c := apimeta.FindStatusCondition(deploy.Status.Conditions, conditionRegressionDetected); c != nil {
+		return c.Status
+	}
+	return metav1.ConditionUnknown
+}
+
+// clampAutoProgressRequeue floors the dwell-driven requeue so a tiny remaining dwell still schedules a
+// prompt wake (never a 0 requeue that would stall the drive shaft).
+func clampAutoProgressRequeue(d time.Duration) time.Duration {
+	if d < 15*time.Second {
+		return 15 * time.Second
+	}
+	return d
 }
 
 // canaryAbortRequested reports whether the human set the rollout-abort annotation.
@@ -336,12 +566,19 @@ func trafficEqual(a, b []servingv1.TrafficTarget) bool {
 // recordCanaryPhase records the canary gate phase + a Ready condition and syncs
 // latestVersion, then STOPS. It re-fetches to avoid clobbering the ksvc-driven
 // status write, mirroring recordHeldGate/recordPromotedGate.
+//
+// rollout is the auto-progression actuator state to persist (ADR 0113): the split/auto-advance path
+// passes the live progression; the terminal (promote/abort) + no-auto-progress paths pass nil to CLEAR
+// it (no progression is in flight). result is returned verbatim so the caller controls RequeueAfter —
+// the auto-progress path returns the dwell clock (its drive shaft); everyone else returns ctrl.Result{}.
 func (r *AgentDeploymentReconciler) recordCanaryPhase(
 	ctx context.Context,
 	deploy *agentsv1alpha1.AgentDeployment,
 	versionName, candidateRev, score, threshold, phase, decision, reason string,
 	condStatus metav1.ConditionStatus,
 	condMsg string,
+	rollout *agentsv1alpha1.RolloutStatus,
+	result ctrl.Result,
 ) (ctrl.Result, error) {
 	var fresh agentsv1alpha1.AgentDeployment
 	if err := r.Get(ctx, client.ObjectKeyFromObject(deploy), &fresh); err != nil {
@@ -357,6 +594,7 @@ func (r *AgentDeploymentReconciler) recordCanaryPhase(
 	}
 	fresh.Status.Gate = &gs
 	fresh.Status.LatestVersion = versionName
+	fresh.Status.Rollout = rollout
 	apimeta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{
 		Type:               conditionReady,
 		Status:             condStatus,
@@ -368,7 +606,7 @@ func (r *AgentDeploymentReconciler) recordCanaryPhase(
 	if err := r.Status().Update(ctx, &fresh); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating canary status: %w", err)
 	}
-	return ctrl.Result{}, nil
+	return result, nil
 }
 
 // clearCanaryAbort removes the rollout-abort annotation so the abort fires once
