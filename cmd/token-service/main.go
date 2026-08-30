@@ -216,6 +216,15 @@ func run(log logr.Logger) error {
 		// (cpDB) + gateway embedder as long-term memory — enabled on the same gateway-reachable condition.
 		tsServer.WithKnowledge(knowledge.NewPostgresStore(cpDB), embedder)
 		log.Info("managed-RAG retrieval enabled (ADR 0061): pgvector knowledge store + gateway embeddings", "gateway", gwURL)
+
+		// Cross-encoder rerank (M140.2, ADR 0117): an OPTIONAL retrieval-quality stage. Wired when a rerank
+		// service URL is set; only ACTIVATES per request when KNOWLEDGE_RERANK="true". Called directly (not via
+		// the gateway) — an internal pipeline stage, not a model call. Fail-open: a dead reranker never breaks
+		// retrieval (2s timeout + store-order fallback in the handler).
+		if rerankURL := strings.TrimSpace(os.Getenv("KNOWLEDGE_RERANK_URL")); rerankURL != "" {
+			tsServer.WithReranker(credplane.NewHTTPReranker(rerankURL, nil))
+			log.Info("cross-encoder rerank wired (M140.2, ADR 0117): rerank service reachable", "reranker", rerankURL)
+		}
 	}
 	handler := tsServer.Handler()
 	listenAddr := envOr("TOKEN_SERVICE_LISTEN_ADDR", defaultListenAddr)
