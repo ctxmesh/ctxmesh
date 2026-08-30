@@ -22,8 +22,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ctxmesh/agent-engine/internal/run"
-	"github.com/ctxmesh/agent-engine/internal/runcap"
+	"github.com/ctxmesh/agentry/internal/run"
+	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 // handoff_handler.go — the BFF's HANDOFF (transfer-of-control) edge (M67, ADR 0060 §5). Handoff is a

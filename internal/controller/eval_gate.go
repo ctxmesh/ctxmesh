@@ -32,8 +32,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/eval"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/eval"
 )
 
 const (
@@ -97,7 +97,7 @@ func (r *AgentDeploymentReconciler) evalTracer() trace.Tracer {
 	if r.EvalTracer != nil {
 		return r.EvalTracer
 	}
-	return noop.NewTracerProvider().Tracer("agent-engine/eval")
+	return noop.NewTracerProvider().Tracer("agentry/eval")
 }
 
 // scorerFor returns the Scorer for a (type, name), defaulting to eval.ScorerFor

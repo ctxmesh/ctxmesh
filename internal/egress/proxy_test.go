@@ -29,8 +29,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agent-engine/internal/credresolve"
-	"github.com/ctxmesh/agent-engine/internal/runcap"
+	"github.com/ctxmesh/agentry/internal/credresolve"
+	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 const (

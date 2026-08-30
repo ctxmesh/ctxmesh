@@ -1,23 +1,23 @@
 # Dockerfile.replay — the replay-serve image (ADR 0071 §3a).
 #
-# Builds the agent-engine CLI (cmd/agent-engine) as a distroless/static image whose
+# Builds the agentry CLI (cmd/agentry) as a distroless/static image whose
 # ENTRYPOINT is the CLI, so `docker run … replay-serve <fixture>` serves the both-channel
-# replay mock. `agent-engine dev --replay` swaps the mock LiteLLM gateway for a container
+# replay mock. `agentry dev --replay` swaps the mock LiteLLM gateway for a container
 # from this image (under the same `gateway` service name + port), so the re-run agent hits
 # the recorded model + tool I/O deterministically with zero cluster deps.
 #
 # This mirrors Dockerfile.launcher exactly (same base, same build flags) — the only delta is
-# the built package (cmd/agent-engine instead of cmd/launcher). No existing image ships the
-# agent-engine CLI, so this is a new but pattern-consistent per-binary image.
+# the built package (cmd/agentry instead of cmd/launcher). No existing image ships the
+# agentry CLI, so this is a new but pattern-consistent per-binary image.
 #
-# The image tag is pinned to the CLI version (agent-engine-replay:<version>); `dev --replay`
+# The image tag is pinned to the CLI version (agentry-replay:<version>); `dev --replay`
 # checks /replay/version at startup and fails fast on a mismatch.
 
 FROM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 # REPLAY_VERSION stamps the CLI/replay version reported at /replay/version. It MUST match the tag
-# (agent-engine-replay:<version>) so `dev --replay`'s parity check passes; defaults to the CLI's
+# (agentry-replay:<version>) so `dev --replay`'s parity check passes; defaults to the CLI's
 # built-in default (m78-smoke), the Makefile passes REPLAY_TAG.
 ARG REPLAY_VERSION=m78-smoke
 
@@ -27,10 +27,10 @@ RUN go mod download
 
 COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
-    go build -a -ldflags "-X github.com/ctxmesh/agent-engine/internal/replay.Version=${REPLAY_VERSION} -X main.devVersion=${REPLAY_VERSION}" \
-    -o agent-engine ./cmd/agent-engine
+    go build -a -ldflags "-X github.com/ctxmesh/agentry/internal/replay.Version=${REPLAY_VERSION} -X main.devVersion=${REPLAY_VERSION}" \
+    -o agentry ./cmd/agentry
 
 FROM gcr.io/distroless/static:nonroot
-COPY --from=builder /workspace/agent-engine /agent-engine
+COPY --from=builder /workspace/agentry /agentry
 USER 65532:65532
-ENTRYPOINT ["/agent-engine"]
+ENTRYPOINT ["/agentry"]

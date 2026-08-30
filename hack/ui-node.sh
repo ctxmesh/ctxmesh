@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ui-node.sh — deterministic Node toolchain bootstrap for the UI (M12).
 #
-# The UI (agent-engine/ui) is built with a Node version PINNED by ui/.nvmrc and
+# The UI (agentry/ui) is built with a Node version PINNED by ui/.nvmrc and
 # managed through nvm (user requirement, ADR 0010 addendum) — the build-time-only
 # analogue of the M10 Python pinned-venv bootstrap. This script makes the Node
 # toolchain reproducible on a CLEAN host (no node / pnpm / nvm) and in CI:

@@ -35,7 +35,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ctxmesh/agent-engine/internal/bff"
+	"github.com/ctxmesh/agentry/internal/bff"
 )
 
 func main() {

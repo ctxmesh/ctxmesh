@@ -45,7 +45,7 @@ from opentelemetry.trace.propagation.tracecontext import (
 _LOG = logging.getLogger("ctxmesh.tracing")
 
 #: The tracer/instrumentation-scope name. Distinct from the launcher's
-#: ``agent-engine/launcher`` scope so a trace shows which producer emitted a span,
+#: ``agentry/launcher`` scope so a trace shows which producer emitted a span,
 #: while both still share the trace id via propagation.
 TRACER_NAME = "ctxmesh"
 

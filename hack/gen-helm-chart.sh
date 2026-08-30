@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# gen-helm-chart.sh — regenerate the agent-engine Helm chart templates from
+# gen-helm-chart.sh — regenerate the agentry Helm chart templates from
 # `kustomize build config/default`.
 #
 # THE NO-DRIFT CONTRACT (m12.2): the Helm chart MUST deploy the SAME resources
@@ -16,7 +16,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 KUSTOMIZE="${KUSTOMIZE:-$REPO_ROOT/bin/kustomize}"
-OUT_DIR="${1:-$REPO_ROOT/deploy/helm/agent-engine/templates}"
+OUT_DIR="${1:-$REPO_ROOT/deploy/helm/agentry/templates}"
 
 [ -x "$KUSTOMIZE" ] || { echo "kustomize not found at $KUSTOMIZE (run 'make kustomize')" >&2; exit 1; }
 

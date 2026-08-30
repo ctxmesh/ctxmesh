@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane"
 )
 
 // memKey builds the map key for (namespace, agentName, agentVersion, windowStart truncated to hour).

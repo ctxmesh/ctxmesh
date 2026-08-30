@@ -30,10 +30,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
-	"github.com/ctxmesh/agent-engine/internal/run"
-	"github.com/ctxmesh/agent-engine/internal/runcap"
+	"github.com/ctxmesh/agentry/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
+	"github.com/ctxmesh/agentry/internal/run"
+	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 // ── helpers ───────────────────────────────────────────────────────────────────

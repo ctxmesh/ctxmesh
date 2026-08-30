@@ -22,7 +22,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane"
 )
 
 func TestValidate(t *testing.T) {

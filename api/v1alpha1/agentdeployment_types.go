@@ -124,7 +124,7 @@ type SessionMemorySpec struct {
 type MemoryBackend struct {
 	// addr is the host:port of the Valkey backend.
 	// If omitted the controller defaults to
-	// agent-engine-statelayer.agent-engine-system.svc:6379.
+	// agentry-statelayer.agentry.svc:6379.
 	// +kubebuilder:validation:MaxLength=256
 	// +optional
 	Addr string `json:"addr,omitempty"`

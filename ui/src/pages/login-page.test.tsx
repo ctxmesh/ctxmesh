@@ -18,7 +18,7 @@ import { logout } from "@/lib/session";
 // redirected to /login (preserving the return path), and a mid-session 401
 // clears the session and bounces back to /login.
 
-const TOKEN_KEY = "agent-engine.session.token";
+const TOKEN_KEY = "agentry.session.token";
 
 function whoamiOk(username = "alex.dev", groups = ["dev-team"]) {
   return { ok: true, status: 200, json: async () => ({ username, groups }) } as Response;

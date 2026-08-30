@@ -8,7 +8,7 @@ import { AppShell } from "@/components/app-shell";
 import { ToastProvider } from "@/components/kit";
 import { forceClear } from "@/lib/session";
 
-// Dev mode (`agent-engine dev --ui`, ADR 0021): the BFF confirms devMode via an
+// Dev mode (`agentry dev --ui`, ADR 0021): the BFF confirms devMode via an
 // unauthenticated GET /api/devmode. When true the SPA drops the login wall and shows
 // the dev banner; the cluster surfaces (namespaces/capabilities) 501 by design and must
 // degrade calmly, never bounce to login or crash. SessionProvider resolves the probe

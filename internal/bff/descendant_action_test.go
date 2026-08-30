@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agent-engine/internal/run"
+	"github.com/ctxmesh/agentry/internal/run"
 )
 
 // TestSurfaceDescendantRequiresAction proves L1 surfacing (ADR 0075 §4): when a DESCENDANT sub-run

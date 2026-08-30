@@ -25,8 +25,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
-	"github.com/ctxmesh/agent-engine/internal/eval"
+	"github.com/ctxmesh/agentry/internal/controlplane/onlinescore"
+	"github.com/ctxmesh/agentry/internal/eval"
 )
 
 // Online-scoring worker (ADR 0062 Fork 2, m69.5). A PERIODIC reconciler goroutine — modelled on

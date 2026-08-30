@@ -8,7 +8,7 @@ kind: RoleBinding
 metadata:
   labels:
     control-plane: bff
-    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/name: agentry
     app.kubernetes.io/managed-by: kustomize
   name: bff-rolebinding
   namespace: system

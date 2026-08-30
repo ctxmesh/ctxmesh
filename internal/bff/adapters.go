@@ -20,7 +20,7 @@ import (
 	"context"
 	"errors"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -225,7 +225,7 @@ type StreamingInvokeAdapter interface {
 	InvokeStream(ctx context.Context, endpoint string, body []byte, onToken func(string), onStep func(string)) (final []byte, traceID string, err error)
 }
 
-// ExpandAdapter reuses the `agent-engine expand` logic server-side (agent.yaml →
+// ExpandAdapter reuses the `agentry expand` logic server-side (agent.yaml →
 // CRD) for the config-builder round-trip (m12.6).
 type ExpandAdapter interface {
 	// Expand renders a simplified agent.yaml into the CRD manifest set.

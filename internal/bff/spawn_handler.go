@@ -25,9 +25,9 @@ import (
 	"strings"
 	"time"
 
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
-	"github.com/ctxmesh/agent-engine/internal/run"
-	"github.com/ctxmesh/agent-engine/internal/runcap"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	"github.com/ctxmesh/agentry/internal/run"
+	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 // SpawnRunRequest is the launcher's create-a-sub-run body (M64, ADR 0057 Door 2). The LAUNCHER (platform

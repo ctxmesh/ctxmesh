@@ -32,8 +32,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/controlplane/onlinescore"
 )
 
 // RegressionDetected is the status condition the detector maintains on an AgentDeployment
@@ -73,7 +73,7 @@ const baselineWindowLimit = 24
 // this codebase has NO EventRecorder in its controllers (m68.12 reasoned deviation), so a status
 // condition + a metric are the surfacing mechanism, NOT a k8s Event.
 var regressionDetectedGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-	Name: "agentengine_regression_detected",
+	Name: "agentry_regression_detected",
 	Help: "1 when the online-score regression detector has flagged the serving AgentVersion as regressed " +
 		"vs the prior version's baseline (RegressionDetected=True), else 0. DETECTION ONLY — no auto-rollback " +
 		"is wired (ADR 0062 Fork 4; PRD §17.4 defers the auto-trigger). Labels: namespace, agent.",

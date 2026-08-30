@@ -29,27 +29,27 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
 )
 
 const (
 	// MockResponse is the deterministic response rendered for provider: mock entries.
 	// Harness e2e tests assert the presence of the MOCK_OK marker (ADR 0004
 	// mock-first policy). Must not be changed without updating harness fixtures.
-	MockResponse = "MOCK_OK deterministic response from agent-engine gateway"
+	MockResponse = "MOCK_OK deterministic response from agentry gateway"
 
 	// GatewayNamespace is the namespace where the LiteLLM gateway is deployed.
 	// All gateway resources (ConfigMap, Deployment, Service) live here.
-	GatewayNamespace = "agent-engine-system"
+	GatewayNamespace = "agentry"
 
 	// GatewayConfigMapName is the full post-kustomize name of the ConfigMap the
-	// controller renders into. The kustomize namePrefix adds "agent-engine-" to
+	// controller renders into. The kustomize namePrefix adds "agentry-" to
 	// the base name "gateway-config".
-	GatewayConfigMapName = "agent-engine-gateway-config"
+	GatewayConfigMapName = "agentry-gateway-config"
 
 	// GatewayDeploymentName is the full post-kustomize name of the LiteLLM
 	// Deployment. The controller patches its pod-template annotation and SB_* env.
-	GatewayDeploymentName = "agent-engine-gateway"
+	GatewayDeploymentName = "agentry-gateway"
 
 	// mockProvider is the special provider name that short-circuits LiteLLM with a
 	// deterministic canned response (no real API key required).

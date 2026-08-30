@@ -68,7 +68,7 @@ func TestPrometheusQueryProjectsVector(t *testing.T) {
 	a, err := NewPrometheusAdapter(PrometheusConfig{BaseURL: srv.URL, BearerToken: "tok-secret"})
 	require.NoError(t, err)
 
-	pts, err := a.Query(context.Background(), "sum by (agent) (agent_engine_agent_replicas)")
+	pts, err := a.Query(context.Background(), "sum by (agent) (agentry_agent_replicas)")
 	require.NoError(t, err)
 	require.Len(t, pts, 2)
 	// Sorted deterministically by label.
@@ -79,7 +79,7 @@ func TestPrometheusQueryProjectsVector(t *testing.T) {
 
 	// The bearer token is sent server-side and never returned in a DTO.
 	assert.Equal(t, "Bearer tok-secret", rec.authHeader)
-	assert.Contains(t, rec.query, "agent_engine_agent_replicas")
+	assert.Contains(t, rec.query, "agentry_agent_replicas")
 }
 
 func TestPrometheusQueryEmptyIsNonNil(t *testing.T) {

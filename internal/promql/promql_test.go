@@ -68,7 +68,7 @@ func TestQueryProjectsVectorSortedByLabel(t *testing.T) {
 	c, err := New(Config{BaseURL: srv.URL, BearerToken: "tok-secret"})
 	require.NoError(t, err)
 
-	out, err := c.Query(context.Background(), "sum by (agent) (agent_engine_agent_replicas)")
+	out, err := c.Query(context.Background(), "sum by (agent) (agentry_agent_replicas)")
 	require.NoError(t, err)
 	require.Len(t, out, 2)
 	// Deterministic label order regardless of the server's result order.
@@ -78,7 +78,7 @@ func TestQueryProjectsVectorSortedByLabel(t *testing.T) {
 	assert.InDelta(t, 1.0, out[1].Value, 1e-9)
 
 	assert.Equal(t, "Bearer tok-secret", rec.authHeader)
-	assert.Contains(t, rec.query, "agent_engine_agent_replicas")
+	assert.Contains(t, rec.query, "agentry_agent_replicas")
 }
 
 func TestSeriesLabelFallback(t *testing.T) {

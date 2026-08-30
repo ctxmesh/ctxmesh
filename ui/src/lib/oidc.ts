@@ -14,7 +14,7 @@ const END_USER_SCOPES = "openid email offline_access";
 // the SAME session seam as a pasted token (ADR 0012 login()), so token login remains the
 // fallback and nothing downstream changes.
 
-const FLOW_KEY = "agent-engine.oidc.flow";
+const FLOW_KEY = "agentry.oidc.flow";
 const CALLBACK_PATH = "/auth/callback";
 // Dex needs `groups` to emit the groups claim RBAC binds to; email/profile for identity.
 const SCOPES = "openid profile email groups";

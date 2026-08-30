@@ -13,7 +13,7 @@ import (
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
-	"github.com/ctxmesh/agent-engine/internal/runcap"
+	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 // isAlreadyExists reports whether a Create raced a parallel hook. Uses the apimachinery matcher so it

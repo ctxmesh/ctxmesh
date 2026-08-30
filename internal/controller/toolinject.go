@@ -22,7 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/ctxmesh/agent-engine/internal/toolmanifest"
+	"github.com/ctxmesh/agentry/internal/toolmanifest"
 )
 
 const (

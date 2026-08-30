@@ -32,11 +32,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/sharedrun"
-	"github.com/ctxmesh/agent-engine/internal/run"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
+	"github.com/ctxmesh/agentry/internal/controlplane/sharedrun"
+	"github.com/ctxmesh/agentry/internal/run"
 )
 
 // Share-link constants (M75, m75.1, ADR 0069 §1).

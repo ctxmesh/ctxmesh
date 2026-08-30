@@ -29,8 +29,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
-	"github.com/ctxmesh/agent-engine/internal/run"
+	"github.com/ctxmesh/agentry/internal/controlplane/authz"
+	"github.com/ctxmesh/agentry/internal/run"
 )
 
 // perResourceAuthorizer answers the per-kind persona gate: allowed iff allow[a.Resource]. It records the

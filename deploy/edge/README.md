@@ -12,10 +12,10 @@ config differs, not shape (ADR 0038 — the code never branches on environment).
 
 | Host (local default) | Path | Backend |
 |----------------------|------|---------|
-| `console.127.0.0.1.sslip.io` | all | `agent-engine-bff` (BFF) |
+| `console.127.0.0.1.sslip.io` | all | `agentry-bff` (BFF) |
 | `langfuse.127.0.0.1.sslip.io` | all | `langfuse-web` |
 | `*.default.127.0.0.1.sslip.io` | `/invoke` (Exact) | `kourier-internal` → Knative routes by Host to the agent (ext-auth guarded) |
-| `*.default.127.0.0.1.sslip.io` | everything else | `agent-engine-bff` (BFF) — the per-agent **chatbox** SPA + `/api/*` |
+| `*.default.127.0.0.1.sslip.io` | everything else | `agentry-bff` (BFF) — the per-agent **chatbox** SPA + `/api/*` |
 
 The agent host is **path-split** across two `HTTPRoute`s (m37.3, `agentEdge` values): the machine
 `/invoke` endpoint → the agent (behind ext-auth), and everything else → the BFF, which serves a
@@ -49,7 +49,7 @@ console's `POST /api/invoke` — the agent URL is a first-class authenticated en
 **relays** the capability (never forges it), so the ADR 0033 model holds end to end; one place mints (the
 BFF), and the signing key never leaves it.
 
-Because the agents route is in `kourier-system` and the BFF in `agent-engine-system`, the chart also
+Because the agents route is in `kourier-system` and the BFF in `agentry`, the chart also
 renders the cross-namespace `ReferenceGrant` (SecurityPolicy → BFF Service). Set `extAuth.enabled: false`
 to leave agent URLs unauthenticated (no OBO — the pre-ADR-0039 behaviour).
 

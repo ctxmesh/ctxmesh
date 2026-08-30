@@ -122,7 +122,7 @@ class PlaneConfig:
                 "(none of "
                 + ", ".join(_LAUNCHER_MARKERS)
                 + " is set). The SDK reads the launcher-injected localhost "
-                "plane and only works inside an agent-engine pod. For tests or "
+                "plane and only works inside an agentry pod. For tests or "
                 "offline use, build a PlaneConfig explicitly and call "
                 "agent.from_config(config)."
             )

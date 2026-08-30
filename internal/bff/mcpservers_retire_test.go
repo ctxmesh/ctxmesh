@@ -9,10 +9,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane/authz"
+	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
 )
 
 // Retired delete: the server's ToolRegistry is removed from the store (SSAR-gated).

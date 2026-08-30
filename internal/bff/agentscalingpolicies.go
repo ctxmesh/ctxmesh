@@ -27,7 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
 )
 
 // agentScalingPolicyKind is the CRD kind name for an AgentScalingPolicy (used in
@@ -467,7 +467,7 @@ func (s *Server) handleCreateAgentScalingPolicy(w http.ResponseWriter, r *http.R
 // --- PUT /api/agentscalingpolicies/{ns}/{name} ------------------------------
 
 // handleUpdateAgentScalingPolicy serves PUT /api/agentscalingpolicies/{ns}/{name}
-// — edits an AgentScalingPolicy via SSA under the "agent-engine-console"
+// — edits an AgentScalingPolicy via SSA under the "agentry-console"
 // field-manager (ForceOwnership). The controller's status (backend and conditions)
 // is never clobbered.
 //

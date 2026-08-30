@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# backup-restore.sh — back up and restore agent-engine's durable state (M48, ADR 0047).
+# backup-restore.sh — back up and restore agentry's durable state (M48, ADR 0047).
 #
 # Three durable stores, backed up TOGETHER (a backup of one without the others is not a
 # consistent restore):
@@ -19,16 +19,16 @@
 #   backup-restore.sh restore <in-dir>
 #
 # Env (override for your install):
-#   NS=agent-engine-system          control-plane namespace
-#   CRED_NS=agent-engine-system     credential (locked) namespace for kubernetes-backend Secrets
-#   KEK_SECRET=agent-engine-credstore-kek   the KEK Secret (postgres backend, LocalSealer)
+#   NS=agentry          control-plane namespace
+#   CRED_NS=agentry     credential (locked) namespace for kubernetes-backend Secrets
+#   KEK_SECRET=agentry-credstore-kek   the KEK Secret (postgres backend, LocalSealer)
 #   PG_POD / PG_USER / PG_DB        control-plane Postgres (default: runstore-pg / postgres / runs)
 #   VALKEY_STS=statelayer           the Valkey StatefulSet/pod name prefix
 set -euo pipefail
 
-NS="${NS:-agent-engine-system}"
-CRED_NS="${CRED_NS:-agent-engine-system}"
-KEK_SECRET="${KEK_SECRET:-agent-engine-credstore-kek}"
+NS="${NS:-agentry}"
+CRED_NS="${CRED_NS:-agentry}"
+KEK_SECRET="${KEK_SECRET:-agentry-credstore-kek}"
 PG_POD="${PG_POD:-runstore-pg}"
 PG_USER="${PG_USER:-postgres}"
 PG_DB="${PG_DB:-runs}"
@@ -42,7 +42,7 @@ backup() {
   local out="$1"; mkdir -p "$out"
   log "1/3 credential grants + KEK"
   # kubernetes backend: dump the credential Secrets (labelled by the credential plane).
-  kubectl -n "$CRED_NS" get secret -l app.kubernetes.io/part-of=agent-engine-credentials -o yaml \
+  kubectl -n "$CRED_NS" get secret -l app.kubernetes.io/part-of=agentry-credentials -o yaml \
     > "$out/credential-secrets.yaml" 2>/dev/null || log "  (no kubernetes-backend credential Secrets — postgres backend?)"
   # postgres backend: the KEK is REQUIRED to ever read the encrypted grants again.
   if kubectl -n "$NS" get secret "$KEK_SECRET" >/dev/null 2>&1; then

@@ -1,6 +1,6 @@
 import * as React from "react";
 
-// DevModeContext carries whether the console is running under `agent-engine dev --ui`
+// DevModeContext carries whether the console is running under `agentry dev --ui`
 // (ADR 0021): a local, single-developer substrate with NO cluster and NO login wall.
 // The reduced surface (fleet/providers/topology/RBAC) is served as honest 501s; only
 // config-preview + the local run work. The SPA reads this to drop the login gate and

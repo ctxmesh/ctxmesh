@@ -50,7 +50,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
 )
 
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get
@@ -344,7 +344,7 @@ func defaultSMTPSend(cfg smtpConfig, to []string, subject, body string) error {
 		from = cfg.Username
 	}
 	if from == "" {
-		from = "alerts@agent-engine.local"
+		from = "alerts@agentry.local"
 	}
 	msg := buildEmailMessage(from, to, subject, body)
 	var auth smtp.Auth
@@ -384,7 +384,7 @@ func (r *AlertPolicyReconciler) dispatchEmail(
 	}
 	subject := em.Subject
 	if subject == "" {
-		subject = fmt.Sprintf("[agent-engine] alert: %s/%s (%s)", payload.Namespace, payload.Policy, payload.Condition)
+		subject = fmt.Sprintf("[agentry] alert: %s/%s (%s)", payload.Namespace, payload.Policy, payload.Condition)
 	}
 	body := fmt.Sprintf(
 		"AlertPolicy %s/%s fired.\n\nCondition: %s (%s)\nValue: %s\nMessage: %s\nFired at: %s\n",

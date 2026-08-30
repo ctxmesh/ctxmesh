@@ -48,11 +48,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/publishedartifact"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/controlplane/namespacetenant"
+	"github.com/ctxmesh/agentry/internal/controlplane/promptversion"
+	"github.com/ctxmesh/agentry/internal/controlplane/publishedartifact"
+	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
 )
 
 // newRefClosureServer wires a BFF Server for the ref-closure tests: everything newForkServer

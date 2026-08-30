@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
 )
 
 // FixtureResolver is the deterministic, OFFLINE Resolver used in dev / envtest /

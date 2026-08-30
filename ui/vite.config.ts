@@ -2,7 +2,7 @@ import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath, URL } from "node:url";
 
-// Vite config for the agent-engine SPA.
+// Vite config for the agentry SPA.
 //
 // - Builds to STATIC ASSETS (dist/) — no Node runtime is deployed; the Go BFF
 //   serves dist/ in production (see internal/bff).

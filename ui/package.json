@@ -1,9 +1,9 @@
 {
-  "name": "agent-engine-ui",
+  "name": "agentry-ui",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "agent-engine operator UI — Vite React SPA (static assets, no Node runtime). Served by the Go BFF.",
+  "description": "agentry operator UI — Vite React SPA (static assets, no Node runtime). Served by the Go BFF.",
   "packageManager": "pnpm@9.15.0",
   "engines": {
     "node": ">=22 <23"

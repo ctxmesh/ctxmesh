@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
+	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
 )
 
 // errStore is an audit store whose Append always fails — proves appendAudit is best-effort.

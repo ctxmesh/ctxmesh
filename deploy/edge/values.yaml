@@ -38,8 +38,8 @@ dns:
 # already owns token verification, identity resolution, boundary computation, and the signing key.
 extAuth:
   enabled: true
-  service: agent-engine-bff
-  namespace: agent-engine-system
+  service: agentry-bff
+  namespace: agentry
   port: 9090
   # Envoy PREPENDS this to the original request path (its path_prefix), so the BFF matches the whole
   # /api/extauth/ subtree — a client POST /invoke arrives as POST /api/extauth/invoke.
@@ -53,8 +53,8 @@ extAuth:
 routes:
   console:
     subdomain: console
-    service: agent-engine-bff
-    namespace: agent-engine-system
+    service: agentry-bff
+    namespace: agentry
     port: 9090
   langfuse:
     subdomain: langfuse
@@ -80,7 +80,7 @@ agentEdge:
     namespace: kourier-system
     port: 80
   app:
-    service: agent-engine-bff
-    namespace: agent-engine-system
+    service: agentry-bff
+    namespace: agentry
     port: 9090
   chatboxHeader: X-Ctxmesh-Agent-Chatbox

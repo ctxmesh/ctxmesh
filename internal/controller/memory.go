@@ -17,14 +17,14 @@ limitations under the License.
 package controller
 
 import (
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
 )
 
 const (
 	// memoryDefaultAddr is the cluster-default Valkey address applied by the
 	// controller when spec.sessionMemory.backend.addr is omitted (specs/state-layer.md).
 	// Also reused as the default TENANT_QUOTA_ADDR (same operator-namespace Valkey).
-	memoryDefaultAddr = "agent-engine-statelayer.agent-engine-system.svc:6379"
+	memoryDefaultAddr = "agentry-statelayer.agentry.svc:6379"
 )
 
 // resolveMemory resolves an agent's session-memory config from the FOLDED

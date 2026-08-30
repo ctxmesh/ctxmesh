@@ -21,8 +21,8 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/ctxmesh/agent-engine/internal/replay"
-	"github.com/ctxmesh/agent-engine/internal/run"
+	"github.com/ctxmesh/agentry/internal/replay"
+	"github.com/ctxmesh/agentry/internal/run"
 )
 
 // RunFixtureDTO is the GET /api/runs/{id}/fixture response — the O10a fixture stepper's data (ADR

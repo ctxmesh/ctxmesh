@@ -28,9 +28,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/ctxmesh/agent-engine/internal/objectstore"
-	"github.com/ctxmesh/agent-engine/internal/replay"
-	"github.com/ctxmesh/agent-engine/internal/run"
+	"github.com/ctxmesh/agentry/internal/objectstore"
+	"github.com/ctxmesh/agentry/internal/replay"
+	"github.com/ctxmesh/agentry/internal/run"
 )
 
 // fixtureRunServer mirrors authzRunServer but wires the DocStore the fixture endpoint reads.

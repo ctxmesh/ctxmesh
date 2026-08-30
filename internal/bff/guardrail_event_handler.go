@@ -42,8 +42,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
-	"github.com/ctxmesh/agent-engine/internal/runcap"
+	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
+	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 // auditActionGuardrailBlock is the stable action kind written to audit_log for a guardrail

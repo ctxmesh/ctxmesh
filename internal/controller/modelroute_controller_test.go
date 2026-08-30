@@ -32,13 +32,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/gateway"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/gateway"
 )
 
 const (
 	// gwNS is the namespace where the gateway ConfigMap and Deployment live.
-	gwNS = gateway.GatewayNamespace // "agent-engine-system"
+	gwNS = gateway.GatewayNamespace // "agentry"
 )
 
 // newMRReconciler constructs a ModelRouteReconciler backed by the envtest API server.

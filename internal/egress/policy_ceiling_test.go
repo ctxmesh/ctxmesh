@@ -29,7 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agent-engine/internal/runcap"
+	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 // ceilingPolicy is a pure-allow policy carrying ONLY a fan-out ceiling — no deny / require-approval

@@ -30,7 +30,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ctxmesh/agent-engine/internal/runcap"
+	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 // maxInvokeResponseBytes bounds the agent response the Playground reads back. An

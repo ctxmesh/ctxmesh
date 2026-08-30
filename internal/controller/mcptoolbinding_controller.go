@@ -35,9 +35,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/toolmanifest"
-	"github.com/ctxmesh/agent-engine/internal/toolpush"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/toolmanifest"
+	"github.com/ctxmesh/agentry/internal/toolpush"
 )
 
 // bindingFinalizer guards binding deletion so the agent's tool state converges

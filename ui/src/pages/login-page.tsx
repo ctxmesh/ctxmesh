@@ -178,7 +178,7 @@ export function LoginPage() {
             <Boxes className="h-6 w-6" />
           </div>
           <h1 className="text-xl font-semibold tracking-snug">
-            Sign in to agent-engine
+            Sign in to agentry
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Paste a Kubernetes bearer token. It&apos;s held for this session

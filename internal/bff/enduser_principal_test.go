@@ -28,11 +28,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane/enduseragent"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
-	"github.com/ctxmesh/agent-engine/internal/credresolve"
-	"github.com/ctxmesh/agent-engine/internal/enduseroidc"
-	"github.com/ctxmesh/agent-engine/internal/runcap"
+	"github.com/ctxmesh/agentry/internal/controlplane/enduseragent"
+	"github.com/ctxmesh/agentry/internal/controlplane/namespacetenant"
+	"github.com/ctxmesh/agentry/internal/credresolve"
+	"github.com/ctxmesh/agentry/internal/enduseroidc"
+	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 type fakeEndUserVerifier struct {

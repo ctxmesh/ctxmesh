@@ -2,7 +2,7 @@ apiVersion: agents.ctxmesh.ai/v1alpha1
 kind: AgentDeployment
 metadata:
   labels:
-    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/name: agentry
     app.kubernetes.io/managed-by: kustomize
   name: agentdeployment-sample
 spec:

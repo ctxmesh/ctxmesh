@@ -143,7 +143,7 @@ function CapabilityBanner() {
 }
 
 // DevModeBanner is the honest "you're on the local loop" notice (ADR 0021): under
-// `agent-engine dev --ui` the console runs against Docker Compose with NO cluster, so
+// `agentry dev --ui` the console runs against Docker Compose with NO cluster, so
 // the fleet/providers/topology/RBAC surfaces are unavailable (served as calm 501s) and
 // there is no login. This persistent banner names that plainly so a dev never reads the
 // missing cluster surfaces as a broken console. Shown only when the BFF confirms devMode.
@@ -159,7 +159,7 @@ function DevModeBanner() {
       <FlaskConical className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
       <p>
         <span className="font-semibold">Dev mode</span> — running against your
-        local <code className="font-mono">agent-engine dev</code> loop, no
+        local <code className="font-mono">agentry dev</code> loop, no
         cluster. Define, config-preview, and run work here; fleet, providers,
         topology, and RBAC are cluster features and aren&apos;t available.
       </p>
@@ -183,7 +183,7 @@ function Sidebar() {
           <Boxes className="h-5 w-5" />
         </div>
         <span className="text-base font-semibold tracking-tight">
-          agent-engine
+          agentry
         </span>
       </div>
       <nav className="flex flex-col gap-1 p-3">

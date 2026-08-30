@@ -1,4 +1,4 @@
-# ctxmesh — the agent-engine TypeScript SDK
+# ctxmesh — the agentry TypeScript SDK
 
 Typed sugar over the **launcher localhost plane** — at parity with the Python SDK
 (`sdk/python/`). The launcher (PID 1) injects a fixed env/port contract into every

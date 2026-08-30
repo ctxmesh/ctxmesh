@@ -26,7 +26,7 @@ package credprovider
 import (
 	"context"
 
-	"github.com/ctxmesh/agent-engine/internal/credresolve"
+	"github.com/ctxmesh/agentry/internal/credresolve"
 )
 
 // APIVersion is the contract's semver-major, echoed in the version header so a client and

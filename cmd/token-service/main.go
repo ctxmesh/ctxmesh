@@ -41,15 +41,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
-	"github.com/ctxmesh/agent-engine/internal/credplane"
-	"github.com/ctxmesh/agent-engine/internal/credresolve"
-	"github.com/ctxmesh/agent-engine/internal/credstore"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	"github.com/ctxmesh/agentry/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/agentry/internal/controlplane/knowledge"
+	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/agentry/internal/credplane"
+	"github.com/ctxmesh/agentry/internal/credresolve"
+	"github.com/ctxmesh/agentry/internal/credstore"
 )
 
 // mcpAuthTypeAnnotation MUST match internal/bff.annMCPAuthType — the non-secret annotation

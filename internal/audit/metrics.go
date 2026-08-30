@@ -30,27 +30,27 @@ var (
 	// full (the paired LogSink still recorded them — see pgsink.go). A rising rate ⇒ the DB writer can't
 	// keep up with mutation churn: widen pgSinkBuffer or scale the control-plane DB.
 	auditDroppedTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "agentengine_audit_dropped_rows_total",
+		Name: "agentry_audit_dropped_rows_total",
 		Help: "Total controller audit rows dropped due to a full PostgresSink queue (still in the log).",
 	})
 
 	// auditPrunedTotal counts audit_log rows deleted by the retention pruner over the process lifetime.
 	auditPrunedTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "agentengine_audit_pruned_rows_total",
+		Name: "agentry_audit_pruned_rows_total",
 		Help: "Total audit_log rows deleted by the retention pruner.",
 	})
 
 	// auditPruneFailuresTotal counts prune cycles that errored (the window was NOT enforced that cycle —
 	// the next tick retries; a sustained rise ⇒ the control-plane DB is unreachable).
 	auditPruneFailuresTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "agentengine_audit_prune_failures_total",
+		Name: "agentry_audit_prune_failures_total",
 		Help: "Total audit retention prune cycles that failed.",
 	})
 
 	// auditPruneLastSuccessSeconds is the unix timestamp of the last SUCCESSFUL prune — an alert can fire
 	// when it falls too far behind now() (the retention window is silently not being enforced).
 	auditPruneLastSuccessSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "agentengine_audit_prune_last_success_seconds",
+		Name: "agentry_audit_prune_last_success_seconds",
 		Help: "Unix timestamp of the last successful audit retention prune.",
 	})
 )

@@ -30,7 +30,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ctxmesh/agent-engine/internal/credresolve"
+	"github.com/ctxmesh/agentry/internal/credresolve"
 )
 
 // The OAuth 2.1 (Authorization-Code + PKCE) tier of BYO-MCP registration (ADR

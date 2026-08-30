@@ -24,7 +24,7 @@ import (
 	"strings"
 	"testing"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
 )
 
 func TestRawContentURL(t *testing.T) {

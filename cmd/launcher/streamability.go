@@ -16,7 +16,7 @@ limitations under the License.
 
 package main
 
-import "github.com/ctxmesh/agent-engine/internal/guardrail"
+import "github.com/ctxmesh/agentry/internal/guardrail"
 
 // ── K2/K10 (ADR 0086): guardrail streamability — launcher wrapper ───────────────
 //

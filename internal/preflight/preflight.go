@@ -1,4 +1,4 @@
-// Package preflight validates that an agent-engine install is COHERENTLY configured, and fails LOUD
+// Package preflight validates that an agentry install is COHERENTLY configured, and fails LOUD
 // when it is not — so a misconfiguration surfaces at install time (a failed Helm hook with a clear
 // message) instead of silently at runtime as a missing citation, a queued-forever workflow, or a
 // per-user credential silently downgraded to a shared one (GA audit's "correct-when-configured,
@@ -15,7 +15,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/ctxmesh/agent-engine/internal/runcap"
+	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 // Config is the resolved install configuration the preflight validates. Values are read from the

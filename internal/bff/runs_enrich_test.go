@@ -31,7 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/ctxmesh/agent-engine/internal/run"
+	"github.com/ctxmesh/agentry/internal/run"
 )
 
 // With ?enrich= the list carries real tokens + an ok/error status from each trace's /detail; a

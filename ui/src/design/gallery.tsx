@@ -55,7 +55,7 @@ function GalleryFrame({
               <Palette className="h-4 w-4" />
             </div>
             <span className="text-sm font-semibold tracking-tight">
-              agent-engine · design gallery
+              agentry · design gallery
             </span>
           </Link>
           <Badge variant="secondary" className="text-[10px]">v2 console arc · m13.1</Badge>

@@ -16,7 +16,7 @@ limitations under the License.
 
 package prompt
 
-import agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+import agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
 
 // ResolvedPromptAnnotation is the AgentDeployment annotation the BFF stamps with the DENORMALIZED
 // PromptVersion pointer (ADR 0042, m40.3 — compose-and-denormalize). It lets the AgentDeployment

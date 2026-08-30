@@ -277,8 +277,8 @@ func TestIsBlobRef(t *testing.T) {
 		payload string
 		wantRef bool
 	}{
-		{"valid ref", `{"$ref":"agent-engine-blobs/abc","$size":42}`, true},
-		{"ref with whitespace", `  {"$ref":"agent-engine-blobs/abc"}  `, true},
+		{"valid ref", `{"$ref":"agentry-blobs/abc","$size":42}`, true},
+		{"ref with whitespace", `  {"$ref":"agentry-blobs/abc"}  `, true},
 		{"agent object without ref", `{"task":"x","doc":"y"}`, false},
 		{"empty ref string", `{"$ref":"","$size":0}`, false},
 		{"json array", `[1,2,3]`, false},

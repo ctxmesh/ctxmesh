@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ctxmesh/agent-engine/internal/run"
+	"github.com/ctxmesh/agentry/internal/run"
 )
 
 // runExecTimeout bounds ONE run advance — the agent's whole managed loop for a turn (all model +

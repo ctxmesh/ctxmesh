@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ctxmesh/agent-engine/internal/credresolve"
+	"github.com/ctxmesh/agentry/internal/credresolve"
 )
 
 // defaultTimeout bounds a delegation round-trip. The central service may itself refresh a

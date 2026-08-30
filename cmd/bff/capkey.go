@@ -19,7 +19,7 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/ctxmesh/agent-engine/internal/bootstrap"
+	"github.com/ctxmesh/agentry/internal/bootstrap"
 )
 
 // runEnsureCapabilityKey is the `bff -ensure-capability-key` mode: the Helm post-install/pre-upgrade hook
@@ -46,7 +46,7 @@ func runEnsureCapabilityKey(ctx context.Context) int {
 	dep := &clientDeployOps{cs: cs}
 	// The env consumers of bff-capability (bff.yaml / control-plane.yaml / run-worker.yaml). run-worker
 	// may be absent (dep tolerates NotFound).
-	consumers := []string{"agent-engine-bff", "agent-engine-controller-manager", "run-worker"}
+	consumers := []string{"agentry-bff", "agentry-controller-manager", "run-worker"}
 
 	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
@@ -84,7 +84,7 @@ func (o *clientSecretOps) Create(ctx context.Context, ns, name, priv, pub string
 			// never-re-key guarantee comes from the get-before-create logic, NOT this annotation. NB: what
 			// actually destroys the key is `helm uninstall` deleting the chart-owned Namespace (see NOTES).
 			Annotations: map[string]string{"helm.sh/resource-policy": "keep"},
-			Labels:      map[string]string{"app.kubernetes.io/name": "agent-engine", "app.kubernetes.io/managed-by": "agent-engine-keygen"},
+			Labels:      map[string]string{"app.kubernetes.io/name": "agentry", "app.kubernetes.io/managed-by": "agentry-keygen"},
 		},
 		Type: corev1.SecretTypeOpaque,
 		// stringData: the API stores the runcap base64 STRING verbatim as the value (do NOT hand-base64

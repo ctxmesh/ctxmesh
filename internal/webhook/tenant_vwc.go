@@ -46,8 +46,8 @@ func buildTenantLabelVWC(namespace string, webhookServiceName string, caBundle [
 		ObjectMeta: metav1.ObjectMeta{
 			Name: TenantLabelVWCName,
 			Labels: map[string]string{
-				"app.kubernetes.io/name":       "agent-engine",
-				"app.kubernetes.io/managed-by": "agent-engine-controller-manager",
+				"app.kubernetes.io/name":       "agentry",
+				"app.kubernetes.io/managed-by": "agentry-controller-manager",
 			},
 		},
 		Webhooks: []admissionregistrationv1.ValidatingWebhook{{

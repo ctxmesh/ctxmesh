@@ -30,8 +30,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/expand"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/expand"
 )
 
 // This file implements POST /api/agents/generate — the create-from-prompt
@@ -61,7 +61,7 @@ const maxGenerateRequestBytes = 64 << 10 // 64 KiB
 // The tools field directive is intentionally open-ended here; at runtime
 // buildGenerationPrompt appends the caller-visible tool catalog so the model
 // selects only real, approved tool names (ADR 0066 D2).
-const generationSystemPrompt = `You are a configuration generator for the agent-engine platform.
+const generationSystemPrompt = `You are a configuration generator for the agentry platform.
 Turn the user's description of an agent into a single simplified agent.yaml document.
 
 Output ONLY the YAML — no prose, no explanation, no markdown code fences.

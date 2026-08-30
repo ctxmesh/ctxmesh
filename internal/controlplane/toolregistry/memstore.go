@@ -24,7 +24,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane"
 )
 
 // memStore is the in-memory twin of the Postgres store — the conformance suite runs both. Not for prod.
@@ -96,7 +96,7 @@ func (m *memStore) Delete(_ context.Context, ns, name string) error {
 }
 
 // ListCatalog implements Store.ListCatalog — the in-memory twin of the Postgres catalog query.
-// The same predicate as pgstore: managed-by=agent-engine-mcp AND one of:
+// The same predicate as pgstore: managed-by=agentry-mcp AND one of:
 //   - org visibility in any member namespace
 //   - public visibility (any namespace)
 //   - team visibility in callerNS

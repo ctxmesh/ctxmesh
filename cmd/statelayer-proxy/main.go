@@ -37,7 +37,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	"github.com/ctxmesh/agent-engine/internal/statelayer"
+	"github.com/ctxmesh/agentry/internal/statelayer"
 )
 
 // defaultPodAudience is the Kubernetes projected SA-token audience the proxy verifies for

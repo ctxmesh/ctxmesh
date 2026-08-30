@@ -28,7 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
 )
 
 // reconcileFeedbackStore reconciles the named FeedbackStore against the envtest API server.

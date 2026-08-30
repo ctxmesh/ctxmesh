@@ -25,7 +25,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane"
 )
 
 // SortBy column values the store understands (any other value → the default namespace,name order).

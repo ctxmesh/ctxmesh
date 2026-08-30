@@ -24,8 +24,8 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/gateway"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/gateway"
 )
 
 const testNS = "default"
@@ -131,13 +131,13 @@ func TestRender_GoldenConfig(t *testing.T) {
     litellm_params:
       model: openai/mock-default
       api_key: DUMMY_MOCK_KEY
-      mock_response: "MOCK_OK deterministic response from agent-engine gateway"
+      mock_response: "MOCK_OK deterministic response from agentry gateway"
       rpm: 600
   - model_name: z-route
     litellm_params:
       model: openai/mock-default
       api_key: DUMMY_MOCK_KEY
-      mock_response: "MOCK_OK deterministic response from agent-engine gateway"
+      mock_response: "MOCK_OK deterministic response from agentry gateway"
 `
 	assert.Equal(t, wantConfig, result.ConfigYAML, "rendered LiteLLM config YAML")
 

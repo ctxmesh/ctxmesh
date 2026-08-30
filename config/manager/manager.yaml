@@ -3,7 +3,7 @@ kind: Namespace
 metadata:
   labels:
     control-plane: controller-manager
-    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/name: agentry
     app.kubernetes.io/managed-by: kustomize
   name: system
 ---
@@ -14,13 +14,13 @@ metadata:
   namespace: system
   labels:
     control-plane: controller-manager
-    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/name: agentry
     app.kubernetes.io/managed-by: kustomize
 spec:
   selector:
     matchLabels:
       control-plane: controller-manager
-      app.kubernetes.io/name: agent-engine
+      app.kubernetes.io/name: agentry
   replicas: 1
   template:
     metadata:
@@ -28,7 +28,7 @@ spec:
         kubectl.kubernetes.io/default-container: manager
       labels:
         control-plane: controller-manager
-        app.kubernetes.io/name: agent-engine
+        app.kubernetes.io/name: agentry
     spec:
       # TODO(user): Uncomment the following code to configure the nodeAffinity expression
       # according to the platforms which are supported by your solution.
@@ -81,7 +81,7 @@ spec:
           # Service (the namespace is Helm-templated). Set to "" to run PROXY-LESS — agents
           # then get the direct Valkey address (the legacy pre-cutover path).
           - name: STATELAYER_PROXY_URL
-            value: http://agent-engine-statelayer-proxy.agent-engine-system.svc:8080
+            value: http://agentry-statelayer-proxy.agentry.svc:8080
           # CONSOLE_URL (M75, ADR 0069 §3) — the browser-reachable console origin, used by the
           # AlertPolicy approvalWaiting condition to build the HITL notification's deep-link to the
           # AUTHENTICATED console approval view (a POINTER, never the public share link, never an
@@ -117,9 +117,9 @@ spec:
           - name: MCP_CAPABILITY_AUDIENCE
             value: ""
           - name: MCP_CREDENTIAL_NAMESPACE
-            value: agent-engine-system
+            value: agentry
           - name: TOKEN_SERVICE_URL
-            value: http://agent-engine-token-service.agent-engine-system.svc:8443
+            value: http://agentry-token-service.agentry.svc:8443
           # OPS-2 — dev-data-plane gate. "true" here (== the kustomize dev posture) makes the
           # controller inject the DEV-ONLY object-store + Langfuse feedback creds into agent pods;
           # gen_helm_chart templates it to {{ .Values.devDataPlane.enabled }}, so a
@@ -199,7 +199,7 @@ spec:
             readOnly: true
       volumes:
         # NON-optional: the empty `webhook-server-cert` Secret is shipped unconditionally (namePrefix
-        # → agent-engine-webhook-server-cert = pki.SecretName), so it always exists (empty or populated).
+        # → agentry-webhook-server-cert = pki.SecretName), so it always exists (empty or populated).
         # A truly missing Secret then surfaces as a legible MountVolume event, not a Go crash-loop.
         - name: webhook-certs
           secret:

@@ -52,11 +52,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
-	"github.com/ctxmesh/agent-engine/internal/objectstore"
-	"github.com/ctxmesh/agent-engine/internal/run"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	"github.com/ctxmesh/agentry/internal/controlplane/knowledge"
+	"github.com/ctxmesh/agentry/internal/controlplane/namespacetenant"
+	"github.com/ctxmesh/agentry/internal/objectstore"
+	"github.com/ctxmesh/agentry/internal/run"
 )
 
 const kbNS = "team-kb"

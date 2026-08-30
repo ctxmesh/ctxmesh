@@ -28,7 +28,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ctxmesh/agent-engine/internal/runcap"
+	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 // delegate.go — the launcher's delegate_to endpoint (M64, ADR 0057 Door 2): sub-agent-as-a-tool with

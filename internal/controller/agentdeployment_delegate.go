@@ -25,8 +25,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
 )
 
 // Delegate (M64, ADR 0057) runtime wiring: when an AgentDeployment is the SUPERVISOR of an AgentTeam,
@@ -37,8 +37,8 @@ import (
 
 // bffInternalURL is the in-cluster BFF base the launcher calls for the capability-authorized spawn +
 // await endpoints (the same operator-namespace convention as memoryDefaultAddr). The BFF Service is
-// agent-engine-bff:9090.
-const bffInternalURL = "http://agent-engine-bff.agent-engine-system.svc.cluster.local:9090"
+// agentry-bff:9090.
+const bffInternalURL = "http://agentry-bff.agentry.svc.cluster.local:9090"
 
 // Spawn-budget defaults (mirror the AgentTeam CRD's kubebuilder defaults) — used when spec.spawnBudget
 // (or a field) is omitted, so the injected env is always complete.

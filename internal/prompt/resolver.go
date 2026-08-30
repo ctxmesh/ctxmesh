@@ -33,7 +33,7 @@ import (
 	"errors"
 	"fmt"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
 )
 
 // ErrNotFound is returned by a Resolver when the (repo, ref, path) pointer does

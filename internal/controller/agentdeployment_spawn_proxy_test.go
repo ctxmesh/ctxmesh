@@ -28,7 +28,7 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
 )
 
 // supervisorKsvcEnv builds a supervisor agent + registry + team, reconciles it with the given reconciler,
@@ -70,7 +70,7 @@ func supervisorKsvcEnv(t *testing.T, r *AgentDeploymentReconciler, name, regName
 func TestReconcile_SupervisorSpawnGuard_ProxyVsDirect(t *testing.T) {
 	t.Run("proxy configured → no direct Valkey addr", func(t *testing.T) {
 		r := newReconciler()
-		r.StatelayerProxyURL = "http://statelayer-proxy.agent-engine-system.svc:8080"
+		r.StatelayerProxyURL = "http://statelayer-proxy.agentry.svc:8080"
 		env := supervisorKsvcEnv(t, r, "sup-proxy", "sup-proxy-reg", "sup-proxy-team")
 
 		assert.Equal(t, "true", env["DELEGATE_ENABLED"], "the supervisor has the delegate wiring")

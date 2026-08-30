@@ -19,7 +19,7 @@ import { whoami, ApiError } from "@/lib/api";
 // SESSION_STORAGE_KEY is the sessionStorage slot for the bearer token. Only the
 // token is persisted; the resolved user identity is re-validated (via whoami) on
 // a fresh load rather than trusting a persisted copy.
-const SESSION_STORAGE_KEY = "agent-engine.session.token";
+const SESSION_STORAGE_KEY = "agentry.session.token";
 
 export interface Session {
   /** The caller's bearer token. Secret — never logged. */

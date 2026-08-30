@@ -54,20 +54,20 @@ func TestMetrics_RunOutcomesAndDuration(t *testing.T) {
 
 	body := scrape(t, m)
 
-	assert.Contains(t, body, `agentengine_run_outcomes_total{outcome="succeeded"} 2`)
-	assert.Contains(t, body, `agentengine_run_outcomes_total{outcome="failed"} 1`)
-	assert.Contains(t, body, `agentengine_run_outcomes_total{outcome="cancelled"} 1`,
+	assert.Contains(t, body, `agentry_run_outcomes_total{outcome="succeeded"} 2`)
+	assert.Contains(t, body, `agentry_run_outcomes_total{outcome="failed"} 1`)
+	assert.Contains(t, body, `agentry_run_outcomes_total{outcome="cancelled"} 1`,
 		"the US spelling must normalize to cancelled (bounded cardinality)")
 	// The histogram is present with the outcome label → p95 is derivable.
-	assert.Contains(t, body, `agentengine_run_duration_seconds_bucket{outcome="succeeded"`)
-	assert.Contains(t, body, `agentengine_run_duration_seconds_count{outcome="succeeded"} 2`)
+	assert.Contains(t, body, `agentry_run_duration_seconds_bucket{outcome="succeeded"`)
+	assert.Contains(t, body, `agentry_run_duration_seconds_count{outcome="succeeded"} 2`)
 }
 
 func TestMetrics_OutcomeCardinalityBounded(t *testing.T) {
 	m := newMetrics(nil)
 	m.observeRun("some-weird-status", 1.0) // must NOT create an unbounded label
 	body := scrape(t, m)
-	assert.Contains(t, body, `agentengine_run_outcomes_total{outcome="unknown"} 1`)
+	assert.Contains(t, body, `agentry_run_outcomes_total{outcome="unknown"} 1`)
 	assert.NotContains(t, body, "some-weird-status")
 }
 
@@ -77,13 +77,13 @@ func TestMetrics_WorkerActiveGauge(t *testing.T) {
 	m.incWorkerActive()
 	m.decWorkerActive()
 	body := scrape(t, m)
-	assert.Contains(t, body, "agentengine_run_worker_active 1")
+	assert.Contains(t, body, "agentry_run_worker_active 1")
 }
 
 func TestMetrics_QueueDepth_FromStore(t *testing.T) {
 	m := newMetrics(fakeQueued{n: 7})
 	body := scrape(t, m)
-	assert.Contains(t, body, "agentengine_run_queue_depth 7")
+	assert.Contains(t, body, "agentry_run_queue_depth 7")
 }
 
 func TestMetrics_QueueDepth_OmittedOnError(t *testing.T) {
@@ -91,14 +91,14 @@ func TestMetrics_QueueDepth_OmittedOnError(t *testing.T) {
 	// false 0 that would silently clear a backlog alert.
 	m := newMetrics(fakeQueued{err: errors.New("db down")})
 	body := scrape(t, m)
-	assert.NotContains(t, body, "agentengine_run_queue_depth ")
+	assert.NotContains(t, body, "agentry_run_queue_depth ")
 }
 
 func TestMetrics_QueueDepth_AbsentWhenStoreLacksCapability(t *testing.T) {
 	// A store that doesn't implement CountQueued (a hot store) simply omits the gauge.
 	m := newMetrics(nil)
 	body := scrape(t, m)
-	assert.False(t, strings.Contains(body, "agentengine_run_queue_depth"),
+	assert.False(t, strings.Contains(body, "agentry_run_queue_depth"),
 		"queue-depth gauge must be absent when the store can't count")
 }
 

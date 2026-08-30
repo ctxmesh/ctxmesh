@@ -44,7 +44,7 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/ctxmesh/agent-engine/internal/egress"
+	"github.com/ctxmesh/agentry/internal/egress"
 )
 
 // readToolPolicyFile reads the mounted policy file. A missing file OR an empty/whitespace file

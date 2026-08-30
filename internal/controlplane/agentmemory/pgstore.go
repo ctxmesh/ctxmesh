@@ -24,7 +24,7 @@ import (
 
 	pgvector "github.com/pgvector/pgvector-go"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane"
 )
 
 // pgStore is the pgvector-backed agent-memory store (ADR 0045). It shares the control-plane *sql.DB (pgx

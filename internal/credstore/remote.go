@@ -26,10 +26,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/credplane"
-	"github.com/ctxmesh/agent-engine/internal/credprovider"
-	"github.com/ctxmesh/agent-engine/internal/credresolve"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/credplane"
+	"github.com/ctxmesh/agentry/internal/credprovider"
+	"github.com/ctxmesh/agentry/internal/credresolve"
 )
 
 // remoteTimeout bounds a call to an out-of-tree provider.

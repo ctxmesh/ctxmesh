@@ -31,7 +31,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane"
 )
 
 // SortBy column values the store understands (any other value → the default namespace,name order).
@@ -44,7 +44,7 @@ const (
 // The BFF defines its own copies; these are for the store implementations only.
 const (
 	labelManagedByKey  = "app.kubernetes.io/managed-by"
-	labelManagedByMCP  = "agent-engine-mcp"
+	labelManagedByMCP  = "agentry-mcp"
 	labelVisibilityKey = "mcp.ctxmesh.ai/visibility"
 
 	visOrg     = "org"
@@ -93,7 +93,7 @@ type Store interface {
 	Upsert(ctx context.Context, tr ToolRegistry) (*ToolRegistry, error)
 	Delete(ctx context.Context, namespace, name string) error
 	// ListCatalog returns the cross-tenant catalog rows visible to callerNS (ADR 0067 §6, m73.4).
-	// It filters to managed-by=agent-engine-mcp rows whose visibility qualifies them under the
+	// It filters to managed-by=agentry-mcp rows whose visibility qualifies them under the
 	// tenant-membership model:
 	//   - org rows in any namespace in members (tenant-wide sharing);
 	//   - public rows in any namespace (world-readable);

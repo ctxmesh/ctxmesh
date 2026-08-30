@@ -39,8 +39,8 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/ctxmesh/agent-engine/internal/credresolve"
-	"github.com/ctxmesh/agent-engine/internal/runcap"
+	"github.com/ctxmesh/agentry/internal/credresolve"
+	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 // maxRecordBody bounds how much of a tool request/response the record seam buffers into a fixture,

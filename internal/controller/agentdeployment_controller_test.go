@@ -35,8 +35,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/telemetry"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/telemetry"
 )
 
 // bareIdentitySuffix is the "-h<digest>" combined-digest suffix EVERY agent's revision name now carries
@@ -176,7 +176,7 @@ func TestReconcile_CreatesAgentVersionAndKsvc(t *testing.T) {
 		envMap[e.Name] = e.Value
 	}
 	assert.Equal(t, fmt.Sprintf("%d", port), envMap["AGENT_PORT"], "AGENT_PORT env var")
-	assert.Equal(t, "http://agent-engine-gateway.agent-engine-system.svc:4000",
+	assert.Equal(t, "http://agentry-gateway.agentry.svc:4000",
 		envMap["MODEL_GATEWAY_URL"], "MODEL_GATEWAY_URL env var")
 
 	// Stable revision name — must be "{service}-{hash}" for idempotent reconciles.
@@ -434,7 +434,7 @@ func TestReconcile_EnvAndResources(t *testing.T) {
 		envMap[e.Name] = e.Value
 	}
 	assert.Equal(t, "9090", envMap["AGENT_PORT"], "AGENT_PORT must reflect custom port")
-	assert.Equal(t, "http://agent-engine-gateway.agent-engine-system.svc:4000",
+	assert.Equal(t, "http://agentry-gateway.agentry.svc:4000",
 		envMap["MODEL_GATEWAY_URL"], "MODEL_GATEWAY_URL must always be injected")
 	assert.Equal(t, "debug", envMap["LOG_LEVEL"], "user LOG_LEVEL env var must be present")
 
@@ -505,7 +505,7 @@ func TestReconcile_BudgetInjection(t *testing.T) {
 	// address travels as GATEWAY_UPSTREAM_URL.
 	assert.Equal(t, "http://localhost:2996", envMap["MODEL_GATEWAY_URL"].Value,
 		"MODEL_GATEWAY_URL must point at the launcher budget proxy when a budget is set")
-	assert.Equal(t, "http://agent-engine-gateway.agent-engine-system.svc:4000",
+	assert.Equal(t, "http://agentry-gateway.agentry.svc:4000",
 		envMap["GATEWAY_UPSTREAM_URL"].Value, "the real LiteLLM address is GATEWAY_UPSTREAM_URL")
 
 	// The three budget knobs, injected as STATIC env.
@@ -566,7 +566,7 @@ func TestReconcile_RecordCapableInjection(t *testing.T) {
 	// The gateway is forced on by the record-mode reason — with NO budget/quota/guardrail set.
 	assert.Equal(t, "http://localhost:2996", envMap["MODEL_GATEWAY_URL"].Value,
 		"a record-capable agent must route its LLM calls THROUGH the gateway so it can be captured")
-	assert.Equal(t, "http://agent-engine-gateway.agent-engine-system.svc:4000",
+	assert.Equal(t, "http://agentry-gateway.agentry.svc:4000",
 		envMap["GATEWAY_UPSTREAM_URL"].Value, "the real LiteLLM address travels as GATEWAY_UPSTREAM_URL")
 
 	// The record-mode env flips the launcher's record capture on.
@@ -620,7 +620,7 @@ func TestReconcile_NonRecordAgentUnchanged(t *testing.T) {
 		envMap[e.Name] = e
 	}
 
-	assert.Equal(t, "http://agent-engine-gateway.agent-engine-system.svc:4000",
+	assert.Equal(t, "http://agentry-gateway.agentry.svc:4000",
 		envMap["MODEL_GATEWAY_URL"].Value, "a plain agent talks to LiteLLM directly")
 	_, hasGwUpstream := envMap["GATEWAY_UPSTREAM_URL"]
 	assert.False(t, hasGwUpstream, "no gateway reason ⇒ no GATEWAY_UPSTREAM_URL")
@@ -701,7 +701,7 @@ func TestReconcile_NoBudgetNoInjection(t *testing.T) {
 		envMap[e.Name] = e.Value
 	}
 
-	assert.Equal(t, "http://agent-engine-gateway.agent-engine-system.svc:4000",
+	assert.Equal(t, "http://agentry-gateway.agentry.svc:4000",
 		envMap["MODEL_GATEWAY_URL"], "unbudgeted agent talks to LiteLLM directly")
 	for _, k := range []string{"GATEWAY_UPSTREAM_URL", "BUDGET_PER_CONVERSATION_USD", "BUDGET_PER_AGENT_USD", "BUDGET_SOFT_PCT"} {
 		_, present := envMap[k]
@@ -1015,7 +1015,7 @@ func TestReconcile_IdentitySAConflict_ReadyFalse(t *testing.T) {
 		Client:             k8sClient,
 		Scheme:             k8sClient.Scheme(),
 		Registry:           NewPostgresRegistryReader(testRegStore),
-		StatelayerProxyURL: "http://statelayer-proxy.agent-engine-system.svc:8080",
+		StatelayerProxyURL: "http://statelayer-proxy.agentry.svc:8080",
 	}
 
 	// reconcileNN asserts Reconcile returns nil error — the conflict must NOT

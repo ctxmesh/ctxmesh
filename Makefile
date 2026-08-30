@@ -242,8 +242,8 @@ build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
 .PHONY: build-cli
-build-cli: fmt vet ## Build agent-engine CLI binary (bin/agent-engine).
-	go build -o bin/agent-engine ./cmd/agent-engine
+build-cli: fmt vet ## Build agentry CLI binary (bin/agentry).
+	go build -o bin/agentry ./cmd/agentry
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
@@ -265,12 +265,12 @@ docker-build-egress-sidecar: ## Build the egress-sidecar image (egress-sidecar:l
 	$(CONTAINER_TOOL) build -t egress-sidecar:latest -f Dockerfile.egress-sidecar .
 
 # REPLAY_TAG is the version the replay-serve image is tagged AND stamped with. It must match the
-# CLI's devVersion (cmd/agent-engine) so `dev --replay`'s /replay/version parity check passes; the
+# CLI's devVersion (cmd/agentry) so `dev --replay`'s /replay/version parity check passes; the
 # default "m78-smoke" agrees with the CLI's built-in default out of the box (ADR 0071 §3a).
 REPLAY_TAG ?= m78-smoke
 .PHONY: docker-build-replay
-docker-build-replay: ## Build the replay-serve image (agent-engine-replay:$(REPLAY_TAG)) from Dockerfile.replay (ADR 0071 §3a).
-	$(CONTAINER_TOOL) build --build-arg REPLAY_VERSION=$(REPLAY_TAG) -t agent-engine-replay:$(REPLAY_TAG) -f Dockerfile.replay .
+docker-build-replay: ## Build the replay-serve image (agentry-replay:$(REPLAY_TAG)) from Dockerfile.replay (ADR 0071 §3a).
+	$(CONTAINER_TOOL) build --build-arg REPLAY_VERSION=$(REPLAY_TAG) -t agentry-replay:$(REPLAY_TAG) -f Dockerfile.replay .
 
 .PHONY: docker-build-token-service
 docker-build-token-service: ## Build the token-service image (token-service:latest) from Dockerfile.token-service (ADR 0030 §1 central service).
@@ -339,10 +339,10 @@ PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
-	- $(CONTAINER_TOOL) buildx create --name agent-engine-builder
-	$(CONTAINER_TOOL) buildx use agent-engine-builder
+	- $(CONTAINER_TOOL) buildx create --name agentry-builder
+	$(CONTAINER_TOOL) buildx use agentry-builder
 	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
-	- $(CONTAINER_TOOL) buildx rm agent-engine-builder
+	- $(CONTAINER_TOOL) buildx rm agentry-builder
 	rm Dockerfile.cross
 
 .PHONY: build-installer
@@ -379,7 +379,7 @@ undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.
 	# won't remove it — delete it explicitly so a dev cluster doesn't accumulate an orphaned fail-closed webhook.
 	-"$(KUBECTL)" delete validatingwebhookconfiguration tenant-label-validator --ignore-not-found
 
-##@ Helm chart (deploy/helm/agent-engine — GENERATED from config/, m12.2)
+##@ Helm chart (deploy/helm/agentry — GENERATED from config/, m12.2)
 
 # The Helm chart's control-plane + CRD templates are GENERATED from
 # `kustomize build config/default` — NEVER hand-maintained — so `helm install`
@@ -387,7 +387,7 @@ undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.
 # `helm-verify` fails if the committed chart drifts from config/ OR if
 # `helm template` (default values) stops matching `kustomize build config/default`.
 HELM ?= helm
-HELM_CHART ?= deploy/helm/agent-engine
+HELM_CHART ?= deploy/helm/agentry
 
 .PHONY: helm-generate
 helm-generate: manifests kustomize ## Regenerate the Helm chart templates from config/default. Run after any config/ change.
@@ -410,7 +410,7 @@ helm-verify: manifests kustomize ## Prove the Helm chart does not drift from `ku
 	done; \
 	echo ">> checking helm template (default values) == kustomize build config/default"; \
 	"$(KUSTOMIZE)" build config/default > "$$tmp/kustomize.yaml"; \
-	"$(HELM)" template agent-engine "$(HELM_CHART)" > "$$tmp/helm.yaml"; \
+	"$(HELM)" template agentry "$(HELM_CHART)" > "$$tmp/helm.yaml"; \
 	python3 ./hack/helm_nodrift_diff.py "$$tmp/kustomize.yaml" "$$tmp/helm.yaml"
 
 .PHONY: helm-lint

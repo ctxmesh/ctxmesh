@@ -21,7 +21,7 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 
-	v1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	v1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
 )
 
 // +kubebuilder:object:root=true

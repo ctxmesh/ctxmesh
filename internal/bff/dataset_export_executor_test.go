@@ -32,9 +32,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
-	"github.com/ctxmesh/agent-engine/internal/run"
+	"github.com/ctxmesh/agentry/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane/dataset"
+	"github.com/ctxmesh/agentry/internal/run"
 )
 
 // ── A FAKE LANGFUSE server (httptest) ───────────────────────────────────────────────────────────────────────

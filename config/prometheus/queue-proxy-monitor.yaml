@@ -26,7 +26,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
   labels:
-    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/name: agentry
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/component: knative-queue-proxy-metrics
   name: knative-queue-proxy
