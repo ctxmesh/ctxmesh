@@ -13,6 +13,46 @@ There are three ways to work with it:
 - **The `ctxmesh` Python SDK** — author a code-first agent against the in-pod platform plane
   (memory / tools / model / feedback / tracing).
 
+## Install on a cluster (Helm)
+
+agentry ships as a Helm chart in [`deploy/helm/agentry`](deploy/helm/agentry). It installs the
+control plane — controller-manager + CRDs, the LiteLLM model gateway, RBAC personas
+(`agentry-{operator,developer,viewer}`), the operator UI + Go BFF, and (for dev/trial) a bundled
+data plane (Valkey + MinIO).
+
+**Prerequisites.** A Kubernetes cluster (≥ 1.29) with **Knative Serving + Eventing** and **KEDA**
+already installed — the controller reconciles their CRDs and agents won't come up without them
+(agentry does *not* bundle them) — plus Helm 3.
+
+```sh
+# from a clone of this repo — a dev/trial install (bundled Valkey + MinIO, single replica)
+helm install agentry ./deploy/helm/agentry --namespace agentry --create-namespace
+```
+
+Wait for it to come up, then open the console:
+
+```sh
+kubectl -n agentry rollout status deploy/agentry-controller-manager
+kubectl -n agentry port-forward svc/agentry-bff 9090:9090   # → http://localhost:9090/
+```
+
+**Use your own images.** The chart defaults to the `:latest` tags built by `make docker-build-*`
+(side-loaded into a kind cluster). For a real cluster, push the images to a registry and override
+the repository + tag:
+
+```sh
+helm install agentry ./deploy/helm/agentry -n agentry --create-namespace \
+  --set controllerManager.image.repository=ghcr.io/my-org/agentry-controller \
+  --set controllerManager.image.tag=v0.1.0
+  # …likewise bff.image.* and gateway.image.* (see values.yaml)
+```
+
+**Production.** Add `--set profile=production` to make the HA invariants hard — multiple replicas +
+leader election, PodDisruptionBudgets, an external data plane (not the bundled Valkey/MinIO), and
+signed images. See [`values-production.yaml`](deploy/helm/agentry/values-production.yaml).
+
+Uninstall with `helm uninstall agentry -n agentry`.
+
 ## The console
 
 The console (a React app served by the operator's BFF) is the golden path: **connect a provider →
