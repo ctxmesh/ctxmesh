@@ -234,8 +234,7 @@ export function AgentRegistriesPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Agent Registries</h2>
           <p className="text-sm text-muted-foreground">
-            AgentRegistry CRDs — groups AgentDeployments with roles and member
-            selectors. The filter is windowed to the loaded page.
+            Registries group your agents and decide who may join a team.
           </p>
         </div>
         {canCreate && (

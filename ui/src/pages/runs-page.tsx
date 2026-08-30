@@ -523,9 +523,7 @@ export function RunsPage() {
       <div>
         <h2 className="text-2xl font-semibold tracking-tight">Runs</h2>
         <p className="text-sm text-muted-foreground">
-          Global run history — all traces across all agents. The text filter is
-          windowed to the loaded page; use the agent + date filters to narrow
-          server-side.
+          Every run across your agents — click one to open its trace.
         </p>
       </div>
 

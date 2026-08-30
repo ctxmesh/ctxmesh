@@ -308,8 +308,7 @@ export function AgentsPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Agents</h2>
           <p className="text-sm text-muted-foreground">
-            Your agents, RBAC-scoped to what you can see. The filter is windowed
-            to the loaded page.
+            Every agent you can see, with its live serving status.
           </p>
         </div>
         {/* New agent is a page action, not a nav item (m25 S8): the primary
