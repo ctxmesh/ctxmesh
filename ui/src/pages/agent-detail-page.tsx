@@ -4,9 +4,11 @@ import {
   Activity,
   AlertTriangle,
   Boxes,
+  Check,
   ChevronRight,
   ExternalLink,
   GitFork,
+  Minus,
   Pencil,
   Play,
   Plus,
@@ -1242,6 +1244,8 @@ function OverviewTab({
           <p className="mb-3 text-sm font-medium">Bindings</p>
           <BindingsList bindings={detail.bindings} />
         </div>
+
+        <PromotionPipeline detail={detail} />
 
         <ImprovementLoopSection
           ns={detail.namespace}
@@ -3313,6 +3317,136 @@ type OnlineScoreLoad =
   | { kind: "ready"; data: OnlineScoreResponse }
   | { kind: "unavailable" }  // 501 — store not configured
   | { kind: "error"; message: string };
+
+// ── Promotion pipeline (M144.7) ──────────────────────────────────────────────
+// An at-a-glance lifecycle strip: Draft → Evaluated → Approved → Serving, derived
+// from the agent's REAL spec-vs-status (isDraft, gate projection, ready, url) —
+// never fabricated. When no EvalSuite is wired the Evaluated/Approved stages read
+// honestly as "not gated" (skipped), so a simple agent shows Draft → Serving.
+type StageState = "done" | "current" | "pending" | "skipped" | "failed";
+
+function promotionStages(
+  detail: AgentDetailResponse,
+): { label: string; state: StageState; note?: string }[] {
+  const gate = detail.gate;
+  const gated = gate != null;
+  const gp = (gate?.phase ?? "").toLowerCase();
+  // "scored" = the gate has a scored revision or has moved past scoring.
+  const scored =
+    Boolean(gate?.scoredRevision) || ["promoted", "canary", "passed", "scored"].includes(gp);
+
+  const draft: StageState = detail.isDraft ? "current" : "done";
+
+  let evaluated: StageState;
+  let evalNote: string | undefined;
+  if (detail.isDraft) evaluated = "pending";
+  else if (!gated) {
+    evaluated = "skipped";
+    evalNote = "no eval suite";
+  } else if (gp === "failed") evaluated = "failed";
+  else if (scored) evaluated = "done";
+  else {
+    evaluated = "current";
+    evalNote = "scoring";
+  }
+
+  let approved: StageState;
+  let apprNote: string | undefined;
+  if (detail.isDraft) approved = "pending";
+  else if (!gated) {
+    approved = "skipped";
+    apprNote = "no gate";
+  } else if (gp === "promoted") approved = "done";
+  else if (gp === "canary") {
+    approved = "current";
+    apprNote = "canary";
+  } else if (evaluated === "done") {
+    approved = "current";
+    apprNote = "awaiting promotion";
+  } else approved = "pending";
+
+  let serving: StageState;
+  if (detail.ready && detail.url) serving = "done";
+  else if (detail.isDraft) serving = "pending";
+  else serving = "current";
+
+  return [
+    { label: "Draft", state: draft },
+    { label: "Evaluated", state: evaluated, note: evalNote },
+    { label: "Approved", state: approved, note: apprNote },
+    { label: "Serving", state: serving },
+  ];
+}
+
+function StageDot({ state }: { state: StageState }) {
+  const base = "flex h-6 w-6 items-center justify-center rounded-full border text-[10px]";
+  if (state === "done")
+    return (
+      <span className={`${base} border-transparent bg-success text-success-foreground`}>
+        <Check className="h-3.5 w-3.5" />
+      </span>
+    );
+  if (state === "current")
+    return (
+      <span className={`${base} border-info bg-info/15 text-info`}>
+        <span className="h-2 w-2 rounded-full bg-info" />
+      </span>
+    );
+  if (state === "failed")
+    return (
+      <span className={`${base} border-transparent bg-destructive text-destructive-foreground`}>
+        <X className="h-3.5 w-3.5" />
+      </span>
+    );
+  if (state === "skipped")
+    return (
+      <span className={`${base} border-dashed border-border text-muted-foreground`}>
+        <Minus className="h-3 w-3" />
+      </span>
+    );
+  return <span className={`${base} border-border text-muted-foreground`}>•</span>;
+}
+
+function PromotionPipeline({ detail }: { detail: AgentDetailResponse }) {
+  const stages = promotionStages(detail);
+  const labelClass = (s: StageState) =>
+    s === "done"
+      ? "text-foreground"
+      : s === "current"
+        ? "text-info"
+        : s === "failed"
+          ? "text-destructive"
+          : "text-muted-foreground";
+  return (
+    <div className="rounded-lg border bg-card p-5 shadow-card" data-testid="promotion-pipeline">
+      <div className="mb-4 flex items-center gap-2">
+        <Server className="h-4 w-4 text-muted-foreground" />
+        <p className="text-sm font-medium">Promotion</p>
+      </div>
+      <ol className="flex items-start">
+        {stages.map((s, i) => (
+          <React.Fragment key={s.label}>
+            {i > 0 && (
+              <div
+                className={`mt-3 h-px flex-1 ${
+                  stages[i - 1].state === "done" ? "bg-success" : "bg-border"
+                }`}
+              />
+            )}
+            <li
+              className="flex flex-col items-center gap-1 px-2 text-center"
+              data-testid={`promotion-stage-${s.label.toLowerCase()}`}
+            >
+              <StageDot state={s.state} />
+              <span className={`text-xs font-medium ${labelClass(s.state)}`}>{s.label}</span>
+              {s.note && <span className="text-[10px] text-muted-foreground">{s.note}</span>}
+            </li>
+          </React.Fragment>
+        ))}
+      </ol>
+    </div>
+  );
+}
 
 function ImprovementLoopSection({
   ns,
