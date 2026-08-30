@@ -8198,6 +8198,35 @@ spec:
                   type: string
                 type: array
                 x-kubernetes-list-type: atomic
+              streaming:
+                description: |-
+                  streaming reports the EFFECTIVE streaming mode a guarded agent runs under (M139/K10, ADR 0086),
+                  computed by the SAME shared decision the launcher enforces with (no drift). Nil until first reconcile.
+                properties:
+                  effectiveMode:
+                    description: |-
+                      effectiveMode is "Streaming" (opted in AND stream-safe AND no blocking semanticJudge — span-
+                      suppression behind a hold-window) or "Buffered" (the default: not opted in, a semanticJudge is
+                      present, or an output detector is not stream-safe).
+                    enum:
+                    - Streaming
+                    - Buffered
+                    type: string
+                  reason:
+                    description: |-
+                      reason explains the effectiveMode — especially WHY a streaming opt-in was downgraded to Buffered (the
+                      disqualifying detector + construct, or a semanticJudge). Operator-visible.
+                    maxLength: 512
+                    type: string
+                  window:
+                    description: |-
+                      window is the rolling hold-window (runes) the streaming scanner requires — the max output-detector
+                      match length. 0 when Buffered or when there are no output detectors.
+                    format: int32
+                    type: integer
+                required:
+                - effectiveMode
+                type: object
             type: object
         type: object
     served: true

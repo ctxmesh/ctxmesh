@@ -250,6 +250,31 @@ type GuardrailPolicyStatus struct {
 	// observedGeneration is the .metadata.generation that was last fully reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// streaming reports the EFFECTIVE streaming mode a guarded agent runs under (M139/K10, ADR 0086),
+	// computed by the SAME shared decision the launcher enforces with (no drift). Nil until first reconcile.
+	// +optional
+	Streaming *StreamingStatus `json:"streaming,omitempty"`
+}
+
+// StreamingStatus is the reported streaming decision for a GuardrailPolicy (M139/K10, ADR 0086).
+type StreamingStatus struct {
+	// effectiveMode is "Streaming" (opted in AND stream-safe AND no blocking semanticJudge — span-
+	// suppression behind a hold-window) or "Buffered" (the default: not opted in, a semanticJudge is
+	// present, or an output detector is not stream-safe).
+	// +kubebuilder:validation:Enum=Streaming;Buffered
+	EffectiveMode string `json:"effectiveMode"`
+
+	// window is the rolling hold-window (runes) the streaming scanner requires — the max output-detector
+	// match length. 0 when Buffered or when there are no output detectors.
+	// +optional
+	Window int32 `json:"window,omitempty"`
+
+	// reason explains the effectiveMode — especially WHY a streaming opt-in was downgraded to Buffered (the
+	// disqualifying detector + construct, or a semanticJudge). Operator-visible.
+	// +optional
+	// +kubebuilder:validation:MaxLength=512
+	Reason string `json:"reason,omitempty"`
 }
 
 // +kubebuilder:object:root=true

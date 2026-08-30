@@ -846,6 +846,13 @@ export interface GuardrailPolicySummary {
   policyHash?: string;
   // referencingAgents mirrors status.referencingAgents — blast-radius agents.
   referencingAgents: string[];
+  // streamingMode mirrors status.streaming.effectiveMode ("Streaming" | "Buffered") — the mode a guarded
+  // agent actually runs under (M139/K10, ADR 0086). Absent until first reconcile.
+  streamingMode?: string;
+  // streamingWindow is status.streaming.window (runes) — the hold-window when streaming.
+  streamingWindow?: number;
+  // streamingReason explains the mode — esp. why a streaming opt-in was downgraded to Buffered.
+  streamingReason?: string;
 }
 
 export interface GuardrailPolicyListResponse {

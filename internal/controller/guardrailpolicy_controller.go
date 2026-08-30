@@ -30,6 +30,7 @@ import (
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	"github.com/ctxmesh/agent-engine/internal/guardrail"
 )
 
 // GuardrailPolicy status condition types (M66, ADR 0059 §8). Validated=True when every
@@ -96,10 +97,47 @@ func (r *GuardrailPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// the load-bearing status; the referencer list is informational.
 	refs := r.referencingAgents(ctx, &policy)
 
-	if err := r.setStatus(ctx, &policy, status, reason, message, hash, refs); err != nil {
+	// Compute the EFFECTIVE streaming mode via the SHARED decision (M139/K10, ADR 0086) — the same code the
+	// launcher enforces with, so status.streaming can never disagree with runtime behavior (no drift).
+	streaming := guardrailStreamingStatus(&policy.Spec)
+
+	if err := r.setStatus(ctx, &policy, status, reason, message, hash, refs, streaming); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+// guardrailStreamingStatus computes GuardrailPolicy.status.streaming from the spec using the shared
+// guardrail decision (M139/K10, ADR 0086). It builds the OUTPUT detectors and applies the SAME
+// opted-in/judge/stream-safe rule the launcher's evalStreamEligibility applies. A non-compiling detector
+// (already flagged Invalid on the Validated condition) reports Buffered here rather than erroring.
+func guardrailStreamingStatus(spec *agentsv1beta1.GuardrailPolicySpec) *agentsv1beta1.StreamingStatus {
+	rules, err := guardrail.OutputDetectorRules(spec)
+	if err != nil {
+		return &agentsv1beta1.StreamingStatus{
+			EffectiveMode: guardrail.EffectiveBuffered,
+			Reason:        "policy has an invalid output detector — see the Validated condition",
+		}
+	}
+	res := guardrail.DecideStreaming(guardrail.StreamingInput{
+		OptedIn:      guardrail.StreamingOptedIn(spec.Streaming),
+		JudgePresent: guardrail.SemanticJudgeActive(spec.SemanticJudge),
+		OutputRules:  rules,
+	})
+	return &agentsv1beta1.StreamingStatus{
+		EffectiveMode: res.EffectiveMode,
+		Window:        int32(res.Window),
+		Reason:        res.Reason,
+	}
+}
+
+// streamingStatusEqual reports whether two StreamingStatus values are equivalent (nil-safe) — the
+// change-guard so a steady-state reconcile does not thrash the status.
+func streamingStatusEqual(a, b *agentsv1beta1.StreamingStatus) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.EffectiveMode == b.EffectiveMode && a.Window == b.Window && a.Reason == b.Reason
 }
 
 // referencingAgents lists (best-effort) the names of AgentDeployments in the policy's
@@ -132,6 +170,7 @@ func (r *GuardrailPolicyReconciler) setStatus(
 	status metav1.ConditionStatus,
 	reason, message, hash string,
 	refs []string,
+	streaming *agentsv1beta1.StreamingStatus,
 ) error {
 	condChanged := apimeta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
 		Type:               conditionGuardrailValidated,
@@ -143,12 +182,14 @@ func (r *GuardrailPolicyReconciler) setStatus(
 	hashChanged := policy.Status.PolicyHash != hash
 	refsChanged := !slices.Equal(policy.Status.ReferencingAgents, refs)
 	genChanged := policy.Status.ObservedGeneration != policy.Generation
-	if !condChanged && !hashChanged && !refsChanged && !genChanged {
+	streamingChanged := !streamingStatusEqual(policy.Status.Streaming, streaming)
+	if !condChanged && !hashChanged && !refsChanged && !genChanged && !streamingChanged {
 		return nil
 	}
 	policy.Status.PolicyHash = hash
 	policy.Status.ReferencingAgents = refs
 	policy.Status.ObservedGeneration = policy.Generation
+	policy.Status.Streaming = streaming
 	if err := r.Status().Update(ctx, policy); err != nil {
 		return fmt.Errorf("updating GuardrailPolicy status: %w", err)
 	}
