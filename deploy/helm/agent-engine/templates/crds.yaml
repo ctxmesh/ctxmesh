@@ -516,6 +516,57 @@ spec:
                   deferred and the agent falls back to promote-all/hold. Shadow rollout is rejected
                   (double side-effects) and auto-progression is deferred.
                 properties:
+                  autoProgress:
+                    description: |-
+                      autoProgress optionally enables OPT-IN automatic canary PROGRESSION (M139/N4, ADR 0113): a healthy
+                      candidate (RegressionDetected=False — an evidence-backed non-inferiority verdict with a per-window
+                      sample floor) auto-advances through a step schedule and auto-promotes at 100%, instead of holding at
+                      canaryPercent for a human. Absent (the default) ⇒ hold-for-human, byte-for-byte unchanged. Fail-safe:
+                      an Unknown verdict (dev without cpDB / sparse data) HOLDS, one step per reconcile (never fast-forward),
+                      and a human promote/abort always wins. Only consulted when strategy == "canary".
+                    properties:
+                      dwellSeconds:
+                        default: 3600
+                        description: |-
+                          dwellSeconds is the minimum soak per step before an advance is considered (M139/N4). Default 3600 —
+                          one aggregate window, so each step sees fresh online-score evidence; a shorter dwell would advance
+                          multiple steps on one window's data.
+                        format: int32
+                        minimum: 60
+                        type: integer
+                      enabled:
+                        default: false
+                        description: enabled, when true, arms auto-advance + auto-promote
+                          on a healthy online-score verdict. Default false.
+                        type: boolean
+                      steps:
+                        description: |-
+                          steps is the percent ladder the canary auto-advances through (intended ascending, each > canaryPercent).
+                          A step element is a STRUCT so future per-step knobs are additive. Default [{percent: 100}] ⇒ soak at
+                          canaryPercent then auto-promote. A schedule MAY top out below 100 (machine advances that far, then holds
+                          for a human) — a useful safety dial. Ordering is NOT enforced by admission (a strict-ascending CEL on a
+                          list-of-structs is fragile and a malformed rule breaks the whole CRD); the controller treats steps as a
+                          SET — the next rung is the minimum percent strictly greater than the current one — so a mis-ordered
+                          schedule is harmless (monotone, never regresses traffic), just cosmetically odd.
+                        items:
+                          description: |-
+                            CanaryStep is one rung of the auto-progression ladder (ADR 0113). A struct (not a bare percent) so
+                            per-step knobs (dwell, min-samples) are future non-breaking adds.
+                          properties:
+                            percent:
+                              description: percent is the candidate-arm traffic percent
+                                at this rung (> canaryPercent, ≤ 100).
+                              format: int32
+                              maximum: 100
+                              minimum: 2
+                              type: integer
+                          required:
+                          - percent
+                          type: object
+                        maxItems: 10
+                        type: array
+                        x-kubernetes-list-type: atomic
+                    type: object
                   autoRollback:
                     description: |-
                       autoRollback optionally enables OPT-IN automatic rollback to the last-healthy
@@ -974,11 +1025,13 @@ spec:
                 properties:
                   frozenUntilAck:
                     description: |-
-                      frozenUntilAck, when true, freezes further AUTO-actions on this deployment
-                      until a human acknowledges (ADR 0062 Fork 4 damping (d)). In v1 (human-only
-                      rollback) it is DEFINED and HONORED but never set — no auto-path exists to set
-                      it (the auto-rollback trigger is deferred, PRD §17.4). A future auto-action sets
-                      it; a human rollback is always permitted regardless (a human ack IS the human).
+                      frozenUntilAck, when true, freezes further actions on this deployment until a human
+                      acknowledges (ADR 0062 Fork 4 damping (d)) — the anti-runaway guard. An auto-action
+                      (auto-rollback) SETS it; the human ACKS by CLEARING it (agents.ctxmesh.ai/rollback-ack),
+                      which then permits the next action. NOTE: while frozen, `rollbackGuards` refuses ALL
+                      rollbacks including a human-driven one — the human must clear the freeze first, THEN roll
+                      back (the ack is the human's deliberate resume). Auto-progression (ADR 0113) RESPECTS this
+                      freeze (holds) but never SETS it (forward motion is already bounded).
                     type: boolean
                   history:
                     description: |-
@@ -1028,6 +1081,36 @@ spec:
                       rolledBackTo is the AgentVersion the serving spec was last reverted to by a
                       human rollback. Empty until the first successful rollback.
                     maxLength: 253
+                    type: string
+                type: object
+              rollout:
+                description: |-
+                  rollout reports the auto-progression actuator state (M139/N4, ADR 0113). Nil when
+                  autoProgress is off / no canary. Keyed by candidateRevision (a new candidate resets
+                  progression) + currentPercent (the live step, not an index — survives spec edits).
+                properties:
+                  candidateRevision:
+                    description: |-
+                      candidateRevision pins this progression to a specific candidate Knative revision. When it no longer
+                      matches the current candidate (a new push mid-canary), the controller resets progression to step 0.
+                    maxLength: 253
+                    type: string
+                  currentPercent:
+                    description: |-
+                      currentPercent is the candidate-arm traffic percent auto-progression has advanced to. 0/absent ⇒
+                      spec.canaryPercent (the implicit step 0). The controller converges the ksvc split to this level.
+                    format: int32
+                    type: integer
+                  lastAdvanceAt:
+                    description: lastAdvanceAt is when the controller last advanced
+                      a step (or opened the canary) — the dwell clock.
+                    format: date-time
+                    type: string
+                  reason:
+                    description: |-
+                      reason is the most recent auto-progression outcome for operator visibility (e.g. Advanced,
+                      AutoProgressHeld, InsufficientData, Frozen, AutoPromoted).
+                    maxLength: 256
                     type: string
                 type: object
               url:
@@ -1534,6 +1617,57 @@ spec:
                   deferred and the agent falls back to promote-all/hold. Shadow rollout is rejected
                   (double side-effects) and auto-progression is deferred.
                 properties:
+                  autoProgress:
+                    description: |-
+                      autoProgress optionally enables OPT-IN automatic canary PROGRESSION (M139/N4, ADR 0113): a healthy
+                      candidate (RegressionDetected=False — an evidence-backed non-inferiority verdict with a per-window
+                      sample floor) auto-advances through a step schedule and auto-promotes at 100%, instead of holding at
+                      canaryPercent for a human. Absent (the default) ⇒ hold-for-human, byte-for-byte unchanged. Fail-safe:
+                      an Unknown verdict (dev without cpDB / sparse data) HOLDS, one step per reconcile (never fast-forward),
+                      and a human promote/abort always wins. Only consulted when strategy == "canary".
+                    properties:
+                      dwellSeconds:
+                        default: 3600
+                        description: |-
+                          dwellSeconds is the minimum soak per step before an advance is considered (M139/N4). Default 3600 —
+                          one aggregate window, so each step sees fresh online-score evidence; a shorter dwell would advance
+                          multiple steps on one window's data.
+                        format: int32
+                        minimum: 60
+                        type: integer
+                      enabled:
+                        default: false
+                        description: enabled, when true, arms auto-advance + auto-promote
+                          on a healthy online-score verdict. Default false.
+                        type: boolean
+                      steps:
+                        description: |-
+                          steps is the percent ladder the canary auto-advances through (intended ascending, each > canaryPercent).
+                          A step element is a STRUCT so future per-step knobs are additive. Default [{percent: 100}] ⇒ soak at
+                          canaryPercent then auto-promote. A schedule MAY top out below 100 (machine advances that far, then holds
+                          for a human) — a useful safety dial. Ordering is NOT enforced by admission (a strict-ascending CEL on a
+                          list-of-structs is fragile and a malformed rule breaks the whole CRD); the controller treats steps as a
+                          SET — the next rung is the minimum percent strictly greater than the current one — so a mis-ordered
+                          schedule is harmless (monotone, never regresses traffic), just cosmetically odd.
+                        items:
+                          description: |-
+                            CanaryStep is one rung of the auto-progression ladder (ADR 0113). A struct (not a bare percent) so
+                            per-step knobs (dwell, min-samples) are future non-breaking adds.
+                          properties:
+                            percent:
+                              description: percent is the candidate-arm traffic percent
+                                at this rung (> canaryPercent, ≤ 100).
+                              format: int32
+                              maximum: 100
+                              minimum: 2
+                              type: integer
+                          required:
+                          - percent
+                          type: object
+                        maxItems: 10
+                        type: array
+                        x-kubernetes-list-type: atomic
+                    type: object
                   autoRollback:
                     description: |-
                       autoRollback optionally enables OPT-IN automatic rollback to the last-healthy
@@ -1992,11 +2126,13 @@ spec:
                 properties:
                   frozenUntilAck:
                     description: |-
-                      frozenUntilAck, when true, freezes further AUTO-actions on this deployment
-                      until a human acknowledges (ADR 0062 Fork 4 damping (d)). In v1 (human-only
-                      rollback) it is DEFINED and HONORED but never set — no auto-path exists to set
-                      it (the auto-rollback trigger is deferred, PRD §17.4). A future auto-action sets
-                      it; a human rollback is always permitted regardless (a human ack IS the human).
+                      frozenUntilAck, when true, freezes further actions on this deployment until a human
+                      acknowledges (ADR 0062 Fork 4 damping (d)) — the anti-runaway guard. An auto-action
+                      (auto-rollback) SETS it; the human ACKS by CLEARING it (agents.ctxmesh.ai/rollback-ack),
+                      which then permits the next action. NOTE: while frozen, `rollbackGuards` refuses ALL
+                      rollbacks including a human-driven one — the human must clear the freeze first, THEN roll
+                      back (the ack is the human's deliberate resume). Auto-progression (ADR 0113) RESPECTS this
+                      freeze (holds) but never SETS it (forward motion is already bounded).
                     type: boolean
                   history:
                     description: |-
@@ -2046,6 +2182,36 @@ spec:
                       rolledBackTo is the AgentVersion the serving spec was last reverted to by a
                       human rollback. Empty until the first successful rollback.
                     maxLength: 253
+                    type: string
+                type: object
+              rollout:
+                description: |-
+                  rollout reports the auto-progression actuator state (M139/N4, ADR 0113). Nil when
+                  autoProgress is off / no canary. Keyed by candidateRevision (a new candidate resets
+                  progression) + currentPercent (the live step, not an index — survives spec edits).
+                properties:
+                  candidateRevision:
+                    description: |-
+                      candidateRevision pins this progression to a specific candidate Knative revision. When it no longer
+                      matches the current candidate (a new push mid-canary), the controller resets progression to step 0.
+                    maxLength: 253
+                    type: string
+                  currentPercent:
+                    description: |-
+                      currentPercent is the candidate-arm traffic percent auto-progression has advanced to. 0/absent ⇒
+                      spec.canaryPercent (the implicit step 0). The controller converges the ksvc split to this level.
+                    format: int32
+                    type: integer
+                  lastAdvanceAt:
+                    description: lastAdvanceAt is when the controller last advanced
+                      a step (or opened the canary) — the dwell clock.
+                    format: date-time
+                    type: string
+                  reason:
+                    description: |-
+                      reason is the most recent auto-progression outcome for operator visibility (e.g. Advanced,
+                      AutoProgressHeld, InsufficientData, Frozen, AutoPromoted).
+                    maxLength: 256
                     type: string
                 type: object
               url:
@@ -3830,6 +3996,57 @@ spec:
                       deferred and the agent falls back to promote-all/hold. Shadow rollout is rejected
                       (double side-effects) and auto-progression is deferred.
                     properties:
+                      autoProgress:
+                        description: |-
+                          autoProgress optionally enables OPT-IN automatic canary PROGRESSION (M139/N4, ADR 0113): a healthy
+                          candidate (RegressionDetected=False — an evidence-backed non-inferiority verdict with a per-window
+                          sample floor) auto-advances through a step schedule and auto-promotes at 100%, instead of holding at
+                          canaryPercent for a human. Absent (the default) ⇒ hold-for-human, byte-for-byte unchanged. Fail-safe:
+                          an Unknown verdict (dev without cpDB / sparse data) HOLDS, one step per reconcile (never fast-forward),
+                          and a human promote/abort always wins. Only consulted when strategy == "canary".
+                        properties:
+                          dwellSeconds:
+                            default: 3600
+                            description: |-
+                              dwellSeconds is the minimum soak per step before an advance is considered (M139/N4). Default 3600 —
+                              one aggregate window, so each step sees fresh online-score evidence; a shorter dwell would advance
+                              multiple steps on one window's data.
+                            format: int32
+                            minimum: 60
+                            type: integer
+                          enabled:
+                            default: false
+                            description: enabled, when true, arms auto-advance + auto-promote
+                              on a healthy online-score verdict. Default false.
+                            type: boolean
+                          steps:
+                            description: |-
+                              steps is the percent ladder the canary auto-advances through (intended ascending, each > canaryPercent).
+                              A step element is a STRUCT so future per-step knobs are additive. Default [{percent: 100}] ⇒ soak at
+                              canaryPercent then auto-promote. A schedule MAY top out below 100 (machine advances that far, then holds
+                              for a human) — a useful safety dial. Ordering is NOT enforced by admission (a strict-ascending CEL on a
+                              list-of-structs is fragile and a malformed rule breaks the whole CRD); the controller treats steps as a
+                              SET — the next rung is the minimum percent strictly greater than the current one — so a mis-ordered
+                              schedule is harmless (monotone, never regresses traffic), just cosmetically odd.
+                            items:
+                              description: |-
+                                CanaryStep is one rung of the auto-progression ladder (ADR 0113). A struct (not a bare percent) so
+                                per-step knobs (dwell, min-samples) are future non-breaking adds.
+                              properties:
+                                percent:
+                                  description: percent is the candidate-arm traffic
+                                    percent at this rung (> canaryPercent, ≤ 100).
+                                  format: int32
+                                  maximum: 100
+                                  minimum: 2
+                                  type: integer
+                              required:
+                              - percent
+                              type: object
+                            maxItems: 10
+                            type: array
+                            x-kubernetes-list-type: atomic
+                        type: object
                       autoRollback:
                         description: |-
                           autoRollback optionally enables OPT-IN automatic rollback to the last-healthy
@@ -4635,6 +4852,57 @@ spec:
                       deferred and the agent falls back to promote-all/hold. Shadow rollout is rejected
                       (double side-effects) and auto-progression is deferred.
                     properties:
+                      autoProgress:
+                        description: |-
+                          autoProgress optionally enables OPT-IN automatic canary PROGRESSION (M139/N4, ADR 0113): a healthy
+                          candidate (RegressionDetected=False — an evidence-backed non-inferiority verdict with a per-window
+                          sample floor) auto-advances through a step schedule and auto-promotes at 100%, instead of holding at
+                          canaryPercent for a human. Absent (the default) ⇒ hold-for-human, byte-for-byte unchanged. Fail-safe:
+                          an Unknown verdict (dev without cpDB / sparse data) HOLDS, one step per reconcile (never fast-forward),
+                          and a human promote/abort always wins. Only consulted when strategy == "canary".
+                        properties:
+                          dwellSeconds:
+                            default: 3600
+                            description: |-
+                              dwellSeconds is the minimum soak per step before an advance is considered (M139/N4). Default 3600 —
+                              one aggregate window, so each step sees fresh online-score evidence; a shorter dwell would advance
+                              multiple steps on one window's data.
+                            format: int32
+                            minimum: 60
+                            type: integer
+                          enabled:
+                            default: false
+                            description: enabled, when true, arms auto-advance + auto-promote
+                              on a healthy online-score verdict. Default false.
+                            type: boolean
+                          steps:
+                            description: |-
+                              steps is the percent ladder the canary auto-advances through (intended ascending, each > canaryPercent).
+                              A step element is a STRUCT so future per-step knobs are additive. Default [{percent: 100}] ⇒ soak at
+                              canaryPercent then auto-promote. A schedule MAY top out below 100 (machine advances that far, then holds
+                              for a human) — a useful safety dial. Ordering is NOT enforced by admission (a strict-ascending CEL on a
+                              list-of-structs is fragile and a malformed rule breaks the whole CRD); the controller treats steps as a
+                              SET — the next rung is the minimum percent strictly greater than the current one — so a mis-ordered
+                              schedule is harmless (monotone, never regresses traffic), just cosmetically odd.
+                            items:
+                              description: |-
+                                CanaryStep is one rung of the auto-progression ladder (ADR 0113). A struct (not a bare percent) so
+                                per-step knobs (dwell, min-samples) are future non-breaking adds.
+                              properties:
+                                percent:
+                                  description: percent is the candidate-arm traffic
+                                    percent at this rung (> canaryPercent, ≤ 100).
+                                  format: int32
+                                  maximum: 100
+                                  minimum: 2
+                                  type: integer
+                              required:
+                              - percent
+                              type: object
+                            maxItems: 10
+                            type: array
+                            x-kubernetes-list-type: atomic
+                        type: object
                       autoRollback:
                         description: |-
                           autoRollback optionally enables OPT-IN automatic rollback to the last-healthy
@@ -5304,14 +5572,11 @@ spec:
     listKind: ApprovalPolicyList
     plural: approvalpolicies
     shortNames:
-    - ap
+    - apr
     singular: approvalpolicy
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.requireApprovalForAllTools
-      name: AllTools
-      type: boolean
     - jsonPath: .status.conditions[?(@.type=='Validated')].status
       name: Validated
       type: string
@@ -5428,7 +5693,7 @@ spec:
               conditions:
                 description: |-
                   conditions reflect reconciliation: Validated=True when the spec is coherent; Invalid=True (Validated
-                  False) when it is not (e.g. requireApprovalForAllTools with a non-empty requireApprovalForTools).
+                  False) when it is not (e.g. a rule that sets neither tools nor allTools, so it gates nothing).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

@@ -86,7 +86,7 @@ type ApprovalPolicySpec struct {
 // ApprovalPolicyStatus is the observed state, populated by the ApprovalPolicyReconciler (validate-only).
 type ApprovalPolicyStatus struct {
 	// conditions reflect reconciliation: Validated=True when the spec is coherent; Invalid=True (Validated
-	// False) when it is not (e.g. requireApprovalForAllTools with a non-empty requireApprovalForTools).
+	// False) when it is not (e.g. a rule that sets neither tools nor allTools, so it gates nothing).
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -96,8 +96,7 @@ type ApprovalPolicyStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=ap,categories={agents}
-// +kubebuilder:printcolumn:name="AllTools",type="boolean",JSONPath=".spec.requireApprovalForAllTools"
+// +kubebuilder:resource:scope=Namespaced,shortName=apr,categories={agents}
 // +kubebuilder:printcolumn:name="Validated",type="string",JSONPath=".status.conditions[?(@.type=='Validated')].status"
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=approvalpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=approvalpolicies/status,verbs=get;update;patch

@@ -14,14 +14,11 @@ spec:
     listKind: ApprovalPolicyList
     plural: approvalpolicies
     shortNames:
-    - ap
+    - apr
     singular: approvalpolicy
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.requireApprovalForAllTools
-      name: AllTools
-      type: boolean
     - jsonPath: .status.conditions[?(@.type=='Validated')].status
       name: Validated
       type: string
@@ -138,7 +135,7 @@ spec:
               conditions:
                 description: |-
                   conditions reflect reconciliation: Validated=True when the spec is coherent; Invalid=True (Validated
-                  False) when it is not (e.g. requireApprovalForAllTools with a non-empty requireApprovalForTools).
+                  False) when it is not (e.g. a rule that sets neither tools nor allTools, so it gates nothing).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
