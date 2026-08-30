@@ -52,6 +52,10 @@ type Server struct {
 	// KNOWLEDGE_RERANK != "true" ⇒ retrieval returns the store's fusion order unchanged. An
 	// ENHANCEMENT over retrieval: a rerank failure falls back to the store order.
 	reranker Reranker
+	// LLM query-rewriter (M140.3), optional — enabled via WithRewriter. nil OR
+	// KNOWLEDGE_QUERY_REWRITE != "true" ⇒ the raw query is used unchanged. An ENHANCEMENT: a
+	// rewrite failure falls back to the original query.
+	rewriter QueryRewriter
 }
 
 // NewServer builds a Server over the given (single, shared) resolver.

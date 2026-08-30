@@ -225,6 +225,14 @@ func run(log logr.Logger) error {
 			tsServer.WithReranker(credplane.NewHTTPReranker(rerankURL, nil))
 			log.Info("cross-encoder rerank wired (M140.2, ADR 0117): rerank service reachable", "reranker", rerankURL)
 		}
+
+		// LLM query-rewrite (M140.3): an OPTIONAL retrieval-quality stage over the same gateway as the embedder.
+		// Wired when a rewrite model is set; only ACTIVATES per request when KNOWLEDGE_QUERY_REWRITE="true".
+		// Fail-open: a rewrite failure falls back to the raw query.
+		if rewriteModel := strings.TrimSpace(os.Getenv("KNOWLEDGE_REWRITE_MODEL")); rewriteModel != "" {
+			tsServer.WithRewriter(credplane.NewGatewayRewriter(gwURL, os.Getenv("MODEL_GATEWAY_KEY"), rewriteModel, nil))
+			log.Info("LLM query-rewrite wired (M140.3): gateway rewriter reachable", "model", rewriteModel)
+		}
 	}
 	handler := tsServer.Handler()
 	listenAddr := envOr("TOKEN_SERVICE_LISTEN_ADDR", defaultListenAddr)
