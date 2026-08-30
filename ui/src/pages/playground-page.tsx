@@ -659,7 +659,7 @@ export function PlaygroundPage() {
                   className="flex items-center gap-2 text-sm text-muted-foreground"
                   data-testid="trace-building"
                 >
-                  <span className="h-2 w-2 animate-pulse rounded-full bg-info" />
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-info motion-reduce:animate-none" />
                   Building trace…{run.step ? ` — ${run.step}` : ""}
                 </div>
               ) : run.kind === "done" ? (
