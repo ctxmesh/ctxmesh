@@ -36,11 +36,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/alertstore"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
-	"github.com/ctxmesh/agent-engine/internal/promql"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	"github.com/ctxmesh/agentry/internal/controlplane/alertstore"
+	"github.com/ctxmesh/agentry/internal/controlplane/costrollup"
+	"github.com/ctxmesh/agentry/internal/promql"
 )
 
 // fakeAlertStore is a minimal in-memory alertstore.Store for the evaluator tests: it records appended

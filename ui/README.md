@@ -1,6 +1,6 @@
-# agent-engine UI
+# agentry UI
 
-A Vite + React + TypeScript single-page app (SPA) for the agent-engine control
+A Vite + React + TypeScript single-page app (SPA) for the agentry control
 plane. It compiles to **static assets** (`dist/`) served by the Go BFF — there
 is **no Node runtime** in production; Node is a build-time-only dependency.
 

@@ -24,7 +24,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/ctxmesh/agent-engine/internal/expand"
+	"github.com/ctxmesh/agentry/internal/expand"
 )
 
 // maxAgentYAMLBytes bounds the request body the config-builder submits. An
@@ -36,7 +36,7 @@ const maxAgentYAMLBytes = 1 << 20 // 1 MiB
 // body is the simplified agent.yaml the form produced; the response is the
 // expanded CRD manifest(s) as plain YAML the SPA renders as a read-only preview.
 // The mapping is the SAME internal/expand core the CLI uses (via the adapter), so
-// the preview is byte-identical to `agent-engine expand`. A bad agent.yaml is a
+// the preview is byte-identical to `agentry expand`. A bad agent.yaml is a
 // client error (400 with the validation message) — never a 500 and never a
 // silent success.
 func (s *Server) handleExpand(w http.ResponseWriter, r *http.Request) {

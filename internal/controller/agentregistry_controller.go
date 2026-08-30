@@ -39,7 +39,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
 )
 
 const (
@@ -112,21 +112,21 @@ const (
 
 	// agentEngineSystemNamespace hosts the platform backends the agent pod's
 	// launcher reaches on the model/memory/object-store/proxy paths:
-	//   - the LiteLLM model gateway (agent-engine-gateway :4000) — MODEL_GATEWAY_URL;
+	//   - the LiteLLM model gateway (agentry-gateway :4000) — MODEL_GATEWAY_URL;
 	//     breaking it breaks every LLM call.
-	//   - the Valkey state layer (agent-engine-statelayer :6379) —
+	//   - the Valkey state layer (agentry-statelayer :6379) —
 	//     MEMORY_BACKEND_ADDR; the PROXY-LESS (pre-cutover) memory + async-dedupe path.
-	//   - the MinIO object store (agent-engine-objectstore :9000) —
+	//   - the MinIO object store (agentry-objectstore :9000) —
 	//     OBJECT_STORE_ADDR; breaking it breaks m7.6b blob offload.
-	//   - the state-layer proxy (agent-engine-statelayer-proxy :8080) — the m53.7
+	//   - the state-layer proxy (agentry-statelayer-proxy :8080) — the m53.7
 	//     cutover DEFAULT for memory + quota + async-dedup (STATELAYER_PROXY_URL); with
 	//     no direct-Valkey fallback, omitting it makes a registry member's quota
 	//     fail-closed (402 on every LLM call) + dedup NACK-loop + memory silently lost.
-	//   - the token-service (agent-engine-token-service :8443) — long-term-memory OBO
+	//   - the token-service (agentry-token-service :8443) — long-term-memory OBO
 	//     (ADR 0045); omitting it breaks per-user long-term memory for members.
 	// All live in this one namespace, so a single namespace-scoped egress peer
 	// (restricted to these ports) covers them.
-	agentEngineSystemNamespace = "agent-engine-system"
+	agentEngineSystemNamespace = "agentry"
 	modelGatewayPort           = 4000
 	memoryBackendPort          = 6379
 	objectStorePort            = 9000
@@ -340,7 +340,7 @@ func (r *AgentRegistryReconciler) resolveMembers(
 //     resolution dies and every other peer becomes unreachable by name;
 //   - collector→Langfuse (langfuse-web :3000 in the langfuse namespace) — the
 //     OTLP export is egress from the agent pod; THE M6.4 LANDMINE, must stay open;
-//   - model gateway / memory backend / object store (agent-engine-system :4000 /
+//   - model gateway / memory backend / object store (agentry :4000 /
 //     :6379 / :9000) — the launcher's LLM, M5 memory, and blob-offload paths;
 //   - intra-registry A2A (pods carrying the same registry-id label) AND the
 //     Knative data plane (activator in knative-serving, kourier ingress in
@@ -454,7 +454,7 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 					},
 				},
 				{
-					// Platform backends in agent-engine-system: the LiteLLM model
+					// Platform backends in agentry: the LiteLLM model
 					// gateway (:4000), the MinIO object store (:9000), the state-layer
 					// PROXY (:8080, the m53.7 cutover default for memory/quota/dedup/
 					// spawn), the token-service (:8443, long-term memory OBO), and the

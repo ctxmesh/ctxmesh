@@ -26,7 +26,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
-	"github.com/ctxmesh/agent-engine/internal/credresolve"
+	"github.com/ctxmesh/agentry/internal/credresolve"
 )
 
 // refreshSkew refreshes a token slightly before expiry, so a resolve never hands back a

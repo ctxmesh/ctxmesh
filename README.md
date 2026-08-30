@@ -1,6 +1,6 @@
-# agent-engine
+# agentry
 
-agent-engine is a Kubernetes operator for deploying and operating LLM agents. It is built with
+agentry is a Kubernetes operator for deploying and operating LLM agents. It is built with
 [Kubebuilder](https://book.kubebuilder.io/) and manages the full lifecycle of agent workloads —
 from a short agent description to a running, observable, tool-using agent on a cluster.
 
@@ -8,8 +8,8 @@ There are three ways to work with it:
 
 - **The web console** — connect a model provider, describe an agent, run it, and inspect its
   traces from a browser (the primary surface for most users).
-- **The `agent-engine` CLI** — expand a simplified `agent.yaml` into CRDs and apply it, or run an
-  agent locally with `agent-engine dev`.
+- **The `agentry` CLI** — expand a simplified `agent.yaml` into CRDs and apply it, or run an
+  agent locally with `agentry dev`.
 - **The `ctxmesh` Python SDK** — author a code-first agent against the in-pod platform plane
   (memory / tools / model / feedback / tracing).
 
@@ -20,17 +20,17 @@ describe an agent → run it → follow the trace**, plus fleet CRUD, tenants, c
 management. Run it locally with no cluster:
 
 ```sh
-agent-engine dev --ui        # serves the console + a local agent runtime (no cluster, no login)
+agentry dev --ui        # serves the console + a local agent runtime (no cluster, no login)
 ```
 
 ## CLI
 
-The `agent-engine` CLI converts a simplified agent description into CRD manifests.
+The `agentry` CLI converts a simplified agent description into CRD manifests.
 
 ```sh
-make build-cli                                            # build bin/agent-engine
-bin/agent-engine expand agent.yaml                        # → AgentDeployment (+ related CRDs) on stdout
-bin/agent-engine expand agent.yaml | kubectl apply -f -   # apply directly
+make build-cli                                            # build bin/agentry
+bin/agentry expand agent.yaml                        # → AgentDeployment (+ related CRDs) on stdout
+bin/agentry expand agent.yaml | kubectl apply -f -   # apply directly
 ```
 
 **agent.yaml** — a **managed** agent needs no image or code; its behaviour is its configuration
@@ -74,13 +74,13 @@ logic; `ctxmesh.testing` lets you exercise it offline with no cluster. See the
 
 Runnable agents live in [`examples/`](examples): `echo-agent` (minimal), `sdk-custom-agent` (a
 no-framework loop using the SDK's tracing helpers), `langchain-agent`, `batch-agent`, and
-`mcp-echo-server` (a tool server). Most run locally via `agent-engine dev -f examples/<name>/agent.yaml`.
+`mcp-echo-server` (a tool server). Most run locally via `agentry dev -f examples/<name>/agent.yaml`.
 
 ## Development
 
 ```sh
 make build                 # compile the operator binary
-make build-cli             # compile the agent-engine CLI (bin/agent-engine)
+make build-cli             # compile the agentry CLI (bin/agentry)
 make test                  # go unit + envtest, the Python SDK tests, and the UI tests
 make lint                  # go + python + ui linters
 make run                   # run the operator locally against the current kubeconfig context

@@ -10,9 +10,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
+	"github.com/ctxmesh/agentry/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane/authz"
+	"github.com/ctxmesh/agentry/internal/controlplane/promptversion"
 )
 
 // pvRetireServer builds a Server with the store wired — PromptVersion is Postgres-only (ADR 0044), so

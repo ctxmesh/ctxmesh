@@ -34,7 +34,7 @@ const (
 	// LabelManagedBy / ManagedByGrant mark a Secret as an OBO per-user grant so a
 	// grant lookup or revoke never touches a shared register-flow credential.
 	LabelManagedBy = "app.kubernetes.io/managed-by"
-	ManagedByGrant = "agent-engine-mcp-grant"
+	ManagedByGrant = "agentry-mcp-grant"
 
 	// LabelGrantUser holds the HASHED invoking-user identity (UserHash) — a lookup
 	// key, never PII, never a token. Two grants for the same server differ ONLY here.

@@ -32,10 +32,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	sigsyaml "sigs.k8s.io/yaml"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
-	"github.com/ctxmesh/agent-engine/internal/expand"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/controlplane/promptversion"
+	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/agentry/internal/expand"
 )
 
 // consoleFieldManager is the server-side-apply field-owner the console edit path
@@ -44,7 +44,7 @@ import (
 // console owns only the spec fields it manages. Applying under this owner with
 // client.Apply + ForceOwnership means the console never PUT-clobbers controller-
 // owned state — it only co-owns the fields it sends.
-const consoleFieldManager = "agent-engine-console"
+const consoleFieldManager = "agentry-console"
 
 // envModelRoute / envSystemPrompt are the two container env vars the simplified
 // spec models (see internal/expand): model.route → MODEL_ROUTE, systemPrompt →

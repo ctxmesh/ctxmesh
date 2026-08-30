@@ -64,31 +64,31 @@ func newMetrics(queued queuedCounter) *Metrics {
 	m := &Metrics{
 		registry: reg,
 		runDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name: "agentengine_run_duration_seconds",
+			Name: "agentry_run_duration_seconds",
 			Help: "Durable run wall-clock execution time (claim to terminal), by outcome.",
 			// Agent runs span sub-second (cached/mock) to multi-minute (multi-step tool loops);
 			// these buckets give useful p50/p95/p99 across that range.
 			Buckets: []float64{0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600},
 		}, []string{"outcome"}),
 		runOutcomes: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "agentengine_run_outcomes_total",
+			Name: "agentry_run_outcomes_total",
 			Help: "Count of durable runs reaching a terminal state, by outcome (succeeded|failed|cancelled).",
 		}, []string{"outcome"}),
 		workerActive: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "agentengine_run_worker_active",
+			Name: "agentry_run_worker_active",
 			Help: "Number of live run-worker claim loops in this process (0 ⇒ the pool is dead).",
 		}),
 		sweepRescued: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "agentengine_run_sweep_rescued_total",
+			Name: "agentry_run_sweep_rescued_total",
 			Help: "Waiting runs re-queued by the no-stranded-waiter reconciler (a nonzero rate ⇒ a missed transactional wake).",
 		}),
 		checkpointBytes: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name:    "agentengine_supervisor_checkpoint_bytes",
+			Name:    "agentry_supervisor_checkpoint_bytes",
 			Help:    "Supervisor-loop checkpoint payload size at suspend (bytes).",
 			Buckets: []float64{1 << 10, 1 << 12, 1 << 14, 1 << 16, 1 << 18, 1 << 20, 4 << 20},
 		}),
 		checkpointRejects: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "agentengine_supervisor_checkpoint_rejects_total",
+			Name: "agentry_supervisor_checkpoint_rejects_total",
 			Help: "Suspends failed because the checkpoint payload exceeded the size cap (fail-closed).",
 		}),
 	}
@@ -124,7 +124,7 @@ func (m *Metrics) observeRun(outcome string, seconds float64) {
 
 // incWorkerActive / decWorkerActive track the live claim-loop count (dead-pool alert
 // input): each loop increments on entry and decrements on exit, so a drained OR crashed
-// loop drops the gauge — `agentengine_run_worker_active == 0` (with the process still up)
+// loop drops the gauge — `agentry_run_worker_active == 0` (with the process still up)
 // means the pool is dead.
 func (m *Metrics) incWorkerActive() {
 	if m == nil {
@@ -182,7 +182,7 @@ type queuedCounter interface {
 	CountQueued() (int, error)
 }
 
-// queueDepthCollector reports agentengine_run_queue_depth by querying the store at
+// queueDepthCollector reports agentry_run_queue_depth by querying the store at
 // SCRAPE time (a prometheus.Collector), so it never drifts from reality and needs no
 // background poll. A store read error surfaces the metric's staleness honestly by
 // omitting the sample for that scrape (Prometheus marks it stale) rather than lying a 0.
@@ -195,7 +195,7 @@ func newQueueDepthCollector(q queuedCounter) *queueDepthCollector {
 	return &queueDepthCollector{
 		queued: q,
 		desc: prometheus.NewDesc(
-			"agentengine_run_queue_depth",
+			"agentry_run_queue_depth",
 			"Number of durable runs currently in the `queued` state (backlog awaiting a worker).",
 			nil, nil,
 		),

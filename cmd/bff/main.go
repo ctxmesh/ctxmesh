@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Command bff is the agent-engine Backend-for-Frontend: it serves the static
+// Command bff is the agentry Backend-for-Frontend: it serves the static
 // Vite SPA build and the /api surface (client-go reads of the agent CRDs) behind
 // the M11 control-plane auth. It reuses the controllers' client-go — the K8s
 // credentials stay in this process; the browser never receives them (ADR 0010).
@@ -46,31 +46,31 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
-	"github.com/ctxmesh/agent-engine/internal/bff"
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/alertstore"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/enduseragent"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/publishedartifact"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/sharedrun"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
-	"github.com/ctxmesh/agent-engine/internal/credplane"
-	"github.com/ctxmesh/agent-engine/internal/credresolve"
-	"github.com/ctxmesh/agent-engine/internal/dbpool"
-	"github.com/ctxmesh/agent-engine/internal/enduseroidc"
-	"github.com/ctxmesh/agent-engine/internal/objectstore"
-	"github.com/ctxmesh/agent-engine/internal/preflight"
-	"github.com/ctxmesh/agent-engine/internal/prompt"
-	runstore "github.com/ctxmesh/agent-engine/internal/run"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	"github.com/ctxmesh/agentry/internal/bff"
+	"github.com/ctxmesh/agentry/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/agentry/internal/controlplane/alertstore"
+	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
+	"github.com/ctxmesh/agentry/internal/controlplane/costrollup"
+	"github.com/ctxmesh/agentry/internal/controlplane/dataset"
+	"github.com/ctxmesh/agentry/internal/controlplane/enduseragent"
+	"github.com/ctxmesh/agentry/internal/controlplane/knowledge"
+	"github.com/ctxmesh/agentry/internal/controlplane/namespacetenant"
+	"github.com/ctxmesh/agentry/internal/controlplane/onlinescore"
+	"github.com/ctxmesh/agentry/internal/controlplane/promptversion"
+	"github.com/ctxmesh/agentry/internal/controlplane/publishedartifact"
+	"github.com/ctxmesh/agentry/internal/controlplane/sharedrun"
+	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/agentry/internal/credplane"
+	"github.com/ctxmesh/agentry/internal/credresolve"
+	"github.com/ctxmesh/agentry/internal/dbpool"
+	"github.com/ctxmesh/agentry/internal/enduseroidc"
+	"github.com/ctxmesh/agentry/internal/objectstore"
+	"github.com/ctxmesh/agentry/internal/preflight"
+	"github.com/ctxmesh/agentry/internal/prompt"
+	runstore "github.com/ctxmesh/agentry/internal/run"
 )
 
 func main() {

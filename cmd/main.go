@@ -54,26 +54,26 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
-	"github.com/ctxmesh/agent-engine/internal/audit"
-	"github.com/ctxmesh/agent-engine/internal/controller"
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/alertstore"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/enduseragent"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
-	"github.com/ctxmesh/agent-engine/internal/kedatypes"
-	"github.com/ctxmesh/agent-engine/internal/objectstore"
-	"github.com/ctxmesh/agent-engine/internal/pki"
-	"github.com/ctxmesh/agent-engine/internal/prompt"
-	"github.com/ctxmesh/agent-engine/internal/promql"
-	"github.com/ctxmesh/agent-engine/internal/run"
-	enginewebhook "github.com/ctxmesh/agent-engine/internal/webhook"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	"github.com/ctxmesh/agentry/internal/audit"
+	"github.com/ctxmesh/agentry/internal/controller"
+	"github.com/ctxmesh/agentry/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane/alertstore"
+	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
+	"github.com/ctxmesh/agentry/internal/controlplane/costrollup"
+	"github.com/ctxmesh/agentry/internal/controlplane/enduseragent"
+	"github.com/ctxmesh/agentry/internal/controlplane/knowledge"
+	"github.com/ctxmesh/agentry/internal/controlplane/namespacetenant"
+	"github.com/ctxmesh/agentry/internal/controlplane/onlinescore"
+	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/agentry/internal/kedatypes"
+	"github.com/ctxmesh/agentry/internal/objectstore"
+	"github.com/ctxmesh/agentry/internal/pki"
+	"github.com/ctxmesh/agentry/internal/prompt"
+	"github.com/ctxmesh/agentry/internal/promql"
+	"github.com/ctxmesh/agentry/internal/run"
+	enginewebhook "github.com/ctxmesh/agentry/internal/webhook"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -143,14 +143,14 @@ const envValueTrue = "true"
 // VWC clientConfig target), and the default local cert dir the controller-runtime webhook
 // server reads (certwatcher hot-reload). These are GA-frozen wire contract (ADR 0102 §Consequences).
 //
-// Both the Secret and Service names are the config/default namePrefix (`agent-engine-`) DEPLOYED forms:
+// Both the Secret and Service names are the config/default namePrefix (`agentry-`) DEPLOYED forms:
 // their manifests are named `webhook-server-cert` / `webhook-service` (pre-prefix) so kustomize renders
 // them to exactly these constants, keeping the shipped resource, the runtime VWC clientConfig, and the
 // cert SAN in agreement (M134: the fresh-boot proof caught the Service constant left un-prefixed while
 // its manifest gets prefixed — an un-shipped contract mismatch, corrected before first ship).
 const (
-	webhookCertSecretName = "agent-engine-webhook-server-cert"
-	webhookServiceName    = "agent-engine-webhook-service"
+	webhookCertSecretName = "agentry-webhook-server-cert"
+	webhookServiceName    = "agentry-webhook-service"
 	defaultWebhookCertDir = "/tmp/k8s-webhook-server/serving-certs"
 )
 
@@ -172,7 +172,7 @@ func managerNamespace() string {
 			return ns
 		}
 	}
-	return "agent-engine-system"
+	return "agentry"
 }
 
 // selfControllerUsername asks the API server for the manager's OWN identity via SelfSubjectReview
@@ -802,8 +802,8 @@ func main() {
 			ServiceName:        webhookServiceName,
 			CertDir:            webhookCertPath,
 			SecretName:         webhookCertSecretName,
-			CAName:             "agent-engine-ca",
-			CAOrganization:     "agent-engine",
+			CAName:             "agentry-ca",
+			CAOrganization:     "agentry",
 			CADuration:         5 * 365 * 24 * time.Hour, // ADR 0102: CA ~5y
 			ServerCertDuration: 90 * 24 * time.Hour,      // ADR 0102: leaf ~90d, rotates ahead of expiry
 			// The rotator keeps this VWC's caBundle current on rotation (M128/Gate E, ADR 0102 — no cert-manager).

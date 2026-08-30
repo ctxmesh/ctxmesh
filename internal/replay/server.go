@@ -156,7 +156,7 @@ func (s *ReplaySession) Handler() http.Handler {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
 			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, "agent-engine replay-serve\n")
+			_, _ = io.WriteString(w, "agentry replay-serve\n")
 			return
 		}
 		http.NotFound(w, r)
@@ -290,7 +290,7 @@ func (s *ReplaySession) handleMCP(w http.ResponseWriter, r *http.Request) {
 		writeMCPResult(w, req.ID, map[string]any{
 			"protocolVersion": mcpProtocolVersion,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{nameKey: "agent-engine-replay", "version": "1"},
+			"serverInfo":      map[string]any{nameKey: "agentry-replay", "version": "1"},
 		})
 	case methodInitialized:
 		// A notification: ack with 202 and no body (mirrors the SDK/BFF handshake).
@@ -318,7 +318,7 @@ func (s *ReplaySession) recordedToolDescriptors() []map[string]any {
 		seen[t.ToolName] = true
 		out = append(out, map[string]any{
 			nameKey:       t.ToolName,
-			"description": "recorded tool replayed by agent-engine (fixture " + s.fixture.RunID + ")",
+			"description": "recorded tool replayed by agentry (fixture " + s.fixture.RunID + ")",
 			"inputSchema": map[string]any{"type": "object"},
 		})
 	}
@@ -443,7 +443,7 @@ type VersionInfo struct {
 }
 
 // Version is the CLI version this binary was built as. Overridable at build time via -ldflags
-// "-X github.com/ctxmesh/agent-engine/internal/replay.Version=<v>"; "dev" in an un-stamped build.
+// "-X github.com/ctxmesh/agentry/internal/replay.Version=<v>"; "dev" in an un-stamped build.
 // The value is echoed at /replay/version so dev --replay can assert image/CLI parity.
 var Version = "dev"
 

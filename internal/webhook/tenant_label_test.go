@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-const controllerSA = "system:serviceaccount:agent-engine-system:agent-engine-controller-manager"
+const controllerSA = "system:serviceaccount:agentry:agentry-controller-manager"
 
 func testValidator(t *testing.T) *TenantLabelValidator {
 	t.Helper()

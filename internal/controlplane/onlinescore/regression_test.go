@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
+	"github.com/ctxmesh/agentry/internal/controlplane/onlinescore"
 )
 
 // judgeAgg builds a window aggregate with a judge mean of `mean` over `n` samples.

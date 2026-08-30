@@ -39,7 +39,7 @@ import (
 // / usage views (ADR 0014 — generation is cost-tagged + honest, not hidden). Both
 // Anthropic and OpenAI echo a request `metadata` object into their usage/cost
 // analytics; tagging here is the visible, provider-side cost marker.
-const generationCostTag = "agent-engine/create-from-prompt"
+const generationCostTag = "agentry/create-from-prompt"
 
 // maxGenerationTokens bounds the model's completion. A simplified agent.yaml is
 // small; this cap keeps the generation call cheap and its cost predictable.

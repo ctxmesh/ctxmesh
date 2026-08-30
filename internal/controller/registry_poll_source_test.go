@@ -25,7 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
 )
 
 // drainEvents non-blockingly reads every queued GenericEvent and returns each

@@ -44,7 +44,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/ctxmesh/agent-engine/internal/guardrail"
+	"github.com/ctxmesh/agentry/internal/guardrail"
 	"github.com/fsnotify/fsnotify"
 )
 

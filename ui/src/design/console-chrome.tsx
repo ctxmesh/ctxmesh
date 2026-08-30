@@ -61,7 +61,7 @@ export function ConsoleChrome({
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-brand-2 text-primary-foreground shadow-sm">
             <Boxes className="h-5 w-5" />
           </div>
-          <span className="text-sm font-semibold tracking-tight">agent-engine</span>
+          <span className="text-sm font-semibold tracking-tight">agentry</span>
           {devMode && (
             <Badge variant="warning" className="ml-auto text-[9px]">
               dev

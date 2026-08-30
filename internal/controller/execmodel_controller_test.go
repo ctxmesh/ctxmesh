@@ -33,8 +33,8 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/telemetry"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/telemetry"
 )
 
 // createExecAgent creates an AgentDeployment with the given execution model and
@@ -258,7 +258,7 @@ func TestExecModel_Eventing_MemoryProxy_PerAgentSA(t *testing.T) {
 		name       = "eventing-mem-proxy-agent"
 		namespace  = "default"
 		registryID = "evt-mem-reg"
-		proxyURL   = "http://agent-engine-statelayer-proxy.agent-engine-system.svc:8080"
+		proxyURL   = "http://agentry-statelayer-proxy.agentry.svc:8080"
 	)
 	createRegistry(t, "evt-mem-registry", namespace, registryID, "registry", registryID)
 	createExecAgent(t, name, namespace, "eventing", map[string]string{"registry": registryID})
@@ -385,7 +385,7 @@ func TestExecModel_Job_MemoryProxy_PerAgentSA(t *testing.T) {
 	const (
 		namespace = "default"
 		name      = "job-mem-proxy-agent"
-		proxyURL  = "http://agent-engine-statelayer-proxy.agent-engine-system.svc:8080"
+		proxyURL  = "http://agentry-statelayer-proxy.agentry.svc:8080"
 	)
 	createExecAgent(t, name, namespace, "job", nil)
 	setAgentSessionMemory(t, namespace, name, "session", "")

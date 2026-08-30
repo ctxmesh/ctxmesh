@@ -27,9 +27,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/run"
-	"github.com/ctxmesh/agent-engine/internal/runcap"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/run"
+	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 // maxInvokeRequestBytes bounds the Playground input body. A run's input is a
@@ -236,7 +236,7 @@ func (s *Server) mintRunCapability(username, ns, agent, boundary, runID string) 
 	return token, true
 }
 
-// handleDevInvoke serves POST /api/invoke under `agent-engine dev --ui` (ADR 0021).
+// handleDevInvoke serves POST /api/invoke under `agentry dev --ui` (ADR 0021).
 // There is no cluster to resolve an endpoint from, so the run targets the SINGLE local
 // Compose agent at the fixed devInvokeEndpoint; the request's agent/namespace are
 // ignored (the dev loop runs exactly one agent). The trace-id hand-off and the honest

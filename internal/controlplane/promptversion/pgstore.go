@@ -26,7 +26,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane"
 )
 
 // pgUniqueViolation is the Postgres SQLSTATE for a unique-constraint violation.

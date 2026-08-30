@@ -27,7 +27,7 @@ function LoginCard({ error }: { error?: boolean }) {
           <Boxes className="h-6 w-6" />
         </div>
         <h1 className="text-xl font-semibold tracking-snug">
-          Sign in to agent-engine
+          Sign in to agentry
         </h1>
         <p className="mt-1 text-sm text-muted-foreground">
           Paste a Kubernetes bearer token. It's held for this session only and
@@ -209,7 +209,7 @@ export function DashboardWireframe() {
             <EmptyState
               icon={PlugZap}
               title="Connect a provider to get started"
-              description="agent-engine needs a model provider (Anthropic, OpenAI, …) before you can create an agent. Paste a key once — we create the Secret, binding, and route for you."
+              description="agentry needs a model provider (Anthropic, OpenAI, …) before you can create an agent. Paste a key once — we create the Secret, binding, and route for you."
               action={{ label: "Connect a provider", icon: PlugZap }}
               secondaryAction={{ label: "What is a provider?" }}
             />

@@ -26,7 +26,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver
 
-	"github.com/ctxmesh/agent-engine/internal/credresolve"
+	"github.com/ctxmesh/agentry/internal/credresolve"
 )
 
 // openTestStore connects to the Postgres named by CREDPOSTGRES_TEST_DSN and returns a fresh

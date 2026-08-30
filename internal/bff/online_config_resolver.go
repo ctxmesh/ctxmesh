@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
+	"github.com/ctxmesh/agentry/internal/controlplane/onlinescore"
 )
 
 // onlineConfigReader is the narrow slice of the online-score store the resolver reads: the per-(namespace,

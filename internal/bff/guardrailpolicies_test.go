@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
 )
 
 func mkGuardrailPolicy(name string, piiEnabled, judgeEnabled, userRateLimited, validated bool, failMode string, denylistCount int, referencingAgents []string) *agentsv1beta1.GuardrailPolicy {

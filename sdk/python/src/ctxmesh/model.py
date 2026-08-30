@@ -331,7 +331,7 @@ class ModelClient:
         # bearer token; the launcher injects the master key in-pod. When absent
         # (offline/mock gateway) we send a harmless placeholder — the mock gateway
         # ignores it — rather than omit the header the real gateway requires.
-        key = self._config.model_gateway_key or "sk-agent-engine"
+        key = self._config.model_gateway_key or "sk-agentry"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {key}",

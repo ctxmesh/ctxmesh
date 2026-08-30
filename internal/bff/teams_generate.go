@@ -27,8 +27,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	sigsyaml "sigs.k8s.io/yaml"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
 )
 
 // This file implements POST /api/teams/generate — the team composition endpoint
@@ -40,7 +40,7 @@ import (
 
 // teamGenCostTag is the provider cost marker for team-generate calls (analogous to
 // generationCostTag for agent-generate): distinguishable spend in provider analytics.
-const teamGenCostTag = "agent-engine/team-generate"
+const teamGenCostTag = "agentry/team-generate"
 
 // teamGenInvalidMsg is the client-safe headline for a 422 team-generate response.
 const teamGenInvalidMsg = "the generated team spec was not valid — regenerate to try again"
@@ -49,7 +49,7 @@ const teamGenInvalidMsg = "the generated team spec was not valid — regenerate 
 // spec from the provided eligible agents. It is explicit about allowed fields and
 // the referential constraint so the output validates; unknown fields or non-listed
 // agentRefs fail decode/validation → regenerate.
-const teamGenerationSystemPrompt = `You are a team composition tool for the agent-engine platform.
+const teamGenerationSystemPrompt = `You are a team composition tool for the agentry platform.
 Compose an AgentTeam from the EXISTING agents listed below.
 
 Output ONLY the AgentTeam YAML — no prose, no explanation, no markdown code fences.

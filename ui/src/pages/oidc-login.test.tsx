@@ -47,7 +47,7 @@ function stubFetch(
               ? {
                   oidcEnabled: true,
                   issuer: "https://dex.example.com",
-                  clientId: "agent-engine-console",
+                  clientId: "agentry-console",
                 }
               : { oidcEnabled: false },
         } as Response);
@@ -109,7 +109,7 @@ describe("LoginPage × SSO", () => {
   it("offers end-user login when the tenant has an end-user IdP, and starts that flow", async () => {
     stubFetch(false, {
       issuer: "https://dex-eu.example.com",
-      clientId: "agent-engine-enduser",
+      clientId: "agentry-enduser",
     });
     render(
       <MemoryRouter initialEntries={["/login"]}>

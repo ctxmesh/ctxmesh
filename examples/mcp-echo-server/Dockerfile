@@ -1,4 +1,4 @@
-# MCP echo server — standalone fixture image (does NOT use the agent-engine
+# MCP echo server — standalone fixture image (does NOT use the agentry
 # base image; this is a plain MCP server, not an instrumented agent).
 #
 # Build from repo root:

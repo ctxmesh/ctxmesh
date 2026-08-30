@@ -26,7 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane"
 )
 
 // TestPgStore_ListCatalog_RealPostgres exercises the pgstore ListCatalog SQL path against a live
@@ -61,7 +61,7 @@ func TestPgStore_ListCatalog_RealPostgres(t *testing.T) {
 	// excluded so the org-clause NON-member branch is exercised.
 	members := []string{callerNS, memberNS}
 
-	// mcp seeds a managed-by=agent-engine-mcp catalog row with the given visibility.
+	// mcp seeds a managed-by=agentry-mcp catalog row with the given visibility.
 	mcp := func(ns, name, visibility string) {
 		t.Helper()
 		_, err := s.Upsert(ctx, ToolRegistry{

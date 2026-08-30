@@ -1,0 +1,66 @@
+{{- /*
+Run-pipeline SLIs (M128/Gate E, ops maturity): a PodMonitor that scrapes the BFF +
+run-worker `metrics` port (:9092, the private exporter — internal/bff/metrics.go) and a
+PrometheusRule whose headline alert fires when the run-worker pool is dead.
+
+Opt-in (values: prometheus.runPipeline.enabled) because it requires the Prometheus
+Operator CRDs — an operator-enabled add-on that does NOT change the no-drift control-plane
+baseline (mirrors the ServiceMonitor / queue-proxy PodMonitor posture).
+*/ -}}
+{{- if .Values.prometheus.runPipeline.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: agentry-run-pipeline
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: agentry
+    app.kubernetes.io/managed-by: Helm
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Values.namespace }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentry
+  podMetricsEndpoints:
+    # Scrapes only pods that expose a port NAMED `metrics` (the BFF + run-worker) — the
+    # manager/token-service pods have no such port and are skipped.
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.prometheus.runPipeline.interval | default "30s" }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: agentry-run-pipeline
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: agentry
+    app.kubernetes.io/managed-by: Helm
+spec:
+  groups:
+    - name: agentry.run-pipeline
+      rules:
+        # The headline Gate-E alert: NO run-worker claim loop is live anywhere → the durable
+        # queue drains for nobody. `absent()` also catches the pool process being gone entirely
+        # (no series scraped), so a crash-looped OR scaled-to-zero-by-bug pool both fire.
+        - alert: AgentEngineRunWorkerPoolDead
+          expr: (sum(agentry_run_worker_active) == 0) or absent(agentry_run_worker_active)
+          for: {{ .Values.prometheus.runPipeline.deadPoolFor | default "5m" }}
+          labels:
+            severity: critical
+          annotations:
+            summary: "agentry run-worker pool is dead"
+            description: "No run-worker claim loop has been live for {{ .Values.prometheus.runPipeline.deadPoolFor | default "5m" }}; durable runs are not being executed. Check the run-worker Deployment + its RUN_STORE_DSN."
+        # A secondary signal: the queued backlog is growing while the pool looks alive — workers
+        # are up but not keeping up (or wedged on a poison run). Warning, not critical.
+        - alert: AgentEngineRunQueueBacklogGrowing
+          expr: (agentry_run_queue_depth > 50) and (sum(agentry_run_worker_active) > 0)
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "agentry run queue backlog is growing"
+            description: "The durable run queue depth has exceeded 50 for 10m while workers are live — the pool is not keeping up. Consider scaling the run-worker Deployment (KEDA) or investigating a wedged run."
+{{- end }}

@@ -26,11 +26,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
-	"github.com/ctxmesh/agent-engine/internal/prompt"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane/authz"
+	"github.com/ctxmesh/agentry/internal/controlplane/promptversion"
+	"github.com/ctxmesh/agentry/internal/prompt"
 )
 
 // promptVersionKind is the "PromptVersion" kind label (for created-object responses).
@@ -392,7 +392,7 @@ func (s *Server) handleCreatePromptVersion(w http.ResponseWriter, r *http.Reques
 // --- PUT /api/promptversions/{ns}/{name} ------------------------------------
 
 // handleUpdatePromptVersion serves PUT /api/promptversions/{ns}/{name} — edits a
-// PromptVersion via SSA under the "agent-engine-console" field-manager (ForceOwnership).
+// PromptVersion via SSA under the "agentry-console" field-manager (ForceOwnership).
 // The controller's status conditions are NEVER clobbered (SSA spec-only apply).
 //
 // Rename guard: spec name in the body ≠ URL {name} → 400.

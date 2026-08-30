@@ -25,7 +25,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ctxmesh/agent-engine/internal/run"
+	"github.com/ctxmesh/agentry/internal/run"
 )
 
 // Worker-pool defaults (m32.2, ADR 0034). The lease bounds how long a claimed run may run before a

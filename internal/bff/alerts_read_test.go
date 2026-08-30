@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane/alertstore"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agentry/internal/controlplane/alertstore"
+	"github.com/ctxmesh/agentry/internal/controlplane/authz"
 )
 
 // newAlertsServer builds a caller-scoped BFF server with a fake alertstore.Store wired

@@ -33,8 +33,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
 )
 
 // The connect-a-provider handlers (ADR 0015). All three are CALLER-SCOPED
@@ -55,7 +55,7 @@ const (
 	// labelManagedBy marks an object as created by the connect flow.
 	labelManagedBy = "app.kubernetes.io/managed-by"
 	// managedByConnect is the value of labelManagedBy for connect-created objects.
-	managedByConnect = "agent-engine-connect"
+	managedByConnect = "agentry-connect"
 	// labelProvider records the LiteLLM provider prefix (for filtering/discovery).
 	labelProvider = "agents.ctxmesh.ai/provider"
 	// annDisplayName carries the human display name (an annotation, not a label,
@@ -438,7 +438,7 @@ func primaryModel(models []string) string {
 
 // handleListProviders serves GET /api/providers — the connected providers, read
 // through the CALLER-SCOPED client. It lists the connect-managed ModelRoutes
-// (labelled managed-by=agent-engine-connect) and projects each onto the flat
+// (labelled managed-by=agentry-connect) and projects each onto the flat
 // ProviderSummary — NO secret material, only the Secret NAME as a reference.
 // Providers is [] (not null) for the empty case; a Forbidden on the list surfaces
 // as 403, never a swallowed empty list.

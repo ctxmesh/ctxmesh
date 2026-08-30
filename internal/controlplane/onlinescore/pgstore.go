@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane"
 )
 
 // pgStore is the Postgres-backed Store. The schema (online_score_aggregates — migration 0008) is applied
