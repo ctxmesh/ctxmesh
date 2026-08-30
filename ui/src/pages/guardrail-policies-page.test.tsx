@@ -69,8 +69,8 @@ describe("GuardrailPoliciesPage (m66.10)", () => {
     expect(screen.getByText("pii-and-jailbreak")).toBeInTheDocument();
     // The validated policy shows a "Ready" badge (unified lexicon, M99 E1).
     expect(screen.getByText("Ready")).toBeInTheDocument();
-    // The invalid policy shows its reason.
-    expect(screen.getByText("InvalidPattern")).toBeInTheDocument();
+    // The invalid policy shows its reason, humanized (M144.1 status vocabulary).
+    expect(screen.getByText("Invalid pattern")).toBeInTheDocument();
     // Fail mode badges — closed is salient (success variant), open is warning (riskier posture).
     const closedBadge = screen.getByText("closed");
     expect(closedBadge).toBeInTheDocument();
