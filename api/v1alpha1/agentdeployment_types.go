@@ -329,6 +329,14 @@ type AgentDeploymentSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	GuardrailPolicyRef string `json:"guardrailPolicyRef,omitempty"`
 
+	// approvalPolicyRef optionally names an ApprovalPolicy (same namespace) that declaratively requires
+	// human approval for named tool calls (and optionally narrows who may approve) — M139, ADR 0111. The
+	// controller merges its require-approval requirements into this agent's effective tool policy
+	// (reusing the pause/resume/voucher runtime); a dangling ref sets a NotReady condition on the agent.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	ApprovalPolicyRef string `json:"approvalPolicyRef,omitempty"`
+
 	// rollout optionally selects a progressive-delivery strategy for a GATED serving
 	// agent (ADR 0062 Fork 3, M69). Absent (or strategy "") ⇒ today's promote-all/hold
 	// behavior, byte-for-byte unchanged — a no-rollout deployment's Knative Service is

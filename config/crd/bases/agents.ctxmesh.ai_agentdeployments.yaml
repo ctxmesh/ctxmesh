@@ -85,6 +85,14 @@ spec:
                 maxItems: 64
                 type: array
                 x-kubernetes-list-type: atomic
+              approvalPolicyRef:
+                description: |-
+                  approvalPolicyRef optionally names an ApprovalPolicy (same namespace) that declaratively requires
+                  human approval for named tool calls (and optionally narrows who may approve) — M139, ADR 0111. The
+                  controller merges its require-approval requirements into this agent's effective tool policy
+                  (reusing the pause/resume/voucher runtime); a dangling ref sets a NotReady condition on the agent.
+                maxLength: 253
+                type: string
               budget:
                 description: |-
                   budget optionally sets USD cost-governance caps for this agent (PRD §14).
@@ -1095,6 +1103,14 @@ spec:
                 maxItems: 64
                 type: array
                 x-kubernetes-list-type: atomic
+              approvalPolicyRef:
+                description: |-
+                  approvalPolicyRef optionally names an ApprovalPolicy (same namespace) that declaratively requires
+                  human approval for named tool calls (and optionally narrows who may approve) — M139, ADR 0111. The
+                  controller merges its require-approval requirements into this agent's effective tool policy
+                  (reusing the pause/resume/voucher runtime); a dangling ref sets a NotReady condition on the agent.
+                maxLength: 253
+                type: string
               budget:
                 description: |-
                   budget optionally sets USD cost-governance caps for this agent (PRD §14).

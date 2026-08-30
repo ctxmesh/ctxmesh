@@ -461,6 +461,13 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if ie, ok := asInPodRequireApprovalError(err); ok {
 		return r.setReadyFalse(ctx, &deploy, ie.reason, ie.msg)
 	}
+	// Declarative HITL FAIL-CLOSED (M139, ADR 0111 §3): a dangling approvalPolicyRef is surfaced from
+	// buildPodTemplate as an *approvalPolicyResolveError BEFORE any workload write — the agent is held
+	// NotReady rather than served without its declared approval gate. An ApprovalPolicy create fixes it
+	// (re-reconciles via the watch).
+	if ae, ok := asApprovalPolicyResolveError(err); ok {
+		return r.setReadyFalse(ctx, &deploy, ae.reason, ae.msg)
+	}
 	// SA name-collision (m79.1, m52 C11): an agent-<name> SA already owned by a
 	// DIFFERENT controller must fail LOUD, not wedge the reconcile in a hot-loop.
 	// Surface it as Ready=False IdentitySAConflict and STOP cleanly (nil error ⇒
@@ -1103,7 +1110,14 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// prompt-injected/custom loop just hits 127.0.0.1:<port> directly, around the sidecar). So a denied
 	// in-pod tool must simply NOT be deployed. resolveToolPolicy never fails on user input (the CRD
 	// enum bounds the shape); it only errors on a marshal bug.
-	tp, terr := resolveToolPolicy(deploy)
+	// Declarative HITL (M139, ADR 0111): resolve spec.approvalPolicyRef and MERGE its require-approval
+	// requirements into the effective tool policy (max-strictness). A dangling ref fails closed
+	// (approvalPolicyResolveError → Reconcile sets Ready=False) — never served without the declared gate.
+	approvalPolicy, aerr := resolveApprovalPolicy(ctx, r.Client, deploy)
+	if aerr != nil {
+		return podTemplate{}, aerr
+	}
+	tp, terr := resolveToolPolicy(deploy, approvalPolicy)
 	if terr != nil {
 		return podTemplate{}, terr
 	}
