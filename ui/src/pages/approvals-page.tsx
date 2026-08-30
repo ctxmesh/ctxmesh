@@ -40,9 +40,9 @@ export function ApprovalsPage() {
   const { namespace } = useNamespace();
   // Initialise from the current namespace so the first render already shows the right state — no
   // loading-skeleton flash before the "select a namespace" prompt when none is selected.
-  const [loadState, setLoadState] = useState<LoadState>(
-    namespace ? { kind: "loading" } : { kind: "no-namespace" },
-  );
+  // Always start loading — load() fetches whether a namespace is selected (that ns)
+  // or not (aggregates across all visible namespaces, M144.6). No dead-end state.
+  const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
   // refreshing drives the manual Refresh button's spinner. The manual refresh is SILENT (it does not blank
   // the table with a skeleton — matching the background poll); the spinner is the only feedback (V16 close-
   // gate UX finding: a non-silent manual refresh flashed a skeleton over already-visible rows).
@@ -56,13 +56,38 @@ export function ApprovalsPage() {
   const load = useCallback(
     (silent = false) => {
       abortRef.current?.abort();
-      // The queue is namespace-scoped and the backend REQUIRES a namespace (unlike the
-      // cluster-wide alerts feed). When none is selected (the default "all" scope), prompt
-      // the user to pick one rather than firing a request that 400s — a select-a-namespace
-      // state is the honest UX, not an error.
+      // The per-namespace backend REQUIRES a namespace (it 400s without one). When
+      // none is selected, DON'T dead-end on "select a namespace" (M144.6) — aggregate
+      // the queue across every namespace the caller can see, so the inbox shows all
+      // pending decisions at once (each row still carries its namespace).
       if (!namespace) {
-        setLoadState({ kind: "no-namespace" });
-        setRefreshing(false);
+        const allController = new AbortController();
+        abortRef.current = allController;
+        if (!silent) setLoadState({ kind: "loading" });
+        api
+          .namespaces(allController.signal)
+          .then(async (resp) => {
+            const items = (
+              await Promise.all(
+                resp.namespaces.map((n) =>
+                  api.listApprovals(n.name, allController.signal).catch(() => []),
+                ),
+              )
+            ).flat();
+            if (allController.signal.aborted) return;
+            setLoadState({ kind: "ready", items });
+          })
+          .catch((err: unknown) => {
+            if (allController.signal.aborted || silent) return;
+            setLoadState({
+              kind: "error",
+              message: err instanceof Error ? err.message : "request failed",
+              forbidden: err instanceof ApiError && err.isForbidden,
+            });
+          })
+          .finally(() => {
+            if (silent) setRefreshing(false);
+          });
         return;
       }
       const controller = new AbortController();

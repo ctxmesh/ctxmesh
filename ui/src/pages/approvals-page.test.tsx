@@ -237,15 +237,21 @@ describe("ApprovalsPage — namespace param (V5, M112)", () => {
     expect(captured[0]).toContain("namespace=team-a");
   });
 
-  it("prompts to select a namespace (and fires NO request) when none is selected", async () => {
-    nsRef.current = ""; // the default "all namespaces" scope — the backend requires a concrete one
-    const captured = installFetch(() => ({ ok: true, body: [] }));
+  it("aggregates the queue across all visible namespaces when none is selected (M144.6)", async () => {
+    nsRef.current = ""; // the default "all namespaces" scope
+    const captured = installFetch((qs) =>
+      qs.has("namespace")
+        ? { ok: true, body: [] }
+        : { ok: true, body: { namespaces: [{ name: "team-a" }, { name: "team-b" }] } },
+    );
 
     renderPage();
 
-    expect(await screen.findByText("Select a namespace")).toBeInTheDocument();
-    // No request is fired for the required-namespace endpoint (no 400 error surfaced).
-    expect(captured.length).toBe(0);
+    // It does NOT dead-end; it lists namespaces then fetches approvals for each.
+    await waitFor(() => expect(captured.some((u) => u.includes("/api/namespaces"))).toBe(true));
+    await waitFor(() => expect(captured.some((u) => u.includes("namespace=team-a"))).toBe(true));
+    expect(captured.some((u) => u.includes("namespace=team-b"))).toBe(true);
+    expect(screen.queryByText("Select a namespace")).not.toBeInTheDocument();
   });
 });
 
@@ -265,14 +271,18 @@ describe("ApprovalsPage — manual refresh (V16, M115)", () => {
     expect(captured[1]).toContain("namespace=team-a");
   });
 
-  it("the Refresh button is disabled when no namespace is selected", async () => {
+  it("the Refresh button works in the all-namespaces view (M144.6 — no longer a dead-end)", async () => {
     nsRef.current = "";
-    installFetch(() => ({ ok: true, body: [] }));
+    const captured = installFetch((qs) =>
+      qs.has("namespace")
+        ? { ok: true, body: [] }
+        : { ok: true, body: { namespaces: [{ name: "team-a" }] } },
+    );
 
     renderPage();
 
-    await screen.findByText("Select a namespace");
-    expect(screen.getByTestId("approvals-refresh")).toBeDisabled();
+    await waitFor(() => expect(captured.some((u) => u.includes("namespace=team-a"))).toBe(true));
+    expect(screen.getByTestId("approvals-refresh")).not.toBeDisabled();
   });
 
   // The manual refresh is SILENT: it must NOT blank the table with a skeleton (the close-gate UX finding).
