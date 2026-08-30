@@ -31,7 +31,7 @@ type FeedbackState =
 // attributedSourceLabel renders the CRD-declared feedback source (M139, ADR 0112) as a friendly label:
 // "human" → "Human", "external:<channel>" → "External · <channel>", "unattributed" → "Unattributed".
 // Returns null when the agent binds no FeedbackStore (no attribution to show).
-export function attributedSourceLabel(s: string | undefined): string | null {
+function attributedSourceLabel(s: string | undefined): string | null {
   if (!s) return null;
   if (s === "human") return "Human";
   if (s === "unattributed") return "Unattributed";
