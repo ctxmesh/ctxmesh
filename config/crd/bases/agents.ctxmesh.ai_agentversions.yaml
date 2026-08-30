@@ -126,6 +126,15 @@ spec:
                         minimum: 1
                         type: integer
                     type: object
+                  capabilities:
+                    description: |-
+                      capabilities is a SHORT natural-language statement of what this agent can do — the basis for
+                      CAPABILITY-BASED semantic discovery (M141): an agent is found by what it does, not its DNS name. The
+                      control plane embeds this descriptor (via the offline embedder, ADR 0116) so a capability QUERY retrieves
+                      semantically discoverable (it stays reachable by name). Free-text, bounded; a structured skill taxonomy is
+                      a future addition (carded). Example: "Summarizes long documents and extracts action items."
+                    maxLength: 1024
+                    type: string
                   endUserAccess:
                     description: |-
                       endUserAccess opts THIS agent into being reachable by END-USERS via the standalone /chat runtime
@@ -990,6 +999,15 @@ spec:
                         minimum: 1
                         type: integer
                     type: object
+                  capabilities:
+                    description: |-
+                      capabilities is a SHORT natural-language statement of what this agent can do — the basis for
+                      CAPABILITY-BASED semantic discovery (M141): an agent is found by what it does, not its DNS name. The
+                      control plane embeds this descriptor (via the offline embedder, ADR 0116) so a capability QUERY retrieves
+                      semantically discoverable (it stays reachable by name). Free-text, bounded; a structured skill taxonomy is
+                      a future addition (carded). Example: "Summarizes long documents and extracts action items."
+                    maxLength: 1024
+                    type: string
                   endUserAccess:
                     description: |-
                       endUserAccess opts THIS agent into being reachable by END-USERS via the standalone /chat runtime
