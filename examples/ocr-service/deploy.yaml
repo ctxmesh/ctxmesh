@@ -1,0 +1,59 @@
+# ocr-service — the dev-cluster OCR backend for scanned-PDF ingestion (M140.5). The run-worker's ingestion
+# executor POSTs a scanned PDF here (raw body) and gets back its OCR'd text. Offline + self-hosted (tesseract +
+# poppler baked in): no external key, no paid API. Apply into the `agentry` namespace.
+#
+# Build first: `make docker-build-ocr-service` (tag dev.local/ocr-service:m140), then
+# `kind load docker-image dev.local/ocr-service:m140 --name agentry-dev`.
+#
+# Activation: set the run-worker/BFF INGEST_OCR_URL=http://ocr-service.agentry.svc:8080 (OCR is opt-in; when
+# unset the scanned-PDF behaviour is today's honest PartiallyIngested).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocr-service
+  namespace: agentry
+  labels:
+    app: ocr-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ocr-service
+  template:
+    metadata:
+      labels:
+        app: ocr-service
+    spec:
+      containers:
+        - name: ocr
+          image: dev.local/ocr-service:m140
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ocr-service
+  namespace: agentry
+spec:
+  selector:
+    app: ocr-service
+  ports:
+    - port: 8080
+      targetPort: 8080

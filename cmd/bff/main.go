@@ -68,6 +68,7 @@ import (
 	"github.com/ctxmesh/agentry/internal/dbpool"
 	"github.com/ctxmesh/agentry/internal/enduseroidc"
 	"github.com/ctxmesh/agentry/internal/objectstore"
+	"github.com/ctxmesh/agentry/internal/ocr"
 	"github.com/ctxmesh/agentry/internal/preflight"
 	"github.com/ctxmesh/agentry/internal/prompt"
 	runstore "github.com/ctxmesh/agentry/internal/run"
@@ -388,6 +389,15 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	knowledgeStore := knowledge.NewPostgresStore(cpDB)
 	ingestEmbedder := newIngestEmbedder(log)
 
+	// Scanned-PDF OCR (M140.5, ADR 0119): the executor OCRs an image-only PDF via this offline service when its
+	// born-digital text is insufficient. Wired from INGEST_OCR_URL; unset ⇒ nil ⇒ a scanned PDF stays honestly
+	// PartiallyIngested (strictly additive).
+	var ingestOCR ocr.OCR
+	if ocrURL := strings.TrimSpace(os.Getenv("INGEST_OCR_URL")); ocrURL != "" {
+		ingestOCR = ocr.NewHTTPOCR(ocrURL, nil)
+		log.Info("scanned-PDF OCR enabled (M140.5): OCR service wired", "ocr", ocrURL)
+	}
+
 	// Dataset store (M69, ADR 0062 Fork 1): rides the same cpDB (migration 0007 applied by controlplane.Migrate).
 	// The dataset-export executor (m69.2) writes it directly (governance #8: the trusted run-worker holds cpDB +
 	// Langfuse creds), copying M66-redacted, traceId-lineaged cases out of Langfuse. Paired with the Langfuse
@@ -430,6 +440,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		OnlineResolver:         onlineResolver,
 		RollupStore:            rollupStore,
 		Embedder:               ingestEmbedder,
+		OCR:                    ingestOCR,
 		ConvStore:              convStore,
 		PromptStore:            promptStore,
 		// Production git-pointer prompt resolver (m121.3, ADR 0008) — the drop-in for the

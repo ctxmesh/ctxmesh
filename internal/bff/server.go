@@ -47,6 +47,7 @@ import (
 	"github.com/ctxmesh/agentry/internal/credplane"
 	"github.com/ctxmesh/agentry/internal/credresolve"
 	"github.com/ctxmesh/agentry/internal/objectstore"
+	"github.com/ctxmesh/agentry/internal/ocr"
 	"github.com/ctxmesh/agentry/internal/prompt"
 	"github.com/ctxmesh/agentry/internal/run"
 	"github.com/ctxmesh/agentry/internal/runcap"
@@ -158,6 +159,10 @@ type Server struct {
 	// MODEL_GATEWAY_URL is unset ⇒ the ingest endpoint + executor degrade honestly. Constructed in
 	// cmd/bff/main.go via credplane.NewGatewayEmbedder (the same gateway seam the token-service memory uses).
 	embedder credplane.Embedder
+	// ocr extracts text from a scanned (image-only) PDF via the offline OCR service (M140.5, ADR 0119). The
+	// ingestion executor calls it as a FALLBACK when a PDF's born-digital text is insufficient. nil (INGEST_OCR_URL
+	// unset) ⇒ a scanned PDF stays honestly PartiallyIngested (today's behaviour) — strictly additive.
+	ocr ocr.OCR
 
 	// datasetStore is the control-plane Postgres store for eval datasets (M69, ADR 0062 Fork 1), built from
 	// cpDB. The dataset-export executor (m69.2) WRITES it DIRECTLY — EnsureDataset/AppendCase — copying
@@ -559,6 +564,11 @@ type Options struct {
 	// Constructed in cmd/bff/main.go via credplane.NewGatewayEmbedder.
 	Embedder credplane.Embedder
 
+	// OCR is the offline OCR service client for scanned-PDF ingestion (M140.5, ADR 0119). Optional — nil
+	// (INGEST_OCR_URL unset) ⇒ a scanned PDF stays PartiallyIngested. Constructed in cmd/bff/main.go via
+	// ocr.NewHTTPOCR.
+	OCR ocr.OCR
+
 	Log logr.Logger
 }
 
@@ -617,6 +627,7 @@ func NewServer(opts Options) *Server {
 		onlineResolver:           opts.OnlineResolver,
 		rollupStore:              opts.RollupStore,
 		embedder:                 opts.Embedder,
+		ocr:                      opts.OCR,
 		judgeCounters:            &judgeCounter{},
 		enrichCache:              newTraceEnrichCache(),
 		log:                      opts.Log,

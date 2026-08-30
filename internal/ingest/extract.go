@@ -77,7 +77,7 @@ func Extract(contentType, filename string, data []byte) (string, error) {
 		return extractText(data)
 	case isHTML(ct, filename):
 		return extractHTML(data)
-	case isPDF(ct, filename):
+	case IsPDF(ct, filename):
 		return extractPDF(data)
 	case ct == "" || ct == "application/octet-stream":
 		// No usable MIME type — already tried filename extension dispatch above
@@ -106,7 +106,7 @@ func isHTML(ct, filename string) bool {
 	return ext == ".html" || ext == ".htm"
 }
 
-func isPDF(ct, filename string) bool {
+func IsPDF(ct, filename string) bool {
 	if ct == "application/pdf" {
 		return true
 	}
