@@ -5294,6 +5294,212 @@ metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
     helm.sh/resource-policy: keep
+  name: approvalpolicies.agents.ctxmesh.ai
+spec:
+  group: agents.ctxmesh.ai
+  names:
+    categories:
+    - agents
+    kind: ApprovalPolicy
+    listKind: ApprovalPolicyList
+    plural: approvalpolicies
+    shortNames:
+    - ap
+    singular: approvalpolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.requireApprovalForAllTools
+      name: AllTools
+      type: boolean
+    - jsonPath: .status.conditions[?(@.type=='Validated')].status
+      name: Validated
+      type: string
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ApprovalPolicy is a namespaced, reusable human-in-the-loop policy referenced by
+          AgentDeployment.spec.approvalPolicyRef (M139, ADR 0111). It declaratively requires human approval for
+          named tool calls (reusing the existing pause/resume/voucher runtime — the controller merges its
+          requirements into the agent's effective tool policy) and optionally narrows WHO may approve. A
+          SINGLE-version CRD born directly in v1beta1.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ApprovalPolicySpec is a namespaced, reusable HITL policy referenced by AgentDeployment.spec
+              .approvalPolicyRef (M139, ADR 0111). It is STRICTLY MONOTONIC: the controller merges its requirements
+              into the agent's effective tool policy under max-strictness (allow < require-approval < deny), so it can
+              only ADD approval requirements — an inline toolPolicy can never weaken a requirement the policy demands.
+              v1 is TOOL-scoped (the only gate with an existing runtime — pause_for_approval).
+            properties:
+              approvers:
+                description: |-
+                  approvers optionally NARROWS who may approve a pause to these subjects, AND-ed with RBAC: a resume
+                  caller must hold resume RBAC AND match an entry. Empty ⇒ any caller with resume RBAC may approve
+                  (the pre-M139 behavior, unchanged — a semantic callers depend on, so it is fixed). Matched against
+                  the caller's OWN verified identity (username + groups, from a SelfSubjectReview) — never a client claim.
+                items:
+                  description: |-
+                    ApprovalSubject identifies WHO may approve — a Kubernetes User or Group (matching rbacv1.Subject
+                    capitalization), matched at the resume endpoint against the caller's OWN verified identity (username +
+                    groups from a SelfSubjectReview). It is AND-ed with RBAC: a subject listed here must ALSO hold resume
+                    RBAC on the run's agent — the policy NARROWS who may approve, it never grants approval rights to someone
+                    without RBAC (ADR 0111 §4). A ServiceAccount approver works today via its string forms (User
+                    "system:serviceaccount:<ns>:<name>" / Group "system:serviceaccounts:<ns>"); a first-class kind is a
+                    future non-breaking enum widening.
+                  properties:
+                    kind:
+                      description: 'kind is the subject kind: "User" (a K8s username)
+                        or "Group" (a K8s group the caller is a member of).'
+                      enum:
+                      - User
+                      - Group
+                      type: string
+                    name:
+                      description: name is the User username or the Group name to
+                        match against the caller's verified identity.
+                      maxLength: 316
+                      minLength: 1
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                maxItems: 64
+                type: array
+                x-kubernetes-list-type: atomic
+              rules:
+                description: rules select which tool calls require approval (union
+                  across rules). At least one.
+                items:
+                  description: |-
+                    ApprovalRule selects tool calls that require human approval (M139, ADR 0111). A rule is the extension
+                    point — future compatible adds (per-rule approvers, a RunStart phase, workflow steps) become fields here
+                    rather than parallel flat fields. An ApprovalPolicy carries ONLY approval requirements — never allow/deny
+                    (that is ToolPolicy's job); this is what keeps the max-strictness merge coherent.
+                  properties:
+                    allTools:
+                      description: |-
+                        allTools requires approval for EVERY tool the referencing agent may call (a coarse gate). Set this
+                        OR tools, never both empty (a rule that gates nothing is rejected by the CEL rule below).
+                      type: boolean
+                    tools:
+                      description: |-
+                        tools lists the EXACT tool names whose calls require approval (matching ToolPolicyOverride.Name
+                        semantics — exact, no globs). Union across rules.
+                      items:
+                        type: string
+                      maxItems: 128
+                      type: array
+                      x-kubernetes-list-type: set
+                  type: object
+                maxItems: 64
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: atomic
+                x-kubernetes-validations:
+                - message: each rule must set tools or allTools
+                  rule: self.all(r, size(r.tools) > 0 || r.allTools)
+            required:
+            - rules
+            type: object
+          status:
+            description: ApprovalPolicyStatus is the observed state, populated by
+              the ApprovalPolicyReconciler (validate-only).
+            properties:
+              conditions:
+                description: |-
+                  conditions reflect reconciliation: Validated=True when the spec is coherent; Invalid=True (Validated
+                  False) when it is not (e.g. requireApprovalForAllTools with a non-empty requireApprovalForTools).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
   name: clustercredentialstores.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai
