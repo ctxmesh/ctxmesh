@@ -4,7 +4,7 @@ import { Boxes, Pencil, Sparkles, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { DataTable, StatusBadge, type Column, type DataTableError } from "@/components/kit";
+import { DataTable, StatusBadge, resolveStatus, type Column, type DataTableError, type StatusTone } from "@/components/kit";
 import { api, ApiError, type AgentSummary } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
@@ -111,6 +111,8 @@ export function AgentsPage() {
 
   const [query, setQuery] = useState("");
   const [includeDrafts, setIncludeDrafts] = useState(false);
+  // Fleet triage (M144.5): filter the loaded page by status tone via the chips.
+  const [toneFilter, setToneFilter] = useState<StatusTone | null>(null);
   // The page stack: the cursor used to fetch each page. [""] = we're on page 0.
   const [pageStack, setPageStack] = useState<string[]>([""]);
   const [state, setState] = useState<Load>({ kind: "loading" });
@@ -171,6 +173,16 @@ export function AgentsPage() {
   }, [namespace, resetPaging]);
 
   const items = state.kind === "ready" ? state.items : [];
+  // Roll the loaded fleet up by status tone (M144.5) — one glance answers "what's
+  // wrong with my fleet", and each chip filters the list to that tone.
+  const rollup = items.reduce<Partial<Record<StatusTone, number>>>((acc, a) => {
+    const t = resolveStatus(a.ready, a.phase, a.reason).tone;
+    acc[t] = (acc[t] ?? 0) + 1;
+    return acc;
+  }, {});
+  const visibleItems = toneFilter
+    ? items.filter((a) => resolveStatus(a.ready, a.phase, a.reason).tone === toneFilter)
+    : items;
   const nextCursor = state.kind === "ready" ? state.nextCursor : "";
   // hasNext keys off the CURSOR (BFF), never items.length — an empty filtered
   // window with more pages must keep Next live (the cursor-vs-q rule).
@@ -302,6 +314,14 @@ export function AgentsPage() {
       : []),
   ];
 
+  const TONE_ORDER: StatusTone[] = ["failed", "waiting", "progressing", "ready", "draft"];
+  const TONE_LABEL: Record<StatusTone, string> = {
+    failed: "Not ready", waiting: "Waiting", progressing: "Pending", ready: "Ready", draft: "Draft",
+  };
+  const TONE_DOT: Record<StatusTone, string> = {
+    failed: "bg-destructive", waiting: "bg-warning", progressing: "bg-info", ready: "bg-success", draft: "bg-muted",
+  };
+
   return (
     <div className="mx-auto max-w-5xl space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -334,9 +354,37 @@ export function AgentsPage() {
         </Button>
       </div>
 
+      {items.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2" data-testid="agents-triage">
+          <button
+            type="button"
+            onClick={() => setToneFilter(null)}
+            className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+              toneFilter === null ? "border-primary bg-primary/10 text-foreground" : "border-border text-muted-foreground hover:bg-surface-2"
+            }`}
+          >
+            All {items.length}
+          </button>
+          {TONE_ORDER.filter((t) => rollup[t]).map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setToneFilter(toneFilter === t ? null : t)}
+              data-testid={`agents-triage-${t}`}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                toneFilter === t ? "border-primary bg-primary/10 text-foreground" : "border-border text-muted-foreground hover:bg-surface-2"
+              }`}
+            >
+              <span className={`h-2 w-2 rounded-full ${TONE_DOT[t]}`} />
+              {rollup[t]} {TONE_LABEL[t]}
+            </button>
+          ))}
+        </div>
+      )}
+
       <DataTable<AgentSummary>
         columns={columns}
-        rows={items}
+        rows={visibleItems}
         rowKey={(a) => `${a.namespace}/${a.name}`}
         loading={state.kind === "loading"}
         error={error}
