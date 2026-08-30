@@ -94,7 +94,7 @@ function CostSummaryCard({ total }: { total: CostSummary }) {
           </div>
           <div>
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Observations
+              Traced calls
             </p>
             <p className="mt-1 text-2xl font-semibold tabular-nums tracking-tight">
               {formatCompact(total.observations)}

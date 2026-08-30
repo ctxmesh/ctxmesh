@@ -180,11 +180,10 @@ describe("AgentsPage (DataTable + list contract)", () => {
     installFetch({ agents: () => ({ ok: true, body: { agents: [], items: [agent("echo")], nextCursor: "" } }) });
     renderPage(<AgentsPage />);
     await screen.findByText("echo");
+    // The filter input names itself a page-scoped FILTER ("on this page"), never a
+    // global search. (The prose subhead was de-jargoned in M144.3.)
     expect(
       screen.getByPlaceholderText(/Filter agents on this page/),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/filter is windowed to the loaded page/i),
     ).toBeInTheDocument();
   });
 
