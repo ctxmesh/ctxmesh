@@ -75,6 +75,10 @@ const (
 	// the top-K in the reranked order. Unset/false = the store's fusion order unchanged (safe opt-in). Requires
 	// a reranker to be wired (WithReranker); a rerank failure falls back to the store order (never a hard fail).
 	envRerank = "KNOWLEDGE_RERANK"
+	// envQueryRewrite opts retrieval into an LLM QUERY-REWRITE stage (M140.3): "true" rephrases/expands the
+	// raw query before embedding + hybrid keyword search. Unset/false = the raw query unchanged (safe opt-in).
+	// Requires a rewriter to be wired (WithRewriter); a rewrite failure falls back to the original query.
+	envQueryRewrite = "KNOWLEDGE_QUERY_REWRITE"
 	// envRerankDepth overrides the over-fetch candidate depth (default: clamp(topK×5, 20, 100)). A cross-encoder
 	// can only promote a chunk retrieval already surfaced, so N must exceed K to move the needle; clamped ≥ topK.
 	envRerankDepth  = "KNOWLEDGE_RERANK_DEPTH"
@@ -153,6 +157,31 @@ func (s *Server) WithReranker(r Reranker) *Server {
 // rerankEnabled reports whether the rerank stage should run: a reranker is wired AND the opt-in env is on.
 func (s *Server) rerankEnabled() bool {
 	return s.reranker != nil && strings.TrimSpace(os.Getenv(envRerank)) == "true"
+}
+
+// WithRewriter wires an LLM query-rewriter (M140.3). Retrieval only rewrites when this is set AND
+// KNOWLEDGE_QUERY_REWRITE="true"; otherwise the raw query is used unchanged. Returns the Server for chaining.
+func (s *Server) WithRewriter(r QueryRewriter) *Server {
+	s.rewriter = r
+	return s
+}
+
+// rewriteEnabled reports whether the query-rewrite stage should run: a rewriter is wired AND the opt-in env is on.
+func (s *Server) rewriteEnabled() bool {
+	return s.rewriter != nil && strings.TrimSpace(os.Getenv(envQueryRewrite)) == "true"
+}
+
+// applyRewrite returns an LLM-rewritten query, or the original on any failure (fail open — a rewrite must never
+// break search). An empty result is treated as a failure by the rewriter.
+func (s *Server) applyRewrite(ctx context.Context, query string) string {
+	rewritten, err := s.rewriter.Rewrite(ctx, query)
+	if err != nil || strings.TrimSpace(rewritten) == "" {
+		if err != nil {
+			s.log.Error(err, "credplane: query rewrite failed — using the original query")
+		}
+		return query
+	}
+	return rewritten
 }
 
 // applyRerank re-orders the retrieved candidates by cross-encoder relevance and truncates to topK. It is an
@@ -283,6 +312,14 @@ func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
 		topK = maxTopK
 	}
 
+	// Query-rewrite stage (M140.3): when on, rephrase/expand the raw query via an LLM BEFORE embedding +
+	// hybrid keyword search, so a terse/natural question retrieves better. Fail-open (falls back to the raw
+	// query). PII discipline (governance #4): the span records only WHETHER the query changed, never the text.
+	searchQuery := req.Query
+	if s.rewriteEnabled() {
+		searchQuery = s.applyRewrite(ctx, req.Query)
+	}
+
 	// Rerank stage (M140.2, ADR 0117): when on, OVER-FETCH a deeper candidate set so the cross-encoder has
 	// something to re-order (a reranker can only promote a chunk retrieval already surfaced), then truncate to
 	// topK after reranking. Off ⇒ fetch exactly topK (unchanged).
@@ -297,11 +334,12 @@ func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
 		attribute.Int("knowledge.topk", topK),
 		attribute.Float64("knowledge.threshold", req.Threshold),
 		attribute.Bool("knowledge.rerank", rerankOn),
+		attribute.Bool("knowledge.query_rewritten", searchQuery != req.Query),
 	)
 
 	// Embed the query with the CORPUS's embedding model (the one-way door). A mismatched model is not an error
 	// here — it flows to the store's embedding_model filter, which returns nothing: fail-safe by construction.
-	vec, _, err := s.embedder.Embed(ctx, req.EmbeddingModel, req.Query)
+	vec, _, err := s.embedder.Embed(ctx, req.EmbeddingModel, searchQuery)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		s.log.Error(err, "credplane: knowledge embed on search failed",
@@ -316,7 +354,7 @@ func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
 		// with Hybrid on, the store fuses the keyword ranking so a rare-term/identifier hit the embedding
 		// blurs is still retrieved. Off by default (unchanged cosine-only) until an operator sets the env.
 		Hybrid:    strings.TrimSpace(os.Getenv(envHybridSearch)) == "true",
-		QueryText: req.Query,
+		QueryText: searchQuery,
 	})
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -330,7 +368,7 @@ func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
 	// to the store order on any rerank error). Done BEFORE the size-cap/budget loop so the budget is spent on
 	// the BEST chunks, not the fusion-rank ones.
 	if rerankOn {
-		scored = s.applyRerank(ctx, req.Query, scored, topK)
+		scored = s.applyRerank(ctx, searchQuery, scored, topK)
 	}
 
 	// ── per-chunk size cap + total-injected budget (governance #5) ────────────────────────────────
