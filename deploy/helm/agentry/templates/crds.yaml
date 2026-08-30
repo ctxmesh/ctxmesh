@@ -8378,6 +8378,17 @@ spec:
                   the spec-level CEL transition rule above. NOTE: a cluster HMAC-key rotation changes every
                   `userGrantHash`, orphaning every existing per-user subject — see specs/knowledge.md.
                 type: boolean
+              refreshInterval:
+                description: |-
+                  refreshInterval enables SCHEDULED re-ingest (M140.4): when set, the controller automatically re-runs
+                  ingestion from the source once this interval elapses since the last successful ingest — so a corpus
+                  backed by a changing source (an object-store prefix that gains/loses documents) stays current without a
+                  manual POST /ingest. Ingestion is idempotent + cursor-resumable (unchanged content_hash = no-op; orphan
+                  sweep drops removed docs), so a periodic re-ingest safely reconciles adds/changes/deletes. Unset ⇒ no
+                  scheduled refresh (the byte-for-byte-unchanged manual/webhook-only behaviour). MUTABLE (unlike the
+                  one-way-door fields) — the cadence can be tuned or turned off at any time. A guard interval floors it so a
+                  fat-fingered tiny value can't hammer the source; the controller skips a refresh while an ingest is in flight.
+                type: string
               source:
                 description: |-
                   source describes where the KnowledgeBase's documents come from. The ingestion job
@@ -8523,6 +8534,15 @@ spec:
               lastIngestedAt:
                 description: lastIngestedAt is the timestamp of the last successfully
                   completed ingestion run.
+                format: date-time
+                type: string
+              lastScheduledIngestAt:
+                description: |-
+                  lastScheduledIngestAt is when the controller last STARTED a scheduled re-ingest (M140.4), stamped on
+                  each auto-refresh attempt — distinct from lastIngestedAt (which only advances on SUCCESS). The refresh
+                  predicate keys next-due off max(lastIngestedAt, lastScheduledIngestAt) + spec.refreshInterval, so a
+                  scheduled run that fails (lastIngestedAt never advances) is retried exactly once per interval — never
+                  hotter — instead of hot-looping. nil until the first scheduled refresh fires.
                 format: date-time
                 type: string
               observedGeneration:

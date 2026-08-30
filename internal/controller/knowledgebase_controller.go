@@ -127,11 +127,27 @@ type KnowledgeBaseIngestionRunReader interface {
 	IngestionRunStatus(ctx context.Context, runID string) (status string, found bool, err error)
 }
 
+// KnowledgeBaseIngestionRunCreator is the narrow WRITE seam for SCHEDULED re-ingest (M140.4, ADR 0117-adjacent):
+// the controller uses it to create a fresh ingestion Run when a KB's spec.refreshInterval is due. Its concrete
+// impl is a shared ingestion.Creator wired in cmd/main.go (resolve source → pin IngestionSpec → run.New +
+// Create), the ONE source of truth also used by the BFF /ingest handler — so the controller never imports the
+// object store or the run package. nil ⇒ scheduled refresh is disabled (a dev deployment without the wiring).
+type KnowledgeBaseIngestionRunCreator interface {
+	// CreateIngestionRun resolves the KB's source, pins an IngestionSpec, and creates a queued ingestion Run,
+	// returning its id. It does NOT touch KB.status — the caller (the controller, which owns KB status) stamps
+	// phase=Ingesting + the run ref after a successful create.
+	CreateIngestionRun(ctx context.Context, kb *agentsv1beta1.KnowledgeBase) (runID string, err error)
+}
+
 // ingestingRequeue is how long the reconciler waits before re-projecting KB.status while a corpus is Ingesting
 // (there is no CRD watch on the off-request corpus-status row, so the controller polls the status channel while
 // a run is in flight). A steady-state (Ready/Failed/…) corpus does not requeue — the next spec change or the
 // BFF's Ingesting flip re-triggers it.
 const ingestingRequeue = 10 * time.Second
+
+// minRefreshInterval floors spec.refreshInterval (M140.4): a fat-fingered tiny interval can't make the
+// scheduled re-ingest hammer the source / hot-loop. The controller clamps to this with an event.
+const minRefreshInterval = time.Minute
 
 // KnowledgeBaseReconciler validates the KnowledgeBase spec (m68.1), runs the finalizer's two-store GC (m68.10,
 // ADR 0061 governance #3), and projects the ingestion outcome from the corpus-status channel onto KB.status
@@ -160,6 +176,9 @@ type KnowledgeBaseReconciler struct {
 	// was written), the controller projects Failed. nil ⇒ the safety-net is disabled (a dev deployment
 	// without cpDB) and the corpus-status channel remains the sole projection source.
 	IngestionRuns KnowledgeBaseIngestionRunReader
+	// IngestionRunCreator is the WRITE seam for scheduled re-ingest (M140.4): the controller creates a fresh
+	// ingestion Run when spec.refreshInterval is due. nil ⇒ scheduled refresh is disabled (dev without the wiring).
+	IngestionRunCreator KnowledgeBaseIngestionRunCreator
 }
 
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=knowledgebases,verbs=get;list;watch;create;update;patch;delete
@@ -371,7 +390,78 @@ func (r *KnowledgeBaseReconciler) reconcileCorpusStatus(
 		log.V(1).Info("KnowledgeBase status projected from corpus-status channel",
 			"knowledgebase", kb.Name, "phase", cs.Phase, "chunks", cs.ChunkCount)
 	}
+
+	// ── Scheduled re-ingest (M140.4) ──────────────────────────────────────────────────────────────────
+	// After projecting status, if spec.refreshInterval is due (and no ingest is in flight), CREATE a fresh
+	// ingestion run via the write seam and stamp the KB Ingesting. The controller owns run *scheduling*, not
+	// *execution* — the run-worker still drives the actual ingest (a controller-created run sits queued until a
+	// worker picks it up; scheduled refresh REQUIRES the worker pool). lastScheduledIngestAt is stamped on
+	// every attempt (success or failure) so a broken source retries once per interval, never hotter.
+	if r.IngestionRunCreator != nil {
+		if create, requeue := scheduledRefreshDecision(kb, time.Now()); create {
+			runID, cErr := r.IngestionRunCreator.CreateIngestionRun(ctx, kb)
+			now := metav1.Now()
+			kb.Status.LastScheduledIngestAt = &now
+			if cErr != nil {
+				log.Error(cErr, "scheduled re-ingest: create ingestion run failed — will retry next interval",
+					"knowledgebase", kb.Name)
+				if uErr := r.Status().Update(ctx, kb); uErr != nil {
+					return ctrl.Result{}, uErr
+				}
+				return ctrl.Result{RequeueAfter: clampedRefreshInterval(kb)}, nil
+			}
+			kb.Status.Phase = kbPhaseIngesting
+			kb.Status.IngestionRunRef = runID
+			if uErr := r.Status().Update(ctx, kb); uErr != nil {
+				return ctrl.Result{}, uErr
+			}
+			log.Info("scheduled re-ingest: created ingestion run", "knowledgebase", kb.Name, "run", runID)
+			return ctrl.Result{RequeueAfter: ingestingRequeue}, nil
+		} else if requeue > 0 {
+			return ctrl.Result{RequeueAfter: requeue}, nil
+		}
+	}
 	return ctrl.Result{}, nil
+}
+
+// clampedRefreshInterval returns spec.refreshInterval floored at minRefreshInterval (M140.4). Caller guards nil.
+func clampedRefreshInterval(kb *agentsv1beta1.KnowledgeBase) time.Duration {
+	d := kb.Spec.RefreshInterval.Duration
+	if d < minRefreshInterval {
+		return minRefreshInterval
+	}
+	return d
+}
+
+// scheduledRefreshDecision decides the scheduled-re-ingest action for a KB (M140.4). It returns whether to
+// CREATE a fresh ingestion run now, and how long until the next reconcile should check (0 = no scheduled
+// requeue). Pure + deterministic (envtest asserts it directly). Rules:
+//   - no spec.refreshInterval ⇒ (false, 0): scheduled refresh off.
+//   - phase Ingesting ⇒ (false, 0): never create while an ingest is in flight (the poll path requeues).
+//   - due = max(lastIngestedAt, lastScheduledIngestAt) + clamped-interval. A KB that has NEVER ingested or
+//     attempted (both nil) is due NOW — a declared cadence that never fires until a manual poke is a lie in
+//     desired state (and it makes the first scheduled ingest self-starting).
+//   - now ≥ due ⇒ (true, 0): create. Else ⇒ (false, due-now): requeue when it will be due.
+func scheduledRefreshDecision(kb *agentsv1beta1.KnowledgeBase, now time.Time) (bool, time.Duration) {
+	if kb.Spec.RefreshInterval == nil || kb.Status.Phase == kbPhaseIngesting {
+		return false, 0
+	}
+	interval := clampedRefreshInterval(kb)
+	var last time.Time // zero ⇒ never ingested/attempted ⇒ due now
+	if kb.Status.LastIngestedAt != nil {
+		last = kb.Status.LastIngestedAt.Time
+	}
+	if a := kb.Status.LastScheduledIngestAt; a != nil && a.Time.After(last) {
+		last = a.Time
+	}
+	if last.IsZero() {
+		return true, 0
+	}
+	due := last.Add(interval)
+	if !now.Before(due) {
+		return true, 0
+	}
+	return false, due.Sub(now)
 }
 
 // reconcileUserStorageSoftCap reflects the WARN-only per-user storage soft-cap condition
