@@ -591,7 +591,7 @@ function RunStatusDot({ status }: { status: string }) {
   const failed = /(fail|error|denied|cancel)/.test(s);
   const done = /(done|success|succeeded|complete|promoted)/.test(s);
   const cls = running
-    ? "bg-info animate-pulse"
+    ? "bg-info animate-pulse motion-reduce:animate-none"
     : waiting
       ? "bg-warning"
       : failed
