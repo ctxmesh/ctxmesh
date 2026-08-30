@@ -265,6 +265,16 @@ type AgentDeploymentSpec struct {
 	// +kubebuilder:validation:MaxLength=63
 	Role string `json:"role,omitempty"`
 
+	// capabilities is a SHORT natural-language statement of what this agent can do — the basis for
+	// CAPABILITY-BASED semantic discovery (M141): an agent is found by what it does, not its DNS name. The
+	// control plane embeds this descriptor (via the offline embedder, ADR 0116) so a capability QUERY retrieves
+	// + reranks the right agent (ADR 0084/0117). Optional — an agent with no descriptor is simply not
+	// semantically discoverable (it stays reachable by name). Free-text, bounded; a structured skill taxonomy is
+	// a future addition (carded). Example: "Summarizes long documents and extracts action items."
+	// +optional
+	// +kubebuilder:validation:MaxLength=1024
+	Capabilities string `json:"capabilities,omitempty"`
+
 	// allowedCallers is the per-agent inbound allowlist (PRD §12.4 layer 3):
 	// the names of peer agents permitted to call this agent over A2A. The
 	// controller comma-joins it into the static AGENT_ALLOWED_CALLERS env var;
