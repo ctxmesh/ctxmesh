@@ -1,0 +1,33 @@
+{{- /*
+NetworkPolicy restricting the controller-manager /metrics endpoint (:8443) to
+ingress from namespaces labeled `metrics: enabled`. Opt-in (values:
+networkPolicy.metricsIngress.enabled) because enforcement requires a
+NetworkPolicy-capable CNI (ADR 0007 — Calico). Mirrors
+config/network-policy/allow-metrics-traffic.yaml. Additive add-on; does not
+change the no-drift control-plane baseline.
+*/ -}}
+{{- if .Values.networkPolicy.metricsIngress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: agentry
+    app.kubernetes.io/managed-by: Helm
+  name: agentry-allow-metrics-traffic
+  namespace: {{ .Values.namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: agentry
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              metrics: enabled
+      ports:
+        - port: 8443
+          protocol: TCP
+{{- end }}

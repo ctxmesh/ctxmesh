@@ -16,7 +16,7 @@ limitations under the License.
 
 // Package expand is the single source of truth for the simplified agent.yaml →
 // CRD manifest mapping (PRD §8.5 M2+M8+M9 subset). It is imported by BOTH the
-// `agent-engine expand` CLI (cmd/agent-engine) and the BFF config-builder
+// `agentry expand` CLI (cmd/agentry) and the BFF config-builder
 // (internal/bff, m12.6) so the form-driven UI and the CLI produce byte-identical
 // manifests — there is exactly one mapping, never a forked second one.
 //

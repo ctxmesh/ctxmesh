@@ -31,7 +31,7 @@ var (
 	// corpusBytesSoftCap should alert operators that the tenant is approaching
 	// or has exceeded its soft storage ceiling.
 	tenantCorpusBytesGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "agentengine_tenant_corpus_bytes",
+		Name: "agentry_tenant_corpus_bytes",
 		Help: "Total corpus bytes (sum of KnowledgeBase.status.sizeBytes) across all member namespaces for a tenant. " +
 			"Exceeding storage.corpusBytesSoftCap triggers a StorageSoftCapExceeded warning condition (SOFT — never blocks ingestion). " +
 			"Hard enforcement is deferred (m52 Theme M).",

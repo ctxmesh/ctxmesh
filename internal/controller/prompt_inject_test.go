@@ -27,8 +27,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/prompt"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/prompt"
 )
 
 // A fast (no-envtest) unit test of the m40.3 compose-and-denormalize branch: resolvePrompt prefers the

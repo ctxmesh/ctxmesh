@@ -1,5 +1,5 @@
 # ClusterIP Service for the LiteLLM gateway. Agents reach the gateway via
-# MODEL_GATEWAY_URL=http://agent-engine-gateway.agent-engine-system.svc:4000
+# MODEL_GATEWAY_URL=http://agentry-gateway.agentry.svc:4000
 apiVersion: v1
 kind: Service
 metadata:
@@ -7,13 +7,13 @@ metadata:
   namespace: system
   labels:
     control-plane: gateway
-    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/name: agentry
     app.kubernetes.io/managed-by: kustomize
 spec:
   type: ClusterIP
   selector:
     control-plane: gateway
-    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/name: agentry
   ports:
     - name: http
       port: 4000

@@ -54,9 +54,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
 )
 
 // forkRefSpec is the subset of the source-spec the ref-closure inspects. The source-spec is

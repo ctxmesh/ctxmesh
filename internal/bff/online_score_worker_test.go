@@ -27,8 +27,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
+	"github.com/ctxmesh/agentry/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane/onlinescore"
 )
 
 // onlineScorerFake is a purpose-built LangfuseAdapter for the online-scoring worker tests: it drives

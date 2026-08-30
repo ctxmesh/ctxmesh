@@ -1,6 +1,6 @@
 // config-form — the config-builder's form model, client-side validation, and
 // agent.yaml serializer. It mirrors the simplified agent.yaml schema the engine's
-// `expand` core consumes (cmd/agent-engine/expand.go → internal/expand): name,
+// `expand` core consumes (cmd/agentry/expand.go → internal/expand): name,
 // image, executionModel, resources, scaling, model.route, budget, eval, prompt.
 //
 // The client-side validation is a FRIENDLY mirror of the server's rules (the BFF

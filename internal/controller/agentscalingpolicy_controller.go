@@ -30,8 +30,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/kedatypes"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/kedatypes"
 )
 
 // backend values written to status.backend (specs/eventing-scaling.md §18 table).

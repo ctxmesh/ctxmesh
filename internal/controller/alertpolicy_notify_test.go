@@ -44,7 +44,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
 )
 
 // notifyTestScheme builds a runtime.Scheme with v1beta1 and corev1 types registered.

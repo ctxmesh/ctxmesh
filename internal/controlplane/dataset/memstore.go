@@ -26,7 +26,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane"
 )
 
 // memStore is the in-memory twin of the Postgres store — used in unit tests + the cross-impl conformance suite

@@ -8,13 +8,13 @@ metadata:
   namespace: system
   labels:
     control-plane: bff
-    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/name: agentry
     app.kubernetes.io/managed-by: kustomize
 spec:
   type: ClusterIP
   selector:
     control-plane: bff
-    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/name: agentry
   ports:
     - name: http
       port: 9090

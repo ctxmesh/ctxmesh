@@ -1,4 +1,4 @@
-# ctxmesh — the agent-engine Python SDK.
+# ctxmesh — the agentry Python SDK.
 #
 # Distribution name: "ctxmesh"; import name: "ctxmesh". Both match so
 # `pip install ctxmesh` gives `import ctxmesh` with zero surprises (spec
@@ -19,12 +19,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ctxmesh"
 version = "0.1.0"
-description = "Typed Python SDK over the agent-engine launcher localhost plane (memory / tools / feedback)."
+description = "Typed Python SDK over the agentry launcher localhost plane (memory / tools / feedback)."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
-authors = [{ name = "agent-engine" }]
-keywords = ["agent-engine", "ctxmesh", "llm", "agents", "observability"]
+authors = [{ name = "agentry" }]
+keywords = ["agentry", "ctxmesh", "llm", "agents", "observability"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",

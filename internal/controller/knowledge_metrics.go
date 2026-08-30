@@ -31,7 +31,7 @@ var (
 	// value means the primary status channel is dropping terminal-failure writes. Previously the
 	// rescue only logged (invisible in monitoring); this makes the silent stuck→Failed observable.
 	kbIngestionSafetyNetTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "agentengine_kb_ingestion_safetynet_total",
+		Name: "agentry_kb_ingestion_safetynet_total",
 		Help: "Times the KnowledgeBase controller safety-net projected phase:Failed because an ingestion run " +
 			"terminated failed out-of-band (no corpus-status row). Non-zero ⇒ the executor status channel is " +
 			"dropping terminal-failure writes (M16, ADR 0061 Fork 2).",

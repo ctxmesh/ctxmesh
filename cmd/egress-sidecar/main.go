@@ -40,10 +40,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	"github.com/ctxmesh/agent-engine/internal/credplane"
-	"github.com/ctxmesh/agent-engine/internal/credresolve"
-	"github.com/ctxmesh/agent-engine/internal/egress"
-	"github.com/ctxmesh/agent-engine/internal/runcap"
+	"github.com/ctxmesh/agentry/internal/credplane"
+	"github.com/ctxmesh/agentry/internal/credresolve"
+	"github.com/ctxmesh/agentry/internal/egress"
+	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 // defaultCapabilityAudience mirrors the BFF default (internal/bff) — the credential-plane

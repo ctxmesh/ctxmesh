@@ -26,7 +26,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ctxmesh/agent-engine/internal/credresolve"
+	"github.com/ctxmesh/agentry/internal/credresolve"
 )
 
 // Subject describes a backend under test: the resolver, a way to seed a resolvable grant,

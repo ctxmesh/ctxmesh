@@ -14,7 +14,7 @@ metadata:
   namespace: system
   labels:
     control-plane: statelayer
-    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/name: agentry
     app.kubernetes.io/managed-by: kustomize
 spec:
   podSelector:

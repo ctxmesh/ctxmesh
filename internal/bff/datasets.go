@@ -35,10 +35,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
-	"github.com/ctxmesh/agent-engine/internal/run"
-	"github.com/ctxmesh/agent-engine/internal/telemetry"
+	"github.com/ctxmesh/agentry/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane/dataset"
+	"github.com/ctxmesh/agentry/internal/run"
+	"github.com/ctxmesh/agentry/internal/telemetry"
 )
 
 // ExportRequest is the POST /api/datasets/{name}/export body. The dataset name comes from the URL path; the body

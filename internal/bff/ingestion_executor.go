@@ -25,11 +25,11 @@ import (
 	"strings"
 	"time"
 
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
-	"github.com/ctxmesh/agent-engine/internal/credplane"
-	"github.com/ctxmesh/agent-engine/internal/ingest"
-	"github.com/ctxmesh/agent-engine/internal/run"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	"github.com/ctxmesh/agentry/internal/controlplane/knowledge"
+	"github.com/ctxmesh/agentry/internal/credplane"
+	"github.com/ctxmesh/agentry/internal/ingest"
+	"github.com/ctxmesh/agentry/internal/run"
 )
 
 // ── The ingestion executor (m68.6, ADR 0061 Fork 2) ─────────────────────────────────────────────────────────

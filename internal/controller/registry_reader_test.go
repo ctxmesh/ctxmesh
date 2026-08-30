@@ -27,9 +27,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
 )
 
 // stubRegistryReader returns a fixed result — used to drive resolveAgentBindings'

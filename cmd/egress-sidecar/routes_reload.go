@@ -36,7 +36,7 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/ctxmesh/agent-engine/internal/egress"
+	"github.com/ctxmesh/agentry/internal/egress"
 )
 
 // loadInitialRoutes reads + parses the mounted routes file at startup into the holder. Returns an

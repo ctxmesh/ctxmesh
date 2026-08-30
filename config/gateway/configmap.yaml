@@ -10,7 +10,7 @@ metadata:
   namespace: system
   labels:
     control-plane: gateway
-    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/name: agentry
     app.kubernetes.io/managed-by: kustomize
 data:
   config.yaml: |

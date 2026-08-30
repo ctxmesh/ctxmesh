@@ -32,9 +32,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
-	"github.com/ctxmesh/agent-engine/internal/toolmanifest"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/agentry/internal/toolmanifest"
 )
 
 // testRegStore is the in-memory ToolRegistry store the envtest binding reconciler

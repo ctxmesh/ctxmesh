@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
 )
 
 // FixtureResolver satisfies the Resolver interface — the seam the controller

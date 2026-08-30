@@ -23,9 +23,9 @@ import (
 	"fmt"
 	"time"
 
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
-	"github.com/ctxmesh/agent-engine/internal/run"
-	"github.com/ctxmesh/agent-engine/internal/workflow"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	"github.com/ctxmesh/agentry/internal/run"
+	"github.com/ctxmesh/agentry/internal/workflow"
 )
 
 // ── The workflow executor (m67.3, ADR 0060 §2-3) ──────────────────────────────────────────────────────────

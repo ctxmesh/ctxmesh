@@ -27,8 +27,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
 )
 
 // kbRosterEntry is the per-KB wire shape stamped into KNOWLEDGE_BASES and read by the launcher

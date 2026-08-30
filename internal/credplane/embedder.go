@@ -56,7 +56,7 @@ func EmbedStatus(err error) int {
 // The gateway (LiteLLM) resolves the model's provider credential server-side, so the token-service holds no
 // provider key — it only reaches the in-cluster gateway (the same trust model as the launcher's model calls).
 type gatewayEmbedder struct {
-	baseURL string // e.g. http://agent-engine-gateway.agent-engine-system.svc:4000
+	baseURL string // e.g. http://agentry-gateway.agentry.svc:4000
 	apiKey  string // optional LiteLLM master key; "" = no Authorization header
 	client  *http.Client
 }

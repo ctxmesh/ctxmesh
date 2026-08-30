@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
+	"github.com/ctxmesh/agentry/internal/controlplane/authz"
 )
 
 // newAuditServer builds a caller-scoped BFF server with an audit memstore wired as the source and

@@ -26,10 +26,10 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/credpostgres"
-	"github.com/ctxmesh/agent-engine/internal/credresolve"
-	"github.com/ctxmesh/agent-engine/internal/dbpool"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/credpostgres"
+	"github.com/ctxmesh/agentry/internal/credresolve"
+	"github.com/ctxmesh/agentry/internal/dbpool"
 )
 
 // buildPostgresBackend constructs the Postgres reference backend: open the DB from the DSN

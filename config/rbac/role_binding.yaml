@@ -2,7 +2,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   labels:
-    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/name: agentry
     app.kubernetes.io/managed-by: kustomize
   name: manager-rolebinding
 roleRef:
@@ -15,14 +15,14 @@ subjects:
   namespace: system
 ---
 # SEC-3: bind the NAMESPACED manager Role (secrets create/update/delete in
-# agent-engine-system) to the controller-manager SA. Paired with the cluster-wide
+# agentry) to the controller-manager SA. Paired with the cluster-wide
 # read in the ClusterRole above — the manager reads Secrets cluster-wide but writes
 # them only here.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   labels:
-    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/name: agentry
     app.kubernetes.io/managed-by: kustomize
   name: manager-rolebinding
   namespace: system

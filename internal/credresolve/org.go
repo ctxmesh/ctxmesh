@@ -35,7 +35,7 @@ const (
 	// per-user grant (mcp-grant-*) or the register-flow server Secret.
 	OrgSecretPrefix = "mcp-org"
 	// ManagedByOrgCredential marks a Secret as an org credential (value of LabelManagedBy).
-	ManagedByOrgCredential = "agent-engine-mcp-org"
+	ManagedByOrgCredential = "agentry-mcp-org"
 	// LabelOrgServer holds the server the org credential is for (a lookup key).
 	LabelOrgServer = LabelGrantServer
 	// KeyOrgCredential is the Secret data key holding the shared bearer.

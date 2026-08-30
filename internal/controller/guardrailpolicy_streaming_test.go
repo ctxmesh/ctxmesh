@@ -21,8 +21,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
-	"github.com/ctxmesh/agent-engine/internal/guardrail"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	"github.com/ctxmesh/agentry/internal/guardrail"
 )
 
 func enabledStreaming() *agentsv1beta1.StreamingGuardrail {

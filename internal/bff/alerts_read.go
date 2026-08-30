@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agentry/internal/controlplane/authz"
 )
 
 // AlertSummary is one fired-alert row on the wire (GET /api/alerts). It NEVER

@@ -33,7 +33,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ctxmesh/agent-engine/internal/toolmanifest"
+	"github.com/ctxmesh/agentry/internal/toolmanifest"
 )
 
 // silentLogger returns a logger that discards all output (keeps test output clean).

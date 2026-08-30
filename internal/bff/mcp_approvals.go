@@ -26,9 +26,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/controlplane/authz"
+	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
 )
 
 // The MCP APPROVAL QUEUE — the operator-facing surface for the HARDENED trust
@@ -66,7 +66,7 @@ const mcpApprovalRejected = "rejected"
 // handleListMCPApprovals serves GET /api/mcp/approvals — the register-managed MCP
 // servers awaiting operator approval (ApprovalStatus == pending), read through the
 // CALLER-SCOPED client. It lists the register-managed ToolRegistries
-// (labelled managed-by=agent-engine-mcp) and returns ONLY the pending ones,
+// (labelled managed-by=agentry-mcp) and returns ONLY the pending ones,
 // projected onto the flat MCPServerSummary (no secret material — only the Secret
 // NAME as a reference). Servers is [] (not null) for the empty case; a Forbidden
 // on the list surfaces as 403, never a swallowed empty list.
@@ -270,7 +270,7 @@ func (s *Server) handleRejectMCP(w http.ResponseWriter, r *http.Request) {
 // getManagedMCPRegistry reads the register-managed ToolRegistry {ns}/{name} with
 // the CALLER'S client and returns it, or writes the honest error and returns
 // ok=false. A read that succeeds but finds a registry NOT managed by the register
-// flow (no managed-by=agent-engine-mcp label) is a 404 — the approval surface acts
+// flow (no managed-by=agentry-mcp label) is a 404 — the approval surface acts
 // ONLY on BYO-MCP servers, never on operator-curated ToolRegistries.
 func (s *Server) getManagedMCPRegistry(w http.ResponseWriter, r *http.Request, caller client.Client, ns, name string) (*agentsv1alpha1.ToolRegistry, bool) {
 	tr, err := s.mcpGetToolRegistry(r.Context(), caller, ns, name)

@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ctxmesh/agent-engine/internal/runcap"
+	"github.com/ctxmesh/agentry/internal/runcap"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/trace/noop"

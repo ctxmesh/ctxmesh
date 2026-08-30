@@ -29,7 +29,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
 )
 
 // knativeServiceLabel is the label Knative stamps on every pod serving an agent.

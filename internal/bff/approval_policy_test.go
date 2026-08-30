@@ -21,7 +21,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
 )
 
 // TestApproverMatches: a User entry matches the exact username; a Group entry matches any caller group

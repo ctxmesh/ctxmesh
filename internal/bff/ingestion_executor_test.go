@@ -29,12 +29,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
-	"github.com/ctxmesh/agent-engine/internal/credplane"
-	"github.com/ctxmesh/agent-engine/internal/objectstore"
-	"github.com/ctxmesh/agent-engine/internal/run"
+	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	"github.com/ctxmesh/agentry/internal/controlplane/knowledge"
+	"github.com/ctxmesh/agentry/internal/controlplane/namespacetenant"
+	"github.com/ctxmesh/agentry/internal/credplane"
+	"github.com/ctxmesh/agentry/internal/objectstore"
+	"github.com/ctxmesh/agentry/internal/run"
 )
 
 // ── mock embedder ───────────────────────────────────────────────────────────────────────────────────────────

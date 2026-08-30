@@ -21,7 +21,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ctxmesh/agent-engine/internal/credresolve"
+	"github.com/ctxmesh/agentry/internal/credresolve"
 )
 
 // GrantLister enumerates legacy grants for a backfill (implemented by credresolve.K8sBackend).

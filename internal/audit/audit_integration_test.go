@@ -46,7 +46,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	sigsyaml "sigs.k8s.io/yaml"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
 )
 
 var (
@@ -242,18 +242,18 @@ func TestPersonaClusterRoles_InstallAndValid(t *testing.T) {
 		wantAuditlogs bool
 	}{
 		{
-			file:          "agent_engine_operator_role.yaml",
+			file:          "agentry_operator_role.yaml",
 			roleName:      "operator",
 			wantVerbs:     []string{"*"},
 			wantAuditlogs: true,
 		},
 		{
-			file:      "agent_engine_developer_role.yaml",
+			file:      "agentry_developer_role.yaml",
 			roleName:  "developer",
 			wantVerbs: []string{"create", "delete", "get", "list", "patch", "update", "watch"},
 		},
 		{
-			file:      "agent_engine_viewer_role.yaml",
+			file:      "agentry_viewer_role.yaml",
 			roleName:  "viewer",
 			wantVerbs: []string{"get", "list", "watch"},
 		},

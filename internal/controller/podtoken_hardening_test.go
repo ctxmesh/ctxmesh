@@ -32,7 +32,7 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
 )
 
 // This file holds the per-agent default-token hardening tests (m79.4), the
@@ -67,7 +67,7 @@ func TestMountServiceAccountToken_HardenedByDefault(t *testing.T) {
 	const (
 		namespace = "default"
 		agentName = "msat-default-agent"
-		proxyURL  = "http://statelayer-proxy.agent-engine-system.svc:8080"
+		proxyURL  = "http://statelayer-proxy.agentry.svc:8080"
 	)
 	mkAgent(t, agentName, namespace)
 	setAgentSessionMemory(t, namespace, agentName, "session", "")
@@ -107,7 +107,7 @@ func TestMountServiceAccountToken_OptIn(t *testing.T) {
 	const (
 		namespace = "default"
 		agentName = "msat-optin-agent"
-		proxyURL  = "http://statelayer-proxy.agent-engine-system.svc:8080"
+		proxyURL  = "http://statelayer-proxy.agentry.svc:8080"
 	)
 	a := mkAgent(t, agentName, namespace)
 	a.Spec.MountServiceAccountToken = ptr.To(true)
@@ -142,7 +142,7 @@ func TestMountServiceAccountToken_ToggleRollsRevision(t *testing.T) {
 	const (
 		namespace = "default"
 		agentName = "msat-toggle-agent"
-		proxyURL  = "http://statelayer-proxy.agent-engine-system.svc:8080"
+		proxyURL  = "http://statelayer-proxy.agentry.svc:8080"
 	)
 	a := mkAgent(t, agentName, namespace)
 	setAgentSessionMemory(t, namespace, agentName, "session", "")

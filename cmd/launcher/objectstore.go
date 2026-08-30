@@ -60,7 +60,7 @@ import (
 
 	"github.com/minio/minio-go/v7"
 
-	"github.com/ctxmesh/agent-engine/internal/objectstore"
+	"github.com/ctxmesh/agentry/internal/objectstore"
 )
 
 const (
@@ -75,7 +75,7 @@ const (
 	// One bucket keeps the reference format ("<bucket>/<key>") self-describing
 	// and the dev MinIO trivially inspectable; content-addressing (sha256 key)
 	// gives collision-free coexistence across agents/registries in dev.
-	objectStoreBucket = "agent-engine-blobs"
+	objectStoreBucket = "agentry-blobs"
 
 	// objectStoreOpTimeout bounds a single object-store round-trip (PUT on
 	// publish, GET on consume, bucket ensure). A slow/hung MinIO must never wedge
@@ -123,7 +123,7 @@ type minioStore struct {
 
 // newMinioStore builds the production ObjectStore from OBJECT_STORE_ADDR and the
 // injected dev credentials. addr is a host:port (e.g.
-// agent-engine-objectstore.agent-engine-system.svc:9000); dev MinIO is plain
+// agentry-objectstore.agentry.svc:9000); dev MinIO is plain
 // HTTP in-cluster (Secure:false) — there is no TLS on the dev object store, same
 // posture as the dev Valkey. A construction error (bad addr) is returned so the
 // caller can log it and run WITHOUT offload rather than crash the launcher.

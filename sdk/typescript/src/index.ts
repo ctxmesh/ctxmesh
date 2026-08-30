@@ -1,5 +1,5 @@
 /**
- * ctxmesh — the agent-engine TypeScript SDK (parity with the Python `ctxmesh`).
+ * ctxmesh — the agentry TypeScript SDK (parity with the Python `ctxmesh`).
  *
  * Foundation surface (M77.1): the launcher-plane configuration and the typed error
  * hierarchy. M77.2 adds the data-plane clients (memory/knowledge/feedback/model) and

@@ -1,7 +1,7 @@
 apiVersion: v2
 name: platform-edge
 description: >-
-  Gateway API edge for the agent-engine platform (ADR 0038). Host-routes the console, Langfuse, and
+  Gateway API edge for the agentry platform (ADR 0038). Host-routes the console, Langfuse, and
   agents through one gateway. Same manifests local→prod; only values differ (baseDomain, TLS, DNS,
   Service type). Requires a Gateway API implementation (Envoy Gateway) already installed.
 type: application

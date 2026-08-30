@@ -6,8 +6,8 @@ cliVersion: 4.15.0
 domain: ctxmesh.ai
 layout:
 - go.kubebuilder.io/v4
-projectName: agent-engine
-repo: github.com/ctxmesh/agent-engine
+projectName: agentry
+repo: github.com/ctxmesh/agentry
 resources:
 - api:
     crdVersion: v1
@@ -16,7 +16,7 @@ resources:
   domain: ctxmesh.ai
   group: agents
   kind: AgentDeployment
-  path: github.com/ctxmesh/agent-engine/api/v1alpha1
+  path: github.com/ctxmesh/agentry/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -24,7 +24,7 @@ resources:
   domain: ctxmesh.ai
   group: agents
   kind: AgentVersion
-  path: github.com/ctxmesh/agent-engine/api/v1alpha1
+  path: github.com/ctxmesh/agentry/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -33,7 +33,7 @@ resources:
   domain: ctxmesh.ai
   group: agents
   kind: ModelRoute
-  path: github.com/ctxmesh/agent-engine/api/v1alpha1
+  path: github.com/ctxmesh/agentry/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -41,7 +41,7 @@ resources:
   domain: ctxmesh.ai
   group: agents
   kind: SecretBinding
-  path: github.com/ctxmesh/agent-engine/api/v1alpha1
+  path: github.com/ctxmesh/agentry/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -50,7 +50,7 @@ resources:
   domain: ctxmesh.ai
   group: agents
   kind: MCPToolBinding
-  path: github.com/ctxmesh/agent-engine/api/v1alpha1
+  path: github.com/ctxmesh/agentry/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -59,6 +59,6 @@ resources:
   domain: ctxmesh.ai
   group: agents
   kind: MemoryBinding
-  path: github.com/ctxmesh/agent-engine/api/v1alpha1
+  path: github.com/ctxmesh/agentry/api/v1alpha1
   version: v1alpha1
 version: "3"

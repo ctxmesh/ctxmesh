@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agent-engine/internal/egress"
+	"github.com/ctxmesh/agentry/internal/egress"
 )
 
 func writeRoutesFile(t *testing.T, path, content string) {

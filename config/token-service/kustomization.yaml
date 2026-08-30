@@ -1,5 +1,5 @@
 # Central OBO token-service — Deployment + Service + least-privilege SA/RBAC (ADR 0030 §1).
-# Flows into config/default (namespace agent-engine-system, namePrefix agent-engine-).
+# Flows into config/default (namespace agentry, namePrefix agentry-).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:

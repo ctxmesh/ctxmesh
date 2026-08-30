@@ -1,4 +1,4 @@
-"""ctxmesh — the agent-engine Python SDK.
+"""ctxmesh — the agentry Python SDK.
 
 Typed, optional sugar over the launcher's language-agnostic localhost platform
 plane (ADR 0002). Every capability the SDK exposes is *also* a raw launcher

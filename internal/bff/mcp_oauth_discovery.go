@@ -92,7 +92,7 @@ const (
 	oauthGrantAuthCode    = "authorization_code"
 	oauthGrantRefresh     = "refresh_token"
 	oauthResponseTypeCode = "code"
-	oauthClientName       = "agent-engine console"
+	oauthClientName       = "agentry console"
 
 	schemeHTTP  = "http"
 	schemeHTTPS = "https"

@@ -1,12 +1,12 @@
 # Simplified agent.yaml for the echo-agent example — the same schema the
-# `agent-engine expand` and `agent-engine dev` commands consume.
+# `agentry expand` and `agentry dev` commands consume.
 #
 # Local inner loop (spec §22): build the image once, then run it locally with
 # the full runtime contract + a mock gateway (MOCK_OK):
 #
 #   make docker-build-example        # builds echo-agent:latest
 #   make docker-build-discovery      # builds the tool-discovery sidecar
-#   agent-engine dev -f examples/echo-agent/agent.yaml
+#   agentry dev -f examples/echo-agent/agent.yaml
 #
 # Then POST to the printed /invoke URL; the mock gateway answers MOCK_OK.
 name: echo-agent

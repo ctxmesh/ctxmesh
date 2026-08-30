@@ -29,7 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/ctxmesh/agent-engine/internal/run"
+	"github.com/ctxmesh/agentry/internal/run"
 )
 
 // leaseHeartbeatStore embeds run.Store (nil — only Heartbeat is exercised by startHeartbeat) and

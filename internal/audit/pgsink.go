@@ -22,7 +22,7 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
+	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
 )
 
 // pgSinkBuffer bounds the in-flight queue between the informer loop (Record) and the async writer
@@ -118,5 +118,5 @@ func (p *PostgresSink) drain() {
 func (p *PostgresSink) NeedLeaderElection() bool { return false }
 
 // Dropped reports how many entries were dropped due to a full queue (also exported as the
-// agentengine_audit_dropped_rows_total Prometheus counter, m63.6).
+// agentry_audit_dropped_rows_total Prometheus counter, m63.6).
 func (p *PostgresSink) Dropped() int64 { return p.dropped.Load() }

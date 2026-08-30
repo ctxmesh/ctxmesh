@@ -43,10 +43,10 @@ import (
 
 const (
 	// knowledgeBaseBucket is the single durable bucket all KB documents land in.
-	// Distinct from the launcher's "agent-engine-blobs" ephemeral bucket — the two
+	// Distinct from the launcher's "agentry-blobs" ephemeral bucket — the two
 	// must never share a bucket so their lifecycle policies (GC vs never-GC) cannot
 	// bleed across.
-	knowledgeBaseBucket = "agent-engine-knowledge"
+	knowledgeBaseBucket = "agentry-knowledge"
 
 	// knowledgeKeyPrefix is the top-level key namespace all KB documents share.
 	// Full key: knowledge/{namespace}/{kb-name}/{sanitized-document-name}
@@ -232,7 +232,7 @@ func EnsureBucket(ctx context.Context, client *minio.Client, bucket string) erro
 // panicking on a missing env var.
 //
 // The credential resolution mirrors the launcher's newMinioStore:
-//   - OBJECT_STORE_ADDR → host:port (e.g. agent-engine-objectstore.agent-engine-system.svc:9000)
+//   - OBJECT_STORE_ADDR → host:port (e.g. agentry-objectstore.agentry.svc:9000)
 //   - OBJECT_STORE_ACCESS_KEY / OBJECT_STORE_SECRET_KEY → MinIO root credentials
 //   - Secure:false — dev in-cluster MinIO uses plain HTTP, same posture as the launcher
 //

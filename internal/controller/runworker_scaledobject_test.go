@@ -27,7 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/ctxmesh/agent-engine/internal/kedatypes"
+	"github.com/ctxmesh/agentry/internal/kedatypes"
 )
 
 // TestRunWorkerScaledObject_Wiring proves the durable run-worker autoscaler (m32.2): the built

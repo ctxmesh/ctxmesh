@@ -21,7 +21,7 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/ctxmesh/agent-engine/internal/credresolve"
+	"github.com/ctxmesh/agentry/internal/credresolve"
 )
 
 // Per-user on-behalf-of (OBO) MCP grants (m17.3, ADR 0016 §5) — the FILL-IN of the

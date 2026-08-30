@@ -76,7 +76,7 @@ export function RequireAuth({ children }: { children: React.ReactNode }) {
   const session = useSession();
   const devMode = useDevMode();
   const location = useLocation();
-  // Dev mode (`agent-engine dev --ui`, ADR 0021) is a single local developer with no
+  // Dev mode (`agentry dev --ui`, ADR 0021) is a single local developer with no
   // cluster and no multi-tenant RBAC to enforce — there is no login wall. The BFF runs
   // AllowAll on loopback, so guarding here would only block a console that has no auth
   // to satisfy. Gate on the server-confirmed devMode flag, never a client toggle.

@@ -56,8 +56,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/ctxmesh/agent-engine/internal/gateway/budget"
-	"github.com/ctxmesh/agent-engine/internal/runcap"
+	"github.com/ctxmesh/agentry/internal/gateway/budget"
+	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 const (

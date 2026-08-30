@@ -217,7 +217,7 @@ export class PlaneConfig {
         "ctxmesh.agent.fromEnv(): no launcher environment detected (none of " +
           LAUNCHER_MARKERS.join(", ") +
           " is set). The SDK reads the launcher-injected localhost plane and only " +
-          "works inside an agent-engine pod. For tests or offline use, build a " +
+          "works inside an agentry pod. For tests or offline use, build a " +
           "PlaneConfig explicitly and call agent.fromConfig(config).",
       );
     }
