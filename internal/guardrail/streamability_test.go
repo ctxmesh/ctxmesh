@@ -14,18 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package main
+package guardrail
 
 import (
 	"testing"
 
-	"github.com/ctxmesh/agent-engine/internal/telemetry"
 	"github.com/stretchr/testify/assert"
 )
 
-// TestPatternRuneBounds covers the AST length-bound walk: bounded content-consuming patterns
-// yield finite [min,max] rune bounds; unbounded quantifiers saturate; zero-width assertions and
-// unknown constructs are default-denied (ok=false). All lengths are in RUNES.
+// TestPatternRuneBounds covers the AST length-bound walk: bounded content-consuming patterns yield finite
+// [min,max] rune bounds; unbounded quantifiers saturate; zero-width assertions and unknown constructs are
+// default-denied (ok=false). All lengths are in RUNES.
 func TestPatternRuneBounds(t *testing.T) {
 	cases := []struct {
 		pattern  string
@@ -65,9 +64,9 @@ func TestPatternRuneBounds(t *testing.T) {
 	}
 }
 
-// TestPatternRuneBounds_HugeRepeatIsNotStreamable proves an astronomically large nested repeat
-// is safely non-streamable: Go's regexp parser rejects the (a{1000}){1000} expansion outright,
-// so patternRuneBounds fails closed (ok=false) rather than guessing a bound.
+// TestPatternRuneBounds_HugeRepeatIsNotStreamable proves an astronomically large nested repeat is safely
+// non-streamable: Go's regexp parser rejects the (a{1000}){1000} expansion outright, so patternRuneBounds
+// fails closed (ok=false) rather than guessing a bound.
 func TestPatternRuneBounds_HugeRepeatIsNotStreamable(t *testing.T) {
 	_, _, ok := patternRuneBounds(`(?:a{1000}){1000}`)
 	assert.False(t, ok, "a repeat expansion the parser rejects is not streamable (fail-closed)")
@@ -84,74 +83,56 @@ func TestSaturatingArithmetic(t *testing.T) {
 	assert.Equal(t, patternLenInfinite, satMul(1_000_000, 1_000_000), "10^12 saturates, never wraps negative")
 }
 
-// ruleFor builds an output guardrailRule carrying only the pattern source (the analyzer reads
-// PatternSource) — the detector need not be compiled for the length analysis.
-func ruleFor(name, pattern string) guardrailRule {
-	return guardrailRule{
-		name:      name,
-		scanPoint: scanOutput,
-		detector:  telemetry.Detector{Name: name, PatternSource: pattern},
-	}
-}
+func rule(name, pattern string) OutputRule { return OutputRule{Name: name, Pattern: pattern} }
 
-// TestAnalyzeOutputStreamability is the policy-level safety gate: a policy is streamable only when
-// EVERY output detector is bounded, non-empty-matchable, and within the window cap; the window is
-// the max match length across detectors. A single disqualifying detector makes the whole policy
-// buffered-only (ok=false) with a PII-safe reason naming the detector.
+// TestAnalyzeOutputStreamability is the policy-level safety gate: a policy is streamable only when EVERY
+// output detector is bounded, non-empty-matchable, and within the window cap; the window is the max match
+// length across detectors. A single disqualifying detector makes the whole policy buffered-only (OK=false)
+// with a PII-safe reason naming the detector.
 func TestAnalyzeOutputStreamability(t *testing.T) {
 	t.Run("all bounded → streamable, W = max match len", func(t *testing.T) {
-		v := analyzeOutputStreamability([]guardrailRule{
-			ruleFor("codename", `sk-[A-Za-z0-9]{20}`), // 23
-			ruleFor("secret", `secret`),               // 6
+		v := AnalyzeOutputStreamability([]OutputRule{
+			rule("codename", `sk-[A-Za-z0-9]{20}`), // 23
+			rule("secret", `secret`),               // 6
 		})
-		assert.True(t, v.ok)
-		assert.Equal(t, 23, v.window, "window is the largest detector's max length")
+		assert.True(t, v.OK)
+		assert.Equal(t, 23, v.Window, "window is the largest detector's max length")
 	})
 
 	t.Run("no output rules → trivially streamable, W=0", func(t *testing.T) {
-		v := analyzeOutputStreamability(nil)
-		assert.True(t, v.ok)
-		assert.Equal(t, 0, v.window)
+		v := AnalyzeOutputStreamability(nil)
+		assert.True(t, v.OK)
+		assert.Equal(t, 0, v.Window)
 	})
 
 	t.Run("an unbounded detector → not streamable", func(t *testing.T) {
-		v := analyzeOutputStreamability([]guardrailRule{
-			ruleFor("ok", `secret`),
-			ruleFor("greedy", `.*key`),
-		})
-		assert.False(t, v.ok)
-		assert.Contains(t, v.reason, "greedy")
-		assert.Contains(t, v.reason, "unbounded")
+		v := AnalyzeOutputStreamability([]OutputRule{rule("ok", `secret`), rule("greedy", `.*key`)})
+		assert.False(t, v.OK)
+		assert.Contains(t, v.Reason, "greedy")
+		assert.Contains(t, v.Reason, "unbounded")
 	})
 
 	t.Run("a zero-width assertion → not streamable", func(t *testing.T) {
-		v := analyzeOutputStreamability([]guardrailRule{ruleFor("anchored", `\bsecret\b`)})
-		assert.False(t, v.ok)
-		assert.Contains(t, v.reason, "anchored")
+		v := AnalyzeOutputStreamability([]OutputRule{rule("anchored", `\bsecret\b`)})
+		assert.False(t, v.OK)
+		assert.Contains(t, v.Reason, "anchored")
 	})
 
 	t.Run("an empty-matchable detector → not streamable", func(t *testing.T) {
-		v := analyzeOutputStreamability([]guardrailRule{ruleFor("maybe", `\d{0,5}`)})
-		assert.False(t, v.ok)
-		assert.Contains(t, v.reason, "empty string")
+		v := AnalyzeOutputStreamability([]OutputRule{rule("maybe", `\d{0,5}`)})
+		assert.False(t, v.OK)
+		assert.Contains(t, v.Reason, "empty string")
 	})
 
 	t.Run("over the window cap → not streamable", func(t *testing.T) {
-		// Reached via CONCATENATION of ≤1000 repeats (Go's parser rejects a single {n>1000}):
-		// 1000 + 100 = 1100 > the 1024 cap.
-		v := analyzeOutputStreamability([]guardrailRule{
-			ruleFor("huge", `[A-Z]{1000}[a-z]{100}`),
-		})
-		assert.False(t, v.ok)
-		assert.Contains(t, v.reason, "cap")
+		v := AnalyzeOutputStreamability([]OutputRule{rule("huge", `[A-Z]{1000}[a-z]{100}`)})
+		assert.False(t, v.OK)
+		assert.Contains(t, v.Reason, "cap")
 	})
 
 	t.Run("exactly at the window cap → streamable", func(t *testing.T) {
-		// 1000 + 24 = 1024, exactly the cap (each single repeat ≤ 1000 so the parser accepts it).
-		v := analyzeOutputStreamability([]guardrailRule{
-			ruleFor("edge", `[A-Z]{1000}[a-z]{24}`),
-		})
-		assert.True(t, v.ok)
-		assert.Equal(t, streamWindowMaxRunes, v.window)
+		v := AnalyzeOutputStreamability([]OutputRule{rule("edge", `[A-Z]{1000}[a-z]{24}`)})
+		assert.True(t, v.OK)
+		assert.Equal(t, StreamWindowMaxRunes, v.Window)
 	})
 }

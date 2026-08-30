@@ -100,6 +100,26 @@ export function GuardrailPoliciesPage() {
       ),
     },
     {
+      id: "streaming",
+      header: "Streaming",
+      hideOnMobile: true,
+      cell: (p) =>
+        p.streamingMode ? (
+          <Badge
+            variant={p.streamingMode === "Streaming" ? "success" : "secondary"}
+            className="text-xs"
+            title={p.streamingReason}
+            data-testid={`streaming-${p.name}`}
+          >
+            {p.streamingMode === "Streaming"
+              ? `Streaming${p.streamingWindow ? ` · W=${p.streamingWindow}` : ""}`
+              : "Buffered"}
+          </Badge>
+        ) : (
+          <span className="text-sm text-muted-foreground">—</span>
+        ),
+    },
+    {
       id: "agents",
       header: "Agents",
       hideOnMobile: true,

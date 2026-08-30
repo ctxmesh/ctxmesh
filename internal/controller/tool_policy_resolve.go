@@ -25,12 +25,59 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 	"github.com/ctxmesh/agent-engine/internal/toolmanifest"
 )
+
+// approvalPolicyResolveError is raised when spec.approvalPolicyRef is set but the policy cannot be
+// resolved (dangling ref) — the agent is held NotReady rather than served WITHOUT the declared approval
+// gate (fail-closed, ADR 0111 §3; mirrors guardrailResolveError). Reconcile intercepts it.
+type approvalPolicyResolveError struct {
+	reason string
+	msg    string
+}
+
+func (e *approvalPolicyResolveError) Error() string { return e.msg }
+
+// asApprovalPolicyResolveError extracts an *approvalPolicyResolveError from an error chain.
+func asApprovalPolicyResolveError(err error) (*approvalPolicyResolveError, bool) {
+	var ae *approvalPolicyResolveError
+	if errors.As(err, &ae) {
+		return ae, true
+	}
+	return nil, false
+}
+
+// reasonApprovalPolicyNotFound is the Ready=False reason for a dangling approvalPolicyRef.
+const reasonApprovalPolicyNotFound = "ApprovalPolicyNotFound"
+
+// resolveApprovalPolicy fetches the agent's spec.approvalPolicyRef (M139, ADR 0111). Nil ref ⇒ (nil, nil)
+// (no approval gate). A dangling ref ⇒ a fail-closed approvalPolicyResolveError (the agent is held
+// NotReady, never served without the declared gate). Any other Get error is returned as-is.
+func resolveApprovalPolicy(ctx context.Context, c client.Client, deploy *agentsv1alpha1.AgentDeployment) (*agentsv1beta1.ApprovalPolicy, error) {
+	ref := deploy.Spec.ApprovalPolicyRef
+	if ref == "" {
+		return nil, nil
+	}
+	var policy agentsv1beta1.ApprovalPolicy
+	if err := c.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: ref}, &policy); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, &approvalPolicyResolveError{
+				reason: reasonApprovalPolicyNotFound,
+				msg: fmt.Sprintf("approvalPolicyRef %q not found in namespace %q; the agent is held NotReady "+
+					"rather than served without its declared approval gate", ref, deploy.Namespace),
+			}
+		}
+		return nil, fmt.Errorf("fetching approvalPolicyRef %q: %w", ref, err)
+	}
+	return &policy, nil
+}
 
 // The normalized tool-policy rules (matches the CRD enum, lower-cased). These are the SAME rule
 // strings the egress sidecar's ToolPolicy.RuleFor returns (internal/egress/policy.go) — the
@@ -159,16 +206,100 @@ const reasonInPodToolRequireApprovalUnsupported = "InPodToolRequireApprovalUnsup
 // shape; there are no operator-authored RE2 patterns to compile), so it never fails the reconcile:
 // it simply serializes the SAME ToolPolicySpec the SDK receives (via AGENT_RUNTIME) for delivery to
 // the sidecar. Nil runtime / nil toolPolicy ⇒ not referenced (permissive, no ConfigMap).
-func resolveToolPolicy(deploy *agentsv1alpha1.AgentDeployment) (resolvedToolPolicy, error) {
-	rt := deploy.Spec.Runtime
-	if rt == nil || rt.ToolPolicy == nil {
-		return resolvedToolPolicy{}, nil
+func resolveToolPolicy(deploy *agentsv1alpha1.AgentDeployment, approvalPolicy *agentsv1beta1.ApprovalPolicy) (resolvedToolPolicy, error) {
+	var base *agentsv1alpha1.ToolPolicySpec
+	if rt := deploy.Spec.Runtime; rt != nil {
+		base = rt.ToolPolicy
 	}
-	b, err := json.Marshal(rt.ToolPolicy)
+	// Fold the ApprovalPolicy's require-approval requirements into the EFFECTIVE tool policy (M139, ADR
+	// 0111 §3), max-strictness. THE NIL-TRAP: a ref-only agent (an ApprovalPolicy but no inline toolPolicy)
+	// MUST still get a real, restrictive policy — merging fires even when base is nil, so the sidecar is
+	// never left unrestricted.
+	effective := mergeApprovalPolicy(base, approvalPolicy)
+	if effective == nil {
+		return resolvedToolPolicy{}, nil // no inline toolPolicy AND no approval requirements → permissive
+	}
+	b, err := json.Marshal(effective)
 	if err != nil {
-		return resolvedToolPolicy{}, fmt.Errorf("marshaling spec.runtime.toolPolicy: %w", err)
+		return resolvedToolPolicy{}, fmt.Errorf("marshaling the effective toolPolicy: %w", err)
 	}
-	return resolvedToolPolicy{referenced: true, policyJSON: string(b), spec: rt.ToolPolicy}, nil
+	return resolvedToolPolicy{referenced: true, policyJSON: string(b), spec: effective}, nil
+}
+
+// toolRuleStrictness orders the tool rules by how RESTRICTIVE they are (ADR 0111 §3):
+// allow(0) < require-approval(1) < deny(2). Used to merge an ApprovalPolicy monotonically.
+func toolRuleStrictness(rule string) int {
+	switch normalizeToolRule(rule) {
+	case toolRuleDeny:
+		return 2
+	case toolRuleRequireApproval:
+		return 1
+	default:
+		return 0 // allow (or an unrecognized value → treated as the weakest, so the merge only tightens)
+	}
+}
+
+// maxStrictnessRule returns whichever of a, b is the more restrictive (ADR 0111 §3).
+func maxStrictnessRule(a, b string) string {
+	if toolRuleStrictness(a) >= toolRuleStrictness(b) {
+		return normalizeToolRule(a)
+	}
+	return normalizeToolRule(b)
+}
+
+// mergeApprovalPolicy folds an ApprovalPolicy's require-approval requirements into a base ToolPolicySpec
+// under MAX-STRICTNESS (ADR 0111 §3): the policy can only TIGHTEN — an inline allow never defeats a
+// policy's require-approval, and an inline deny stays deny (deny already exceeds "at least approval"). All
+// other base fields (forcedChoice, parallelLimit, maxToolCallsPerRun) are preserved. Returns base
+// unchanged when the policy adds no requirements; returns a fresh spec (never nil) when it does — so a
+// ref-only agent gets a real restrictive policy (the nil-trap fix).
+func mergeApprovalPolicy(base *agentsv1alpha1.ToolPolicySpec, ap *agentsv1beta1.ApprovalPolicy) *agentsv1alpha1.ToolPolicySpec {
+	if ap == nil || len(ap.Spec.Rules) == 0 {
+		return base
+	}
+	merged := &agentsv1alpha1.ToolPolicySpec{}
+	if base != nil {
+		merged = base.DeepCopy()
+	}
+	allTools := false
+	tools := map[string]bool{}
+	for i := range ap.Spec.Rules {
+		if ap.Spec.Rules[i].AllTools {
+			allTools = true
+		}
+		for _, t := range ap.Spec.Rules[i].Tools {
+			tools[t] = true
+		}
+	}
+	// effective rule for a tool in `merged` (existing override, else the default).
+	ruleForTool := func(name string) string {
+		for i := range merged.Overrides {
+			if merged.Overrides[i].Name == name {
+				return normalizeToolRule(merged.Overrides[i].Rule)
+			}
+		}
+		return normalizeToolRule(merged.Default)
+	}
+	setRule := func(name, rule string) {
+		for i := range merged.Overrides {
+			if merged.Overrides[i].Name == name {
+				merged.Overrides[i].Rule = rule
+				return
+			}
+		}
+		merged.Overrides = append(merged.Overrides, agentsv1alpha1.ToolPolicyOverride{Name: name, Rule: rule})
+	}
+	if allTools {
+		// Tighten the default AND every existing override (an explicit allow must also become approval).
+		merged.Default = maxStrictnessRule(merged.Default, toolRuleRequireApproval)
+		for i := range merged.Overrides {
+			merged.Overrides[i].Rule = maxStrictnessRule(merged.Overrides[i].Rule, toolRuleRequireApproval)
+		}
+	}
+	for t := range tools {
+		setRule(t, maxStrictnessRule(ruleForTool(t), toolRuleRequireApproval))
+	}
+	return merged
 }
 
 // reconcileToolPolicyConfigMap materialises the resolved toolPolicy JSON into the per-agent,

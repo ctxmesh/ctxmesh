@@ -53,8 +53,8 @@ type streamResult struct {
 func runStream(t *testing.T, rules []guardrailRule, chunks []string) streamResult {
 	t.Helper()
 	v := analyzeOutputStreamability(rules)
-	require.True(t, v.ok, "test rules must be streamable: %s", v.reason)
-	sc := newStreamGuardrailScanner(rules, v.window)
+	require.True(t, v.OK, "test rules must be streamable: %s", v.Reason)
+	sc := newStreamGuardrailScanner(rules, v.Window)
 
 	var out strings.Builder
 	res := streamResult{}
@@ -192,7 +192,7 @@ func TestStreamScan_EquivalenceProperty(t *testing.T) {
 			i += step
 		}
 
-		sc := newStreamGuardrailScanner(rules, analyzeOutputStreamability(rules).window)
+		sc := newStreamGuardrailScanner(rules, analyzeOutputStreamability(rules).Window)
 		var got strings.Builder
 		for _, c := range chunks {
 			got.WriteString(sc.feed(c).emit)

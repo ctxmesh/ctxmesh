@@ -44,6 +44,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/ctxmesh/agent-engine/internal/guardrail"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -141,26 +142,29 @@ func buildGuardrailBundle(policyJSON string, cfg gatewayConfig, logf func(string
 func evalStreamEligibility(
 	policyJSON string, engine *guardrailEngine, judge *semanticJudge, logf func(string, ...any),
 ) (bool, int) {
-	mode, err := parseStreamingMode(policyJSON)
-	if err != nil || !strings.EqualFold(mode, streamModeEnabled) {
-		return false, 0 // not opted in (the default) — buffered-only, no log needed
-	}
 	if engine == nil {
 		return false, 0 // no policy to guard; the unguarded path handles stream:true itself
 	}
-	if judge != nil {
-		logf("launcher: gateway: streaming requested but a semanticJudge needs the whole completion " +
-			"→ buffered-only (ADR 0086)")
+	mode, err := parseStreamingMode(policyJSON)
+	optedIn := err == nil && strings.EqualFold(mode, streamModeEnabled)
+
+	// The DECISION is the shared one (internal/guardrail) — the SAME code the GuardrailPolicyReconciler
+	// reports status.streaming with, so enforcement and the reported status never disagree (M139/K10).
+	res := guardrail.DecideStreaming(guardrail.StreamingInput{
+		OptedIn:      optedIn,
+		JudgePresent: judge != nil,
+		OutputRules:  outputRulesOf(engine.output),
+	})
+	if res.EffectiveMode != guardrail.EffectiveStreaming {
+		// Only log the downgrade when the operator ASKED for streaming (opted in) — otherwise it is the
+		// silent buffered-only default. The reason names the cause (judge / a non-streamable detector).
+		if optedIn {
+			logf("launcher: gateway: streaming requested but %s → buffered-only (ADR 0086)", res.Reason)
+		}
 		return false, 0
 	}
-	v := analyzeOutputStreamability(engine.output)
-	if !v.ok {
-		logf("launcher: gateway: streaming requested but the policy is not stream-safe (%s) → buffered-only "+
-			"(ADR 0086)", v.reason)
-		return false, 0
-	}
-	logf("launcher: gateway: streaming ENABLED (span-suppression, hold-window W=%d runes; ADR 0086)", v.window)
-	return true, v.window
+	logf("launcher: gateway: streaming ENABLED (span-suppression, hold-window W=%d runes; ADR 0086)", res.Window)
+	return true, res.Window
 }
 
 // readGuardrailPolicyFile reads the mounted policy file. A missing file OR an empty/whitespace

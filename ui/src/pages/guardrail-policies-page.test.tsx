@@ -116,7 +116,8 @@ describe("GuardrailPoliciesPage (m66.10)", () => {
   it("no referencing agents shows a dash", async () => {
     installFetch(() => ({
       ok: true,
-      body: { items: [policy({ name: "orphan-policy", referencingAgents: [] })] },
+      // streamingMode set so the streaming column renders a badge, leaving the agents "—" unique.
+      body: { items: [policy({ name: "orphan-policy", referencingAgents: [], streamingMode: "Buffered" })] },
     }));
     renderPage();
     await screen.findByText("orphan-policy");
@@ -156,5 +157,27 @@ describe("GuardrailPoliciesPage — K7 polish (m76.6)", () => {
     renderPage();
     await screen.findByText("multi-policy");
     expect(screen.getByText("3 agents")).toBeInTheDocument();
+  });
+
+  it("K10 renders the effective streaming mode (M139, ADR 0086)", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        items: [
+          policy({ name: "streams", streamingMode: "Streaming", streamingWindow: 23 }),
+          policy({ name: "buffered", streamingMode: "Buffered", streamingReason: "not stream-safe" }),
+          policy({ name: "unreconciled" }), // no streamingMode ⇒ a dash
+        ],
+      },
+    }));
+    renderPage();
+    await screen.findByText("streams");
+
+    const streaming = screen.getByTestId("streaming-streams");
+    expect(streaming).toHaveTextContent("Streaming");
+    expect(streaming).toHaveTextContent("W=23");
+    expect(screen.getByTestId("streaming-buffered")).toHaveTextContent("Buffered");
+    // A policy not yet reconciled shows no streaming badge.
+    expect(screen.queryByTestId("streaming-unreconciled")).toBeNull();
   });
 });

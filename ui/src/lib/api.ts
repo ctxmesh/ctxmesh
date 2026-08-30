@@ -480,6 +480,11 @@ export interface FeedbackScore {
   stringValue?: string;
   comment?: string;
   source?: string;
+  // attributedSource is the feedback source declared by the agent's FeedbackStore
+  // (M139, ADR 0112): "human", "external:<channel>", or "unattributed". Absent when
+  // the agent binds no FeedbackStore. Distinct from `source` (the raw Langfuse origin,
+  // always "API" for platform-written scores) — this is the CRD-driven attribution.
+  attributedSource?: string;
 }
 
 export interface FeedbackResponse {
@@ -841,6 +846,13 @@ export interface GuardrailPolicySummary {
   policyHash?: string;
   // referencingAgents mirrors status.referencingAgents — blast-radius agents.
   referencingAgents: string[];
+  // streamingMode mirrors status.streaming.effectiveMode ("Streaming" | "Buffered") — the mode a guarded
+  // agent actually runs under (M139/K10, ADR 0086). Absent until first reconcile.
+  streamingMode?: string;
+  // streamingWindow is status.streaming.window (runes) — the hold-window when streaming.
+  streamingWindow?: number;
+  // streamingReason explains the mode — esp. why a streaming opt-in was downgraded to Buffered.
+  streamingReason?: string;
 }
 
 export interface GuardrailPolicyListResponse {

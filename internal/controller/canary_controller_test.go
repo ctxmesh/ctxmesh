@@ -20,9 +20,11 @@ package controller
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
@@ -289,4 +291,127 @@ func TestCanary_RolloutRoundTrip(t *testing.T) {
 	var gotNo agentsv1alpha1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "no-rollout-rt-agent", Namespace: namespace}, &gotNo))
 	assert.Nil(t, gotNo.Spec.Rollout, "an absent rollout block reads back nil (optional)")
+}
+
+// setRegressionCondition injects a RegressionDetected verdict on the deployment status, standing in for
+// the separate RegressionDetectorReconciler (a pure sensor). Merge-writes the condition so it survives the
+// canary reconcile's own Ready-condition write. (M139, ADR 0113.)
+func setRegressionCondition(t *testing.T, name, namespace string, status metav1.ConditionStatus) {
+	t.Helper()
+	d := getDeploy(t, name, namespace)
+	apimeta.SetStatusCondition(&d.Status.Conditions, metav1.Condition{
+		Type:               conditionRegressionDetected,
+		Status:             status,
+		Reason:             "TestVerdict",
+		Message:            "test-injected regression verdict",
+		ObservedGeneration: d.Generation,
+	})
+	require.NoError(t, k8sClient.Status().Update(testCtx, d))
+}
+
+// backdateRolloutAdvance rewinds status.rollout.lastAdvanceAt so the per-step dwell has elapsed — the test
+// analogue of a real step soaking out over an aggregate window.
+func backdateRolloutAdvance(t *testing.T, name, namespace string, ago time.Duration) {
+	t.Helper()
+	d := getDeploy(t, name, namespace)
+	require.NotNil(t, d.Status.Rollout, "expected an active auto-progression rollout to backdate")
+	d.Status.Rollout.LastAdvanceAt = &metav1.Time{Time: time.Now().Add(-ago)}
+	require.NoError(t, k8sClient.Status().Update(testCtx, d))
+}
+
+// TestCanary_AutoProgress drives the headline M139 🧪 end to end (ADR 0113): an autoProgress-enabled canary
+// OPENS at the base percent, HOLDS within the dwell, ADVANCES one step per soaked passing verdict, and
+// AUTO-PROMOTES at 100% — actuating the real ksvc traffic split each step.
+func TestCanary_AutoProgress(t *testing.T) {
+	const (
+		name      = "canary-autoprogress-agent"
+		namespace = "default"
+	)
+	es := mkEvalSuite(t, "canary-autoprogress-suite", namespace, "0.7", eval.GateBlock)
+
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image:        "ghcr.io/ctxmesh/example-agent:latest",
+			EvalSuiteRef: es.Name,
+			Rollout: &agentsv1alpha1.RolloutSpec{
+				Strategy:      "canary",
+				CanaryPercent: 10,
+				AutoProgress: &agentsv1alpha1.AutoProgressConfig{
+					Enabled:      true,
+					Steps:        []agentsv1alpha1.CanaryStep{{Percent: 50}, {Percent: 100}},
+					DwellSeconds: 60,
+				},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+
+	r := gateReconciler(0.9) // passes the 0.7 threshold
+
+	// Establish an old serving revision R1 (a first-deploy canary degenerates → promote it).
+	reconcileNN(t, r, name, namespace)
+	r1 := getDeploy(t, name, namespace).Status.Gate.ScoredRevision
+	require.NotEmpty(t, r1)
+	promoteTo(t, r, name, namespace, r1)
+	require.True(t, ksvcExists(name, namespace))
+
+	// Roll a candidate R2 → the canary opens. With autoProgress on, the first reconcile OPENS progression
+	// at the base percent (10%) and records status.rollout pinned to R2.
+	upd := getDeploy(t, name, namespace)
+	upd.Spec.Port = 8090
+	delete(upd.Annotations, promoteAnnotation)
+	require.NoError(t, k8sClient.Update(testCtx, upd))
+	reconcileNN(t, r, name, namespace)
+
+	opened := getDeploy(t, name, namespace)
+	assert.Equal(t, eval.PhaseCanary, opened.Status.Gate.Phase)
+	r2 := opened.Status.Gate.ScoredRevision
+	require.NotEqual(t, r1, r2)
+	require.NotNil(t, opened.Status.Rollout, "auto-progress records status.rollout")
+	assert.Equal(t, r2, opened.Status.Rollout.CandidateRevision, "progression is pinned to the candidate")
+	assert.Equal(t, int32(10), opened.Status.Rollout.CurrentPercent, "opens at the base canaryPercent")
+	assert.Equal(t, reasonCanaryOpened, opened.Status.Rollout.Reason)
+	tm := trafficMap(getKsvc(t, name, namespace))
+	assert.Equal(t, int64(90), tm[r1])
+	assert.Equal(t, int64(10), tm[r2])
+
+	// A passing verdict but a fresh (not-yet-soaked) dwell HOLDS at 10%.
+	setRegressionCondition(t, name, namespace, metav1.ConditionFalse)
+	reconcileNN(t, r, name, namespace)
+	held := getDeploy(t, name, namespace)
+	assert.Equal(t, int32(10), held.Status.Rollout.CurrentPercent, "holds within the dwell")
+	assert.Equal(t, reasonAutoProgressSoaking, held.Status.Rollout.Reason)
+
+	// Soak out the dwell + keep the passing verdict → ADVANCE exactly one step to 50%.
+	backdateRolloutAdvance(t, name, namespace, 2*time.Minute)
+	setRegressionCondition(t, name, namespace, metav1.ConditionFalse)
+	reconcileNN(t, r, name, namespace)
+	advanced := getDeploy(t, name, namespace)
+	require.NotNil(t, advanced.Status.Rollout)
+	assert.Equal(t, int32(50), advanced.Status.Rollout.CurrentPercent, "advances one step on a soaked passing eval")
+	assert.Equal(t, reasonAutoAdvanced, advanced.Status.Rollout.Reason)
+	tm = trafficMap(getKsvc(t, name, namespace))
+	assert.Equal(t, int64(50), tm[r1], "the ksvc split converges to the advanced percent")
+	assert.Equal(t, int64(50), tm[r2])
+
+	// A regressed verdict at 50% HOLDS (never advances on a breach) — the fail-safe.
+	backdateRolloutAdvance(t, name, namespace, 2*time.Minute)
+	setRegressionCondition(t, name, namespace, metav1.ConditionTrue)
+	reconcileNN(t, r, name, namespace)
+	regressed := getDeploy(t, name, namespace)
+	assert.Equal(t, int32(50), regressed.Status.Rollout.CurrentPercent, "a regression holds the step")
+	assert.Equal(t, reasonAutoProgressRegressed, regressed.Status.Rollout.Reason)
+	assert.Equal(t, eval.PhaseCanary, regressed.Status.Gate.Phase, "still canary — not promoted")
+
+	// Verdict recovers + soaked → next step is 100 → AUTO-PROMOTE (reuses the human promote path).
+	backdateRolloutAdvance(t, name, namespace, 2*time.Minute)
+	setRegressionCondition(t, name, namespace, metav1.ConditionFalse)
+	reconcileNN(t, r, name, namespace)
+	promoted := getDeploy(t, name, namespace)
+	assert.Equal(t, eval.PhasePromoted, promoted.Status.Gate.Phase, "reaching 100% auto-promotes")
+	tm = trafficMap(getKsvc(t, name, namespace))
+	assert.Equal(t, int64(100), tm[r2], "auto-promote routes 100% to the candidate")
+	assert.Len(t, getKsvc(t, name, namespace).Spec.Traffic, 1, "a promoted canary has a single 100% arm")
 }

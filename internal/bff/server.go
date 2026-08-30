@@ -1256,6 +1256,10 @@ func (s *Server) Handler() http.Handler {
 		// flat score list. Requires ?traceId; missing → 400. Langfuse absent → 501
 		// (registered by the else branch below).
 		authed.HandleFunc("GET /api/feedback", s.handleFeedback)
+		// Feedback WRITE (M139, ADR 0112): the console/external submit path. Caller-scoped;
+		// gated by the agent's FeedbackStore (declared score names) when bound; relayed to
+		// Langfuse (the store of record). Langfuse absent → 501 (registered by the else branch).
+		authed.HandleFunc("POST /api/feedback", s.handleSubmitFeedback)
 		// Cost breakdown by agent (m16.5): aggregates a bounded recent window of
 		// Langfuse traces by agent:<ns>/<name> tag and returns per-agent cost/usage.
 		// ?by=agent is required; any other `by` value → 400. Requires ?by=agent;
@@ -1267,6 +1271,7 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("GET /api/cost", notImplemented("Langfuse cost adapter"))
 		authed.Handle("GET /api/traces/", notImplemented("Langfuse trace adapter"))
 		authed.Handle("GET /api/feedback", notImplemented("Langfuse feedback adapter"))
+		authed.Handle("POST /api/feedback", notImplemented("Langfuse feedback adapter"))
 		authed.Handle("GET /api/cost/breakdown", notImplemented("Langfuse cost breakdown adapter"))
 	}
 
