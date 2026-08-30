@@ -324,6 +324,14 @@ spec:
                 - eventing
                 - job
                 type: string
+              feedbackStoreRef:
+                description: |-
+                  feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
+                  multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
+                  gates ingestion by the declared score names and the read path attributes scores to their source;
+                  Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
+                maxLength: 253
+                type: string
               guardrailPolicyRef:
                 description: |-
                   guardrailPolicyRef optionally names a GuardrailPolicy (same namespace) that governs this
@@ -1424,6 +1432,14 @@ spec:
                 - serving
                 - eventing
                 - job
+                type: string
+              feedbackStoreRef:
+                description: |-
+                  feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
+                  multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
+                  gates ingestion by the declared score names and the read path attributes scores to their source;
+                  Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
+                maxLength: 253
                 type: string
               guardrailPolicyRef:
                 description: |-
