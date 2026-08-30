@@ -5,7 +5,8 @@ import { Plus, Waypoints } from "lucide-react";
 import { DataTable, StatusBadge, humanizeStatusReason, type Column, type DataTableError } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { api, ApiError, type AgentTeamSummary, type AgentTeamRoster } from "@/lib/api";
+import { api, ApiError, type AgentTeamSummary } from "@/lib/api";
+import { TeamSheet } from "@/components/teams/team-sheet";
 
 // TeamsPage — the AgentTeam orchestration rosters (m64.11, ADR 0057).
 //
@@ -64,50 +65,10 @@ function TeamDetailPanel({
         )}
       </div>
 
-      <dl className="space-y-3 text-sm">
-        <div>
-          <dt className="mb-1 text-xs text-muted-foreground">Supervisor</dt>
-          <dd className="font-medium">{team.supervisor}</dd>
-        </div>
-
-        <div>
-          <dt className="mb-1 text-xs text-muted-foreground">
-            Roster ({team.roster.length} sub-agent{team.roster.length === 1 ? "" : "s"})
-          </dt>
-          <dd>
-            {team.roster.length === 0 ? (
-              <span className="text-muted-foreground">—</span>
-            ) : (
-              <ul className="space-y-2" data-testid="team-detail-roster">
-                {team.roster.map((m: AgentTeamRoster) => (
-                  <li
-                    key={m.name}
-                    className="rounded-md border bg-surface-2/40 px-3 py-2"
-                    data-testid={`team-member-${m.name}`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium text-sm">{m.name}</span>
-                      <span className="text-muted-foreground">→</span>
-                      <span className="font-mono text-xs text-muted-foreground">{m.agentRef}</span>
-                    </div>
-                    {m.description && (
-                      <p className="mt-0.5 text-xs text-muted-foreground">{m.description}</p>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </dd>
-        </div>
-
-        <div>
-          <dt className="mb-1 text-xs text-muted-foreground">Spawn budget</dt>
-          <dd className="text-xs text-muted-foreground">
-            fan-out {team.budget.maxFanOut} · depth {team.budget.maxSpawnDepth} · total{" "}
-            {team.budget.maxTotalSpawns}
-          </dd>
-        </div>
-      </dl>
+      {/* The delegation canvas — Declared lens (M144.9, ADR 0115). Replaces the
+          old text list with the organogram: supervisor → delegates-to bus →
+          roster, spawn budget drawn, inherited governance rail. */}
+      <TeamSheet team={team} />
     </div>
   );
 }
