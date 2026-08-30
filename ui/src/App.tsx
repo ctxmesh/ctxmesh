@@ -41,6 +41,7 @@ import { TeamsPage } from "@/pages/teams-page";
 import { CreateTeamPage } from "@/pages/create-team-page";
 import { GuardrailPoliciesPage } from "@/pages/guardrail-policies-page";
 import { WorkflowsPage } from "@/pages/workflows-page";
+import { WorkflowDetailPage } from "@/pages/workflow-detail-page";
 import { KnowledgeBasesPage, KBDetailPage } from "@/pages/knowledge-bases-page";
 import { DatasetsPage, DatasetDetailPage } from "@/pages/datasets-page";
 import {
@@ -198,6 +199,7 @@ export function App() {
             <Route path="guardrails" element={<GuardrailPoliciesPage />} />
             {/* m67.9: Workflows — the declarative agent graph CRs (read-only list + invoke). */}
             <Route path="workflows" element={<WorkflowsPage />} />
+            <Route path="workflows/:ns/:name" element={<WorkflowDetailPage />} />
             {/* m68.13: KnowledgeBases — managed RAG corpora (list + detail, upload, ingest, test-query). */}
             <Route path="knowledgebases" element={<KnowledgeBasesPage />} />
             <Route path="knowledgebases/:ns/:name" element={<KBDetailPage />} />
