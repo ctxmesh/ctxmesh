@@ -98,4 +98,39 @@ describe("FeedbackPanel (m16.9)", () => {
     );
     expect(screen.getByRole("alert")).toHaveTextContent("Couldn't load feedback scores");
   });
+
+  it("attributes scores to their FeedbackStore source (M139, ADR 0112)", async () => {
+    // The read path (m139.4) tags each score with attributedSource via the agent's
+    // FeedbackStore: human / external:<channel> / unattributed. The panel surfaces it
+    // as a friendly badge, with an explicit "Unattributed" for an undeclared name.
+    stubFeedback({
+      scores: [
+        { id: "h1", name: "thumbs", value: 1, source: "API", attributedSource: "human" },
+        { id: "e1", name: "csat", value: 0.8, source: "API", attributedSource: "external:csat-webhook" },
+        { id: "u1", name: "mystery", value: 0.5, source: "API", attributedSource: "unattributed" },
+      ],
+    });
+    render(<FeedbackPanel traceId="t1" />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("feedback-attribution-h1")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("feedback-attribution-h1")).toHaveTextContent("Human");
+    expect(screen.getByTestId("feedback-attribution-e1")).toHaveTextContent("External · csat-webhook");
+    expect(screen.getByTestId("feedback-attribution-u1")).toHaveTextContent("Unattributed");
+  });
+
+  it("shows no attribution badge when the agent binds no FeedbackStore", async () => {
+    // attributedSource absent ⇒ the panel falls back to the raw Langfuse source (unchanged).
+    stubFeedback({
+      scores: [{ id: "s1", name: "quality", value: 0.9, source: "API" }],
+    });
+    render(<FeedbackPanel traceId="t1" />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("feedback-score-s1")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("feedback-attribution-s1")).toBeNull();
+    expect(screen.getByTestId("feedback-score-s1")).toHaveTextContent("API");
+  });
 });
