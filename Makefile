@@ -324,6 +324,10 @@ docker-build-collector: ## Build the project OTel Collector image (dev.local/age
 docker-build-mcp-echo-server: ## Build the M4 fixture MCP echo server (dev.local/mcp-echo-server:e2e — matches the ToolRegistry pin).
 	$(CONTAINER_TOOL) build -t dev.local/mcp-echo-server:e2e examples/mcp-echo-server
 
+.PHONY: docker-build-real-embedder
+docker-build-real-embedder: ## Build the offline semantic embedder (dev.local/real-embedder:m117 — fastembed/MiniLM, model baked in; M140). Bakes the model at build time so the pod runs offline.
+	$(CONTAINER_TOOL) build -t dev.local/real-embedder:m117 examples/real-embedder
+
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
