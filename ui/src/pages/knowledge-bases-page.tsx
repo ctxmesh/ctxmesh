@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 
-import { DataTable, type Column, type DataTableError } from "@/components/kit";
+import { DataTable, StatusBadge, type Column, type DataTableError } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -41,23 +41,6 @@ import {
 //   knowledge-bases-page  — root container
 //   kb-table              — the DataTable (aria-label="KnowledgeBases")
 //   kb-row-{name}         — each row
-
-// phaseBadge returns the Badge variant for a KB phase.
-function phaseBadge(phase: string): "success" | "warning" | "destructive" | "default" | "secondary" {
-  switch (phase) {
-    case "Ready":
-      return "success";
-    case "Ingesting":
-      return "secondary";
-    case "PartiallyIngested":
-      return "warning";
-    case "Failed":
-    case "BudgetExceeded":
-      return "destructive";
-    default:
-      return "default"; // Pending or unknown
-  }
-}
 
 // formatBytes renders a byte count as a human-readable string (e.g. "1.2 MB").
 function formatBytes(bytes: number): string {
@@ -145,11 +128,7 @@ export function KnowledgeBasesPage() {
     {
       id: "phase",
       header: "Phase",
-      cell: (kb) => (
-        <Badge variant={phaseBadge(kb.phase)}>
-          {kb.phase || "Pending"}
-        </Badge>
-      ),
+      cell: (kb) => <StatusBadge ready={kb.phase === "Ready"} phase={kb.phase} />,
     },
     {
       id: "chunks",
@@ -389,7 +368,7 @@ export function KBDetailPage() {
         <div className="flex-1 space-y-1">
           <div className="flex items-center gap-3">
             <h2 className="text-2xl font-semibold tracking-tight font-mono">{kb.name}</h2>
-            <Badge variant={phaseBadge(kb.phase)}>{kb.phase || "Pending"}</Badge>
+            <StatusBadge ready={kb.phase === "Ready"} phase={kb.phase} />
           </div>
           {kb.displayName && (
             <p className="text-sm text-muted-foreground">{kb.displayName}</p>

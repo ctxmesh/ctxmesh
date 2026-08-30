@@ -68,9 +68,10 @@ describe("TeamsPage (m64.11)", () => {
     expect(screen.getByText("planner")).toBeInTheDocument();
     // The spawn budget renders with inline labels (fan-out / depth / total).
     expect(screen.getAllByText(/fan-out 4 · depth 3 · total\s*20/).length).toBeGreaterThan(0);
-    // Readiness badges: one ready, one with its NotReady reason.
-    expect(screen.getByText("ready")).toBeInTheDocument();
-    expect(screen.getByText("MemberNotFound")).toBeInTheDocument();
+    // Readiness badges (M144.1 unified vocabulary): one Ready (green), one showing
+    // its reason humanized in the failed tone.
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.getByText("Member not found")).toBeInTheDocument();
   });
 
   it("filters teams by name", async () => {

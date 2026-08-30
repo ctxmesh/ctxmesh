@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Plus, Waypoints } from "lucide-react";
 
-import { DataTable, type Column, type DataTableError } from "@/components/kit";
+import { DataTable, StatusBadge, humanizeStatusReason, type Column, type DataTableError } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api, ApiError, type AgentTeamSummary, type AgentTeamRoster } from "@/lib/api";
@@ -200,15 +200,17 @@ export function TeamsPage() {
     },
     {
       id: "ready",
-      header: "Ready",
-      cell: (t) =>
-        t.ready ? (
-          <Badge variant="success">ready</Badge>
-        ) : (
-          <Badge variant="warning" title={t.reason}>
-            {t.reason || "not ready"}
-          </Badge>
-        ),
+      header: "Status",
+      // Two-line status (M144.1): the badge is the STATE; the humanized reason is
+      // the subordinate cause line — so a not-ready team says WHY, not just "Not ready".
+      cell: (t) => (
+        <div className="flex flex-col gap-0.5">
+          <StatusBadge ready={t.ready} reason={t.reason} />
+          {!t.ready && t.reason ? (
+            <span className="text-xs text-muted-foreground">{humanizeStatusReason(t.reason)}</span>
+          ) : null}
+        </div>
+      ),
     },
   ];
 
