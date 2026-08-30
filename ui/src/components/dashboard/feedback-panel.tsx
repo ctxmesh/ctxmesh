@@ -28,6 +28,17 @@ type FeedbackState =
   | { kind: "error"; message: string }
   | { kind: "ready"; scores: FeedbackScore[] };
 
+// attributedSourceLabel renders the CRD-declared feedback source (M139, ADR 0112) as a friendly label:
+// "human" → "Human", "external:<channel>" → "External · <channel>", "unattributed" → "Unattributed".
+// Returns null when the agent binds no FeedbackStore (no attribution to show).
+export function attributedSourceLabel(s: string | undefined): string | null {
+  if (!s) return null;
+  if (s === "human") return "Human";
+  if (s === "unattributed") return "Unattributed";
+  if (s.startsWith("external:")) return `External · ${s.slice("external:".length)}`;
+  return s;
+}
+
 export function FeedbackPanel({ traceId }: { traceId: string }) {
   const [state, setState] = React.useState<FeedbackState>({ kind: "loading" });
 
@@ -130,7 +141,26 @@ export function FeedbackPanel({ traceId }: { traceId: string }) {
                       {score.comment || "—"}
                     </td>
                     <td className="py-2 text-muted-foreground">
-                      {score.source || "—"}
+                      {attributedSourceLabel(score.attributedSource) !== null ? (
+                        <div className="flex flex-col gap-0.5">
+                          <span
+                            data-testid={`feedback-attribution-${score.id}`}
+                            className={
+                              "inline-flex w-fit items-center rounded-full px-2 py-0.5 text-xs font-medium " +
+                              (score.attributedSource === "unattributed"
+                                ? "bg-surface-2 text-muted-foreground"
+                                : "bg-primary/10 text-primary")
+                            }
+                          >
+                            {attributedSourceLabel(score.attributedSource)}
+                          </span>
+                          {score.source && (
+                            <span className="text-xs text-muted-foreground/70">{score.source}</span>
+                          )}
+                        </div>
+                      ) : (
+                        score.source || "—"
+                      )}
                     </td>
                   </tr>
                 ))}
