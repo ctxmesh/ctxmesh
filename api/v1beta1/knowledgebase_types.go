@@ -139,6 +139,17 @@ type KnowledgeBaseSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	UserStorageSoftCap int64 `json:"userStorageSoftCap,omitempty"`
+
+	// refreshInterval enables SCHEDULED re-ingest (M140.4): when set, the controller automatically re-runs
+	// ingestion from the source once this interval elapses since the last successful ingest — so a corpus
+	// backed by a changing source (an object-store prefix that gains/loses documents) stays current without a
+	// manual POST /ingest. Ingestion is idempotent + cursor-resumable (unchanged content_hash = no-op; orphan
+	// sweep drops removed docs), so a periodic re-ingest safely reconciles adds/changes/deletes. Unset ⇒ no
+	// scheduled refresh (the byte-for-byte-unchanged manual/webhook-only behaviour). MUTABLE (unlike the
+	// one-way-door fields) — the cadence can be tuned or turned off at any time. A guard interval floors it so a
+	// fat-fingered tiny value can't hammer the source; the controller skips a refresh while an ingest is in flight.
+	// +optional
+	RefreshInterval *metav1.Duration `json:"refreshInterval,omitempty"`
 }
 
 // KnowledgeBaseStatus defines the observed state of a KnowledgeBase. Populated by the m68.1
@@ -186,6 +197,14 @@ type KnowledgeBaseStatus struct {
 	// Populated by the m68.6 ingestion executor; useful for debugging and status correlation.
 	// +optional
 	IngestionRunRef string `json:"ingestionRunRef,omitempty"`
+
+	// lastScheduledIngestAt is when the controller last STARTED a scheduled re-ingest (M140.4), stamped on
+	// each auto-refresh attempt — distinct from lastIngestedAt (which only advances on SUCCESS). The refresh
+	// predicate keys next-due off max(lastIngestedAt, lastScheduledIngestAt) + spec.refreshInterval, so a
+	// scheduled run that fails (lastIngestedAt never advances) is retried exactly once per interval — never
+	// hotter — instead of hot-looping. nil until the first scheduled refresh fires.
+	// +optional
+	LastScheduledIngestAt *metav1.Time `json:"lastScheduledIngestAt,omitempty"`
 
 	// conditions reflect the KnowledgeBase's reconciliation state.
 	//   Validated=True  → the spec is valid (embeddingRoute non-empty, chunking sane, source valid).
