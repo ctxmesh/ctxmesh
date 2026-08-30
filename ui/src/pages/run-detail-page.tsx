@@ -537,10 +537,34 @@ function OrchestrationTree({ runId }: { runId: string }) {
   // must render nothing, not throw on tree.nodes.length). Single-node tree ⇒ not orchestrated.
   if (!tree || !Array.isArray(tree.nodes) || tree.nodes.length <= 1) return null;
 
-  // Show every agent the platform ran (the root run is the page itself; steps/delegates are the nodes),
-  // in execution order. Neutral for both a workflow pipeline and a supervisor's dynamic delegation.
-  const steps = tree.nodes.filter((n) => n.id !== tree.rootId);
-  const nodes = steps.length > 0 ? steps : tree.nodes;
+  // The LIVE lens of the delegation canvas (M144.10, ADR 0115): the run-tree drawn
+  // as the actual delegation TREE (who handed work to whom), the filled counterpart
+  // to the Team Sheet's declared, hollow structure. Children keyed by parentRunId.
+  const byParent = new Map<string, RunTreeNode[]>();
+  for (const n of tree.nodes) {
+    const p = n.parentRunId ?? tree.rootId;
+    if (n.id === tree.rootId) continue; // the root anchors the tree, not its own child
+    if (!byParent.has(p)) byParent.set(p, []);
+    byParent.get(p)!.push(n);
+  }
+  for (const arr of byParent.values()) {
+    arr.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+  const root = tree.nodes.find((n) => n.id === tree.rootId) ?? tree.nodes[0];
+  // Orphans: any node whose parent isn't in the tree hangs off the root, so nothing
+  // is silently dropped from the picture.
+  const seen = new Set<string>([root.id]);
+  const collect = (id: string) => {
+    for (const c of byParent.get(id) ?? []) {
+      seen.add(c.id);
+      collect(c.id);
+    }
+  };
+  collect(root.id);
+  const orphans = tree.nodes.filter((n) => !seen.has(n.id));
+  if (orphans.length > 0) byParent.set(root.id, [...(byParent.get(root.id) ?? []), ...orphans]);
+
+  const total = tree.nodes.length;
 
   return (
     <div className="rounded-lg border bg-card p-5 shadow-card" data-testid="run-orchestration">
@@ -548,42 +572,95 @@ function OrchestrationTree({ runId }: { runId: string }) {
         Orchestration
       </h2>
       <p className="mt-1 text-sm text-muted-foreground">
-        The platform ran {nodes.length} agent{nodes.length === 1 ? "" : "s"} to complete this — here's who
-        did what, in order, and how the work flowed between them.
+        The platform ran {total} agent{total === 1 ? "" : "s"} to complete this — here's who delegated
+        to whom, and how the work flowed between them.
       </p>
-      <div className="mt-4 space-y-3">
-        {nodes.map((n, i) => (
-          <OrchestrationNode key={n.id} node={n} step={i + 1} />
-        ))}
+      <div className="mt-4">
+        <RunTreeNodeView node={root} byParent={byParent} depth={0} />
       </div>
     </div>
   );
 }
 
-function OrchestrationNode({ node, step }: { node: RunTreeNode; step: number }) {
+// A filled, status-colored run node — the live counterpart to the Team Sheet's
+// hollow readiness dot. Solid = the run reached this state.
+function RunStatusDot({ status }: { status: string }) {
+  const s = status.toLowerCase();
+  const running = /(running|in.?progress|active|streaming)/.test(s);
+  const waiting = /(waiting|requires.?action|approval|paused|suspend)/.test(s);
+  const failed = /(fail|error|denied|cancel)/.test(s);
+  const done = /(done|success|succeeded|complete|promoted)/.test(s);
+  const cls = running
+    ? "bg-info animate-pulse"
+    : waiting
+      ? "bg-warning"
+      : failed
+        ? "bg-destructive"
+        : done
+          ? "bg-success"
+          : "bg-muted-foreground/50";
+  return <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${cls}`} aria-hidden />;
+}
+
+function RunTreeNodeView({
+  node,
+  byParent,
+  depth,
+}: {
+  node: RunTreeNode;
+  byParent: Map<string, RunTreeNode[]>;
+  depth: number;
+}) {
+  const children = byParent.get(node.id) ?? [];
   return (
     <div
-      data-testid={`orchestration-node-${node.agent}`}
-      className="rounded-md border bg-background p-3"
+      className={
+        depth > 0
+          ? "relative pl-5 before:absolute before:left-[7px] before:top-0 before:h-full before:w-px before:bg-border"
+          : ""
+      }
     >
-      <div className="flex items-center gap-2">
-        <Badge variant="secondary" className="text-[10px]">
-          Step {step}
-        </Badge>
-        <span className="text-sm font-medium">{node.agent}</span>
-        <Badge variant={statusVariant(node.status)} className="ml-auto text-[10px]">
-          {fmtStatus(node.status)}
-        </Badge>
-      </div>
-      {node.input && (
-        <p className="mt-2 text-xs text-muted-foreground">
-          <span className="font-medium text-foreground">Task:</span> {truncateText(node.input, 180)}
-        </p>
+      {/* the connector elbow into this node */}
+      {depth > 0 && (
+        <span
+          className="absolute left-[7px] top-[14px] h-px w-3 bg-border"
+          aria-hidden
+        />
       )}
-      {node.output && (
-        <p className="mt-1 text-xs text-muted-foreground">
-          <span className="font-medium text-foreground">Result:</span> {truncateText(node.output, 240)}
-        </p>
+      <div
+        data-testid={`orchestration-node-${node.agent}`}
+        className="rounded-md border bg-background p-3"
+      >
+        <div className="flex items-center gap-2">
+          <RunStatusDot status={node.status} />
+          <span className="text-sm font-medium">{node.agent}</span>
+          {depth === 0 && (
+            <Badge variant="secondary" className="text-[10px]">
+              supervisor
+            </Badge>
+          )}
+          <Badge variant={statusVariant(node.status)} className="ml-auto text-[10px]">
+            {fmtStatus(node.status)}
+          </Badge>
+        </div>
+        {node.input && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            <span className="font-medium text-foreground">Task:</span> {truncateText(node.input, 180)}
+          </p>
+        )}
+        {node.output && (
+          <p className="mt-1 text-xs text-muted-foreground">
+            <span className="font-medium text-foreground">Result:</span>{" "}
+            {truncateText(node.output, 240)}
+          </p>
+        )}
+      </div>
+      {children.length > 0 && (
+        <div className="mt-2 space-y-2">
+          {children.map((c) => (
+            <RunTreeNodeView key={c.id} node={c} byParent={byParent} depth={depth + 1} />
+          ))}
+        </div>
       )}
     </div>
   );
