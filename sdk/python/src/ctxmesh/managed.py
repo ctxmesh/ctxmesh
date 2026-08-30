@@ -1826,13 +1826,13 @@ def _drive_loop(
                         blocked[call_id] = f"tool {name!r} is not permitted by policy"
                         continue
                     if rule == "require-approval":
-                        # Gate on human approval — at ANY delegation depth (M138, ADR 0110). The ADR 0058
-                        # fifth-issue ban (deny in a delegated sub-run) is LIFTED: a sub-run now SUSPENDS
-                        # durably instead of parking a worker (ADR 0108), and its pause SURFACES on the root
-                        # via descendant-requires-action (M108), so it is neither hung nor invisible. Every
-                        # delegated sub-run inherits the parent's OBO identity, so root-run approval is the
-                        # correct human (ADR 0110). An unapproved key raises ApprovalRequiredError here
-                        # (before any dispatch) — do NOT swallow it; the outer run_managed_loop turns it into
+                        # Gate on human approval at ANY delegation depth (M138, ADR 0110). The ADR
+                        # 0058 ban (deny in a delegated sub-run) is LIFTED: a sub-run now SUSPENDS
+                        # durably instead of parking a worker (ADR 0108), and its pause SURFACES on
+                        # the root via descendant-requires-action (M108) — not hung, not invisible.
+                        # Every sub-run inherits the parent's OBO identity, so root-run approval is
+                        # the right human. An unapproved key raises ApprovalRequiredError here
+                        # (before any dispatch) — do NOT swallow it; the outer loop turns it into
                         # approval_required, which the BFF parks in requires_action.
                         args = _parse_arguments(_call_arguments(call))
                         pause_for_approval(f"tool:{name}", f"Run tool {name!r} with args {args!r}?")
