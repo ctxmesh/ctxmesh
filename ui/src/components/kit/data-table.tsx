@@ -157,7 +157,12 @@ export function DataTable<T>({
   const showSearch = onQueryChange !== undefined;
   const isFiltered = !!query && query.length > 0;
   const colSpan = columns.length + (rowActions ? 1 : 0);
-  const showPagination = onPrev !== undefined || onNext !== undefined || rangeLabel !== undefined;
+  // Show the pager only when there is actually another page to reach — a disabled
+  // Prev/Next under a single-page table is dead chrome (M144.2). A rangeLabel alone
+  // (a "1–N of M" count) may still show.
+  const showPagination =
+    ((hasPrev || hasNext) && (onPrev !== undefined || onNext !== undefined)) ||
+    rangeLabel !== undefined;
 
   // Roving keyboard focus over rows (Up/Down move, Enter/Space activate).
   const [focusedRow, setFocusedRow] = React.useState(0);
@@ -260,6 +265,11 @@ export function DataTable<T>({
       );
     });
 
+  // Genuinely-empty list (no items at all, not a filtered window, no more pages):
+  // hide the column headers so the teaching empty state doesn't sit under ghost
+  // chrome (M144.2). The filter toolbar + the empty-state row still render.
+  const genuinelyEmpty = !loading && !error && rows.length === 0 && !isFiltered && !hasNext;
+
   return (
     <div className={cn("space-y-3", className)}>
       {/* Toolbar: filter bar (q) + parent-supplied controls. */}
@@ -294,6 +304,7 @@ export function DataTable<T>({
         )}
       >
         <table className="w-full text-left text-sm" aria-label={ariaLabel}>
+          {!genuinelyEmpty && (
           <thead>
             <tr className="border-b bg-surface-2/60">
               {columns.map((col) => {
@@ -347,6 +358,7 @@ export function DataTable<T>({
               )}
             </tr>
           </thead>
+          )}
           <tbody>
             {loading && (
               <tr>
