@@ -355,6 +355,20 @@ func (s *Server) ingestOneDocument(
 		s.failIngestion(runID, ingestionFailed, fmt.Sprintf("extracting document %q: %v", doc.Key, err))
 		return 0, true
 	}
+	// OCR fallback (M140.5, ADR 0119): a scanned (image-only) PDF has no text layer, so the born-digital
+	// extractor yielded insufficient text. If OCR is wired AND this is a PDF, OCR the raw bytes before giving up.
+	// FAIL-OPEN: an OCR error/timeout, or a still-insufficient result (a truly blank page), keeps the honest
+	// PartiallyIngested state below — the OCR enhancement being down must never fail a corpus.
+	if !sufficient && s.ocr != nil && ingest.IsPDF(doc.ContentType, filename) {
+		if ocrText, ocrErr := s.ocr.OCRPDF(ctx, data); ocrErr != nil {
+			s.log.Error(ocrErr, "ingest: OCR fallback failed — keeping PartiallyIngested", "doc", doc.Key)
+		} else if len(strings.TrimSpace(ocrText)) >= ingest.MinSufficientChars {
+			chunks = ingest.Chunk(ocrText, chunkCfg)
+			sufficient = true
+			_ = s.runStore.AppendEvent(runID, run.EventStep, "ingestion-ocr:"+doc.Key)
+		}
+	}
+
 	if !sufficient {
 		// Scanned PDF / empty doc → PARTIAL. Never error, never silently succeed: flag the run partial + still
 		// sweep any prior chunks for this doc (a doc that WAS ingested and is now empty must not leave stale chunks).

@@ -332,6 +332,10 @@ docker-build-real-embedder: ## Build the offline semantic embedder (dev.local/re
 docker-build-real-reranker: ## Build the offline cross-encoder reranker (dev.local/real-reranker:m140 — fastembed TextCrossEncoder/ms-marco-MiniLM, model baked in; M140.2, ADR 0117).
 	$(CONTAINER_TOOL) build -t dev.local/real-reranker:m140 examples/real-reranker
 
+.PHONY: docker-build-ocr-service
+docker-build-ocr-service: ## Build the offline OCR service (dev.local/ocr-service:m140 — tesseract + poppler baked in; scanned-PDF text, M140.5).
+	$(CONTAINER_TOOL) build -t dev.local/ocr-service:m140 examples/ocr-service
+
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
