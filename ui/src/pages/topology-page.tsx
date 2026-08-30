@@ -24,6 +24,7 @@ import {
   List,
   Network,
   Search,
+  Shield,
 } from "lucide-react";
 
 import { api, ApiError } from "@/lib/api";
@@ -88,6 +89,17 @@ function HealthDots({ health }: { health: TopologyGroup["health"] }) {
 // GroupCard — one collapsible registry/namespace group in graph view
 // ---------------------------------------------------------------------------
 
+// The health-accent left rule — the canvas status vocabulary applied to a fleet
+// group: red if anything's failing, amber if anything's pending, green if all
+// resolved, muted if empty. Worst-first, so a problem is never hidden by a healthy
+// majority.
+function groupAccent(health: TopologyGroup["health"]): string {
+  if (health.notReady > 0) return "border-l-destructive";
+  if (health.pending > 0) return "border-l-warning";
+  if (health.ready > 0) return "border-l-success";
+  return "border-l-muted-foreground/40";
+}
+
 function GroupCard({
   group,
   expanded,
@@ -97,18 +109,24 @@ function GroupCard({
   expanded: boolean;
   onToggle: () => void;
 }) {
+  // Canvas grammar (ADR 0115): a registry is a trust boundary — drawn with the
+  // same dashed-fence + Shield vocabulary as the Team Sheet, tinted by fleet health.
   return (
     <button
       type="button"
       data-testid={`group-card-${group.id}`}
       onClick={onToggle}
-      className="w-56 rounded-lg border border-border-strong bg-card p-3 text-left shadow-card transition-shadow hover:shadow-elevated"
+      className={cn(
+        "w-56 rounded-lg border border-dashed border-l-2 border-muted-foreground/40 bg-card p-3 text-left shadow-card transition-shadow hover:shadow-elevated",
+        groupAccent(group.health),
+      )}
     >
       <div className="mb-2 flex items-center gap-2">
-        <div className="flex h-7 w-7 items-center justify-center rounded-md bg-accent text-accent-foreground">
-          <Boxes className="h-4 w-4" />
-        </div>
+        <Shield className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
         <div className="min-w-0 flex-1">
+          <p className="truncate text-[10px] uppercase tracking-wide text-muted-foreground">
+            registry
+          </p>
           <p className="truncate text-sm font-medium" data-testid={`group-label-${group.id}`}>
             {group.label}
           </p>
@@ -134,6 +152,13 @@ function GroupCard({
 // AgentNodeCard — an expanded individual agent in graph view
 // ---------------------------------------------------------------------------
 
+const NODE_HEALTH_DOT: Record<string, string> = {
+  ready: "bg-success",
+  notReady: "bg-destructive",
+  pending: "bg-warning",
+  unknown: "bg-muted-foreground",
+};
+
 function AgentNodeCard({
   node,
   onClick,
@@ -141,23 +166,26 @@ function AgentNodeCard({
   node: TopologyNode;
   onClick: () => void;
 }) {
-  const healthColor: Record<string, string> = {
-    ready: "border-success text-success",
-    notReady: "border-destructive text-destructive",
-    pending: "border-warning text-warning",
-    unknown: "border-muted-foreground text-muted-foreground",
-  };
+  // Canvas grammar: readiness is a status DOT (as on the Team Sheet + Live lens),
+  // not a full-border color — one consistent vocabulary across every lens.
   return (
     <button
       type="button"
       data-testid={`agent-node-${node.id}`}
       onClick={onClick}
-      className={cn(
-        "min-w-36 rounded-md border-2 bg-card px-3 py-2 text-left shadow-card transition-shadow hover:shadow-elevated",
-        healthColor[node.health] ?? "border-muted-foreground text-muted-foreground",
-      )}
+      className="min-w-36 rounded-md border bg-card px-3 py-2 text-left shadow-card transition-shadow hover:shadow-elevated"
     >
-      <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Agent</p>
+      <div className="flex items-center gap-1.5">
+        <span
+          className={cn(
+            "h-2 w-2 shrink-0 rounded-full",
+            NODE_HEALTH_DOT[node.health] ?? "bg-muted-foreground",
+          )}
+        />
+        <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          Agent
+        </p>
+      </div>
       <p className="truncate text-sm font-semibold text-card-foreground">{node.name}</p>
       {node.detail && (
         <p className="truncate font-mono text-[10px] text-muted-foreground">{node.detail}</p>
