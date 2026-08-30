@@ -360,19 +360,19 @@ export function PlaygroundPage() {
       <div>
         <h2 className="text-2xl font-semibold tracking-tight">Playground</h2>
         <p className="text-sm text-muted-foreground">
-          Define an agent, run it fully traced, and inspect the trace — then export
-          the same definition to a CRD. No raw YAML.
+          Pick a deployed agent, send it a message, and watch the trace build live —
+          then open the full trace or export the definition to a CRD.
         </p>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[1fr_1fr]">
-        {/* ── Define + run ─────────────────────────────────────────────── */}
+        {/* ── LEFT: chat ───────────────────────────────────────────────── */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Define &amp; run</CardTitle>
+            <CardTitle className="text-base">Chat</CardTitle>
             <CardDescription>
-              A minimal agent definition + an input to invoke. The agent must be
-              deployed; the run is traced end to end.
+              Pick an agent and send it a message — each turn is invoked on the live
+              agent and traced end to end.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-5">
@@ -431,42 +431,55 @@ export function PlaygroundPage() {
               />
             </FormField>
 
-            <FormField id="image" label="Image" error={errors.image} hint="Used when exporting to a CRD.">
-              <Input
-                id="image"
-                value={form.image}
-                onChange={(e) => set("image", e.target.value)}
-                placeholder="ghcr.io/ctxmesh/echo:v1"
-              />
-            </FormField>
+            {/* Advanced — the CRD-authoring fields, needed only to define + export a
+                new agent (a deployed agent runs from just its name). Collapsed by
+                default so the primary flow is: pick agent → message → run. */}
+            <details
+              className="rounded-md border bg-card/40 px-3 py-2"
+              data-testid="playground-advanced"
+            >
+              <summary className="cursor-pointer text-sm font-medium text-muted-foreground">
+                Advanced — image, execution model, route (define &amp; export)
+              </summary>
+              <div className="space-y-4 pt-3">
+                <FormField id="image" label="Image" error={errors.image} hint="Used when exporting to a CRD.">
+                  <Input
+                    id="image"
+                    value={form.image}
+                    onChange={(e) => set("image", e.target.value)}
+                    placeholder="ghcr.io/ctxmesh/echo:v1"
+                  />
+                </FormField>
 
-            <FormField id="executionModel" label="Execution model">
-              <Select
-                id="executionModel"
-                value={form.executionModel}
-                onChange={(e) =>
-                  set("executionModel", e.target.value as ConfigForm["executionModel"])
-                }
-              >
-                <option value="serving">serving (request-driven)</option>
-                <option value="eventing">eventing (broker-triggered)</option>
-                <option value="job">job (one-shot)</option>
-              </Select>
-            </FormField>
+                <FormField id="executionModel" label="Execution model">
+                  <Select
+                    id="executionModel"
+                    value={form.executionModel}
+                    onChange={(e) =>
+                      set("executionModel", e.target.value as ConfigForm["executionModel"])
+                    }
+                  >
+                    <option value="serving">serving (request-driven)</option>
+                    <option value="eventing">eventing (broker-triggered)</option>
+                    <option value="job">job (one-shot)</option>
+                  </Select>
+                </FormField>
 
-            <FormField id="modelRoute" label="Model route" hint="ModelRoute alias for the agent's LLM calls (optional).">
-              <Input
-                id="modelRoute"
-                value={form.modelRoute}
-                onChange={(e) => set("modelRoute", e.target.value)}
-                placeholder="default-model"
-              />
-            </FormField>
+                <FormField id="modelRoute" label="Model route" hint="ModelRoute alias for the agent's LLM calls (optional).">
+                  <Input
+                    id="modelRoute"
+                    value={form.modelRoute}
+                    onChange={(e) => set("modelRoute", e.target.value)}
+                    placeholder="default-model"
+                  />
+                </FormField>
+              </div>
+            </details>
 
-            <FormField id="input" label="Input (JSON)" hint="Posted verbatim to the agent's /invoke.">
+            <FormField id="input" label="Message (JSON)" hint="Posted verbatim to the agent's /invoke.">
               <Textarea
                 id="input"
-                className="min-h-[8rem] font-mono text-xs"
+                className="min-h-[6rem] font-mono text-xs"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
               />
@@ -506,29 +519,63 @@ export function PlaygroundPage() {
                 />
               )}
             </div>
-          </CardContent>
-        </Card>
 
-        {/* ── Run result + native trace link ────────────────────────────── */}
-        <div className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Run result</CardTitle>
-              <CardDescription>
-                The agent's response. Use "View full trace" for the native
-                waterfall and span explorer.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {run.kind === "done" ? (
-                <>
-                  <div className="flex items-center gap-2 text-success">
-                    <CheckCircle2 className="h-5 w-5" />
-                    <span className="text-sm font-medium">
-                      {run.runStatus === "waiting" ? "Suspended — awaiting next node" : "Traced run complete"}
-                    </span>
+            {/* ── Conversation (M144.8 chat-first) — your message + the agent's reply.
+                The response is the same traced invoke; the trace itself renders in the
+                pane to the right. ─────────────────────────────────────────────────── */}
+            {(run.kind === "running" || run.kind === "done") && (
+              <div className="space-y-3 border-t pt-4" data-testid="chat-transcript">
+                {/* your message */}
+                <div className="flex justify-end">
+                  <div className="max-w-[88%] whitespace-pre-wrap break-words rounded-lg rounded-br-sm bg-primary/10 px-3 py-2 font-mono text-xs">
+                    {input}
                   </div>
-                  {run.consentRequired && run.consentRequired.length > 0 && (
+                </div>
+                {/* agent reply */}
+                <div className="space-y-2 rounded-lg rounded-bl-sm border bg-card p-3">
+                  {run.kind === "running" && (
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="text-xs text-muted-foreground" data-testid="run-streaming">
+                          Streaming…
+                        </span>
+                        {run.step && (
+                          <Badge
+                            variant="secondary"
+                            className="truncate font-mono text-[10px]"
+                            data-testid="run-step"
+                          >
+                            {run.step}
+                          </Badge>
+                        )}
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void onCancel(run.runId)}
+                        data-testid="cancel-run"
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  )}
+                  {run.kind === "done" && (
+                    <div className="flex items-center gap-2 text-success">
+                      <CheckCircle2 className="h-4 w-4" />
+                      <span className="text-sm font-medium">
+                        {run.runStatus === "waiting"
+                          ? "Suspended — awaiting next node"
+                          : "Traced run complete"}
+                      </span>
+                    </div>
+                  )}
+                  <Textarea
+                    aria-label="Agent response"
+                    readOnly
+                    className="min-h-[8rem] resize-y border-0 bg-transparent p-0 font-mono text-xs focus-visible:ring-0"
+                    value={run.response}
+                  />
+                  {run.kind === "done" && run.consentRequired && run.consentRequired.length > 0 && (
                     <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
                       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
                       <div className="space-y-2">
@@ -559,16 +606,13 @@ export function PlaygroundPage() {
                       </div>
                     </div>
                   )}
-                  {run.approval && (
+                  {run.kind === "done" && run.approval && (
                     <div
                       className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"
                       data-testid="approval-request"
                     >
                       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
                       <div className="space-y-2">
-                        {/* m75.3: this is the deep-link target of the HITL approval-waiting
-                            notification (ADR 0069 §3). The approver arrives here (caller-scoped —
-                            NOT via a magic link) and approves/denies via /api/runs/{id}/resume. */}
                         <p className="font-medium">Waiting for your approval</p>
                         <p className="text-muted-foreground">{run.approval.summary}</p>
                         <div className="flex flex-wrap gap-2">
@@ -593,6 +637,33 @@ export function PlaygroundPage() {
                       </div>
                     </div>
                   )}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* ── RIGHT: live trace pane ─────────────────────────────────────── */}
+        <div className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Trace</CardTitle>
+              <CardDescription>
+                The run's spans as they arrive. Open the full waterfall for the native
+                span explorer.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {run.kind === "running" ? (
+                <div
+                  className="flex items-center gap-2 text-sm text-muted-foreground"
+                  data-testid="trace-building"
+                >
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-info" />
+                  Building trace…{run.step ? ` — ${run.step}` : ""}
+                </div>
+              ) : run.kind === "done" ? (
+                <>
                   {run.traceId && (
                     <div className="rounded-md border p-3">
                       <p className="text-xs text-muted-foreground">trace id</p>
@@ -608,68 +679,22 @@ export function PlaygroundPage() {
                       runStatus={run.runStatus}
                     />
                   )}
-                  <Textarea
-                    aria-label="Agent response"
-                    readOnly
-                    className="min-h-[8rem] font-mono text-xs"
-                    value={run.response}
-                  />
+                  {/* Native trace explorer (/traces/:id, m16.7) — link-out only (m17.13). */}
+                  <Link
+                    to={`/traces/${encodeURIComponent(run.traceId)}`}
+                    data-testid="view-full-trace"
+                    className={buttonVariants({ variant: "outline", size: "sm" })}
+                  >
+                    View full trace
+                  </Link>
                 </>
-              ) : run.kind === "running" ? (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span className="text-sm text-muted-foreground" data-testid="run-streaming">
-                        Streaming…
-                      </span>
-                      {/* Live step-visibility (M78, ADR 0071 §4): what step is the agent on now. */}
-                      {run.step && (
-                        <Badge
-                          variant="secondary"
-                          className="truncate font-mono text-[10px]"
-                          data-testid="run-step"
-                        >
-                          {run.step}
-                        </Badge>
-                      )}
-                    </div>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => void onCancel(run.runId)}
-                      data-testid="cancel-run"
-                    >
-                      Cancel
-                    </Button>
-                  </div>
-                  <Textarea
-                    aria-label="Agent response"
-                    readOnly
-                    className="min-h-[8rem] font-mono text-xs"
-                    value={run.response}
-                  />
-                </div>
               ) : (
                 <p className="py-6 text-center text-sm text-muted-foreground">
-                  Run the agent to see its response and trace.
+                  Run an agent to see its trace build here.
                 </p>
               )}
             </CardContent>
           </Card>
-
-          {/* Post-run: link to the native trace explorer (/traces/:id, m16.7).
-              No embedded Langfuse iframe — link-out only (m17.13). */}
-          {run.kind === "done" && (
-            <div className="flex justify-start">
-              <Link
-                to={`/traces/${encodeURIComponent(run.traceId)}`}
-                data-testid="view-full-trace"
-                className={buttonVariants({ variant: "outline", size: "sm" })}
-              >
-                View full trace
-              </Link>
-            </div>
-          )}
         </div>
       </div>
 
