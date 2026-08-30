@@ -337,6 +337,14 @@ type AgentDeploymentSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	ApprovalPolicyRef string `json:"approvalPolicyRef,omitempty"`
 
+	// feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
+	// multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
+	// gates ingestion by the declared score names and the read path attributes scores to their source;
+	// Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	FeedbackStoreRef string `json:"feedbackStoreRef,omitempty"`
+
 	// rollout optionally selects a progressive-delivery strategy for a GATED serving
 	// agent (ADR 0062 Fork 3, M69). Absent (or strategy "") ⇒ today's promote-all/hold
 	// behavior, byte-for-byte unchanged — a no-rollout deployment's Knative Service is

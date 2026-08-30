@@ -330,6 +330,14 @@ spec:
                 - eventing
                 - job
                 type: string
+              feedbackStoreRef:
+                description: |-
+                  feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
+                  multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
+                  gates ingestion by the declared score names and the read path attributes scores to their source;
+                  Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
+                maxLength: 253
+                type: string
               guardrailPolicyRef:
                 description: |-
                   guardrailPolicyRef optionally names a GuardrailPolicy (same namespace) that governs this
@@ -1430,6 +1438,14 @@ spec:
                 - serving
                 - eventing
                 - job
+                type: string
+              feedbackStoreRef:
+                description: |-
+                  feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
+                  multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
+                  gates ingestion by the declared score names and the read path attributes scores to their source;
+                  Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
+                maxLength: 253
                 type: string
               guardrailPolicyRef:
                 description: |-
@@ -3810,6 +3826,14 @@ spec:
                     - eventing
                     - job
                     type: string
+                  feedbackStoreRef:
+                    description: |-
+                      feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
+                      multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
+                      gates ingestion by the declared score names and the read path attributes scores to their source;
+                      Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
+                    maxLength: 253
+                    type: string
                   guardrailPolicyRef:
                     description: |-
                       guardrailPolicyRef optionally names a GuardrailPolicy (same namespace) that governs this
@@ -4665,6 +4689,14 @@ spec:
                     - serving
                     - eventing
                     - job
+                    type: string
+                  feedbackStoreRef:
+                    description: |-
+                      feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
+                      multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
+                      gates ingestion by the declared score names and the read path attributes scores to their source;
+                      Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
+                    maxLength: 253
                     type: string
                   guardrailPolicyRef:
                     description: |-
@@ -7557,6 +7589,251 @@ spec:
             type: object
         required:
         - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
+  name: feedbackstores.agents.ctxmesh.ai
+spec:
+  group: agents.ctxmesh.ai
+  names:
+    categories:
+    - agents
+    kind: FeedbackStore
+    listKind: FeedbackStoreList
+    plural: feedbackstores
+    shortNames:
+    - fs
+    singular: feedbackstore
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Validated')].status
+      name: Validated
+      type: string
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          FeedbackStore is a namespaced, reusable, DECLARATIVE multi-source feedback model referenced by
+          AgentDeployment.spec.feedbackStoreRef (M139, ADR 0112, PRD §17.3). It declares which score names belong
+          to which source (human / external) so the BFF write path can GATE ingestion and the read path can
+          ATTRIBUTE scores to sources — Langfuse remains the store of record (ADR 0008). CONFIG only: deleting a
+          FeedbackStore stops gating/attribution; the raw feedback in Langfuse is retained. A SINGLE-version CRD
+          born directly in v1beta1.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              FeedbackStoreSpec is a namespaced, reusable, DECLARATIVE feedback model referenced by
+              AgentDeployment.spec.feedbackStoreRef (M139, ADR 0112). It stores NO feedback data — raw scores live in
+              Langfuse (ADR 0008), the derived rollup in the control-plane fold; this CRD is CONFIG. Deleting it stops
+              gating/attribution; the raw feedback in Langfuse is retained. At least one source (human or external)
+              must be declared. The LLM-as-judge source is deferred (ADR 0112 §Consequences) — it ships with its runner.
+            properties:
+              external:
+                description: external declares the external-signal channels.
+                items:
+                  description: |-
+                    ExternalSource declares one external-signal channel — a webhook/API rating, completion, or business
+                    metric (PRD §17.3). One declared score per named channel.
+                  properties:
+                    name:
+                      description: name is the external channel name (the allowlisted
+                        signal source, e.g. "csat-webhook").
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                    score:
+                      description: score is the dimension this channel writes.
+                      properties:
+                        categories:
+                          description: categories is the allowed label set for a CATEGORICAL
+                            score (informational in v1). Ignored otherwise.
+                          items:
+                            type: string
+                          maxItems: 64
+                          type: array
+                          x-kubernetes-list-type: set
+                        dataType:
+                          default: NUMERIC
+                          description: |-
+                            dataType is the score's Langfuse dataType. NUMERIC/BOOLEAN carry a numeric value; CATEGORICAL carries
+                            a string label. Defaults to NUMERIC (the dominant feedback path, ADR 0008).
+                          enum:
+                          - NUMERIC
+                          - BOOLEAN
+                          - CATEGORICAL
+                          type: string
+                        name:
+                          description: |-
+                            name is the Langfuse score name this dimension binds to (e.g. "thumbs", "accuracy", "nps"). Unique
+                            across the whole FeedbackStore.
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      type: object
+                  required:
+                  - name
+                  - score
+                  type: object
+                maxItems: 32
+                type: array
+                x-kubernetes-list-type: atomic
+              human:
+                description: human declares the human-annotation scores (optional
+                  singleton).
+                properties:
+                  scores:
+                    description: scores are the human-annotation dimensions.
+                    items:
+                      description: |-
+                        ScoreDecl declares ONE feedback score dimension (M139, ADR 0112). The `name` is the correlation +
+                        attribution key: it is UNIQUE across the whole store (all sources) so a Langfuse score's name maps to
+                        exactly one declared source (Langfuse stamps every API-written score `Source=API`, so it cannot itself
+                        tell human from external — the CRD's name→source map IS the attribution).
+                      properties:
+                        categories:
+                          description: categories is the allowed label set for a CATEGORICAL
+                            score (informational in v1). Ignored otherwise.
+                          items:
+                            type: string
+                          maxItems: 64
+                          type: array
+                          x-kubernetes-list-type: set
+                        dataType:
+                          default: NUMERIC
+                          description: |-
+                            dataType is the score's Langfuse dataType. NUMERIC/BOOLEAN carry a numeric value; CATEGORICAL carries
+                            a string label. Defaults to NUMERIC (the dominant feedback path, ADR 0008).
+                          enum:
+                          - NUMERIC
+                          - BOOLEAN
+                          - CATEGORICAL
+                          type: string
+                        name:
+                          description: |-
+                            name is the Langfuse score name this dimension binds to (e.g. "thumbs", "accuracy", "nps"). Unique
+                            across the whole FeedbackStore.
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    maxItems: 64
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: atomic
+                required:
+                - scores
+                type: object
+              mode:
+                default: Enforce
+                description: |-
+                  mode selects whether a bound store GATES ingestion: Enforce rejects an undeclared score name, Monitor
+                  accepts + counts it (migration). Defaults to Enforce.
+                enum:
+                - Enforce
+                - Monitor
+                type: string
+            type: object
+          status:
+            description: FeedbackStoreStatus is the observed state, populated by the
+              FeedbackStoreReconciler (validate-only).
+            properties:
+              conditions:
+                description: |-
+                  conditions reflect reconciliation: Validated=True when the spec is coherent; Validated=False (reason
+                  InvalidSpec) when it is not (no source, or a duplicate score name across sources).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+            type: object
         type: object
     served: true
     storage: true

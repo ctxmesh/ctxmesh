@@ -591,6 +591,12 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "approvalpolicy")
 		os.Exit(1)
 	}
+	if err := (&controller.FeedbackStoreReconciler{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "feedbackstore")
+		os.Exit(1)
+	}
 	if err := (&controller.WorkflowReconciler{
 		Client: mgr.GetClient(),
 	}).SetupWithManager(mgr); err != nil {
