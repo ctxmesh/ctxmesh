@@ -115,14 +115,15 @@ describe("WorkflowsPage (m67.9)", () => {
     expect(screen.getByText("my-pipeline")).toBeInTheDocument();
     expect(screen.getByText("broken-wf")).toBeInTheDocument();
 
-    // Status badges: validated → "Ready" (unified, M99 E1), invalid → shows the reason.
+    // Status badges (M144.1 semantic vocabulary): validated → "Ready" (green);
+    // a validation failure → the humanized reason in the FAILED tone (red), not amber.
     expect(screen.getByText("Ready")).toBeInTheDocument();
     const validBadge = screen.getByText("Ready");
     expect(validBadge.className).toMatch(/bg-success/);
 
-    expect(screen.getByText("DanglingEdge")).toBeInTheDocument();
-    const invalidBadge = screen.getByText("DanglingEdge");
-    expect(invalidBadge.className).toMatch(/bg-warning/);
+    expect(screen.getByText("Dangling edge")).toBeInTheDocument();
+    const invalidBadge = screen.getByText("Dangling edge");
+    expect(invalidBadge.className).toMatch(/bg-destructive/);
 
     // Step counts and registry.
     expect(screen.getByText("3 steps")).toBeInTheDocument();
