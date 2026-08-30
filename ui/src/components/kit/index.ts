@@ -30,7 +30,7 @@ export type { ErrorStateProps } from "./error-state";
 export { ForbiddenInline } from "./forbidden-inline";
 export type { ForbiddenInlineProps } from "./forbidden-inline";
 
-export { StatusBadge } from "./status-badge";
+export { StatusBadge, resolveStatus, humanizeStatusReason, type StatusTone } from "./status-badge";
 export { VisibilityBadge } from "./visibility-badge";
 
 export { ComboSelect } from "./combo-select";

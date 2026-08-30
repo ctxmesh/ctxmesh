@@ -67,7 +67,7 @@ export function resolveStatus(
   const hay = `${phase ?? ""} ${reason ?? ""}`.toLowerCase();
   // A converging phase (the system is still working toward Ready) — blue, not a problem.
   const converging =
-    /(pending|provision|scoring|building|reconcil|revision|creating|initiali|updating|queued|starting|in ?progress)/;
+    /(pending|provision|scoring|building|reconcil|revision|creating|initiali|updating|queued|starting|ingest|in ?progress)/;
   let tone: StatusTone;
   if (/(awaiting|approval|promotion|requires[_ ]?action|\bheld\b|hitl|\bhuman\b)/.test(hay)) {
     tone = "waiting"; // a HUMAN must act — surface this even over "ready"
