@@ -1052,6 +1052,8 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("GET /api/guardrailpolicies", s.handleListGuardrailPolicies)
 		// Workflows (m67.9, ADR 0060): read-only list of Workflow CRs, caller-scoped.
 		authed.HandleFunc("GET /api/workflows", s.handleListWorkflows)
+		// Workflow declared DAG (M144-canvas, ADR 0115): the step graph for the canvas.
+		authed.HandleFunc("GET /api/workflows/{ns}/{name}", s.handleGetWorkflow)
 		if s.scheme != nil {
 			authed.HandleFunc("POST /api/agentregistries", s.handleCreateAgentRegistry)
 			authed.HandleFunc("PUT /api/agentregistries/{ns}/{name}", s.handleUpdateAgentRegistry)
@@ -1227,6 +1229,7 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
 		authed.Handle("GET /api/guardrailpolicies", notImplemented("caller-scoped guardrail policy list"))
 		authed.Handle("GET /api/workflows", notImplemented("caller-scoped workflow list"))
+		authed.Handle("GET /api/workflows/{ns}/{name}", notImplemented("caller-scoped workflow detail"))
 		authed.Handle("GET /api/alerts", notImplemented("caller-scoped alerts feed"))
 		authed.Handle("GET /api/approvals", notImplemented("caller-scoped approval queue"))
 		authed.Handle("GET /api/knowledgebases", notImplemented("caller-scoped KB list"))

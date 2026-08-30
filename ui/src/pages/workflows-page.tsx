@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { GitFork, Play } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { DataTable, StatusBadge, type Column, type DataTableError } from "@/components/kit";
 import { Button } from "@/components/ui/button";
@@ -141,7 +141,15 @@ export function WorkflowsPage() {
     {
       id: "name",
       header: "Workflow",
-      cell: (w) => <span className="font-medium">{w.name}</span>,
+      cell: (w) => (
+        <Link
+          to={`/workflows/${encodeURIComponent(w.namespace)}/${encodeURIComponent(w.name)}`}
+          className="font-medium text-primary underline-offset-2 hover:underline"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {w.name}
+        </Link>
+      ),
     },
     {
       id: "registry",

@@ -1010,6 +1010,34 @@ export interface WorkflowListResponse {
   items: WorkflowSummary[];
 }
 
+// --- Workflow declared DAG (GET /api/workflows/{ns}/{name}, M144-canvas, ADR 0115) ---
+// The declared step graph for the shared delegation canvas: nodes = steps, edges =
+// labeled control flow. Read-only (the declared structure, not a run).
+export interface WorkflowGraphEdge {
+  to: string;
+  // kind ∈ next | branch | default | catch | map | join | loop
+  kind: string;
+  label?: string;
+}
+
+export interface WorkflowGraphNode {
+  name: string;
+  agentRef: string;
+  // kind ∈ task | choice | map | loop
+  kind: string;
+  start?: boolean;
+  edges: WorkflowGraphEdge[];
+}
+
+export interface WorkflowDetailResponse {
+  name: string;
+  namespace: string;
+  registryRef: string;
+  validated: boolean;
+  reason?: string;
+  nodes: WorkflowGraphNode[];
+}
+
 // WorkflowNodeStatus is the per-node status entry in the workflow-run graph view (m67.9).
 // Exposed on RunDetail.nodes when the run is a workflow instance.
 export interface WorkflowNodeStatus {
@@ -3313,6 +3341,26 @@ export const api = {
       );
     }
     return (await res.json()) as RunTree;
+  },
+
+  // getWorkflow returns a workflow's DECLARED step DAG (M144-canvas, ADR 0115):
+  // GET /api/workflows/{ns}/{name}. Caller-scoped; a 403/404 throws ApiError.
+  getWorkflow: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<WorkflowDetailResponse> => {
+    const res = await apiFetch(
+      `/api/workflows/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      { signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `get workflow failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as WorkflowDetailResponse;
   },
 
   // resumeRun re-enters a run paused in requires_action (POST /api/runs/{id}/resume).
