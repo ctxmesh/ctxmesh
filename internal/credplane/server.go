@@ -48,6 +48,10 @@ type Server struct {
 	// Managed-RAG retrieval (ADR 0061 Fork 3), optional — enabled via WithKnowledge. nil ⇒ the
 	// /v1/knowledge endpoint answers errCodeUnsupported. Shares the embedder with the memory endpoints.
 	knowledgeStore knowledge.Store
+	// Cross-encoder reranker (M140.2, ADR 0117), optional — enabled via WithReranker. nil OR
+	// KNOWLEDGE_RERANK != "true" ⇒ retrieval returns the store's fusion order unchanged. An
+	// ENHANCEMENT over retrieval: a rerank failure falls back to the store order.
+	reranker Reranker
 }
 
 // NewServer builds a Server over the given (single, shared) resolver.

@@ -1,0 +1,60 @@
+# real-reranker — the dev-cluster cross-encoder rerank service (M140.2, ADR 0117). Re-scores
+# retrieval candidates with ms-marco-MiniLM-L-6-v2 behind a Cohere-shape /v1/rerank so the KB
+# retrieval path can promote the semantically-best chunks above the fusion rank. Offline +
+# self-hosted: no external key, no paid API. Apply into the `agentry` namespace.
+#
+# Build first: `make docker-build-real-reranker` (tag dev.local/real-reranker:m140), then
+# `kind load docker-image dev.local/real-reranker:m140 --name agentry-dev`.
+#
+# Activation: set the token-service's KNOWLEDGE_RERANK_URL=http://real-reranker.agentry.svc:8080
+# and KNOWLEDGE_RERANK=true (the rerank stage is opt-in; off by default).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: real-reranker
+  namespace: agentry
+  labels:
+    app: real-reranker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: real-reranker
+  template:
+    metadata:
+      labels:
+        app: real-reranker
+    spec:
+      containers:
+        - name: reranker
+          image: dev.local/real-reranker:m140
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: real-reranker
+  namespace: agentry
+spec:
+  selector:
+    app: real-reranker
+  ports:
+    - port: 8080
+      targetPort: 8080

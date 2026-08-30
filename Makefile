@@ -328,6 +328,10 @@ docker-build-mcp-echo-server: ## Build the M4 fixture MCP echo server (dev.local
 docker-build-real-embedder: ## Build the offline semantic embedder (dev.local/real-embedder:m117 — fastembed/MiniLM, model baked in; M140). Bakes the model at build time so the pod runs offline.
 	$(CONTAINER_TOOL) build -t dev.local/real-embedder:m117 examples/real-embedder
 
+.PHONY: docker-build-real-reranker
+docker-build-real-reranker: ## Build the offline cross-encoder reranker (dev.local/real-reranker:m140 — fastembed TextCrossEncoder/ms-marco-MiniLM, model baked in; M140.2, ADR 0117).
+	$(CONTAINER_TOOL) build -t dev.local/real-reranker:m140 examples/real-reranker
+
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
