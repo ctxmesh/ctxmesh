@@ -210,7 +210,7 @@ describe("PlaygroundPage", () => {
 
     // create→run / the checklist "Run" step deep-link here — the identity is pre-filled.
     renderPage("/playground?agent=deployed-agent&ns=prod");
-    fill("Input (JSON)", '{"prompt":"hi"}');
+    fill("Message (JSON)", '{"prompt":"hi"}');
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
     const createCall = calls.find((c) => c.url === "/api/runs" && c.method === "POST");
@@ -251,7 +251,7 @@ describe("PlaygroundPage", () => {
 
     const { unmount } = renderPage();
     fillAgent("sk-agent");
-    fill("Input (JSON)", '{"prompt":"go"}');
+    fill("Message (JSON)", '{"prompt":"go"}');
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
     // Click Connect → the wait registers a `message` listener + a popup-close poll interval.
@@ -274,7 +274,7 @@ describe("PlaygroundPage", () => {
     fillAgent("echo-agent");
     fillNamespace("prod");
     fill("Image", "ghcr.io/ctxmesh/echo:v1");
-    fill("Input (JSON)", '{"prompt":"hi"}');
+    fill("Message (JSON)", '{"prompt":"hi"}');
 
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
@@ -326,7 +326,7 @@ describe("PlaygroundPage", () => {
     fillAgent("sk-agent");
     fillNamespace("prod");
     fill("Image", "ghcr.io/ctxmesh/sk:v1");
-    fill("Input (JSON)", '{"prompt":"list orgs"}');
+    fill("Message (JSON)", '{"prompt":"list orgs"}');
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
     // The consent banner surfaces an inline Connect button for the named server —
@@ -468,7 +468,7 @@ describe("PlaygroundPage", () => {
     renderPage();
     fillAgent("echo-agent");
     fill("Image", "ghcr.io/ctxmesh/echo:v1");
-    fill("Input (JSON)", "{ not json");
+    fill("Message (JSON)", "{ not json");
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
     expect(await screen.findByText(/Input must be valid JSON/)).toBeInTheDocument();
