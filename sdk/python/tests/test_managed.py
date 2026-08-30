@@ -1712,11 +1712,11 @@ def test_tool_policy_require_approval_top_level_granted(monkeypatch):
 
 
 def test_tool_policy_require_approval_in_sub_run_pauses(monkeypatch):
-    """require-approval INSIDE a delegated sub-run (X-Ctxmesh-Spawn-Depth: 1) now PAUSES for approval
-    (M138, ADR 0110 — the ADR 0058 ban is LIFTED). pause_for_approval IS called (proven by a spy), the
-    run becomes an approval_required outcome, and the tool is NOT dispatched. A sub-run suspends durably
-    (ADR 0108) and its pause surfaces on the root (M108), so it neither hangs the supervisor nor is
-    invisible; every sub-run inherits the parent's OBO identity, so root-run approval is the right human."""
+    """require-approval INSIDE a delegated sub-run (spawn-depth 1) now PAUSES for approval (M138,
+    ADR 0110 — the ADR 0058 ban is LIFTED). pause_for_approval IS called (proven by a spy), the run
+    becomes an approval_required outcome, and the tool is NOT dispatched. A sub-run suspends durably
+    (ADR 0108) and its pause surfaces on the root (M108), so it is neither hung nor invisible; every
+    sub-run inherits the parent's OBO identity, so root-run approval is the right human."""
     import ctxmesh.managed as managed_mod
 
     # Spy on pause_for_approval AS THE LOOP CALLS IT (resolved from the ctxmesh.managed namespace).
@@ -1739,9 +1739,9 @@ def test_tool_policy_require_approval_in_sub_run_pauses(monkeypatch):
         )
         result = run_managed_loop(client, config, "go", headers={"X-Ctxmesh-Spawn-Depth": "1"})
 
-    # THE load-bearing change: a delegated sub-run now pauses for approval, exactly like a top-level run.
-    assert pause_calls != [], "a delegated sub-run must now pause for approval (ADR 0110 lifts the ban)"
-    assert result.approval_required is not None, "the sub-run becomes an approval_required outcome"
+    # THE load-bearing change: a delegated sub-run now pauses for approval like a top-level run.
+    assert pause_calls != [], "a delegated sub-run must now pause for approval (ADR 0110)"
+    assert result.approval_required is not None, "the sub-run becomes approval_required"
     # The tool is NOT dispatched while the sub-run awaits approval.
     assert dispatched == []
     assert result.tools_called == []
