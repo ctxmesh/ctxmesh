@@ -25,10 +25,10 @@ import (
 	"strings"
 	"time"
 
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
 	"github.com/ctxmesh/agentry/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agentry/internal/credplane"
 	"github.com/ctxmesh/agentry/internal/ingest"
+	"github.com/ctxmesh/agentry/internal/ingestion"
 	"github.com/ctxmesh/agentry/internal/run"
 )
 
@@ -46,32 +46,12 @@ import (
 // resume story is worker RECLAIM: the cursor records which documents are done, and a reclaimed executor (after a
 // mid-ingest crash) skips the done documents and never re-embeds them (the ADR 0061 cursor-resume mandate).
 
-// IngestionDoc is one source document pinned into the IngestionSpec at ingest-create time. Key is the durable
-// object-store key; Filename + ContentType drive extraction dispatch (ingest.Extract falls back to the filename
-// extension when ContentType is empty/generic). documentRef in knowledge_chunks is the Key (stable, unique).
-type IngestionDoc struct {
-	Key         string `json:"key"`
-	Filename    string `json:"filename,omitempty"`
-	ContentType string `json:"contentType,omitempty"`
-	// Subject is the per-user corpus owner's server-derived subject hash for a PER-USER KB (recovered from
-	// the document's object key at ingest-create, ADR 0061 Fork 3), or "" for an org-wide corpus. The executor
-	// stamps it onto every chunk this document produces so a user retrieves only their own chunks. It is pinned
-	// here at create so a live-edited KB / re-derivation cannot retroactively re-attribute an in-flight ingest.
-	Subject string `json:"subject,omitempty"`
-}
+// IngestionDoc + IngestionSpec are ALIASES of the canonical types in internal/ingestion (M140.4) — the ONE
+// source of truth for the pinned-run JSON, shared by this executor, the BFF /ingest handler, and the KB
+// controller's scheduled re-ingest, so the create paths cannot drift. See internal/ingestion for the docs.
+type IngestionDoc = ingestion.IngestionDoc
 
-// IngestionSpec is the resolved ingestion parameters pinned onto the run (run.IngestionSpec JSON) at
-// ingest-create time. It snapshots everything the off-request executor needs — namespace, KB, the embedding
-// route, the chunking config, and the resolved document list — so a live-edited KnowledgeBase or a changed
-// bucket cannot retroactively alter an in-flight ingestion (the ADR 0060 snapshot-pinning discipline). The
-// documents were resolved from the source (ResolveKBSources) AT CREATE — the executor never re-resolves.
-type IngestionSpec struct {
-	Namespace      string                       `json:"namespace"`
-	KnowledgeBase  string                       `json:"knowledgeBase"`
-	EmbeddingRoute string                       `json:"embeddingRoute"`
-	Chunking       agentsv1beta1.ChunkingConfig `json:"chunking"`
-	Documents      []IngestionDoc               `json:"documents"`
-}
+type IngestionSpec = ingestion.IngestionSpec
 
 // ingestionCursor is the executor's per-document progress (persisted in run.Cursor — the store never inspects
 // it). Done maps a document Key → true once its chunks are embedded + upserted + swept; a reclaimed executor

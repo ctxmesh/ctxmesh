@@ -67,6 +67,7 @@ import (
 	"github.com/ctxmesh/agentry/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/agentry/internal/controlplane/onlinescore"
 	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/agentry/internal/ingestion"
 	"github.com/ctxmesh/agentry/internal/kedatypes"
 	"github.com/ctxmesh/agentry/internal/objectstore"
 	"github.com/ctxmesh/agentry/internal/pki"
@@ -645,11 +646,20 @@ func main() {
 	if ctrlRunStore != nil {
 		kbIngestionRuns = ingestionRunStatusReader{store: ctrlRunStore}
 	}
+	// Scheduled re-ingest write seam (M140.4): the shared ingestion.Creator (the SAME builder the BFF /ingest
+	// handler uses) resolves the source + creates a run. Wired only when both the object store + the run store
+	// are present; nil ⇒ scheduled refresh is disabled (a dev deployment without them). Scheduled refresh needs
+	// the run-worker pool to execute the created runs.
+	var kbIngestionCreator controller.KnowledgeBaseIngestionRunCreator
+	if kbObjStore != nil && ctrlRunStore != nil {
+		kbIngestionCreator = &ingestion.Creator{DocStore: kbObjStore, RunStore: ctrlRunStore}
+	}
 	if err := (&controller.KnowledgeBaseReconciler{
-		Client:        mgr.GetClient(),
-		Knowledge:     knowledge.NewPostgresStore(cpDB),
-		ObjectStore:   kbObjStore,
-		IngestionRuns: kbIngestionRuns,
+		Client:              mgr.GetClient(),
+		Knowledge:           knowledge.NewPostgresStore(cpDB),
+		ObjectStore:         kbObjStore,
+		IngestionRuns:       kbIngestionRuns,
+		IngestionRunCreator: kbIngestionCreator,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "knowledgebase")
 		os.Exit(1)

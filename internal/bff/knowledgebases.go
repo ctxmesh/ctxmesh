@@ -45,6 +45,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	"github.com/ctxmesh/agentry/internal/ingestion"
 	"github.com/ctxmesh/agentry/internal/objectstore"
 	"github.com/ctxmesh/agentry/internal/run"
 )
@@ -364,29 +365,10 @@ func indexByte(s string, b byte) int {
 //	    rc, err := store.Get(ctx, info.Key)
 //	    // ... chunk, embed, index ...
 //	}
-func ResolveKBSources(
-	ctx context.Context,
-	store objectstore.ObjectStore,
-	ns string,
-	kb *agentsv1beta1.KnowledgeBase,
-) ([]objectstore.ObjectInfo, error) {
-	if store == nil {
-		return nil, fmt.Errorf("document store not configured: OBJECT_STORE_ADDR must be set for ingestion")
-	}
-	switch kb.Spec.Source.Type {
-	case kbSourceTypeUpload:
-		prefix := objectstore.KnowledgePrefix(ns, kb.Name)
-		return store.List(ctx, prefix)
-	case kbSourceTypeObjectStorePrefix:
-		prefix := kb.Spec.Source.ObjectStorePrefix
-		if prefix == "" {
-			return nil, fmt.Errorf("KnowledgeBase %q has source.type=objectStorePrefix but source.objectStorePrefix is empty", kb.Name)
-		}
-		return store.List(ctx, prefix)
-	default:
-		return nil, fmt.Errorf("KnowledgeBase %q has unsupported source.type %q (supported: upload, objectStorePrefix)", kb.Name, kb.Spec.Source.Type)
-	}
-}
+// ResolveKBSources is the canonical source enumerator, now in internal/ingestion (M140.4) — aliased here so
+// the existing BFF callers are unchanged while the KB controller's scheduled re-ingest shares the SAME
+// implementation (one source of truth, no drift).
+var ResolveKBSources = ingestion.ResolveKBSources
 
 // -------------------------------------------------------------------------
 // Ingest trigger endpoint (m68.6)
