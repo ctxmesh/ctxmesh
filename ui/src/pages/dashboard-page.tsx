@@ -163,10 +163,13 @@ export function DashboardPage() {
           if (hasProvider && hasAgent && (hasRun || runs.kind === "unavailable")) return null;
           // The steps + routes are the shared FIRST_RUN_CHECKLIST (nav.ts, m54.4) so
           // they can't drift from the IA; only the live `done` signal is computed here.
+          // ORDERED (M144.4): a step is done only once every earlier step is — the
+          // checklist tells a coherent story, so it can't show "Create an agent" done
+          // while "Connect a provider" is still open (agents seeded without a provider).
           const done: Record<string, boolean> = {
             provider: hasProvider,
-            agent: hasAgent,
-            run: hasRun,
+            agent: hasProvider && hasAgent,
+            run: hasProvider && hasAgent && hasRun,
           };
           const steps = FIRST_RUN_CHECKLIST.map((s) => ({
             label: s.label,
