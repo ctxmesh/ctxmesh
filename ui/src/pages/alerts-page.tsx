@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Bell } from "lucide-react";
+import { Bell, Plus } from "lucide-react";
 
 import { DataTable, type Column, type DataTableError } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { NewAlertPolicyDialog } from "@/components/dashboard/new-alert-policy-dialog";
 import { useNamespace } from "@/lib/namespace";
 import { api, ApiError, type AlertSummary } from "@/lib/api";
 
@@ -54,6 +56,7 @@ type LoadState =
 export function AlertsPage() {
   const { namespace } = useNamespace();
   const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
+  const [newPolicyOpen, setNewPolicyOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(() => {
@@ -194,12 +197,23 @@ export function AlertsPage() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-6" data-testid="alerts-page">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Alerts</h2>
-        <p className="text-sm text-muted-foreground">
-          Fired alert conditions from your AlertPolicy rules — newest first. Switch the namespace
-          scope with the global namespace selector.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Alerts</h2>
+          <p className="text-sm text-muted-foreground">
+            Fired alert conditions from your AlertPolicy rules — newest first. Switch the namespace
+            scope with the global namespace selector.
+          </p>
+        </div>
+        <Button
+          size="sm"
+          onClick={() => setNewPolicyOpen(true)}
+          data-testid="new-alert-policy-open"
+          className="shrink-0"
+        >
+          <Plus className="mr-2 h-4 w-4" />
+          New alert policy
+        </Button>
       </div>
 
       <DataTable<AlertSummary>
@@ -213,8 +227,14 @@ export function AlertsPage() {
           icon: Bell,
           title: "No alerts",
           description:
-            "No alert conditions have fired in this namespace yet. AlertPolicy rules fire when a condition threshold is crossed.",
+            "No alert conditions have fired in this namespace yet. Define an AlertPolicy so a condition can fire here — start with New alert policy above.",
         }}
+      />
+
+      <NewAlertPolicyDialog
+        open={newPolicyOpen}
+        onClose={() => setNewPolicyOpen(false)}
+        namespace={namespace}
       />
     </div>
   );
