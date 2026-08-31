@@ -110,7 +110,8 @@ describe("ShellCommandPalette (cmd-K in the production shell)", () => {
     const dialog = await screen.findByRole("dialog", { name: /command palette/i });
     expect(dialog).toBeInTheDocument();
     // Navigate options are present (as listbox options, distinct from nav links).
-    expect(screen.getByRole("option", { name: /Dashboard/ })).toBeInTheDocument();
+    // "Home" since the M151 IA (the index surface, same route "/").
+    expect(screen.getByRole("option", { name: /Home/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Agents/ })).toBeInTheDocument();
     // With create allowed, the write surface IS offered (like the nav).
     expect(screen.getByRole("option", { name: /Config builder/ })).toBeInTheDocument();
