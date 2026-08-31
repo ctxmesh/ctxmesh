@@ -18,21 +18,21 @@ metadata:
   namespace: system
   labels:
     control-plane: token-service
-    app.kubernetes.io/name: agentry
+    app.kubernetes.io/name: ctxmesh
     app.kubernetes.io/managed-by: kustomize
 spec:
   replicas: 1
   selector:
     matchLabels:
       control-plane: token-service
-      app.kubernetes.io/name: agentry
+      app.kubernetes.io/name: ctxmesh
   template:
     metadata:
       annotations:
         kubectl.kubernetes.io/default-container: token-service
       labels:
         control-plane: token-service
-        app.kubernetes.io/name: agentry
+        app.kubernetes.io/name: ctxmesh
     spec:
       securityContext:
         runAsNonRoot: true
@@ -52,7 +52,7 @@ spec:
             # keeps the legacy per-source-namespace grant path so kustomize/helm-default stay
             # valid. The Helm chart templates it from mcp.credentialNamespace (no drift).
             - name: MCP_CREDENTIAL_NAMESPACE
-              value: agentry
+              value: ctxmesh
             # TLS files live on the OPTIONAL token-service-tls mount. Present ⇒ mTLS; absent ⇒
             # plain HTTP (dev). No literal secret material here.
             - name: TOKEN_SERVICE_TLS_CERT_FILE

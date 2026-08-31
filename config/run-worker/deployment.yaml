@@ -15,10 +15,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: run-worker
-  namespace: agentry
+  namespace: ctxmesh
   labels:
     control-plane: run-worker
-    app.kubernetes.io/name: agentry
+    app.kubernetes.io/name: ctxmesh
     app.kubernetes.io/component: run-worker
 spec:
   # Replicas are owned by KEDA (scaledobject.yaml); start at 0 (scale-to-zero).
@@ -26,18 +26,18 @@ spec:
   selector:
     matchLabels:
       control-plane: run-worker
-      app.kubernetes.io/name: agentry
+      app.kubernetes.io/name: ctxmesh
   template:
     metadata:
       labels:
         control-plane: run-worker
-        app.kubernetes.io/name: agentry
+        app.kubernetes.io/name: ctxmesh
     spec:
-      # The bff SA as it exists in the cluster: config/default applies namePrefix `agentry-` to
-      # the `bff` SA, so the deployed name is `agentry-bff`. This standalone overlay has no
+      # The bff SA as it exists in the cluster: config/default applies namePrefix `ctxmesh-` to
+      # the `bff` SA, so the deployed name is `ctxmesh-bff`. This standalone overlay has no
       # prefix transformer (see kustomization.yaml), so the reference is name-aligned explicitly —
       # otherwise the worker would reference a non-existent `bff` SA (OPS-4e).
-      serviceAccountName: agentry-bff
+      serviceAccountName: ctxmesh-bff
       securityContext:
         runAsNonRoot: true
         seccompProfile:

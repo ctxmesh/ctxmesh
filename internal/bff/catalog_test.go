@@ -35,9 +35,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/authz"
-	"github.com/ctxmesh/agentry/internal/controlplane/namespacetenant"
-	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
 
 // --- (a) memstore ListCatalog predicate tests --------------------------------
@@ -114,7 +114,7 @@ func TestListCatalog_PrivateNeverReturned(t *testing.T) {
 
 func TestListCatalog_ManagedByFilter(t *testing.T) {
 	store := toolregistry.NewMemStore()
-	// org server but WITHOUT the managed-by=agentry-mcp label — must not appear
+	// org server but WITHOUT the managed-by=ctxmesh-mcp label — must not appear
 	_, err := store.Upsert(context.Background(), toolregistry.ToolRegistry{
 		Namespace: "ns-caller",
 		Name:      "curated-no-managed-by",

@@ -35,8 +35,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	"github.com/ctxmesh/agentry/internal/credresolve"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 // DefaultStoreName is the conventional name of the namespaced CredentialStore that

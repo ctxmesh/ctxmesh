@@ -31,7 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/enduseroidc"
+	"github.com/ctxmesh/ctxmesh/internal/enduseroidc"
 )
 
 // fakeIssuer is a minimal OIDC issuer: it serves discovery + JWKS and signs ID tokens with a test RSA key.
@@ -103,7 +103,7 @@ func devVerifier() *enduseroidc.Verifier {
 	return enduseroidc.NewVerifier(enduseroidc.Options{AllowLoopback: true})
 }
 
-const testClientID = "agentry-enduser"
+const testClientID = "ctxmesh-enduser"
 
 func TestVerify_Valid(t *testing.T) {
 	fi := newFakeIssuer(t)

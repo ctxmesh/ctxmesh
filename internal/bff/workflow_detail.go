@@ -32,7 +32,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // WorkflowEdge is one labeled control-flow edge from a step to another step.

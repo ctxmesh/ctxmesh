@@ -23,8 +23,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/authz"
-	"github.com/ctxmesh/agentry/internal/controlplane/costrollup"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/costrollup"
 )
 
 // resourceCostRollups is the virtual resource the cost-forecast and chargeback

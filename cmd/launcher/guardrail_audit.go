@@ -44,7 +44,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ctxmesh/agentry/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 const (

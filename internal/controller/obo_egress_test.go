@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/ctxmesh/agentry/internal/toolmanifest"
+	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
 
 func envValue(c corev1.Container, name string) (corev1.EnvVar, bool) {

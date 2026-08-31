@@ -86,10 +86,10 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
-	"github.com/ctxmesh/agentry/internal/run"
-	"github.com/ctxmesh/agentry/internal/workflow"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/workflow"
 )
 
 // resolveWorkflowNodeEndpoints resolves each distinct node agentRef in the (validated) spec to its

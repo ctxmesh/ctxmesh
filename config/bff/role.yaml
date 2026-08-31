@@ -23,7 +23,7 @@ kind: Role
 metadata:
   labels:
     control-plane: bff
-    app.kubernetes.io/name: agentry
+    app.kubernetes.io/name: ctxmesh
     app.kubernetes.io/managed-by: kustomize
   name: bff-role
   namespace: system

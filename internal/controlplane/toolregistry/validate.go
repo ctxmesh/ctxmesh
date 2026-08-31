@@ -22,7 +22,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/validation"
 
-	"github.com/ctxmesh/agentry/internal/controlplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 )
 
 // Bounds mirroring the ToolRegistry CRD's OpenAPI/CEL markers (api/v1alpha1/

@@ -25,9 +25,9 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/agentmemory"
-	"github.com/ctxmesh/agentry/internal/controlplane/knowledge"
-	"github.com/ctxmesh/agentry/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 // maxRequestBytes bounds a delegation request body (a few short strings).

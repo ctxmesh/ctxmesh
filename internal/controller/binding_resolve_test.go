@@ -23,7 +23,7 @@ import (
 
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 )
 
 // The fixed registry key + tool name mkRegistrySchema registers. The

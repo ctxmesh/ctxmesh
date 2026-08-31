@@ -33,7 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // WorkflowSummary is one workflows-list row: the spec summary + the resolved validation status.

@@ -26,7 +26,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/ctxmesh/agentry/internal/controlplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 )
 
 // Postgres SQLSTATEs the store maps to controlplane.ErrNotFound: a foreign-key violation (an AppendCase against a

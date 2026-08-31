@@ -25,10 +25,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	"github.com/ctxmesh/agentry/internal/controlplane"
-	"github.com/ctxmesh/agentry/internal/controlplane/authz"
-	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
 
 // The ToolRegistry read seam (M45 / ADR 0044, the full-retirement phase). The MCP
@@ -114,7 +114,7 @@ func (s *Server) mcpGetToolRegistry(ctx context.Context, caller client.Client, n
 
 // mcpListToolRegistries lists ToolRegistries from the store (SSAR VerbList + paged,
 // projected), optionally namespace-scoped and label-filtered (e.g.
-// managed-by=agentry-mcp for the BYO-server surfaces). labels are AND-ed
+// managed-by=ctxmesh-mcp for the BYO-server surfaces). labels are AND-ed
 // equality filters, matching the store's ListOptions.Labels.
 func (s *Server) mcpListToolRegistries(ctx context.Context, caller client.Client, ns string, labels map[string]string) (*agentsv1alpha1.ToolRegistryList, error) {
 	if err := s.authorizeStore(ctx, caller, authz.VerbList, resourceToolRegistries, ns, ""); err != nil {

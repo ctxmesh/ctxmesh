@@ -29,9 +29,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
-	"github.com/ctxmesh/agentry/internal/controlplane/knowledge"
-	"github.com/ctxmesh/agentry/internal/objectstore"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
+	"github.com/ctxmesh/ctxmesh/internal/objectstore"
 )
 
 // kbFinalizer guards KnowledgeBase deletion so both stores (knowledge_chunks Postgres partition

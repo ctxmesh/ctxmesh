@@ -33,7 +33,7 @@ go.work
 .DS_Store
 
 # build artifacts — the root-level binaries produced by `go build ./cmd/...`
-/agentry
+/ctxmesh
 /discovery
 /launcher
 /bff

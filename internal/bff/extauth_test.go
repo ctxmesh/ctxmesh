@@ -13,7 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	"github.com/ctxmesh/agentry/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // ssrClient builds a caller-scoped fake client whose SelfSubjectReview Create either
@@ -140,7 +140,7 @@ func TestAgentPinForRequest(t *testing.T) {
 	}
 
 	forwarded := httptest.NewRequest(http.MethodGet, "/", nil)
-	forwarded.Host = "agentry-bff:9090" // internal svc host — must be ignored
+	forwarded.Host = "ctxmesh-bff:9090" // internal svc host — must be ignored
 	forwarded.Header.Set(agentChatboxHeader, "1")
 	forwarded.Header.Set("X-Forwarded-Host", "sk-agent.prod.agents.example.com")
 	if got, want := agentPinForRequest(forwarded), "prod/sk-agent"; got != want {

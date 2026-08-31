@@ -42,8 +42,8 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
-	"github.com/ctxmesh/agentry/internal/promql"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/promql"
 )
 
 // scalarEnvelope is a Prometheus instant-query "vector with one series" JSON body carrying value v (the

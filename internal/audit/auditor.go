@@ -29,7 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 )
 
 // auditedTypes is one typed object per mutating-audited agent.ctxmesh.ai CRD.

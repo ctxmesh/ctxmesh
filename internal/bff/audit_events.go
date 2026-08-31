@@ -21,7 +21,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
 )
 
 // BFF audit actions (source="bff") — the security events the audit surface answers "who

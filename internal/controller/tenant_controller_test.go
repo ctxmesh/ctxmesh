@@ -33,9 +33,9 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
-	"github.com/ctxmesh/agentry/internal/controlplane/namespacetenant"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
 )
 
 func makeNamespace(t *testing.T, name string) {
@@ -240,7 +240,7 @@ func TestTenant_ProxyQuotaInjectsProjectedToken(t *testing.T) {
 
 	mkAgent(t, "tnt-proxytok-agent", "tnt-proxytok-ns")
 	r := newReconciler()
-	r.StatelayerProxyURL = "http://agentry-statelayer-proxy.agentry.svc:8080"
+	r.StatelayerProxyURL = "http://ctxmesh-statelayer-proxy.ctxmesh.svc:8080"
 	reconcileNN(t, r, "tnt-proxytok-agent", "tnt-proxytok-ns")
 
 	var ksvc servingv1.Service

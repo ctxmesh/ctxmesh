@@ -35,7 +35,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-const tracerName = "agentry/launcher"
+const tracerName = "ctxmesh/launcher"
 
 // langfuseTraceTagsAttr is the OTel span-attribute key Langfuse's OTLP ingestion
 // promotes to TRACE-LEVEL tags: a string-array attribute whose entries become the

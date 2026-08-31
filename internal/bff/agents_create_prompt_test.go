@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	"github.com/ctxmesh/agentry/internal/controlplane/promptversion"
-	"github.com/ctxmesh/agentry/internal/prompt"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
+	"github.com/ctxmesh/ctxmesh/internal/prompt"
 )
 
 // stampResolvedPrompt (m40.3 + ADR 0044): the BFF denormalizes the prompt git pointer onto the

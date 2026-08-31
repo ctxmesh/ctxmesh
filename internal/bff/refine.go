@@ -28,7 +28,7 @@ import (
 
 	sigsyaml "sigs.k8s.io/yaml"
 
-	"github.com/ctxmesh/agentry/internal/expand"
+	"github.com/ctxmesh/ctxmesh/internal/expand"
 )
 
 // This file implements POST /api/agents/refine — the pure in-place editing
@@ -57,7 +57,7 @@ const maxRefineRequestBytes = 512 << 10 // 512 KiB
 
 // refineCostTag marks a refine request's provider metadata (operation=refine) so refine spend is
 // DISTINGUISHABLE from generate (create-from-prompt) + agent runs in the provider's cost analytics.
-const refineCostTag = "agentry/refine"
+const refineCostTag = "ctxmesh/refine"
 
 // maxTranscriptTurns is the server-enforced cap on the transcript the caller
 // passes. Even if the UI sends a longer history we only forward the last N turns
@@ -67,7 +67,7 @@ const maxTranscriptTurns = 8
 // refineSystemPrompt constrains the model to rewrite the WHOLE agent.yaml applying
 // the user's instruction — the same schema the generation prompt uses, but framed
 // for editing rather than creation (m71.1, ADR 0014 sibling).
-const refineSystemPrompt = `You are editing an existing agent.yaml for the agentry platform.
+const refineSystemPrompt = `You are editing an existing agent.yaml for the ctxmesh platform.
 Rewrite the WHOLE document applying the user's instruction.
 
 Output ONLY the full updated agent.yaml — no prose, no explanation, no markdown code fences,

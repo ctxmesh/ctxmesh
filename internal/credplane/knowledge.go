@@ -30,7 +30,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/knowledge"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
 )
 
 // The managed-RAG retrieval read path (ADR 0061 Fork 3 + governance #8). The token-service is the ONLY holder of

@@ -34,8 +34,8 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/credplane"
-	"github.com/ctxmesh/agentry/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/credplane"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 type testPKI struct {

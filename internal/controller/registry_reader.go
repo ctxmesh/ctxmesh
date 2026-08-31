@@ -21,8 +21,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
 
 // RegistryReader loads a ToolRegistry by (namespace, name) for binding validation

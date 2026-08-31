@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ctxmesh/agentry/internal/objectstore"
+	"github.com/ctxmesh/ctxmesh/internal/objectstore"
 )
 
 // TestFixtureStorePutGetRoundTrip proves a fixture written to the (mem twin of the) durable object

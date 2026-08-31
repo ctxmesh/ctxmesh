@@ -3,7 +3,7 @@
 # Health endpoints verified for v1.91.0: /health/liveliness (liveness), /health/readiness.
 # The ModelRoute controller owns:
 #   - the config.yaml content via the mounted ConfigMap
-#   - the SB_* env vars and the pod-template annotation agentry.ctxmesh.ai/config-hash
+#   - the SB_* env vars and the pod-template annotation ctxmesh.ai/config-hash
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -11,19 +11,19 @@ metadata:
   namespace: system
   labels:
     control-plane: gateway
-    app.kubernetes.io/name: agentry
+    app.kubernetes.io/name: ctxmesh
     app.kubernetes.io/managed-by: kustomize
 spec:
   replicas: 1
   selector:
     matchLabels:
       control-plane: gateway
-      app.kubernetes.io/name: agentry
+      app.kubernetes.io/name: ctxmesh
   template:
     metadata:
       labels:
         control-plane: gateway
-        app.kubernetes.io/name: agentry
+        app.kubernetes.io/name: ctxmesh
     spec:
       containers:
         - name: litellm

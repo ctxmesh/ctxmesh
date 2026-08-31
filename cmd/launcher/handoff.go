@@ -26,7 +26,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ctxmesh/agentry/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // handoff.go — the launcher's handoff_to endpoint (M67, ADR 0060 §5): transfer-of-control as a

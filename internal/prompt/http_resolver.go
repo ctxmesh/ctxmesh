@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 )
 
 // maxPromptBytes bounds a resolved prompt so a hostile/huge path cannot OOM the BFF.

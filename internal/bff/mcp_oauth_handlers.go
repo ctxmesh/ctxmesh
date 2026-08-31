@@ -26,7 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 )
 
 // Console SPA routes the OAuth callback (a BROWSER redirect target, not an API call)

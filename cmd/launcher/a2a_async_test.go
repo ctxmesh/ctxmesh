@@ -13,7 +13,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/ctxmesh/agentry/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // asyncEdge stands in for the platform's async publish edge, capturing what the launcher publishes.

@@ -14,9 +14,9 @@ apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
   name: run-worker
-  namespace: agentry
+  namespace: ctxmesh
   labels:
-    app.kubernetes.io/name: agentry
+    app.kubernetes.io/name: ctxmesh
     app.kubernetes.io/component: run-worker
 spec:
   scaleTargetRef:

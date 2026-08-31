@@ -23,8 +23,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/controlplane"
-	"github.com/ctxmesh/agentry/internal/controlplane/alertstore"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/alertstore"
 )
 
 // eachStore runs a behavioural contract against the Postgres store. The Postgres run gates on

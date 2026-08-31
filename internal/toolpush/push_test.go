@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ctxmesh/agentry/internal/toolmanifest"
+	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
 
 func testManifest() toolmanifest.Manifest {

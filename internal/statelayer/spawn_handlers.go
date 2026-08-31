@@ -20,7 +20,7 @@ import (
 	"context"
 	"net/http"
 
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // clampSpawnMax bounds a launcher-supplied spawn max to the platform ceiling (C19, ADR 0088):

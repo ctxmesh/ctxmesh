@@ -1,7 +1,7 @@
 # PR/branch pipeline per ADR 0003 (agent-brain/decisions/0003):
 # lint -> unit -> envtest -> build -> { e2e, security }
 #
-# Polyglot split (m12.9): agentry is Go + Python SDK (M10) + a Vite/React
+# Polyglot split (m12.9): ctxmesh is Go + Python SDK (M10) + a Vite/React
 # UI (M12). `make lint` = golangci-lint + py-lint + ui-lint and `make test`
 # = go test + py-test + ui-test — i.e. the umbrella targets fan into three
 # toolchains. Rather than let one Go-only runner silently bootstrap Python
@@ -53,6 +53,31 @@ jobs:
         run: make golangci-lint
       - name: golangci-lint (incl. gofumpt)
         run: ./bin/golangci-lint run
+
+  secrets:
+    name: secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # gitleaks scans HISTORY, not just the tip — a secret removed in the last commit is still
+          # public forever once pushed. fetch-depth 0 is load-bearing, not a convenience.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+      - name: Install gitleaks (pinned)
+        run: go install github.com/zricethezav/gitleaks/v8@v8.30.1
+      # The M147 pre-public gate, made permanent. It is deliberately NOT a downstream job of `lint`:
+      # a credential reaching a public repo is not a style problem, and it must be reported even when
+      # the rest of the pipeline is red.
+      - name: Scan full history for secrets
+        run: |
+          "$(go env GOPATH)/bin/gitleaks" git --no-banner -c .gitleaks.toml --redact .
 
   unit:
     name: unit
@@ -118,6 +143,10 @@ jobs:
         with:
           node-version-file: ui/.nvmrc
       - name: Activate pnpm (corepack, pinned by package.json)
+        # working-directory is load-bearing: `packageManager` is declared in ui/package.json and there
+        # is no root package.json, so `corepack prepare --activate` from the repo root has nothing to
+        # read and fails. Masked since ~M79 because the pipeline never got past `lint` (m52.G3).
+        working-directory: ui
         run: corepack enable && corepack prepare --activate
       - name: Install UI deps (frozen lockfile)
         working-directory: ui
@@ -161,6 +190,11 @@ jobs:
       # No-drift gate: the committed chart == generated from config/, AND
       # `helm template` (default values) == `kustomize build config/default`.
       # Catches chart drift on every PR — cheap, no cluster.
+      # hack/check-crd-version-parity.sh imports PyYAML; setup-python provides the interpreter but not
+      # the package, so the parity gate failed on `import yaml`. Masked since ~M79 (m52.G3) because the
+      # pipeline never reached this job.
+      - name: Install PyYAML (the CRD parity gate needs it)
+        run: python3 -m pip install --quiet pyyaml
       - name: Helm no-drift gate (chart == kustomize build)
         run: make helm-verify
       - name: helm lint

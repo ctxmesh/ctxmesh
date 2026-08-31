@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/controlplane"
-	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
 
 // fakeTRStore is a toolregistry.Store whose Get is scriptable + counted; the other

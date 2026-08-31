@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/agentcapability"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
 )
 
 // withRegistry gives a spawn server a capability registry seeded with the given rows, turning the

@@ -42,7 +42,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
 )
 
 // auditActionGuardrailBlock is the stable action kind written to audit_log for a guardrail

@@ -1,6 +1,6 @@
-# agentry
+# ctxmesh
 
-agentry is a Kubernetes operator for deploying and operating LLM agents. It is built with
+ctxmesh is a Kubernetes operator for deploying and operating LLM agents. It is built with
 [Kubebuilder](https://book.kubebuilder.io/) and manages the full lifecycle of agent workloads —
 from a short agent description to a running, observable, tool-using agent on a cluster.
 
@@ -8,32 +8,32 @@ There are three ways to work with it:
 
 - **The web console** — connect a model provider, describe an agent, run it, and inspect its
   traces from a browser (the primary surface for most users).
-- **The `agentry` CLI** — expand a simplified `agent.yaml` into CRDs and apply it, or run an
-  agent locally with `agentry dev`.
+- **The `ctxmesh` CLI** — expand a simplified `agent.yaml` into CRDs and apply it, or run an
+  agent locally with `ctxmesh dev`.
 - **The `ctxmesh` Python SDK** — author a code-first agent against the in-pod platform plane
   (memory / tools / model / feedback / tracing).
 
 ## Install on a cluster (Helm)
 
-agentry ships as a Helm chart in [`deploy/helm/agentry`](deploy/helm/agentry). It installs the
+ctxmesh ships as a Helm chart in [`deploy/helm/ctxmesh`](deploy/helm/ctxmesh). It installs the
 control plane — controller-manager + CRDs, the LiteLLM model gateway, RBAC personas
-(`agentry-{operator,developer,viewer}`), the operator UI + Go BFF, and (for dev/trial) a bundled
+(`ctxmesh-{operator,developer,viewer}`), the operator UI + Go BFF, and (for dev/trial) a bundled
 data plane (Valkey + MinIO).
 
 **Prerequisites.** A Kubernetes cluster (≥ 1.29) with **Knative Serving + Eventing** and **KEDA**
 already installed — the controller reconciles their CRDs and agents won't come up without them
-(agentry does *not* bundle them) — plus Helm 3.
+(ctxmesh does *not* bundle them) — plus Helm 3.
 
 ```sh
 # from a clone of this repo — a dev/trial install (bundled Valkey + MinIO, single replica)
-helm install agentry ./deploy/helm/agentry --namespace agentry --create-namespace
+helm install ctxmesh ./deploy/helm/ctxmesh --namespace ctxmesh --create-namespace
 ```
 
 Wait for it to come up, then open the console:
 
 ```sh
-kubectl -n agentry rollout status deploy/agentry-controller-manager
-kubectl -n agentry port-forward svc/agentry-bff 9090:9090   # → http://localhost:9090/
+kubectl -n ctxmesh rollout status deploy/ctxmesh-controller-manager
+kubectl -n ctxmesh port-forward svc/ctxmesh-bff 9090:9090   # → http://localhost:9090/
 ```
 
 **Use your own images.** The chart defaults to the `:latest` tags built by `make docker-build-*`
@@ -41,17 +41,17 @@ kubectl -n agentry port-forward svc/agentry-bff 9090:9090   # → http://localho
 the repository + tag:
 
 ```sh
-helm install agentry ./deploy/helm/agentry -n agentry --create-namespace \
-  --set controllerManager.image.repository=ghcr.io/my-org/agentry-controller \
+helm install ctxmesh ./deploy/helm/ctxmesh -n ctxmesh --create-namespace \
+  --set controllerManager.image.repository=ghcr.io/my-org/ctxmesh-controller \
   --set controllerManager.image.tag=v0.1.0
   # …likewise bff.image.* and gateway.image.* (see values.yaml)
 ```
 
 **Production.** Add `--set profile=production` to make the HA invariants hard — multiple replicas +
 leader election, PodDisruptionBudgets, an external data plane (not the bundled Valkey/MinIO), and
-signed images. See [`values-production.yaml`](deploy/helm/agentry/values-production.yaml).
+signed images. See [`values-production.yaml`](deploy/helm/ctxmesh/values-production.yaml).
 
-Uninstall with `helm uninstall agentry -n agentry`.
+Uninstall with `helm uninstall ctxmesh -n ctxmesh`.
 
 ## The console
 
@@ -60,17 +60,17 @@ describe an agent → run it → follow the trace**, plus fleet CRUD, tenants, c
 management. Run it locally with no cluster:
 
 ```sh
-agentry dev --ui        # serves the console + a local agent runtime (no cluster, no login)
+ctxmesh dev --ui        # serves the console + a local agent runtime (no cluster, no login)
 ```
 
 ## CLI
 
-The `agentry` CLI converts a simplified agent description into CRD manifests.
+The `ctxmesh` CLI converts a simplified agent description into CRD manifests.
 
 ```sh
-make build-cli                                            # build bin/agentry
-bin/agentry expand agent.yaml                        # → AgentDeployment (+ related CRDs) on stdout
-bin/agentry expand agent.yaml | kubectl apply -f -   # apply directly
+make build-cli                                            # build bin/ctxmesh
+bin/ctxmesh expand agent.yaml                        # → AgentDeployment (+ related CRDs) on stdout
+bin/ctxmesh expand agent.yaml | kubectl apply -f -   # apply directly
 ```
 
 **agent.yaml** — a **managed** agent needs no image or code; its behaviour is its configuration
@@ -114,13 +114,13 @@ logic; `ctxmesh.testing` lets you exercise it offline with no cluster. See the
 
 Runnable agents live in [`examples/`](examples): `echo-agent` (minimal), `sdk-custom-agent` (a
 no-framework loop using the SDK's tracing helpers), `langchain-agent`, `batch-agent`, and
-`mcp-echo-server` (a tool server). Most run locally via `agentry dev -f examples/<name>/agent.yaml`.
+`mcp-echo-server` (a tool server). Most run locally via `ctxmesh dev -f examples/<name>/agent.yaml`.
 
 ## Development
 
 ```sh
 make build                 # compile the operator binary
-make build-cli             # compile the agentry CLI (bin/agentry)
+make build-cli             # compile the ctxmesh CLI (bin/ctxmesh)
 make test                  # go unit + envtest, the Python SDK tests, and the UI tests
 make lint                  # go + python + ui linters
 make run                   # run the operator locally against the current kubeconfig context

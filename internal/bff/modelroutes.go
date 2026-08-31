@@ -29,7 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 )
 
 // modelRouteKind is the CRD kind name for a ModelRoute (used in error messages
@@ -408,7 +408,7 @@ func (s *Server) handleCreateModelRoute(w http.ResponseWriter, r *http.Request) 
 // --- PUT /api/modelroutes/{ns}/{name} ---------------------------------------
 
 // handleUpdateModelRoute serves PUT /api/modelroutes/{ns}/{name} — edits a
-// ModelRoute via SSA under the "agentry-console" field-manager
+// ModelRoute via SSA under the "ctxmesh-console" field-manager
 // (ForceOwnership), so the controller's status and derived fields are never
 // clobbered. Like m15.3 but direct (no expand, no source-spec annotation).
 //

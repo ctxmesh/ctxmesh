@@ -8,7 +8,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	"github.com/ctxmesh/agentry/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // fakeSecret is an in-memory SecretOps that records what was written.
@@ -50,7 +50,7 @@ func (d *fakeDeploy) RolloutRestart(_ context.Context, _, name string) error {
 	return nil
 }
 
-var consumers = []string{"agentry-bff", "agentry-controller-manager", "run-worker"}
+var consumers = []string{"ctxmesh-bff", "ctxmesh-controller-manager", "run-worker"}
 
 func TestEnsure_Absent_GeneratesCreatesRestarts(t *testing.T) {
 	sec := &fakeSecret{exists: false}

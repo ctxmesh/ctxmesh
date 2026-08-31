@@ -1,6 +1,6 @@
 # Webhook Service (M128/Gate E, ADR 0102; ACTIVATED in M134) — the tenant-label
 # ValidatingWebhook's clientConfig target + the SAN the in-process cert-controller signs
-# (`agentry-webhook-service.<ns>.svc` after the config/default namePrefix). Wired into
+# (`ctxmesh-webhook-service.<ns>.svc` after the config/default namePrefix). Wired into
 # config/default (M134); shipped unconditionally, inert until ENABLE_TENANT_LABEL_WEBHOOK.
 # Routes the standard admission port 443 → the manager's webhook TLS listener (9443).
 apiVersion: v1
@@ -10,12 +10,12 @@ metadata:
   namespace: system
   labels:
     control-plane: controller-manager
-    app.kubernetes.io/name: agentry
+    app.kubernetes.io/name: ctxmesh
     app.kubernetes.io/managed-by: kustomize
 spec:
   selector:
     control-plane: controller-manager
-    app.kubernetes.io/name: agentry
+    app.kubernetes.io/name: ctxmesh
   ports:
     - port: 443
       targetPort: webhook

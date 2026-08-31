@@ -31,7 +31,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ctxmesh/agentry/internal/toolmanifest"
+	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
 
 const (

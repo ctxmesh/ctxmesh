@@ -21,7 +21,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/ctxmesh/agentry/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 // maxRequestBytes bounds a provider request body.

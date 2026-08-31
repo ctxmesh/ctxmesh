@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ctxmesh/agentry/internal/gateway/budget"
+	"github.com/ctxmesh/ctxmesh/internal/gateway/budget"
 	"go.opentelemetry.io/otel/trace"
 )
 

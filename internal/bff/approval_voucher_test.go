@@ -29,8 +29,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/ctxmesh/agentry/internal/run"
-	"github.com/ctxmesh/agentry/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // ctxCapturingApprovalAdapter models a HITL agent that pauses on a require-approval TOOL: the first

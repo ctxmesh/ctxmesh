@@ -35,7 +35,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/authz"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 )
 
 // Template source constants distinguish the two entry types in the gallery.

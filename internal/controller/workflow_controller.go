@@ -33,9 +33,9 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
-	"github.com/ctxmesh/agentry/internal/workflow"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/workflow"
 )
 
 // Workflow status condition types + reasons (M67, ADR 0060). Validated=True when the graph is structurally

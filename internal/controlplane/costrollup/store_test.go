@@ -24,8 +24,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/controlplane"
-	"github.com/ctxmesh/agentry/internal/controlplane/costrollup"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/costrollup"
 )
 
 // baseDay is a fixed reference date for store tests.

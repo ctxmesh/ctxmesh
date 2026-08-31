@@ -50,8 +50,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ctxmesh/agentry/internal/objectstore"
-	"github.com/ctxmesh/agentry/internal/replay"
+	"github.com/ctxmesh/ctxmesh/internal/objectstore"
+	"github.com/ctxmesh/ctxmesh/internal/replay"
 )
 
 // RecordHeaderName is the per-run capture toggle the SDK relays on each tool-call egress of a

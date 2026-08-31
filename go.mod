@@ -1,4 +1,4 @@
-module github.com/ctxmesh/agentry
+module github.com/ctxmesh/ctxmesh
 
 go 1.26.5
 

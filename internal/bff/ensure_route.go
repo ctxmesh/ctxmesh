@@ -27,13 +27,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 )
 
 // managedByModelPicker marks a ModelRoute auto-created by the create-agent model
 // picker (m21) — distinct from managedByConnect so listProviders (which filters on the
 // connect label) never mistakes an auto route for a connected provider.
-const managedByModelPicker = "agentry-model-picker"
+const managedByModelPicker = "ctxmesh-model-picker"
 
 // routeNameForModel derives a DETERMINISTIC RFC-1123 route name for a (connection, model)
 // pair, so the same model always maps to the same route (idempotent reuse). e.g.

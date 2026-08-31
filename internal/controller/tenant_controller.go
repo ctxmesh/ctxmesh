@@ -34,9 +34,9 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
-	"github.com/ctxmesh/agentry/internal/controlplane/namespacetenant"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
 )
 
 const (
@@ -369,7 +369,7 @@ func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *a
 					To:    []networkingv1.NetworkPolicyPeer{platformNS(langfuseNamespace)},
 					Ports: []networkingv1.NetworkPolicyPort{{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(langfusePort)}},
 				},
-				{ // platform backends in agentry: gateway :4000, minio :9000, state-layer PROXY
+				{ // platform backends in ctxmesh: gateway :4000, minio :9000, state-layer PROXY
 					// :8080 (memory/quota/dedup/control/SPAWN — the pod-authed, per-tenant-scoped choke point),
 					// token-service :8443 (long-term-memory OBO). Omitting :8080 makes a member's quota
 					// fail-closed (402) post-cutover (audit SEC-1).

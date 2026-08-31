@@ -26,9 +26,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/authz"
-	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
-	"github.com/ctxmesh/agentry/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 // SetOrgCredentialRequest is the POST /api/mcp/org-credential body: an admin promoting a

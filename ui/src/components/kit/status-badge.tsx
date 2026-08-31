@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 // M144.1 gives status ONE vocabulary with five tones that MEAN different things:
 //   ready       → green   the system reconciled it; serving. Ready and ONLY Ready is green.
 //   progressing → blue    the system is still converging (Pending, provisioning, scoring).
-//   waiting     → amber   a HUMAN must act (approval, promotion). agentry's most important state.
+//   waiting     → amber   a HUMAN must act (approval, promotion). ctxmesh's most important state.
 //   failed      → red     it will not converge without a change (NotReady, Failed, blocked).
 //   draft       → gray    not yet enabled / disabled.
 // Purple (primary) is reserved for brand + interactivity and is NEVER a status.

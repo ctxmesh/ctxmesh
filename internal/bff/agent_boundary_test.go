@@ -24,8 +24,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	"github.com/ctxmesh/agentry/internal/credresolve"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 // TestAgentBoundary: the boundary an agent's run resolves credentials within (ADR 0033) is its

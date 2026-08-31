@@ -28,7 +28,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/ctxmesh/agentry/internal/controlplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 )
 
 // memStore is the in-memory twin of the Postgres store — the conformance suite runs both. It computes cosine

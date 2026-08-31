@@ -27,7 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/asyncbus"
+	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
 )
 
 // startEmbeddedJetStream runs a real nats-server with JetStream on a FILE store under t.TempDir().
@@ -255,7 +255,7 @@ func TestJetStream_SubjectsIsolateRegistries(t *testing.T) {
 // A registry id can never widen a subscription: anything outside a subject token is neutralised, so a
 // crafted id cannot smuggle a wildcard into the routing key.
 func TestSubject_CannotEscapeItsToken(t *testing.T) {
-	assert.Equal(t, "agentry.a2a.reg-a", asyncbus.Subject("reg-a"))
+	assert.Equal(t, "ctxmesh.a2a.reg-a", asyncbus.Subject("reg-a"))
 	assert.NotContains(t, asyncbus.Subject("reg.a"), "reg.a", "a dot cannot split the token")
 	assert.NotContains(t, asyncbus.Subject("*"), "*", "a wildcard cannot widen the subscription")
 	assert.NotContains(t, asyncbus.Subject(">"), ">", "a full wildcard cannot widen the subscription")
