@@ -60,7 +60,6 @@ func newEndUserRunServer(t *testing.T, exposedEndpoint string) (*Server, *run.St
 		namespaceTenantStore: tenants,
 		endUserAgentStore:    agents,
 		endUserVerifier:      fakeEndUserVerifier{id: enduseroidc.Identity{Issuer: "https://dex-eu.example.com", Subject: "alice"}},
-		runWorkerDispatch:    true, // skip the in-process goroutine dispatch
 		log:                  logr.Discard(),
 	}
 	return s, &rs

@@ -77,6 +77,7 @@ func TestResumeApprovalMintsVoucher(t *testing.T) {
 		MCPCapabilityAudience:       "test-plane",
 		Log:                         logr.Discard(),
 	})
+	startTestRunWorkers(t, s) // one run path since M143.1 — the pool executes
 
 	created := createRun(t, s, InvokeRequest{Agent: "mailer", Namespace: "prod", Input: json.RawMessage(`{"input":"email the customer"}`)})
 	got := pollRun(t, s, created.ID, func(st run.Status) bool {

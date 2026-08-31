@@ -17,7 +17,6 @@ limitations under the License.
 package bff
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -121,7 +120,10 @@ func (s *Server) tryEndUserCreateRun(w http.ResponseWriter, r *http.Request) (ha
 		return true
 	}
 	boundary := endUserAgentBoundary(ns, agent)
-	token, minted := s.mintRunCapability(principal, ns, agent, boundary, runID)
+	// The token itself is discarded: the WORKER re-mints from the run's inherited identity (one run path,
+	// M143.1/ADR 0125). This call stays as a PRE-FLIGHT check — it is the fail-closed gate below, and
+	// refusing here beats creating a run that could never mint a capability when the worker picks it up.
+	_, minted := s.mintRunCapability(principal, ns, agent, boundary, runID)
 	if !minted {
 		// Minting disabled or the mandatory HMAC key is missing (ADR 0106 §5) — fail CLOSED for an
 		// end-user run rather than proceed unattended with a mis-scoped identity.
@@ -144,10 +146,7 @@ func (s *Server) tryEndUserCreateRun(w http.ResponseWriter, r *http.Request) (ha
 	}
 	s.auditInvoke(r.Context(), principal, agent, ns, runID) // the raw principal is the audit actor (ADR 0107 §5)
 
-	if !s.runWorkerDispatch {
-		execCtx := contextWithRunCapability(contextWithConversationID(context.Background(), convID), token)
-		go s.executeRun(execCtx, runID, row.Endpoint, []byte(req.Input))
-	}
+	// Left `queued` for the worker pool — one run path since M143.1 (ADR 0125).
 	writeJSON(w, http.StatusAccepted, CreateRunResponse{ID: runID, Status: string(run.StatusQueued)})
 	return true
 }

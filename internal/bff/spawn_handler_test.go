@@ -32,10 +32,9 @@ func newSpawnServer(t *testing.T, parent *run.Run) (*Server, *runcap.Signer, run
 		require.NoError(t, store.Create(parent))
 	}
 	s := &Server{
-		capabilitySigner:  signer,
-		runStore:          store,
-		runWorkerDispatch: true, // queue the sub-run; don't invoke a real endpoint in a unit test
-		log:               logr.Discard(),
+		capabilitySigner: signer,
+		runStore:         store,
+		log:              logr.Discard(),
 	}
 	return s, signer, store
 }

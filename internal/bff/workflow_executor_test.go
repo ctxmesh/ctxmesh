@@ -45,9 +45,8 @@ import (
 func newWorkflowServer(t *testing.T) *Server {
 	t.Helper()
 	return &Server{
-		runStore:          run.NewMemStore(),
-		runWorkerDispatch: true, // launched node sub-runs queue; the test completes them via CompleteAndWake.
-		log:               logr.Discard(),
+		runStore: run.NewMemStore(),
+		log:      logr.Discard(),
 	}
 }
 
@@ -170,6 +169,24 @@ func drive(t *testing.T, s *Server, wfRunID string) {
 	})
 	require.NoError(t, err)
 	s.executeWorkflow(context.Background(), wfRunID)
+}
+
+// executeQueuedChild runs the one queued run that is not the workflow itself — standing in for the worker
+// pool's claim+execute without letting a pool race the parent's wake transition.
+func executeQueuedChild(t *testing.T, s *Server, wfRunID string) {
+	t.Helper()
+	for _, r := range s.runStore.List() {
+		if r.ID == wfRunID || r.Status != run.StatusQueued {
+			continue
+		}
+		_, err := s.runStore.Update(r.ID, func(x *run.Run) error {
+			return x.Transition(run.StatusRunning, time.Now())
+		})
+		require.NoError(t, err)
+		s.executeRun(context.Background(), r.ID, r.Endpoint, []byte(r.Input))
+		return
+	}
+	t.Fatalf("no queued child run was enqueued by the workflow node")
 }
 
 // getRun fetches a run (test convenience).
@@ -598,14 +615,15 @@ func TestWorkflowExecutor_IdempotentRelaunch(t *testing.T) {
 // executeRun's terminal transition routes a spawned run through CompleteAndWake. This is the load-bearing
 // wire that makes a completing node re-queue its waiting workflow run without the test simulating it.
 func TestWorkflowNode_TerminalWakesParent(t *testing.T) {
-	// Non-dispatch server so spawnWorkflowNode executes the sub-run in-process via executeRun, and a fake
-	// invoke adapter that returns a fixed answer for the node agent.
+	// M143.1 (ADR 0125): spawnWorkflowNode now only ENQUEUES the node's child run — there is one run path
+	// and the worker pool is it. The property under test is unchanged (a node's terminal transition wakes
+	// its parent workflow through CompleteAndWake); what changed is that the pool must be running to get
+	// there, exactly as in production.
 	inv := &fakeInvokeAdapter{traceID: "tr", resp: []byte(`{"output":"node-answer"}`)}
 	s := &Server{
-		runStore:          run.NewMemStore(),
-		adapters:          Adapters{Invoke: inv},
-		runWorkerDispatch: false, // execute the node sub-run in-process (drives executeRun's terminal path)
-		log:               logr.Discard(),
+		runStore: run.NewMemStore(),
+		adapters: Adapters{Invoke: inv},
+		log:      logr.Discard(),
 	}
 	spec := agentsv1beta1.WorkflowSpec{
 		RegistryRef: "reg",
@@ -613,9 +631,13 @@ func TestWorkflowNode_TerminalWakesParent(t *testing.T) {
 	}
 	wfID := seedWorkflowRun(t, s, spec, `{}`)
 
-	// Advance 1: launch node "only" (executeRun runs it in-process and terminates it → CompleteAndWake wakes
-	// the workflow run back to queued).
+	// Advance 1: launch node "only". Since M143.1 (ADR 0125) spawnWorkflowNode only ENQUEUES the child —
+	// there is one run path and the worker pool is it. The child is executed explicitly here rather than
+	// by starting a pool, because a pool would also claim the parent the moment CompleteAndWake wakes it,
+	// racing the very transition this test asserts. Executing the child directly is exactly what the
+	// worker does, minus the race.
 	drive(t, s, wfID)
+	executeQueuedChild(t, s, wfID)
 
 	// The workflow run is woken (queued) by the node's terminal transition through executeRun→CompleteAndWake.
 	require.Eventually(t, func() bool {

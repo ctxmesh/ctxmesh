@@ -74,7 +74,10 @@ func serverWithIdentity(t *testing.T, username string, kb *agentsv1beta1.Knowled
 		DocStore:       docStore,
 		KnowledgeStore: ks,
 		Embedder:       newMockEmbedder(),
+		RunStore:       run.NewMemStore(),
 	})
+	// One run path since M143.1: an ingestion run only progresses when the pool executes it.
+	startTestRunWorkers(t, s)
 	return s, docStore, ks
 }
 

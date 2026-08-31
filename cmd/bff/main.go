@@ -386,9 +386,13 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// Worker-path dispatch (ADR 0034, m32.2): RUN_WORKER_DISPATCH makes POST /runs leave runs
 	// `queued` for a KEDA-scaled worker pool (this pod, or a dedicated worker Deployment) to claim +
 	// execute — decoupled from the request. Only meaningful with a durable run store.
-	runWorkerDispatch := envTrue(os.Getenv("RUN_WORKER_DISPATCH"))
-	if runWorkerDispatch && runStore == nil {
-		return errors.New("RUN_WORKER_DISPATCH requires a durable run store (set RUN_STORE_DSN)")
+	// RUN_WORKER_DISPATCH is retired (M143.1, ADR 0125): there is one run path and it is always the
+	// worker pool. Still READ so an install that sets it gets told rather than silently ignored — a
+	// config key that stops doing anything without saying so is how an operator ends up believing a mode
+	// exists that does not.
+	if envTrue(os.Getenv("RUN_WORKER_DISPATCH")) {
+		log.Info("RUN_WORKER_DISPATCH is retired and ignored — worker dispatch is now the ONLY run path " +
+			"(ADR 0125); you can remove it from your config")
 	}
 
 	// Live tenant-usage reader (M49): read-only connection to the shared state-layer Valkey so the console
@@ -515,7 +519,6 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		AgentMemoryStore:            agentmemory.NewPostgresStore(cpDB),
 		AuditStore:                  auditlog.NewPostgresStore(cpDB),
 		AlertStore:                  alertstore.NewPostgresStore(cpDB),
-		RunWorkerDispatch:           runWorkerDispatch,
 		CallerClients:               callerClients,
 		Scheme:                      scheme,
 		Auth:                        bff.BearerAuthenticator{},
@@ -564,13 +567,18 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// Run-worker pool (ADR 0034, m32.2): RUN_WORKER_CONCURRENCY>0 runs N claim loops in THIS process
 	// that drain the durable queue. A dedicated worker Deployment sets this (with serving idle); the
 	// front-end BFF can also run a few. Stops claiming when the shutdown signal fires.
-	if n := envInt(os.Getenv("RUN_WORKER_CONCURRENCY")); n > 0 {
-		if runStore == nil {
-			return errors.New("RUN_WORKER_CONCURRENCY requires a durable run store (set RUN_STORE_DSN)")
-		}
-		waitWorkers = srv.StartRunWorkers(ctx, bff.RunWorkerConfig{Concurrency: n})
-		log.Info("run-worker pool started (ADR 0034)", "concurrency", n)
+	// M143.1 (ADR 0125): the pool is no longer optional. With the in-process branch retired it is the
+	// ONLY thing that executes a run, so a BFF that started none would accept work and never do it —
+	// runs would sit `queued` forever, which is a far worse failure than the one the old guard prevented.
+	// It also no longer requires Postgres: the in-memory store implements ClaimQueued/ClaimReclaimable,
+	// so the zero-dependency mode keeps working through the same single path.
+	workerConcurrency := envInt(os.Getenv("RUN_WORKER_CONCURRENCY"))
+	if workerConcurrency <= 0 {
+		workerConcurrency = defaultRunWorkerConcurrency
 	}
+	waitWorkers = srv.StartRunWorkers(ctx, bff.RunWorkerConfig{Concurrency: workerConcurrency})
+	log.Info("run-worker pool started (ADR 0034; the only run path since ADR 0125)",
+		"concurrency", workerConcurrency, "durableStore", runStore != nil)
 
 	maybeStartOnlineScorer(ctx, srv, adapters)
 	maybeStartCostRollupWorker(ctx, srv)
@@ -777,6 +785,11 @@ func discoveryReranker(log logr.Logger) credplane.Reranker {
 	log.Info("capability discovery: cross-encoder rerank wired (ADR 0117)", "reranker", rerankURL)
 	return credplane.NewHTTPReranker(rerankURL, nil)
 }
+
+// defaultRunWorkerConcurrency is what a BFF runs when RUN_WORKER_CONCURRENCY is unset. Small on purpose:
+// a front-end BFF should drain a little work so a single-pod install functions, while a dedicated worker
+// Deployment sets a real number. Zero is no longer a valid answer — nothing else executes runs.
+const defaultRunWorkerConcurrency = 2
 
 // runcapBindStore builds the capability→key bind store over the shared state-layer Valkey (M142.5,
 // ADR 0124). It must be SHARED across BFF replicas: the binding is single-use, and a per-replica record

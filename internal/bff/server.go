@@ -264,10 +264,6 @@ type Server struct {
 	// caller-scoped SSAR (exact RBAC parity with the CRD path). Always non-nil (defaulted to
 	// authz.SSARAuthorizer{}); tests inject a fake to drive allow/deny deterministically.
 	authorizer authz.Authorizer
-	// runWorkerDispatch, when true, makes POST /runs leave the run `queued` for a KEDA-scaled
-	// worker pool to claim + execute (m32.2) instead of running it in-process. Requires a durable
-	// runStore (a hot store is per-pod, so a worker on another pod could not see the run).
-	runWorkerDispatch bool
 
 	// devMode is true when the BFF runs under `agentry dev --ui` (ADR 0021):
 	// a local, single-developer substrate with NO cluster (callerClients nil →
@@ -569,9 +565,6 @@ type Options struct {
 	// AlertStore is the control-plane store for fired alerts (M70, ADR 0063 D2). Optional — nil ⇒
 	// GET /api/alerts returns 501 (CONTROLPLANE_DSN absent). Constructed in cmd/bff/main.go from cpDB.
 	AlertStore alertstore.Store
-	// RunWorkerDispatch routes POST /runs execution to a KEDA-scaled worker pool (m32.2) instead of
-	// running it in-process. Only meaningful with a durable RunStore; ignored otherwise.
-	RunWorkerDispatch bool
 
 	// DocStore is the durable KB object store (M68, ADR 0061 Fork 4). Optional — nil when
 	// OBJECT_STORE_ADDR is unset; the BFF upload endpoint returns honest 501 rather than panicking.
@@ -685,7 +678,6 @@ func NewServer(opts Options) *Server {
 		tenantUsage:              opts.TenantUsage,
 		runControl:               opts.RunControl,
 		authorizer:               authz.SSARAuthorizer{},
-		runWorkerDispatch:        opts.RunWorkerDispatch,
 		docStore:                 opts.DocStore,
 		knowledgeStore:           opts.KnowledgeStore,
 		datasetStore:             opts.DatasetStore,
