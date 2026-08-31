@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.opentelemetry.io/otel/trace"
 	appsv1 "k8s.io/api/apps/v1"
@@ -314,6 +315,12 @@ type AgentDeploymentReconciler struct {
 	// REJECTED. Confirm the flags before setting this (m92.2).
 	LauncherImage string
 
+	// KnowledgeSettleWindow bounds how long the reconciler waits for a referenced KnowledgeBase to
+	// become visible before deploying without it (M143 m143.5 / m52.G12; see
+	// awaitKnowledgeSettle). Zero ⇒ the 30s default. NEGATIVE disables the gate (pre-M143 behavior:
+	// deploy immediately, accepting the revision churn) — an escape hatch, not a setting to reach for.
+	KnowledgeSettleWindow time.Duration
+
 	// PromptResolver resolves a PromptVersion git pointer (repo, ref, path) into
 	// prompt content for the prompt-only-deploy path (M9). It is the mock⇄real
 	// seam: production wires a real (e.g. go-git) resolver; dev / envtest / e2e
@@ -446,6 +453,20 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	if err = r.ensureAgentVersion(ctx, &deploy, versionName); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensuring AgentVersion %s: %w", versionName, err)
+	}
+
+	// Settle gate (M143 m143.5, m52.G12): a referenced-but-not-yet-visible KnowledgeBase is
+	// NOT-YET-SETTLED, not absent. Hold the revision rather than publishing one built as if the
+	// corpus did not exist and then republishing a beat later — that churn raced Knative's revision
+	// creation (RevisionNameTaken on a healthy agent) and, worse, served retrieval-off answers with
+	// no sign anything was missing. Bounded, so a genuinely deleted KB cannot wedge the agent.
+	// Placed before the workload branch so every execution model inherits it.
+	if wait, sErr := r.awaitKnowledgeSettle(ctx, &deploy); sErr != nil {
+		return ctrl.Result{}, fmt.Errorf("settling knowledge bases: %w", sErr)
+	} else if wait > 0 {
+		log.Info("Waiting for KnowledgeBase refs to settle before rolling a revision",
+			"name", deploy.Name, "requeueAfter", wait.String())
+		return ctrl.Result{RequeueAfter: wait}, nil
 	}
 
 	// ── Step 3: Reconcile the workload by execution model ─────────────────────
@@ -1326,20 +1347,11 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	if kbErr != nil {
 		return podTemplate{}, fmt.Errorf("resolving knowledge bases: %w", kbErr)
 	}
-	if len(kbRes.danglingNames) > 0 {
-		// Surface a clear condition so the operator sees exactly which refs are broken.
-		// We do NOT return an error — the resolvable entries are still injected.
-		apimeta.SetStatusCondition(&deploy.Status.Conditions, metav1.Condition{
-			Type:               "KnowledgeBasesResolved",
-			Status:             metav1.ConditionFalse,
-			Reason:             "DanglingRef",
-			Message:            fmt.Sprintf("KnowledgeBase refs not found (skipped): %s", strings.Join(kbRes.danglingNames, ", ")),
-			ObservedGeneration: deploy.Generation,
-		})
-		if err := r.Status().Update(ctx, deploy); err != nil {
-			return podTemplate{}, fmt.Errorf("updating status for dangling KB refs: %w", err)
-		}
-	}
+	// The KnowledgeBasesResolved condition is owned by awaitKnowledgeSettle (knowledge_settle.go),
+	// which runs ONCE per reconcile before any workload write. buildPodTemplate runs TWICE per
+	// reconcile (candidate revision name, then the ksvc), so writing status from here meant two
+	// API writes per pass, each waking another reconcile — half of the G12 revision burst.
+	// Unresolvable refs are still simply skipped: the resolvable entries are injected as before.
 	env = append(env, kbRes.env...)
 	// The launcher's knowledge proxy (:2998 /knowledge/search) proxies to the token-service, so a KB
 	// agent needs TOKEN_SERVICE_URL exactly like a long-term-memory agent (M117 / ADR 0061 Fork 3). The
@@ -1372,9 +1384,12 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 				"will be disabled and retrieval will return nothing. Set controllerManager.oboEgress." +
 				"tokenServiceURL (the chart derives it by default)."
 		}
-		apimeta.SetStatusCondition(&deploy.Status.Conditions, cond)
-		if err := r.Status().Update(ctx, deploy); err != nil {
-			return podTemplate{}, fmt.Errorf("updating KnowledgeReady status: %w", err)
+		// Write ONLY on a real change (m143.5): the unconditional update this replaces fired twice
+		// per reconcile for every KB-bound agent, and each write woke another reconcile.
+		if apimeta.SetStatusCondition(&deploy.Status.Conditions, cond) {
+			if err := r.Status().Update(ctx, deploy); err != nil {
+				return podTemplate{}, fmt.Errorf("updating KnowledgeReady status: %w", err)
+			}
 		}
 	}
 
