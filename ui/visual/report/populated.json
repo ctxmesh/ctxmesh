@@ -1,11 +1,11 @@
 {
   "label": "populated",
   "mode": "populated",
-  "generated": "2026-08-31T22:48:43.319Z",
+  "generated": "2026-08-31T23:26:11.232Z",
   "totals": {
     "renders": 400,
-    "clean": 376,
-    "failing": 24
+    "clean": 390,
+    "failing": 10
   },
   "rows": [
     {
@@ -1400,8 +1400,8 @@
       "consoleErrors": []
     },
     {
-      "documentScrollsX": true,
-      "documentOverflowPx": 80,
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
       "offenders": [],
       "route": "/agents",
       "id": "agents",
@@ -1413,8 +1413,8 @@
       "consoleErrors": []
     },
     {
-      "documentScrollsX": true,
-      "documentOverflowPx": 80,
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
       "offenders": [],
       "route": "/agents",
       "id": "agents",
@@ -2102,8 +2102,8 @@
       "consoleErrors": []
     },
     {
-      "documentScrollsX": true,
-      "documentOverflowPx": 137,
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
       "offenders": [],
       "route": "/tools/mcp-servers",
       "id": "mcp-servers",
@@ -2115,8 +2115,8 @@
       "consoleErrors": []
     },
     {
-      "documentScrollsX": true,
-      "documentOverflowPx": 137,
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
       "offenders": [],
       "route": "/tools/mcp-servers",
       "id": "mcp-servers",
@@ -2128,8 +2128,8 @@
       "consoleErrors": []
     },
     {
-      "documentScrollsX": true,
-      "documentOverflowPx": 297,
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
       "offenders": [],
       "route": "/tools/mcp-servers",
       "id": "mcp-servers",
@@ -2141,8 +2141,8 @@
       "consoleErrors": []
     },
     {
-      "documentScrollsX": true,
-      "documentOverflowPx": 297,
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
       "offenders": [],
       "route": "/tools/mcp-servers",
       "id": "mcp-servers",
@@ -4147,8 +4147,8 @@
       "consoleErrors": []
     },
     {
-      "documentScrollsX": true,
-      "documentOverflowPx": 64,
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
       "offenders": [],
       "route": "/workflows",
       "id": "workflows",
@@ -4160,8 +4160,8 @@
       "consoleErrors": []
     },
     {
-      "documentScrollsX": true,
-      "documentOverflowPx": 64,
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
       "offenders": [],
       "route": "/workflows",
       "id": "workflows",
@@ -4173,8 +4173,8 @@
       "consoleErrors": []
     },
     {
-      "documentScrollsX": true,
-      "documentOverflowPx": 256,
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
       "offenders": [],
       "route": "/workflows",
       "id": "workflows",
@@ -4186,8 +4186,8 @@
       "consoleErrors": []
     },
     {
-      "documentScrollsX": true,
-      "documentOverflowPx": 256,
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
       "offenders": [],
       "route": "/workflows",
       "id": "workflows",
@@ -5175,8 +5175,8 @@
       "consoleErrors": []
     },
     {
-      "documentScrollsX": true,
-      "documentOverflowPx": 84,
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
       "offenders": [],
       "route": "/registries",
       "id": "registries",
@@ -5188,8 +5188,8 @@
       "consoleErrors": []
     },
     {
-      "documentScrollsX": true,
-      "documentOverflowPx": 84,
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
       "offenders": [],
       "route": "/registries",
       "id": "registries",
@@ -5201,8 +5201,8 @@
       "consoleErrors": []
     },
     {
-      "documentScrollsX": true,
-      "documentOverflowPx": 25,
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
       "offenders": [],
       "route": "/registries",
       "id": "registries",
@@ -5214,8 +5214,8 @@
       "consoleErrors": []
     },
     {
-      "documentScrollsX": true,
-      "documentOverflowPx": 25,
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
       "offenders": [],
       "route": "/registries",
       "id": "registries",

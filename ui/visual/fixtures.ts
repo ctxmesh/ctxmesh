@@ -1389,22 +1389,36 @@ const PROMPT_VERSIONS: PromptVersionListResponse = {
   nextCursor: "",
 };
 
-const PROMPT_DIFF: PromptDiffResponse = {
+// The BFF sends a unified-diff STRING, not a line list (internal/bff/
+// promptversions.go). This fixture used to send `lines` — written to the
+// TypeScript type rather than to the wire — which is exactly why the reader
+// throwing against a real cluster went unnoticed. A fixture that is kinder than
+// the server is not a fixture, it is a second bug.
+// Typed as the WIRE shape: `lines` is derived by the client, so a fixture that
+// supplied it would bypass the very parsing this is meant to exercise.
+const PROMPT_DIFF: Omit<PromptDiffResponse, "lines"> = {
   resolveMode: "textual",
-  lines: [
-    { op: " ", content: "You are Acme's customer support assistant." },
-    { op: " ", content: "" },
-    { op: "-", content: "Always issue a refund when the customer asks for one." },
-    { op: "+", content: "Issue a refund only when the charge is a confirmed duplicate." },
-    { op: "+", content: "If the customer's bank has already reversed the charge, explain the" },
-    { op: "+", content: "chargeback path instead of issuing a second refund." },
-    { op: " ", content: "" },
-    { op: " ", content: "Cite the policy document you used for every decision." },
-    { op: "-", content: "Never escalate." },
-    { op: "+", content: "Escalate to a human whenever the refund exceeds EUR 500." },
-  ],
+  identical: false,
+  fromName: "support-system-prompt-v8",
+  toName: "support-system-prompt-v9",
+  fromVersion: "4c1d0ba",
+  toVersion: "9f2a41c",
+  diff: [
+    "--- support-system-prompt-v8",
+    "+++ support-system-prompt-v9",
+    "@@ -1,7 +1,9 @@",
+    " You are Acme's customer support assistant.",
+    " ",
+    "-Always issue a refund when the customer asks for one.",
+    "+Issue a refund only when the charge is a confirmed duplicate.",
+    "+If the customer's bank has already reversed the charge, explain the",
+    "+chargeback path instead of issuing a second refund.",
+    " ",
+    " Cite the policy document you used for every decision.",
+    "-Never escalate.",
+    "+Escalate to a human whenever the refund exceeds EUR 500.",
+  ].join("\n"),
 };
-
 const MEMORY_BINDINGS: MemoryBindingListResponse = {
   items: [
     { name: "demo-assistant-session", namespace: NS_DEFAULT, agentRef: "demo-assistant", scope: "session", backend: "redis", ready: true },

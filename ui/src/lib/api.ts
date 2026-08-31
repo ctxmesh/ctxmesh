@@ -1735,11 +1735,51 @@ export interface PromptDiffLine {
 }
 
 // PromptDiffResponse mirrors GET /api/promptversions/{ns}/{name}/diff?from=.
-// resolveMode is ALWAYS "textual" (the only supported resolver). lines is the
-// line-level diff. NEVER present when the endpoint errors.
+// resolveMode is ALWAYS "textual" (the only supported resolver). NEVER present
+// when the endpoint errors.
+//
+// M151: this type used to declare `lines: PromptDiffLine[]` — a field the BFF
+// has never sent. `internal/bff/promptversions.go` returns `diff`, a unified-diff
+// STRING, plus the two names and versions. Against a real cluster the diff
+// reader therefore threw on `diff.lines.length`; only the fixtures, which had
+// been written to the (wrong) type rather than to the wire, hid it. The wire
+// fields below are now the truth, and `lines` is DERIVED by the client — see
+// `parseUnifiedDiff`. A type that describes what we wished the server sent is
+// worse than no type at all.
 export interface PromptDiffResponse {
   resolveMode: "textual";
+  /** The unified-diff text. "" when the two versions resolve identically. */
+  diff?: string;
+  identical?: boolean;
+  fromName?: string;
+  toName?: string;
+  fromVersion?: string;
+  toVersion?: string;
+  /** Derived client-side from `diff`. A server that starts sending it wins. */
   lines: PromptDiffLine[];
+}
+
+// parseUnifiedDiff turns the BFF's unified-diff text into the line list the
+// reader renders. It drops the file headers (`---`, `+++`) and hunk markers
+// (`@@ … @@`), which carry no prompt content, and classifies everything else by
+// its first character. A line that is exactly "\ No newline at end of file" is
+// diff metadata, not content, and is dropped too.
+export function parseUnifiedDiff(diff: string): PromptDiffLine[] {
+  const out: PromptDiffLine[] = [];
+  for (const raw of diff.split("\n")) {
+    if (raw === "" && out.length === 0) continue;
+    if (raw.startsWith("--- ") || raw.startsWith("+++ ") || raw.startsWith("@@")) continue;
+    if (raw.startsWith("\\ ")) continue;
+    const head = raw.charAt(0);
+    if (head === "+" || head === "-") {
+      out.push({ op: head, content: raw.slice(1) });
+    } else {
+      // A context line is prefixed with a single space; a bare line (some
+      // resolvers omit it on empty context) is context too.
+      out.push({ op: " ", content: head === " " ? raw.slice(1) : raw });
+    }
+  }
+  return out;
 }
 
 export interface PromptVersionSummary {
@@ -5120,7 +5160,23 @@ export const api = {
         res.status,
       );
     }
-    return (await res.json()) as PromptDiffResponse;
+    const body = (await res.json()) as PromptDiffResponse;
+    // Derive `lines` when the server did not send them, which is every real
+    // server. Identical content is an empty list, NOT an unreadable diff — the
+    // reader must be able to tell "nothing changed" from "we could not read it".
+    if (!Array.isArray(body.lines)) {
+      if (body.identical === true) {
+        body.lines = [];
+      } else if (typeof body.diff === "string") {
+        // "" is a legitimately empty diff — identical content — and parses to [].
+        body.lines = parseUnifiedDiff(body.diff);
+      }
+      // Otherwise `lines` stays absent ON PURPOSE. A 200 that carries neither a
+      // diff nor an identical flag is malformed, and the reader must be able to
+      // say "we could not read this" rather than "nothing changed" — those are
+      // different claims and only one of them is true.
+    }
+    return body;
   },
 
   // --- Datasets labeling API (m69.3, ADR 0062 Fork 5) -------------------------
