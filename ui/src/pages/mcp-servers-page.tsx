@@ -1,24 +1,37 @@
 import * as React from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { ExternalLink, Plus, Share2, Trash2, Wrench } from "lucide-react";
+import { ExternalLink, Share2, Trash2, Wrench } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  CellEntity,
+  ClosingNote,
   ConfirmDialog,
   CredentialSourceBadge,
-  EmptyState,
-  ErrorState,
-  ForbiddenInline,
-  SkeletonTable,
+  DataTable,
+  DetailDrawer,
+  FilterChipRow,
+  KeyValueList,
+  NextStepLink,
+  PageHeader,
+  QuantityValue,
+  StatusBadge,
   useFocusTrap,
   useToast,
   VisibilityBadge,
+  nextStepRank,
+  resolveStatus,
+  type Column,
+  type DataTableError,
+  type NextStepTone,
+  type StatusTone,
 } from "@/components/kit";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_REGISTRIES } from "@/lib/nav";
+import { cn } from "@/lib/utils";
 import {
   api,
   ApiError,
@@ -26,10 +39,24 @@ import {
   type McpServerSummary,
 } from "@/lib/api";
 
-// McpServersPage (m25 S10) — the LIST of registered BYO-MCP servers, with an
-// "Add MCP server" action ON the page (not a separate add-only nav item). Read-open
-// so a viewer sees the servers; the Add button is gated on create agentregistries.
-// Each row shows the server's auth tier + tool count and links into the Tool catalog.
+// McpServersPage — archetype A1 (index/table), resource-list column budget
+// (M151 spec §6.1/§4.4). The LIST of registered BYO-MCP servers, with the
+// "Add MCP server" action IN THE HEADER (not a separate nav item, m25 S8).
+// Read-open so a viewer sees the servers; the Add button is gated on create
+// agentregistries.
+//
+// ── FROM CARDS TO A TABLE ───────────────────────────────────────────────────
+// This page used to be a stack of cards, which is why it could never say which
+// server was blocking: nine equal-weight cards in alphabetical order have no
+// first row. It is now the console's one table, ordered by what needs a person
+// (§6.1 A1) — refused first, then awaiting approval, then a server that yields
+// no tools; everything healthy says "Nothing needed" and sinks to the bottom.
+//
+// ── WHY THERE IS A DRAWER ───────────────────────────────────────────────────
+// An MCP server has no detail route, and the §4.4 budget drops its URL, auth
+// and sharing columns below 1280/1024. "Dropped ≠ lost" is only true if the row
+// opens somewhere, so a row-click opens a drawer carrying every field — the URL
+// in a code well, because a URL never belongs in a bare table cell (§4.5).
 
 type PageState =
   | { kind: "loading" }
@@ -42,6 +69,85 @@ interface LocationState {
   highlight?: string; // "<ns>/<name>" of the newly-connected server
 }
 
+type View = "all" | "attention" | "shared";
+
+/** Attention order inside a next-step group (§6.1 A1). */
+const TONE_RANK: Record<StatusTone, number> = {
+  failed: 0,
+  waiting: 1,
+  progressing: 2,
+  ready: 3,
+  draft: 4,
+};
+
+/**
+ * The BFF's approval `status` → the status vocabulary (M144.1 / §2.2). A pending
+ * server is NOT "converging": nothing happens until a person approves it, which
+ * is the hold state — the one distinction ops tooling most often loses.
+ */
+function serverStatus(s: McpServerSummary): { ready: boolean; phase: string } {
+  switch ((s.status ?? "").toLowerCase()) {
+    case "approved":
+      return { ready: true, phase: "Approved" };
+    case "pending":
+      return { ready: false, phase: "AwaitingApproval" };
+    case "rejected":
+      return { ready: false, phase: "Rejected" };
+    default:
+      return { ready: false, phase: s.status ?? "" };
+  }
+}
+
+/** What the row needs from a person (§7.2). `none` renders the inert "Nothing needed". */
+type StepKind = "refusal" | "request" | "connection" | "none";
+
+function stepKind(s: McpServerSummary): StepKind {
+  const st = (s.status ?? "").toLowerCase();
+  if (st === "rejected") return "refusal";
+  if (st === "pending") return "request";
+  // Connected, approved, and yielding nothing: the tools are the entire point
+  // of an MCP server, so zero of them is a real problem — and a KNOWN zero,
+  // which is why the Tools cell prints `0` rather than a dash.
+  if (s.toolCount === 0) return "connection";
+  return "none";
+}
+
+const STEP_LABEL: Record<Exclude<StepKind, "none">, string> = {
+  refusal: "Review the refusal", //   18 chars
+  request: "Review the request", //   18
+  connection: "Check the connection", // 20
+};
+
+const STEP_TONE: Record<Exclude<StepKind, "none">, NextStepTone> = {
+  refusal: "crit",
+  request: "default",
+  connection: "default",
+};
+
+/**
+ * The closing line's copy (§5.18) — a SIGHTED FLOURISH restating the table's
+ * ratio, built only from counts the backend actually sent. `totalTools` is a sum
+ * of real per-server counts, never an estimate.
+ */
+function closingNote(total: number, needing: number, totalTools: number): string {
+  const tools = `${totalTools} ${totalTools === 1 ? "tool" : "tools"}`;
+  if (total === 1)
+    return needing > 0
+      ? "The one server here needs a person."
+      : `The one server here is connected, exposing ${tools}.`;
+  if (needing === 0)
+    return `All ${total} servers are connected, exposing ${tools} between them. Nothing here needs a person.`;
+  return `${total} servers here, exposing ${tools} between them. ${needing} of them need a person.`;
+}
+
+/** The auth Tag: a declared capability, never a health hue (§5.6). */
+function AuthBadge({ server }: { server: McpServerSummary }) {
+  if (server.authType === "oauth") return <Badge variant="muted">OAuth</Badge>;
+  if (server.secretName) return <Badge variant="muted">Key</Badge>;
+  // Declared but nothing attached — the dashed `open` Tag (§2.5).
+  return <Badge variant="open">no auth</Badge>;
+}
+
 export function McpServersPage() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -51,6 +157,10 @@ export function McpServersPage() {
   // Promoting a server to org scope UPDATES its ToolRegistry — the RBAC admin gate.
   const canPromote = can(RES_REGISTRIES, "update");
   const [page, setPage] = React.useState<PageState>({ kind: "loading" });
+  const [query, setQuery] = React.useState("");
+  const [view, setView] = React.useState<View>("all");
+  // The server whose drawer is open (row-click) — where the dropped columns live.
+  const [inspect, setInspect] = React.useState<McpServerSummary | null>(null);
   // The server currently queued for deletion (its ConfirmDialog is open).
   const [toDelete, setToDelete] = React.useState<McpServerSummary | null>(null);
   // The server queued for the unified Share flow (T5).
@@ -95,156 +205,342 @@ export function McpServersPage() {
     return () => c.abort();
   }, [load]);
 
-  const addButton = canAdd ? (
-    <Button
-      onClick={() => navigate("/tools/add-mcp")}
-      data-testid="add-mcp-server-button"
-      className="shrink-0"
-    >
-      <Plus className="mr-1.5 h-4 w-4" />
-      Add MCP server
-    </Button>
-  ) : null;
+  const servers = React.useMemo(
+    () => (page.kind === "ready" ? page.servers : []),
+    [page],
+  );
 
-  return (
-    <div className="mx-auto max-w-5xl space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight">MCP Servers</h2>
-          <p className="text-sm text-muted-foreground">
-            Your connected MCP servers. Each exposes tools you can attach to agents —
-            browse them in the Tool catalog.
-          </p>
+  // Decorate once — status, next step and sort key from the same resolve.
+  const decorated = React.useMemo(
+    () =>
+      servers
+        .map((s) => {
+          const { ready, phase } = serverStatus(s);
+          return { row: s, tone: resolveStatus(ready, phase).tone, kind: stepKind(s) };
+        })
+        .sort(
+          (a, b) =>
+            nextStepRank(a.kind === "none" ? "none" : "default") -
+              nextStepRank(b.kind === "none" ? "none" : "default") ||
+            TONE_RANK[a.tone] - TONE_RANK[b.tone] ||
+            a.row.name.localeCompare(b.row.name),
+        ),
+    [servers],
+  );
+
+  const q = query.trim().toLowerCase();
+  const inView = decorated.filter((d) => {
+    if (view === "attention") return d.kind !== "none";
+    if (view === "shared") return d.row.credentialSource === "shared";
+    return true;
+  });
+  const visible = q ? inView.filter((d) => d.row.name.toLowerCase().includes(q)) : inView;
+  const rows = visible.map((d) => d.row);
+  const kindFor = new Map(
+    decorated.map((d) => [`${d.row.namespace}/${d.row.name}`, d.kind] as const),
+  );
+
+  // Ratio inputs — counts of what the backend actually sent, never a guess.
+  const needing = decorated.filter((d) => d.kind !== "none").length;
+  const totalTools = decorated.reduce((n, d) => n + d.row.toolCount, 0);
+
+  const error: DataTableError | null =
+    page.kind === "forbidden"
+      ? { message: page.message, forbidden: true, resource: "MCP servers" }
+      : page.kind === "error"
+        ? { message: page.message, onRetry: () => load() }
+        : null;
+
+  // §4.4 resource-list budget. Server / State / Next step are priority 1 and
+  // survive 768; URL + Sharing take the p4 slot, Auth + Tools p3.
+  const columns: Column<McpServerSummary>[] = [
+    {
+      id: "name",
+      header: "Server",
+      className: "max-w-[18rem]",
+      cell: (s) => (
+        <div
+          data-testid={`mcp-server-${s.name}`}
+          className={cn(
+            "min-w-0 rounded-sm transition-shadow duration-700",
+            // Selection/attention is always pine-family, never a status hue
+            // (§2.3). The ring is a box-shadow, so it never widens the row.
+            highlighted === `${s.namespace}/${s.name}` && "bg-accent ring-2 ring-primary",
+          )}
+        >
+          <CellEntity name={s.name} namespace={s.namespace} />
         </div>
-        {addButton}
-      </div>
+      ),
+    },
+    {
+      id: "url",
+      header: "Endpoint",
+      priority: 4,
+      className: "max-w-[16rem]",
+      cell: (s) => (
+        <span className="block truncate font-mono text-xs text-faint" title={s.url}>
+          {s.url}
+        </span>
+      ),
+    },
+    {
+      id: "auth",
+      header: "Auth",
+      priority: 3,
+      cell: (s) => (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <AuthBadge server={s} />
+          <CredentialSourceBadge credentialSource={s.credentialSource} name={s.name} />
+        </div>
+      ),
+    },
+    {
+      id: "tools",
+      header: "Tools",
+      priority: 3,
+      numeric: true,
+      cell: (s) => <QuantityValue value={s.toolCount} />,
+    },
+    {
+      id: "sharing",
+      header: "Sharing",
+      priority: 4,
+      cell: (s) => (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <VisibilityBadge visibility={s.visibility} name={s.name} />
+          {s.scope && (
+            // A declared scope, not a health state — muted, never a hue (§5.6).
+            <Badge variant="muted" data-testid={`scope-${s.name}`}>
+              {s.scope}
+            </Badge>
+          )}
+        </div>
+      ),
+    },
+    {
+      id: "state",
+      header: "State",
+      className: "w-[9rem]",
+      cell: (s) => {
+        const { ready, phase } = serverStatus(s);
+        return <StatusBadge ready={ready} phase={phase} />;
+      },
+    },
+    {
+      id: "nextStep",
+      header: "Next step",
+      className: "w-[11rem]",
+      cell: (s) => {
+        const kind = kindFor.get(`${s.namespace}/${s.name}`) ?? "none";
+        if (kind === "none")
+          return <NextStepLink tone="none" testId={`next-step-${s.name}`} />;
+        return (
+          <NextStepLink
+            label={STEP_LABEL[kind]}
+            tone={STEP_TONE[kind]}
+            testId={`next-step-${s.name}`}
+            // A refused or pending server is decided in the approvals queue; a
+            // server yielding no tools is diagnosed from its own wiring, which
+            // is what the drawer shows.
+            to={kind === "connection" ? undefined : "/tools/approvals"}
+            onClick={kind === "connection" ? () => setInspect(s) : undefined}
+          />
+        );
+      },
+    },
+  ];
 
-      {page.kind === "loading" && <SkeletonTable rows={3} />}
-
-      {page.kind === "forbidden" && (
-        <ForbiddenInline
-          title="Not allowed to list MCP servers"
-          description="Your account can't list MCP servers."
-          detail={page.message}
-        />
-      )}
-
-      {page.kind === "error" && (
-        <ErrorState
-          title="Couldn't load MCP servers"
-          description={page.message}
-          onRetry={() => load()}
-        />
-      )}
-
-      {page.kind === "ready" && page.servers.length === 0 && (
-        <EmptyState
-          icon={Wrench}
-          title="No MCP servers yet"
-          description={
+  const emptyState =
+    view !== "all"
+      ? {
+          icon: Wrench,
+          intent: "filtered" as const,
+          title: view === "attention" ? "Nothing here needs you" : "No shared credentials",
+          description:
+            view === "attention"
+              ? "Every server is approved and exposing tools."
+              : "Every server here is connected per-user or needs no credential at all — nobody is sharing one token.",
+          totalCount: decorated.length > 0 ? decorated.length : undefined,
+          countNoun: "servers",
+          action: {
+            label: "Show everything",
+            variant: "outline" as const,
+            onClick: () => setView("all"),
+          },
+        }
+      : {
+          icon: Wrench,
+          title: "No MCP servers yet",
+          description: (
             <>
               Add your own MCP server, or{" "}
-              <Link to="/gallery?tab=mcp" className="underline underline-offset-2 hover:text-foreground" data-testid="gallery-discover-link">
+              <Link
+                to="/gallery?tab=mcp"
+                className="text-primary border-b border-accent hover:border-primary"
+                data-testid="gallery-discover-link"
+              >
                 discover shared servers
               </Link>{" "}
               in the Gallery and connect one to your namespace.
             </>
-          }
-          action={
-            canAdd
-              ? { label: "Add MCP server", icon: Plus, onClick: () => navigate("/tools/add-mcp") }
-              : undefined
-          }
+          ),
+          action: canAdd
+            ? { label: "Add MCP server", onClick: () => navigate("/tools/add-mcp") }
+            : undefined,
+        };
+
+  return (
+    <div className="min-w-0 space-y-6">
+      <PageHeader
+        title="MCP servers"
+        lede="The MCP servers this namespace can reach. Each exposes tools you attach to agents — whatever is refused, awaiting a decision, or yielding nothing is at the top."
+        actions={
+          canAdd
+            ? [
+                {
+                  id: "add",
+                  label: "Add MCP server",
+                  onClick: () => navigate("/tools/add-mcp"),
+                  primary: true,
+                },
+              ]
+            : undefined
+        }
+      />
+
+      {/* Views, not filters (§5.28) — one question, one answer. No counts: the
+          chip contract takes backend counts only. */}
+      {decorated.length > 0 && (
+        <FilterChipRow
+          label="Filter servers"
+          value={view}
+          onChange={(id) => setView(id as View)}
+          chips={[
+            { id: "all", label: "Everything" },
+            { id: "attention", label: "Needs attention" },
+            { id: "shared", label: "Shared credential" },
+          ]}
         />
       )}
 
-      {page.kind === "ready" && page.servers.length > 0 && (
-        <ul className="space-y-2" data-testid="mcp-servers-list">
-          {page.servers.map((s) => {
-            const rowKey = `${s.namespace}/${s.name}`;
-            const isHighlighted = highlighted === rowKey;
-            return (
-              <li
-                key={rowKey}
-                className={[
-                  "rounded-lg border bg-card p-4 shadow-card transition-colors duration-700",
-                  isHighlighted ? "ring-2 ring-primary bg-primary/5" : "",
-                ].join(" ")}
-                data-testid={`mcp-server-${s.name}`}
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="truncate font-medium">{s.name}</p>
-                      {s.authType === "oauth" ? (
-                        <Badge variant="secondary">OAuth</Badge>
-                      ) : s.secretName ? (
-                        <Badge variant="secondary">Key</Badge>
-                      ) : (
-                        <Badge variant="outline">No auth</Badge>
-                      )}
-                      {s.status === "pending" && (
-                        <Badge variant="outline">Pending approval</Badge>
-                      )}
-                      {s.scope && (
-                        <Badge
-                          variant={s.scope === "org" ? "warning" : "outline"}
-                          data-testid={`scope-${s.name}`}
-                        >
-                          {s.scope}
-                        </Badge>
-                      )}
-                      {s.visibility && (
-                        <VisibilityBadge visibility={s.visibility} name={s.name} />
-                      )}
-                      <CredentialSourceBadge credentialSource={s.credentialSource} name={s.name} />
-                    </div>
-                    <p className="truncate text-xs text-muted-foreground">{s.url}</p>
-                    <p className="text-xs text-muted-foreground">{s.namespace}</p>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <Badge variant="secondary">
-                      {s.toolCount} {s.toolCount === 1 ? "tool" : "tools"}
-                    </Badge>
+      <DataTable<McpServerSummary>
+        columns={columns}
+        rows={rows}
+        rowKey={(s) => `${s.namespace}/${s.name}`}
+        loading={page.kind === "loading"}
+        error={error}
+        query={query}
+        onQueryChange={setQuery}
+        queryPlaceholder="Filter servers by name…"
+        ariaLabel="MCP servers"
+        onRowClick={(s) => setInspect(s)}
+        rowActions={
+          canPromote || canDelete
+            ? (s) => (
+                <div
+                  className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {canPromote && (
                     <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => navigate("/tools/catalog")}
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => setToShare(s)}
+                      data-testid={`share-mcp-${s.name}`}
+                      aria-label={`Share ${s.name}`}
+                      title="Share"
                     >
-                      <ExternalLink className="mr-1 h-3.5 w-3.5" />
-                      Tools
+                      <Share2 className="h-3.5 w-3.5" />
                     </Button>
-                    {canPromote && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setToShare(s)}
-                        data-testid={`share-mcp-${s.name}`}
-                        aria-label={`Share ${s.name}`}
-                        title="Share"
-                      >
-                        <Share2 className="mr-1 h-3.5 w-3.5" />
-                        Share
-                      </Button>
-                    )}
-                    {canDelete && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setToDelete(s)}
-                        data-testid={`delete-mcp-${s.name}`}
-                        aria-label={`Delete ${s.name}`}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
-                    )}
-                  </div>
+                  )}
+                  {canDelete && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-destructive hover:text-destructive"
+                      onClick={() => setToDelete(s)}
+                      data-testid={`delete-mcp-${s.name}`}
+                      aria-label={`Delete ${s.name}`}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
                 </div>
-              </li>
-            );
-          })}
-        </ul>
+              )
+            : undefined
+        }
+        empty={emptyState}
+      />
+
+      {page.kind === "ready" && decorated.length > 0 && (
+        <ClosingNote>
+          {closingNote(decorated.length, needing, totalTools)}
+        </ClosingNote>
       )}
+
+      {/* Dropped ≠ lost (§4.4): the columns the budget hides render here, and
+          the URL gets a code well rather than a bare cell (§4.5). */}
+      <DetailDrawer
+        open={inspect !== null}
+        onClose={() => setInspect(null)}
+        title={inspect?.name ?? ""}
+        subtitle={inspect?.namespace}
+        status={
+          inspect ? (
+            <StatusBadge {...serverStatus(inspect)} />
+          ) : undefined
+        }
+        footer={
+          <Button asChild variant="outline" className="w-full">
+            <Link to="/tools/catalog">
+              <ExternalLink className="h-4 w-4" />
+              Browse its tools
+            </Link>
+          </Button>
+        }
+      >
+        {inspect && (
+          <div className="space-y-5" data-testid="mcp-server-drawer">
+            <div>
+              <p className="font-mono text-2xs uppercase tracking-wide text-faint">
+                Endpoint
+              </p>
+              <pre className="mt-1.5 overflow-x-auto rounded-md bg-surface-3 px-3 py-2 font-mono text-xs text-secondary-foreground">
+                <span className="break-all">{inspect.url}</span>
+              </pre>
+            </div>
+            <KeyValueList
+              items={[
+                { key: "Tools", value: <QuantityValue value={inspect.toolCount} /> },
+                {
+                  key: "Auth",
+                  value:
+                    inspect.authType === "oauth"
+                      ? "OAuth"
+                      : inspect.secretName
+                        ? "API key"
+                        : "",
+                  absent: "no credential attached",
+                  mono: false,
+                },
+                { key: "Secret", value: inspect.secretName, absent: "not attached" },
+                {
+                  key: "Credential",
+                  value:
+                    inspect.credentialSource && inspect.credentialSource !== "none"
+                      ? inspect.credentialSource
+                      : "",
+                  absent: "none needed",
+                },
+                { key: "Visibility", value: inspect.visibility, absent: "not published" },
+                { key: "Scope", value: inspect.scope, absent: "not yet known" },
+                { key: "Approval", value: inspect.status, absent: "not yet known" },
+              ]}
+            />
+          </div>
+        )}
+      </DetailDrawer>
 
       {toDelete && (
         <DeleteMcpDialog
@@ -488,7 +784,7 @@ function ShareDialog({
             ))}
             {selected === "public" && (
               <div className="mt-2 space-y-2">
-                <p className="text-sm text-amber-600 dark:text-amber-400" data-testid="publish-public-warning">
+                <p className="text-sm text-warning" data-testid="publish-public-warning">
                   Public means every tenant on this cluster can discover it.
                 </p>
                 <label className="flex cursor-pointer items-center gap-2 text-sm" data-testid="publish-public-confirm-label">
@@ -504,7 +800,7 @@ function ShareDialog({
               </div>
             )}
             {server.credentialSource === "shared" && (
-              <p className="mt-2 text-sm text-amber-600 dark:text-amber-400" data-testid="publish-shared-cred-warning">
+              <p className="mt-2 text-sm text-warning" data-testid="publish-shared-cred-warning">
                 Caution: this server uses a shared credential — widening visibility also widens
                 access to that credential.
               </p>
@@ -515,7 +811,7 @@ function ShareDialog({
         {/* Shared-cred sub-form: credential input */}
         {mode === "shared-cred" && (
           <div className="mt-4 space-y-3" data-testid="share-shared-cred-section">
-            <p className="text-sm text-amber-600 dark:text-amber-400" data-testid="org-cred-caution">
+            <p className="text-sm text-warning" data-testid="org-cred-caution">
               This shares ONE credential with everyone — every user&apos;s runs use it. If teammates
               should connect their own accounts instead, choose the option above.
             </p>

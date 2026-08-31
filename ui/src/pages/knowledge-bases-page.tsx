@@ -1,14 +1,34 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BookOpen,
   ChevronLeft,
+  Filter,
   Upload,
   Play,
   Search,
 } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 
-import { DataTable, StatusBadge, type Column, type DataTableError } from "@/components/kit";
+import {
+  CellEntity,
+  ClosingNote,
+  DataTable,
+  FilterChipRow,
+  NextStepLink,
+  PageHeader,
+  QuantityValue,
+  QuietNote,
+  StatusBadge,
+  UnknownValue,
+  nextStepRank,
+  resolveStatus,
+  type Column,
+  type DataTableError,
+  type EmptyStateProps,
+  type FilterChip,
+  type NextStepTone,
+  type StatusTone,
+} from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -27,20 +47,32 @@ import {
   type KBSearchHit,
 } from "@/lib/api";
 
-// KnowledgeBasesPage — the KnowledgeBase CR list surface (m68.13, ADR 0061).
+// KnowledgeBasesPage — the KnowledgeBase CR list surface (m68.13, ADR 0061;
+// re-housed on the editorial system in M151 as archetype A1).
 //
-// Enterprise-RAG demo surface: upload docs → ingest → watch phase → test-query with citations.
-// Read-only list (caller-scoped, ADR 0011): each row is a KnowledgeBase CR — its name, phase,
-// chunk count, size, and last-ingested timestamp. A KB is authored via YAML/kubectl; the console
-// surfaces it for visibility and operator awareness. A row-click navigates to the detail page
-// (/knowledgebases/:ns/:name) which includes: document upload, ingest trigger, and test-query panel.
+// Enterprise-RAG surface: upload docs → ingest → watch phase → test-query with citations.
+// Read-only list (caller-scoped, ADR 0011): each row is a KnowledgeBase CR. A KB is authored
+// via YAML/kubectl, so the header carries NO create action — the console does not offer an
+// affordance the platform does not have. A row-click navigates to the detail page
+// (/knowledgebases/:ns/:name) which includes: document upload, ingest trigger, and test-query.
 //
-// A 403 surfaces as an honest forbidden state (never a fake empty list).
+// A1 contract (spec §6.1): PageHeader → FilterChipRow → DataTable → ClosingNote, sorted by
+// what is blocking, with a "Next step" column that names the user's next action.
+//
+// Honesty (spec §7): the four degraded states are four DIFFERENT things here —
+//   • first-run empty      → teaching EmptyState ("No knowledge bases")
+//   • filtered to nothing  → EmptyState intent="filtered" naming the view + a way back
+//   • forbidden            → the DataTable forbidden variant, resource-named
+//   • cannot be answered   → a corpus that has never been ingested has NO last-ingested
+//                            date; it renders `—` with a reason, never a fabricated date,
+//                            and one QuietNote above the table says so once. Chunk and size
+//                            go through QuantityValue so a field the BFF did not send reads
+//                            `—` rather than a zero the store never claimed.
 //
 // data-testid contract:
 //   knowledge-bases-page  — root container
 //   kb-table              — the DataTable (aria-label="KnowledgeBases")
-//   kb-row-{name}         — each row
+//   kb-quiet-note         — the never-ingested QuietNote
 
 // formatBytes renders a byte count as a human-readable string (e.g. "1.2 MB").
 function formatBytes(bytes: number): string {
@@ -64,6 +96,16 @@ function formatDate(ts?: string): string {
   }
 }
 
+// formatStamp is the §4.5 table register for a timestamp: same year → "Aug 29",
+// older → "2025-08-29". The full ISO string always rides along in `title`, so the
+// compact form never loses information.
+function formatStamp(ts: string): string {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  if (d.getFullYear() !== new Date().getFullYear()) return d.toISOString().slice(0, 10);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // List page
 // ──────────────────────────────────────────────────────────────────────────────
@@ -73,9 +115,47 @@ type ListLoadState =
   | { kind: "ready"; items: KBSummary[] }
   | { kind: "error"; message: string; forbidden: boolean };
 
+/** Attention-first order (§6.1 A1): what is blocking sorts above what is fine. */
+const ATTENTION: Record<StatusTone, number> = {
+  failed: 0,
+  waiting: 1,
+  progressing: 2,
+  ready: 3,
+  draft: 4,
+};
+
+interface NextStep {
+  label: string;
+  tone: NextStepTone;
+}
+
+/**
+ * The row's next action, verb-first and ≤22 characters (§7.2). It describes what
+ * the USER does, never what the system is: "Fix the ingestion", not "Failed".
+ * A corpus the list has nothing to ask of returns the inert `none` tone, which
+ * NextStepLink renders as "Nothing needed" and the sort puts last.
+ */
+function kbNextStep(kb: KBSummary): NextStep {
+  const phase = (kb.phase ?? "").toLowerCase();
+  if (!kb.embeddingRoute) return { label: "Set an embedding route", tone: "default" };
+  if (phase === "failed") return { label: "Fix the ingestion", tone: "crit" };
+  if (phase === "budgetexceeded") return { label: "Raise the ingest cap", tone: "crit" };
+  if (kb.documentCount === 0) return { label: "Upload a document", tone: "default" };
+  if (phase === "partiallyingested") return { label: "Finish the ingestion", tone: "default" };
+  const tone = resolveStatus(phase === "ready", kb.phase).tone;
+  // Still converging on its own — the machine is working, nobody is blocked.
+  if (tone === "progressing") return { label: "", tone: "none" };
+  if (kb.chunkCount === 0) return { label: "Start the ingestion", tone: "default" };
+  return { label: "", tone: "none" };
+}
+
+const KB_VIEWS = ["all", "attention", "serving"] as const;
+type KBView = (typeof KB_VIEWS)[number];
+
 export function KnowledgeBasesPage() {
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
+  const [view, setView] = useState<KBView>("all");
   const [loadState, setLoadState] = useState<ListLoadState>({ kind: "loading" });
   const abortRef = useRef<AbortController | null>(null);
 
@@ -105,9 +185,68 @@ export function KnowledgeBasesPage() {
     return () => abortRef.current?.abort();
   }, [load]);
 
-  const all = loadState.kind === "ready" ? loadState.items : [];
+  const all = useMemo(
+    () => (loadState.kind === "ready" ? loadState.items : []),
+    [loadState],
+  );
+
+  // Attention-first sort (§6.1): rows that need a person above rows that do not,
+  // "Nothing needed" last, then by how bad the state is, then by name.
+  const sorted = useMemo(() => {
+    return [...all].sort((a, b) => {
+      const sa = kbNextStep(a);
+      const sb = kbNextStep(b);
+      const rank = nextStepRank(sa.tone) - nextStepRank(sb.tone);
+      if (rank !== 0) return rank;
+      const ta = resolveStatus(a.phase === "Ready", a.phase).tone;
+      const tb = resolveStatus(b.phase === "Ready", b.phase).tone;
+      if (ATTENTION[ta] !== ATTENTION[tb]) return ATTENTION[ta] - ATTENTION[tb];
+      return a.name.localeCompare(b.name);
+    });
+  }, [all]);
+
+  const needsSomeone = useMemo(
+    () => sorted.filter((kb) => kbNextStep(kb).tone !== "none"),
+    [sorted],
+  );
+
   const q = query.trim().toLowerCase();
-  const items = q ? all.filter((kb) => kb.name.toLowerCase().includes(q)) : all;
+  const items = useMemo(() => {
+    const byView =
+      view === "attention"
+        ? needsSomeone
+        : view === "serving"
+          ? sorted.filter((kb) => kbNextStep(kb).tone === "none")
+          : sorted;
+    return q ? byView.filter((kb) => kb.name.toLowerCase().includes(q)) : byView;
+  }, [view, q, sorted, needsSomeone]);
+
+  // The list endpoint returns every KnowledgeBase the caller can see in one
+  // response (no cursor), so these counts are the backend's complete answer for
+  // this scope — not a count of the rows that happen to be rendered.
+  // Built FROM the view union rather than beside it, so the chips, their order
+  // and the type cannot drift apart — a chip whose id is not a view stops
+  // compiling instead of silently filtering to nothing.
+  const kbViewLabel: Record<KBView, string> = {
+    all: "Everything",
+    attention: "Needs a person",
+    serving: "Serving",
+  };
+  const kbViewCount: Record<KBView, number> = {
+    all: all.length,
+    attention: needsSomeone.length,
+    serving: all.length - needsSomeone.length,
+  };
+  const chips: FilterChip[] = KB_VIEWS.map((id) => ({
+    id,
+    label: kbViewLabel[id],
+    count: kbViewCount[id],
+  }));
+  const viewLabel = chips.find((c) => c.id === view)?.label ?? "Everything";
+
+  // Corpora that have never run an ingestion. Their last-ingested is ABSENT, not
+  // zero and not "now" — the cell renders a dash and this note says why, once.
+  const neverIngested = items.filter((kb) => !kb.lastIngestedAt).length;
 
   const error: DataTableError | null =
     loadState.kind === "error"
@@ -119,60 +258,153 @@ export function KnowledgeBasesPage() {
         }
       : null;
 
+  const kbPath = (kb: KBSummary) =>
+    `/knowledgebases/${encodeURIComponent(kb.namespace)}/${encodeURIComponent(kb.name)}`;
+
   const columns: Column<KBSummary>[] = [
     {
       id: "name",
-      header: "Name",
-      cell: (kb) => <span className="font-medium">{kb.name}</span>,
+      header: "Knowledge base",
+      priority: 1,
+      className: "max-w-[20rem]",
+      cell: (kb) => <CellEntity name={kb.name} namespace={kb.namespace} />,
+    },
+    {
+      id: "embeddingRoute",
+      header: "Embedding route",
+      priority: 4,
+      className: "max-w-[14rem]",
+      cell: (kb) =>
+        kb.embeddingRoute ? (
+          <span
+            className="block truncate font-mono text-xs text-faint"
+            title={kb.embeddingRoute}
+          >
+            {kb.embeddingRoute}
+          </span>
+        ) : (
+          // Declared but never wired — the `open` tag, not a status hue (§2.5).
+          <Badge variant="open">no route</Badge>
+        ),
+    },
+    {
+      id: "lastIngested",
+      header: "Last ingested",
+      priority: 4,
+      cell: (kb) =>
+        kb.lastIngestedAt ? (
+          <span
+            className="whitespace-nowrap font-mono text-xs tabular-nums text-faint"
+            title={kb.lastIngestedAt}
+          >
+            {formatStamp(kb.lastIngestedAt)}
+          </span>
+        ) : (
+          <UnknownValue title="Never ingested — this corpus has no ingestion date, so none is shown." />
+        ),
     },
     {
       id: "phase",
-      header: "Phase",
+      header: "State",
+      priority: 1,
       cell: (kb) => <StatusBadge ready={kb.phase === "Ready"} phase={kb.phase} />,
     },
     {
       id: "chunks",
       header: "Chunks",
-      hideOnMobile: true,
-      cell: (kb) => (
-        <span className="text-sm text-muted-foreground">{kb.chunkCount.toLocaleString()}</span>
-      ),
+      priority: 3,
+      numeric: true,
+      // Passed straight through: a field the BFF did not send arrives as
+      // `undefined` and QuantityValue renders `—`, never a zero (§7.1).
+      cell: (kb) => <QuantityValue value={kb.chunkCount} />,
     },
     {
       id: "size",
       header: "Size",
-      hideOnMobile: true,
-      cell: (kb) => (
-        <span className="text-sm text-muted-foreground">{formatBytes(kb.sizeBytes)}</span>
-      ),
+      priority: 3,
+      numeric: true,
+      cell: (kb) => <QuantityValue value={kb.sizeBytes} format={formatBytes} />,
     },
     {
-      id: "lastIngested",
-      header: "Last ingested",
-      hideOnMobile: true,
-      cell: (kb) => (
-        <span className="text-sm text-muted-foreground">{formatDate(kb.lastIngestedAt)}</span>
-      ),
-    },
-    {
-      id: "embeddingRoute",
-      header: "Embedding route",
-      hideOnMobile: true,
-      cell: (kb) => (
-        <span className="text-sm text-muted-foreground font-mono">{kb.embeddingRoute}</span>
-      ),
+      id: "next",
+      header: "Next step",
+      priority: 1,
+      cell: (kb) => {
+        const step = kbNextStep(kb);
+        return (
+          <NextStepLink
+            label={step.label}
+            tone={step.tone}
+            to={step.tone === "none" ? undefined : kbPath(kb)}
+            ariaLabel={step.tone === "none" ? undefined : `${step.label} for ${kb.name}`}
+            testId={`kb-next-${kb.name}`}
+          />
+        );
+      },
     },
   ];
 
+  const empty: EmptyStateProps =
+    view !== "all" && all.length > 0
+      ? {
+          intent: "filtered",
+          icon: Filter,
+          title: "Nothing in this view",
+          description: `No knowledge base is in “${viewLabel}” right now.`,
+          action: {
+            label: "Show everything",
+            variant: "outline",
+            onClick: () => setView("all"),
+          },
+          totalCount: all.length,
+          countNoun: "knowledge bases",
+        }
+      : {
+          icon: BookOpen,
+          title: "No knowledge bases",
+          description:
+            "No knowledge bases yet. A knowledge base is a managed RAG corpus your agents retrieve from — apply a KnowledgeBase resource, upload documents, and they are chunked, embedded, and searchable.",
+        };
+
+  const totalChunks = all.reduce(
+    (n, kb) => n + (typeof kb.chunkCount === "number" ? kb.chunkCount : 0),
+    0,
+  );
+  const serving = all.length - needsSomeone.length;
+
   return (
     <div className="mx-auto max-w-6xl space-y-6" data-testid="knowledge-bases-page">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Knowledge Bases</h2>
-        <p className="text-sm text-muted-foreground">
-          Managed RAG corpora — upload documents, ingest and index them, then test retrieval with
-          citations. Each KnowledgeBase is backed by a pgvector store and authored via YAML/kubectl.
-        </p>
-      </div>
+      <PageHeader
+        title="Knowledge bases"
+        loading={loadState.kind === "loading"}
+        meta={
+          all.length > 0
+            ? `${all.length} corpora · ${totalChunks.toLocaleString()} chunks`
+            : undefined
+        }
+        lede="Managed RAG corpora your agents retrieve from. Each one is chunked, embedded into a pgvector store, and authored as a KnowledgeBase resource — so this list reads it, and never invents what it has not been told."
+      />
+
+      {all.length > 0 && (
+        <FilterChipRow
+          chips={chips}
+          value={view}
+          onChange={(id) => setView(id as KBView)}
+          label="Filter knowledge bases"
+        />
+      )}
+
+      {neverIngested > 0 && (
+        <div data-testid="kb-quiet-note">
+          <QuietNote title="Some corpora have never been ingested.">
+            {neverIngested === 1 ? "One" : neverIngested} of the {items.length} listed
+            here has no ingestion behind it, so “Last ingested” reads{" "}
+            <span className="font-mono">—</span> rather than a date. The chunk and size
+            figures are what the store actually holds. Nothing here is estimated — the
+            missing date is simply absent.
+          </QuietNote>
+        </div>
+      )}
 
       <DataTable<KBSummary>
         columns={columns}
@@ -184,14 +416,18 @@ export function KnowledgeBasesPage() {
         onQueryChange={setQuery}
         queryPlaceholder="Filter knowledge bases by name…"
         ariaLabel="KnowledgeBases"
-        onRowClick={(kb) => navigate(`/knowledgebases/${encodeURIComponent(kb.namespace)}/${encodeURIComponent(kb.name)}`)}
-        empty={{
-          icon: BookOpen,
-          title: "No knowledge bases",
-          description:
-            "No knowledge bases yet. A knowledge base is a managed RAG corpus your agents retrieve from — upload documents and they are chunked, embedded, and searchable.",
-        }}
+        tableClassName="min-w-[44rem]"
+        onRowClick={(kb) => navigate(kbPath(kb))}
+        empty={empty}
       />
+
+      {all.length > 0 && (
+        <ClosingNote>
+          {needsSomeone.length === 0
+            ? `All ${all.length} corpora are serving ${totalChunks.toLocaleString()} chunks and need nothing.`
+            : `${needsSomeone.length} of ${all.length} corpora are waiting on a person. The other ${serving} are serving ${totalChunks.toLocaleString()} chunks between them.`}
+        </ClosingNote>
+      )}
     </div>
   );
 }

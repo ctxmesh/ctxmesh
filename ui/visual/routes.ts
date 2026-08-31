@@ -50,6 +50,7 @@ export const ROUTES: RouteCase[] = [
   // ── Govern ──────────────────────────────────────────────────────────────
   { id: "approvals", path: "/approvals", label: "Approvals", chrome: "shell", archetype: "index" },
   { id: "mcp-approvals", path: "/tools/approvals", label: "MCP approvals", chrome: "shell", archetype: "index" },
+  { id: "stops", path: "/stops", label: "Stops", chrome: "shell", archetype: "index" },
   { id: "guardrails", path: "/guardrails", label: "Guardrails", chrome: "shell", archetype: "index" },
   { id: "evals", path: "/evals", label: "Evals", chrome: "shell", archetype: "index" },
   { id: "datasets", path: "/datasets", label: "Datasets", chrome: "shell", archetype: "index" },
