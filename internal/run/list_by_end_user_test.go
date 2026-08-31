@@ -25,12 +25,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// mkEndUserRun creates a run owned by caller at (ns, agent) with a given updatedAt (so newest-first
-// ordering is observable) and returns its id.
-func mkEndUserRun(t *testing.T, s Store, caller, ns, agent string, updated time.Time) string {
+// euNamespace is the namespace every end-user fixture run lives in — the listing is scoped by
+// (principal, agent), so one namespace is all these cases need.
+const euNamespace = "eu-tenant"
+
+// mkEndUserRun creates a run owned by caller at (euNamespace, agent) with a given updatedAt (so
+// newest-first ordering is observable) and returns its id.
+func mkEndUserRun(t *testing.T, s Store, caller, agent string, updated time.Time) string {
 	t.Helper()
 	id := "r-" + agent + "-" + caller + "-" + updated.Format("150405.000")
-	r := New(id, ns, agent, []byte(`{"input":"x"}`), "", updated)
+	r := New(id, euNamespace, agent, []byte(`{"input":"x"}`), "", updated)
 	r.CallerUsername = caller
 	r.CreatedAt = updated
 	r.UpdatedAt = updated
@@ -49,10 +53,10 @@ func TestListByEndUser_OwnershipAndHostScoping(t *testing.T) {
 	const bob = "oidc:https://idp.example.com#bob"
 	t0 := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 
-	aliceOld := mkEndUserRun(t, s, alice, "eu-tenant", "chatbot", t0)
-	aliceNew := mkEndUserRun(t, s, alice, "eu-tenant", "chatbot", t0.Add(2*time.Minute))
-	_ = mkEndUserRun(t, s, bob, "eu-tenant", "chatbot", t0.Add(time.Minute))     // another principal
-	_ = mkEndUserRun(t, s, alice, "eu-tenant", "other-agent", t0.Add(time.Hour)) // alice on a DIFFERENT agent
+	aliceOld := mkEndUserRun(t, s, alice, "chatbot", t0)
+	aliceNew := mkEndUserRun(t, s, alice, "chatbot", t0.Add(2*time.Minute))
+	_ = mkEndUserRun(t, s, bob, "chatbot", t0.Add(time.Minute))     // another principal
+	_ = mkEndUserRun(t, s, alice, "other-agent", t0.Add(time.Hour)) // alice on a DIFFERENT agent
 
 	got, err := s.ListByEndUser(ctx, alice, "eu-tenant", "chatbot", 0)
 	require.NoError(t, err)
@@ -79,8 +83,8 @@ func TestListByEndUser_FailClosedAndLimit(t *testing.T) {
 	s := NewMemStore()
 	const alice = "oidc:https://idp.example.com#alice"
 	t0 := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
-	for i := 0; i < 5; i++ {
-		mkEndUserRun(t, s, alice, "eu-tenant", "chatbot", t0.Add(time.Duration(i)*time.Minute))
+	for i := range 5 {
+		mkEndUserRun(t, s, alice, "chatbot", t0.Add(time.Duration(i)*time.Minute))
 	}
 
 	// Fail-closed: any blank component returns nothing (never all runs).

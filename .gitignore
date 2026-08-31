@@ -45,6 +45,9 @@ go.work
 # UI (ui/ — Vite React SPA, m12.4). Build output + installed deps + tool caches
 # are never committed; the pinned pnpm-lock.yaml + .nvmrc ARE tracked.
 ui/node_modules/
+# A repo-ROOT node_modules/ is a stray vitest/vite cache (a run from the repo root, not ui/) —
+# never source, so ignore it rather than let it sit untracked in `git status`.
+/node_modules/
 ui/dist/
 ui/coverage/
 ui/.vite/

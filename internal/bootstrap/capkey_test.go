@@ -7,24 +7,23 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 // fakeSecret is an in-memory SecretOps that records what was written.
 type fakeSecret struct {
-	priv, pub   string
-	exists      bool
-	createErr   error // if set, Create returns it
-	created     bool
-	pubPatched  bool
-	privTouched bool // set true if the private seed is ever mutated (must stay false)
+	priv, pub  string
+	exists     bool
+	createErr  error // if set, Create returns it
+	created    bool
+	pubPatched bool
 }
 
 func (f *fakeSecret) Get(_ context.Context, _, _ string) (string, string, bool, error) {
 	return f.priv, f.pub, f.exists, nil
 }
+
 func (f *fakeSecret) Create(_ context.Context, _, _, priv, pub string) error {
 	if f.createErr != nil {
 		return f.createErr
@@ -32,6 +31,7 @@ func (f *fakeSecret) Create(_ context.Context, _, _, priv, pub string) error {
 	f.priv, f.pub, f.exists, f.created = priv, pub, true, true
 	return nil
 }
+
 func (f *fakeSecret) SetPublicKey(_ context.Context, _, _, pub string) error {
 	f.pub, f.pubPatched = pub, true
 	return nil
@@ -55,7 +55,7 @@ var consumers = []string{"agentry-bff", "agentry-controller-manager", "run-worke
 func TestEnsure_Absent_GeneratesCreatesRestarts(t *testing.T) {
 	sec := &fakeSecret{exists: false}
 	dep := &fakeDeploy{}
-	changed, err := EnsureCapabilityKey(context.Background(), sec, dep, "ns", consumers, log.Log)
+	changed, err := EnsureCapabilityKey(context.Background(), sec, dep, "ns", consumers)
 	if err != nil || !changed {
 		t.Fatalf("want changed,nil; got %v,%v", changed, err)
 	}
@@ -75,7 +75,7 @@ func TestEnsure_BothPresent_NoOp_NeverReKeys(t *testing.T) {
 	priv, pub := realPair(t)
 	sec := &fakeSecret{priv: priv, pub: pub, exists: true}
 	dep := &fakeDeploy{}
-	changed, err := EnsureCapabilityKey(context.Background(), sec, dep, "ns", consumers, log.Log)
+	changed, err := EnsureCapabilityKey(context.Background(), sec, dep, "ns", consumers)
 	if err != nil || changed {
 		t.Fatalf("want false,nil (no re-key); got %v,%v", changed, err)
 	}
@@ -94,7 +94,7 @@ func TestEnsure_PrivateOnly_DerivesPublic_NeverTouchesPrivate(t *testing.T) {
 	priv, wantPub := realPair(t)
 	sec := &fakeSecret{priv: priv, pub: "", exists: true}
 	dep := &fakeDeploy{}
-	changed, err := EnsureCapabilityKey(context.Background(), sec, dep, "ns", consumers, log.Log)
+	changed, err := EnsureCapabilityKey(context.Background(), sec, dep, "ns", consumers)
 	if err != nil || !changed {
 		t.Fatalf("want changed,nil; got %v,%v", changed, err)
 	}
@@ -112,7 +112,7 @@ func TestEnsure_PrivateOnly_DerivesPublic_NeverTouchesPrivate(t *testing.T) {
 func TestEnsure_PublicOnly_FailsLoud(t *testing.T) {
 	_, pub := realPair(t)
 	sec := &fakeSecret{priv: "", pub: pub, exists: true}
-	_, err := EnsureCapabilityKey(context.Background(), sec, &fakeDeploy{}, "ns", consumers, log.Log)
+	_, err := EnsureCapabilityKey(context.Background(), sec, &fakeDeploy{}, "ns", consumers)
 	if err == nil {
 		t.Fatal("public-only Secret is incoherent — expected an error")
 	}
@@ -122,7 +122,7 @@ func TestEnsure_ExistsButEmpty_FailsLoud(t *testing.T) {
 	// A BYO operator created bff-capability with the wrong key names / a placeholder → neither key present.
 	sec := &fakeSecret{priv: "", pub: "", exists: true}
 	dep := &fakeDeploy{}
-	changed, err := EnsureCapabilityKey(context.Background(), sec, dep, "ns", consumers, log.Log)
+	changed, err := EnsureCapabilityKey(context.Background(), sec, dep, "ns", consumers)
 	if err == nil {
 		t.Fatal("an existing-but-empty Secret must fail loud, not pass as provisioned")
 	}
@@ -136,7 +136,7 @@ func TestEnsure_RestartFailure_FailsLoud(t *testing.T) {
 	// not swallow it (a key-less consumer = silently-broken OBO — the thing Gate A kills).
 	sec := &fakeSecret{exists: false}
 	dep := &fakeDeploy{err: errors.New("forbidden")}
-	_, err := EnsureCapabilityKey(context.Background(), sec, dep, "ns", consumers, log.Log)
+	_, err := EnsureCapabilityKey(context.Background(), sec, dep, "ns", consumers)
 	if err == nil {
 		t.Fatal("a rollout-restart failure must fail the hook loud")
 	}
@@ -145,7 +145,7 @@ func TestEnsure_RestartFailure_FailsLoud(t *testing.T) {
 func TestEnsure_CreateRace_TreatedAsProvisioned(t *testing.T) {
 	sec := &fakeSecret{exists: false, createErr: apierrors.NewAlreadyExists(schema.GroupResource{Resource: "secrets"}, SecretName)}
 	dep := &fakeDeploy{}
-	changed, err := EnsureCapabilityKey(context.Background(), sec, dep, "ns", consumers, log.Log)
+	changed, err := EnsureCapabilityKey(context.Background(), sec, dep, "ns", consumers)
 	if err != nil || changed {
 		t.Fatalf("an AlreadyExists race should be a clean no-op; got changed=%v err=%v", changed, err)
 	}

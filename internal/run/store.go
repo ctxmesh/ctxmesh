@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -646,11 +646,11 @@ func (m *memStore) Subtree(rootRunID string) ([]*Run, error) {
 			out = append(out, cloneRun(e.run))
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
-			return out[i].ID < out[j].ID
+	slices.SortStableFunc(out, func(a, b *Run) int {
+		if a.CreatedAt.Equal(b.CreatedAt) {
+			return strings.Compare(a.ID, b.ID)
 		}
-		return out[i].CreatedAt.Before(out[j].CreatedAt)
+		return a.CreatedAt.Compare(b.CreatedAt)
 	})
 	return out, nil
 }

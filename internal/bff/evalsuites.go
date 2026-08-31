@@ -700,8 +700,7 @@ func (s *Server) handleGetEvalSuiteResults(w http.ResponseWriter, r *http.Reques
 		Conditions: newEvalSuiteConditionDTOs(es.Status.Conditions),
 		Scores:     []FeedbackScore{},
 	}
-	resp.GateResults, resp.GateResultsAvailable, resp.GateResultsUnavailableReason =
-		s.gateResultsForSuite(r.Context(), caller, ns, name)
+	resp.GateResults, resp.GateResultsAvailable, resp.GateResultsUnavailableReason = s.gateResultsForSuite(r.Context(), caller, ns, name)
 
 	// Langfuse scores: honest degrade when the adapter is absent or traceId missing.
 	traceID := strings.TrimSpace(r.URL.Query().Get("traceId"))

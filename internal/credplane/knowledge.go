@@ -17,11 +17,12 @@ limitations under the License.
 package credplane
 
 import (
+	"cmp"
 	"context"
 	"math"
 	"net/http"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -81,7 +82,10 @@ const (
 	envQueryRewrite = "KNOWLEDGE_QUERY_REWRITE"
 	// envRerankDepth overrides the over-fetch candidate depth (default: clamp(topK×5, 20, 100)). A cross-encoder
 	// can only promote a chunk retrieval already surfaced, so N must exceed K to move the needle; clamped ≥ topK.
-	envRerankDepth  = "KNOWLEDGE_RERANK_DEPTH"
+	envRerankDepth = "KNOWLEDGE_RERANK_DEPTH"
+	// envValueTrue is the canonical "on" value for these boolean-ish env toggles (the same spelling the
+	// controller uses), so an opt-in is compared against one constant rather than a scattered literal.
+	envValueTrue    = "true"
 	defaultMaxTopK  = 50
 	defaultMaxChunk = 4000
 	defaultMaxTotal = 24000
@@ -96,10 +100,7 @@ const (
 // clamp(topK×rerankFactor, rerankMinCandidates, rerankStoreMax). KNOWLEDGE_RERANK_DEPTH overrides the target,
 // still clamped to [topK, rerankStoreMax] (N < K would make reranking pointless; N > store-max breaks the contract).
 func rerankCandidateDepth(topK int) int {
-	n := topK * rerankFactor
-	if n < rerankMinCandidates {
-		n = rerankMinCandidates
-	}
+	n := max(topK*rerankFactor, rerankMinCandidates)
 	if override := resolveIntEnv(envRerankDepth, 0); override > 0 {
 		n = override
 	}
@@ -156,7 +157,7 @@ func (s *Server) WithReranker(r Reranker) *Server {
 
 // rerankEnabled reports whether the rerank stage should run: a reranker is wired AND the opt-in env is on.
 func (s *Server) rerankEnabled() bool {
-	return s.reranker != nil && strings.TrimSpace(os.Getenv(envRerank)) == "true"
+	return s.reranker != nil && strings.TrimSpace(os.Getenv(envRerank)) == envValueTrue
 }
 
 // WithRewriter wires an LLM query-rewriter (M140.3). Retrieval only rewrites when this is set AND
@@ -168,7 +169,7 @@ func (s *Server) WithRewriter(r QueryRewriter) *Server {
 
 // rewriteEnabled reports whether the query-rewrite stage should run: a rewriter is wired AND the opt-in env is on.
 func (s *Server) rewriteEnabled() bool {
-	return s.rewriter != nil && strings.TrimSpace(os.Getenv(envQueryRewrite)) == "true"
+	return s.rewriter != nil && strings.TrimSpace(os.Getenv(envQueryRewrite)) == envValueTrue
 }
 
 // applyRewrite returns an LLM-rewritten query, or the original on any failure (fail open — a rewrite must never
@@ -213,7 +214,7 @@ func (s *Server) applyRerank(ctx context.Context, query string, scored []knowled
 	}
 	// Defensively sort by descending score (the Cohere shape returns sorted, but don't rely on it); stable so
 	// equal scores keep the store's fusion order. Then map back to the retrieved chunks, deduped, truncated.
-	sort.SliceStable(results, func(a, b int) bool { return results[a].Score > results[b].Score })
+	slices.SortStableFunc(results, func(a, b RerankResult) int { return cmp.Compare(b.Score, a.Score) })
 	out := make([]knowledge.ScoredChunk, 0, topK)
 	seen := make(map[int]bool, len(results))
 	for _, res := range results {
@@ -353,7 +354,7 @@ func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
 		// M12 (ADR 0084): opt-in hybrid retrieval. QueryText is the same raw query already embedded above;
 		// with Hybrid on, the store fuses the keyword ranking so a rare-term/identifier hit the embedding
 		// blurs is still retrieved. Off by default (unchanged cosine-only) until an operator sets the env.
-		Hybrid:    strings.TrimSpace(os.Getenv(envHybridSearch)) == "true",
+		Hybrid:    strings.TrimSpace(os.Getenv(envHybridSearch)) == envValueTrue,
 		QueryText: searchQuery,
 	})
 	if err != nil {

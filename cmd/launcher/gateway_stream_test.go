@@ -301,7 +301,8 @@ func sseUpstreamPriced(deltas []string, cost string) *httptest.Server {
 				fl.Flush()
 			}
 		}
-		_, _ = fmt.Fprint(w, "data: {\"id\":\"c\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":7,\"total_tokens\":12}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"c\",\"choices\":[],"+
+			"\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":7,\"total_tokens\":12}}\n\n")
 		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 		if fl != nil {
 			fl.Flush()
@@ -353,7 +354,8 @@ func TestServeStreamingVerbatim_StallEmitsErrorFrame(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fl, _ := w.(http.Flusher)
-		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},"+
+			"\"finish_reason\":null}]}\n\n")
 		if fl != nil {
 			fl.Flush()
 		}

@@ -87,9 +87,11 @@ func main() {
 		"Directory of the built Vite SPA (dist/). Empty disables static serving.")
 	flag.StringVar(&version, "version", "dev", "Version string reported by /api/health.")
 	flag.BoolVar(&preflightUp, "preflight", false,
-		"Run install config-coherence checks (fail LOUD on misconfig) and exit — the Helm post-install hook / GA Gate A (ADR 0095).")
+		"Run install config-coherence checks (fail LOUD on misconfig) and exit — "+
+			"the Helm post-install hook / GA Gate A (ADR 0095).")
 	flag.BoolVar(&ensureKey, "ensure-capability-key", false,
-		"Generate the platform capability keypair into bff-capability iff absent (never re-key), restart consumers, and exit — the Helm keygen hook / GA Gate A (ADR 0095).")
+		"Generate the platform capability keypair into bff-capability iff absent (never re-key), restart "+
+			"consumers, and exit — the Helm keygen hook / GA Gate A (ADR 0095).")
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -151,22 +153,76 @@ func runPreflight(ctx context.Context) int {
 	for _, e := range errs {
 		log.Error(e, "preflight FAILED")
 	}
-	fmt.Fprintf(os.Stderr, "\npreflight FAILED with %d problem(s) — fix the above and reinstall. See GA Gate A / ADR 0095.\n", len(errs))
+	fmt.Fprintf(os.Stderr,
+		"\npreflight FAILED with %d problem(s) — fix the above and reinstall. See GA Gate A / ADR 0095.\n", len(errs))
 	return 1
+}
+
+// newPlatformScheme builds the scheme the caller-scoped client encodes/decodes the platform CRDs with
+// (core + both agents API versions).
+func newPlatformScheme() (*runtime.Scheme, error) {
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{
+		clientgoscheme.AddToScheme, agentsv1alpha1.AddToScheme, agentsv1beta1.AddToScheme,
+	} {
+		if err := add(scheme); err != nil {
+			return nil, fmt.Errorf("building the platform scheme: %w", err)
+		}
+	}
+	return scheme, nil
+}
+
+// consoleFeatureFlags are the env-driven kill-switches + pins the BFF resolves once at start-up and
+// hands to the server config: the connect-a-provider switch (ADR 0015), the platform generation-model
+// pin (ADR 0014), the BYO-MCP switch + trust policy (ADR 0016), and the console SSO advertisement
+// (ADR 0020). Each defaults to the dev/trial posture; a hardened install narrows it through the chart.
+type consoleFeatureFlags struct {
+	providerConnect    bool
+	platformGenModels  []string
+	mcpEnabled         bool
+	mcpRequireApproval bool
+	oidcEnabled        bool
+	oidcIssuer         string
+	oidcClientID       string
+}
+
+// readConsoleFeatureFlags resolves those flags from the environment, logging each non-default posture
+// so an install's effective stance is visible in the start-up log rather than inferred from behaviour.
+func readConsoleFeatureFlags(log logr.Logger) consoleFeatureFlags {
+	f := consoleFeatureFlags{
+		providerConnect:    providerConnectEnabled(os.Getenv("PROVIDER_CONNECT_ENABLED")),
+		platformGenModels:  parseGenerationModels(os.Getenv("PLATFORM_GENERATION_MODELS")),
+		mcpEnabled:         envEnabledDefaultTrue(os.Getenv("MCP_ENABLED")),
+		mcpRequireApproval: envTrue(os.Getenv("MCP_REQUIRE_APPROVAL")),
+		oidcEnabled:        envTrue(os.Getenv("OIDC_ENABLED")),
+		oidcIssuer:         strings.TrimSpace(os.Getenv("OIDC_ISSUER")),
+		oidcClientID:       strings.TrimSpace(os.Getenv("OIDC_CLIENT_ID")),
+	}
+	if !f.providerConnect {
+		log.Info("provider-connect disabled by PROVIDER_CONNECT_ENABLED=false; /api/providers routes serve 404")
+	}
+	if len(f.platformGenModels) > 0 {
+		log.Info("platform generation models pinned", "models", f.platformGenModels)
+	}
+	if !f.mcpEnabled {
+		log.Info("BYO-MCP disabled by MCP_ENABLED=false; /api/mcpservers + /api/tools serve 404")
+	}
+	if f.mcpRequireApproval {
+		log.Info("BYO-MCP hardened: registered MCP tools are marked pending-approval (MCP_REQUIRE_APPROVAL=true)")
+	}
+	if f.oidcEnabled {
+		log.Info("console SSO enabled (ADR 0020): advertising OIDC at /api/authconfig",
+			"issuer", f.oidcIssuer, "clientID", f.oidcClientID)
+	}
+	return f
 }
 
 func run(addr, staticDir, version string, log logr.Logger) error {
 	// Build the platform scheme (control-plane CRDs) so the caller-scoped client
 	// can encode/decode the agent CRDs.
-	scheme := runtime.NewScheme()
-	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+	scheme, err := newPlatformScheme()
+	if err != nil {
 		return err
-	}
-	if err := agentsv1alpha1.AddToScheme(scheme); err != nil {
-		return err
-	}
-	if err := agentsv1beta1.AddToScheme(scheme); err != nil {
-		return fmt.Errorf("adding agents/v1beta1 to scheme: %w", err)
 	}
 
 	// The in-cluster rest.Config supplies the API-server host + cluster CA/TLS.
@@ -175,9 +231,9 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// bearer token (ADR 0011), so the K8s API server enforces the caller's own
 	// RBAC (M11 personas). The BFF's own SA credential is never used to act on the
 	// user's CRDs — closing the confused-deputy gap by construction.
-	cfg, err := ctrl.GetConfig()
-	if err != nil {
-		return err
+	cfg, cfgErr := ctrl.GetConfig()
+	if cfgErr != nil {
+		return cfgErr
 	}
 	callerClients := bff.NewCallerClientFactory(cfg, scheme)
 
@@ -200,20 +256,13 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// hardened install sets PROVIDER_CONNECT_ENABLED=false via the chart so the
 	// connect endpoints 404 and the UI falls back to reference-existing. Read from
 	// env with the same "flag-from-env" pattern the adapters use.
-	providerConnect := providerConnectEnabled(os.Getenv("PROVIDER_CONNECT_ENABLED"))
-	if !providerConnect {
-		log.Info("provider-connect disabled by PROVIDER_CONNECT_ENABLED=false; /api/providers routes serve 404")
-	}
+	flags := readConsoleFeatureFlags(log)
 
 	// The create-from-prompt platform generation-model pin (ADR 0014). Empty (the
 	// default) → generation uses the caller's connected-provider model unpinned. An
 	// operator that wants a governed generation model sets a comma-separated list
 	// (PLATFORM_GENERATION_MODELS) — the UI's model dropdown source and the allowed
 	// set the generate endpoint enforces.
-	platformGenModels := parseGenerationModels(os.Getenv("PLATFORM_GENERATION_MODELS"))
-	if len(platformGenModels) > 0 {
-		log.Info("platform generation models pinned", "models", platformGenModels)
-	}
 
 	// The BYO-MCP kill-switch + trust policy (ADR 0016). MCP_ENABLED defaults TRUE
 	// (dev/trial); a hardened install sets it false to 404 the register/catalog
@@ -221,14 +270,6 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// immediately bindable); a hardened install sets it true to mark newly
 	// registered tools pending-approval (the approval queue is M17). Same
 	// "flag-from-env" pattern as the connect kill-switch.
-	mcpEnabled := envEnabledDefaultTrue(os.Getenv("MCP_ENABLED"))
-	if !mcpEnabled {
-		log.Info("BYO-MCP disabled by MCP_ENABLED=false; /api/mcpservers + /api/tools serve 404")
-	}
-	mcpRequireApproval := envTrue(os.Getenv("MCP_REQUIRE_APPROVAL"))
-	if mcpRequireApproval {
-		log.Info("BYO-MCP hardened: registered MCP tools are marked pending-approval (MCP_REQUIRE_APPROVAL=true)")
-	}
 
 	// Per-cluster HMAC key for the one-way user-identity hash on grant Secrets +
 	// the mcp-owner annotation (m25.1, ADR 0029 §7). A production cluster mounts a
@@ -262,13 +303,6 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// Console SSO advertisement (ADR 0020). OIDC_ENABLED=true + an issuer + a client
 	// id → GET /api/authconfig tells the SPA to run Auth-Code+PKCE against Dex; else
 	// the SPA uses token login (ADR 0012). The BFF holds NO OIDC secret (public client).
-	oidcEnabled := envTrue(os.Getenv("OIDC_ENABLED"))
-	oidcIssuer := strings.TrimSpace(os.Getenv("OIDC_ISSUER"))
-	oidcClientID := strings.TrimSpace(os.Getenv("OIDC_CLIENT_ID"))
-	if oidcEnabled {
-		log.Info("console SSO enabled (ADR 0020): advertising OIDC at /api/authconfig",
-			"issuer", oidcIssuer, "clientID", oidcClientID)
-	}
 
 	// End-user OIDC (M137/EU1b, ADR 0106): a distinct per-tenant IdP for the standalone /chat runtime.
 	// The verifier is ALWAYS constructed — it does nothing until a request targets a tenant with
@@ -465,18 +499,18 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		Adapters:                    adapters,
 		Version:                     version,
 		StaticDir:                   staticDir,
-		ProviderConnect:             providerConnect,
-		PlatformGenerationModels:    platformGenModels,
-		MCPEnabled:                  mcpEnabled,
-		MCPRequireApproval:          mcpRequireApproval,
+		ProviderConnect:             flags.providerConnect,
+		PlatformGenerationModels:    flags.platformGenModels,
+		MCPEnabled:                  flags.mcpEnabled,
+		MCPRequireApproval:          flags.mcpRequireApproval,
 		MCPGrantHMACKey:             mcpGrantHMACKey,
 		MCPCredentialNamespace:      mcpCredentialNamespace,
 		CredentialClient:            credentialClient,
 		MCPCapabilityPrivateSeedB64: mcpCapabilitySeed,
 		MCPCapabilityAudience:       mcpCapabilityAudience,
-		OIDCEnabled:                 oidcEnabled,
-		OIDCIssuer:                  oidcIssuer,
-		OIDCClientID:                oidcClientID,
+		OIDCEnabled:                 flags.oidcEnabled,
+		OIDCIssuer:                  flags.oidcIssuer,
+		OIDCClientID:                flags.oidcClientID,
 		ConsoleURL:                  os.Getenv("CONSOLE_URL"), // ADR 0040: canonical MCP-consent callback + relay origin
 		Log:                         ctrl.Log.WithName("bff.server"),
 	})
@@ -486,7 +520,8 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// capability minting is disabled, REFUSE to serve. Else OBO tool calls silently downgrade to the
 	// shared org/public credential reporting success. Placed before the run-worker pool starts, so a
 	// durable worker (same process) refuses too. A no-OBO install (the default) is unaffected.
-	if err := bff.OBOMintingPrecondition(envTrue(os.Getenv("MCP_OBO_REQUIRED")), srv.CapabilityMintingEnabled()); err != nil {
+	oboRequired := envTrue(os.Getenv("MCP_OBO_REQUIRED"))
+	if err := bff.OBOMintingPrecondition(oboRequired, srv.CapabilityMintingEnabled()); err != nil {
 		return err
 	}
 
@@ -531,22 +566,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// never rides the SPA/api listener. METRICS_ADDR="off" disables it.
 	// Default :9092 — a DISTINCT port from the public BFF listener (:9090) so the two never
 	// collide (the metrics surface is private; ADR 0041).
-	metricsAddr := strings.TrimSpace(os.Getenv("METRICS_ADDR"))
-	if metricsAddr == "" {
-		metricsAddr = ":9092"
-	}
-	var metricsSrv *http.Server
-	if metricsAddr != "off" {
-		mmux := http.NewServeMux()
-		mmux.Handle("/metrics", srv.MetricsHandler())
-		metricsSrv = &http.Server{Addr: metricsAddr, Handler: mmux, ReadHeaderTimeout: 10 * time.Second}
-		go func() {
-			log.Info("BFF metrics listening", "addr", metricsAddr)
-			if serveErr := metricsSrv.ListenAndServe(); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-				log.Error(serveErr, "metrics listener failed")
-			}
-		}()
-	}
+	metricsSrv := startMetricsListener(srv, log)
 
 	select {
 	case <-ctx.Done():
@@ -574,6 +594,31 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	case serveErr := <-errCh:
 		return serveErr
 	}
+}
+
+// startMetricsListener starts the PRIVATE metrics listener (M128/Gate E) on METRICS_ADDR and returns its
+// server so the shutdown path can close it (nil when disabled). Default :9092 — deliberately DISTINCT
+// from the public BFF listener (:9090) so /metrics never rides the SPA/api edge (ADR 0041);
+// METRICS_ADDR="off" disables it entirely. Extracted from run() to keep its cyclomatic complexity down,
+// the same reason as maybeStartOnlineScorer below.
+func startMetricsListener(srv *bff.Server, log logr.Logger) *http.Server {
+	metricsAddr := strings.TrimSpace(os.Getenv("METRICS_ADDR"))
+	if metricsAddr == "" {
+		metricsAddr = ":9092"
+	}
+	if metricsAddr == "off" {
+		return nil
+	}
+	mmux := http.NewServeMux()
+	mmux.Handle("/metrics", srv.MetricsHandler())
+	metricsSrv := &http.Server{Addr: metricsAddr, Handler: mmux, ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		log.Info("BFF metrics listening", "addr", metricsAddr)
+		if serveErr := metricsSrv.ListenAndServe(); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			log.Error(serveErr, "metrics listener failed")
+		}
+	}()
+	return metricsSrv
 }
 
 // maybeStartOnlineScorer starts the online-scoring worker (ADR 0062 Fork 2, m69.5) when

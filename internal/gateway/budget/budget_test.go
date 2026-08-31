@@ -333,6 +333,7 @@ func (f *fakeSpendBackend) AgentSpent(context.Context) (Money, error) { return f
 func (f *fakeSpendBackend) ConvSpent(context.Context, string) (Money, error) {
 	return f.conv, f.convErr
 }
+
 func (f *fakeSpendBackend) AddConvSpend(_ context.Context, _ string, d Money) error {
 	f.added = append(f.added, d)
 	f.conv = f.conv.Add(d)

@@ -13,7 +13,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"fmt"
-	"sort"
+	"slices"
 
 	"github.com/ctxmesh/agentry/internal/runcap"
 )
@@ -105,6 +105,6 @@ func sortedKeys(m map[string]string) []string {
 	for k := range m {
 		ks = append(ks, k)
 	}
-	sort.Strings(ks)
+	slices.Sort(ks)
 	return ks
 }

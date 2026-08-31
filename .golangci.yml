@@ -56,6 +56,9 @@ linters:
       - linters:
           - goconst # repeated literals in table-driven tests are fine
         path: _test\.go
+      - linters:
+          - lll # controller-gen markers MUST be one line — wrapping breaks codegen
+        source: "^//\\s*\\+(kubebuilder|groupName|genclient)"
     paths:
       - third_party$
       - builtin$

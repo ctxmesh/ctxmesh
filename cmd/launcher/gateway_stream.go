@@ -207,7 +207,8 @@ func (gp *gatewayProxy) serveStreaming(
 // official OpenAI SDKs raise APIError on a streamed data frame carrying an "error" key, so a truncated
 // stream is no longer wire-indistinguishable from a complete one (a `finish_reason:"stop"` would launder
 // the truncation as success). We also omit [DONE] on this path (belt-and-braces).
-const streamStallErrorPayload = `{"error":{"message":"upstream stalled mid-stream (no data within the idle window)","type":"upstream_stalled","code":"upstream_stalled"}}`
+const streamStallErrorPayload = `{"error":{"message":"upstream stalled mid-stream ` +
+	`(no data within the idle window)","type":"upstream_stalled","code":"upstream_stalled"}}`
 
 // requestIsStream peeks whether the request asked for stream:true, RESTORING the body so the forward
 // re-reads it byte-for-byte. A non-JSON / unreadable body ⇒ false (it takes the buffered path, unchanged).
@@ -288,7 +289,8 @@ func (gp *gatewayProxy) serveStreamingVerbatim(
 				sawDone = true
 				break
 			}
-			if chunk, ok := parseStreamChunk([]byte(data)); ok && len(chunk.Usage) > 0 && !bytes.Equal(chunk.Usage, []byte("null")) {
+			chunk, ok := parseStreamChunk([]byte(data))
+			if ok && len(chunk.Usage) > 0 && !bytes.Equal(chunk.Usage, []byte("null")) {
 				usageBody = append([]byte(nil), data...) // the final usage chunk prices the call
 			}
 		}
@@ -305,7 +307,8 @@ func (gp *gatewayProxy) serveStreamingVerbatim(
 	switch {
 	case streamCtx.Err() != nil && ctx.Err() == nil:
 		// F5: a stalled upstream — signal the client with an error frame, DON'T fake a clean [DONE].
-		gp.logf("launcher: gateway: streaming upstream stalled (no data for %s) — aborted (K9), signalling the client", streamIdleTimeout)
+		gp.logf("launcher: gateway: streaming upstream stalled (no data for %s) — aborted (K9), "+
+			"signalling the client", streamIdleTimeout)
 		writeSSEData(w, flusher, []byte(streamStallErrorPayload))
 	case !sawDone:
 		writeSSERaw(w, flusher, sseDone) // upstream closed without [DONE] — terminate the client stream cleanly
