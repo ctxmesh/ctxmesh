@@ -49,6 +49,7 @@ import (
 	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
 	"github.com/ctxmesh/agentry/internal/controlplane/agentcapability"
 	"github.com/ctxmesh/agentry/internal/controlplane/enduseragent"
+	"github.com/ctxmesh/agentry/internal/controlplane/spawnbudget"
 	"github.com/ctxmesh/agentry/internal/eval"
 	"github.com/ctxmesh/agentry/internal/gateway"
 	"github.com/ctxmesh/agentry/internal/prompt"
@@ -273,6 +274,11 @@ type AgentDeploymentReconciler struct {
 	// (envtest) — the registration sync is a no-op.
 	AgentCapabilityStore agentcapability.Store
 
+	// SpawnBudgetStore mirrors a supervisor's DECLARED spawn budget (M142.6, m52.C19b) so the BFF's
+	// authoritative spawn gate can enforce the team's real numbers instead of the ones a pod relays.
+	// Nil ⇒ no control-plane DB (envtest) — the sync is a no-op.
+	SpawnBudgetStore spawnbudget.Store
+
 	// CollectorImage / DiscoveryImage override the injected OTel-collector / tool-discovery
 	// sidecar images (audit OPS-1; from COLLECTOR_IMAGE / DISCOVERY_IMAGE env, mirror of
 	// EGRESS_SIDECAR_IMAGE). Empty ⇒ the project-default constants — which are dev.local/*
@@ -394,6 +400,9 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			r.pruneEndUserAgentMirror(ctx, req.Namespace, req.Name)
 			// M141 (ADR 0120): likewise de-register the deleted agent from the capability registry.
 			r.pruneCapabilityRegistration(ctx, req.Namespace, req.Name)
+			// M142.6: a deleted supervisor keeps no budget row (the mirror is not K8s-owned, so owner-ref
+			// GC does not reach it).
+			r.pruneSpawnBudget(ctx, req.Namespace, req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching AgentDeployment: %w", err)
@@ -2454,6 +2463,8 @@ func (r *AgentDeploymentReconciler) syncStatus(
 	r.syncEndUserAgentMirror(ctx, deploy, endpoint)
 	// M141 (ADR 0120): register the agent's capability descriptor so peers can discover it by what it does.
 	r.syncCapabilityRegistration(ctx, deploy, readyStatus == metav1.ConditionTrue)
+	// M142.6 (m52.C19b): project the supervised team's DECLARED spawn budget for the BFF's gate.
+	r.syncSpawnBudget(ctx, deploy)
 
 	return r.Status().Update(ctx, deploy)
 }
@@ -2500,6 +2511,7 @@ func (r *AgentDeploymentReconciler) setReadyFalse(
 	// M141 (ADR 0120): a not-Ready agent stays REGISTERED but flagged not-ready — discovery can rank it and
 	// let the caller decide, which beats it vanishing from the candidate set on a transient blip.
 	r.syncCapabilityRegistration(ctx, deploy, false)
+	r.syncSpawnBudget(ctx, deploy)
 	if err := r.Status().Update(ctx, deploy); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
@@ -2537,6 +2549,48 @@ func (r *AgentDeploymentReconciler) pruneEndUserAgentMirror(ctx context.Context,
 	}
 	if err := r.EndUserAgentStore.Delete(ctx, namespace, name); err != nil {
 		logf.FromContext(ctx).Error(err, "end-user agent mirror prune failed", "agent", namespace+"/"+name)
+	}
+}
+
+// syncSpawnBudget mirrors the DECLARED spawn budget of the team this agent SUPERVISES (M142.6,
+// m52.C19b). A non-supervisor is pruned: only a supervisor spawns, so only a supervisor has a budget.
+//
+// It resolves the same team and the same defaults the launcher env injection uses (delegateEnv), so the
+// number the BFF enforces and the number the launcher was told are the same number by construction —
+// two derivations of one CRD field would be a drift waiting to happen.
+//
+// Best-effort: a store error is logged and re-converges on the next reconcile, like the other mirrors.
+func (r *AgentDeploymentReconciler) syncSpawnBudget(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment) {
+	if r.SpawnBudgetStore == nil {
+		return
+	}
+	team, err := resolveSupervisedTeam(ctx, r.Client, deploy)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "spawn-budget mirror skipped: supervised team unresolved",
+			"agent", deploy.Namespace+"/"+deploy.Name)
+		return
+	}
+	if team == nil {
+		r.pruneSpawnBudget(ctx, deploy.Namespace, deploy.Name)
+		return
+	}
+	fanOut, depth, total := resolveSpawnBudget(team)
+	if err := r.SpawnBudgetStore.Set(ctx, spawnbudget.Budget{
+		Namespace: deploy.Namespace, Agent: deploy.Name,
+		MaxFanOut: fanOut, MaxSpawnDepth: depth, MaxTotalSpawns: total,
+	}); err != nil {
+		logf.FromContext(ctx).Error(err, "spawn-budget mirror failed; will re-converge next reconcile",
+			"agent", deploy.Namespace+"/"+deploy.Name)
+	}
+}
+
+// pruneSpawnBudget removes an agent's budget row (it stopped supervising, or was deleted).
+func (r *AgentDeploymentReconciler) pruneSpawnBudget(ctx context.Context, namespace, name string) {
+	if r.SpawnBudgetStore == nil {
+		return
+	}
+	if err := r.SpawnBudgetStore.Delete(ctx, namespace, name); err != nil {
+		logf.FromContext(ctx).Error(err, "spawn-budget mirror prune failed", "agent", namespace+"/"+name)
 	}
 }
 

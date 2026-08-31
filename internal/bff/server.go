@@ -46,6 +46,7 @@ import (
 	"github.com/ctxmesh/agentry/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agentry/internal/controlplane/publishedartifact"
 	"github.com/ctxmesh/agentry/internal/controlplane/sharedrun"
+	"github.com/ctxmesh/agentry/internal/controlplane/spawnbudget"
 	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agentry/internal/credplane"
 	"github.com/ctxmesh/agentry/internal/credresolve"
@@ -191,6 +192,10 @@ type Server struct {
 	// under either posture.
 	// runcapBind records which key each run's capability was bound to — single-use, so the first bind
 	// wins and a leaked bearer token cannot be re-bound by whoever finds it. nil ⇒ no exchange edge.
+	// spawnBudgets is the controller-mirrored DECLARED per-team spawn budget (M142.6, m52.C19b). The
+	// authoritative number for the spawn gate — the relayed one comes from the pod the budget bounds.
+	// nil ⇒ fall back to the clamped relayed value (C19 behaviour).
+	spawnBudgets             spawnbudget.Store
 	runcapBind               RuncapBindStore
 	proofOnce                sync.Once
 	popVerifier              *runcap.ProofVerifier
@@ -625,6 +630,10 @@ type Options struct {
 	// nil ⇒ POST /api/internal/runcap/bind is not registered, so no exchange is offered that could not
 	// be made single-use. Constructed in cmd/bff/main.go over the state-layer Valkey.
 	RuncapBind RuncapBindStore
+	// SpawnBudgets is the controller-mirrored declared per-team spawn budget (M142.6, m52.C19b).
+	// Optional — nil ⇒ the gate falls back to the clamped relayed budget. Constructed in
+	// cmd/bff/main.go from cpDB; the CONTROLLER writes it, the BFF only reads (ADR 0011 — no new RBAC).
+	SpawnBudgets spawnbudget.Store
 
 	Log logr.Logger
 }
@@ -690,6 +699,7 @@ func NewServer(opts Options) *Server {
 		asyncPublisher:           opts.AsyncPublisher,
 		requireProofOfPossession: opts.RequireProofOfPossession,
 		runcapBind:               opts.RuncapBind,
+		spawnBudgets:             opts.SpawnBudgets,
 		ocr:                      opts.OCR,
 		judgeCounters:            &judgeCounter{},
 		enrichCache:              newTraceEnrichCache(),

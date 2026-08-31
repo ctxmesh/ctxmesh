@@ -27,6 +27,7 @@ import (
 	"time"
 
 	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	"github.com/ctxmesh/agentry/internal/controlplane/spawnbudget"
 	"github.com/ctxmesh/agentry/internal/run"
 )
 
@@ -126,6 +127,25 @@ func (s *Server) handleReadSpawnedRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, SpawnedRunStatus{
 		ID: sub.ID, Status: string(sub.Status), Answer: lastAssistantMessage(sub), Error: sub.Error,
 	})
+}
+
+// declaredSpawnBudget resolves the supervisor's budget as its AgentTeam DECLARES it (M142.6, m52.C19b).
+//
+// It is the authoritative number: the relayed one comes from the agent pod, which is exactly the party
+// the budget bounds. A missing row means the controller has not mirrored this agent yet (or it
+// supervises nothing), and the caller falls back to the clamped relayed value — degrading to C19's
+// behaviour rather than refusing every delegation on a fleet whose controller has not caught up.
+func (s *Server) declaredSpawnBudget(ctx context.Context, namespace, agent string) (spawnbudget.Budget, bool) {
+	if s.spawnBudgets == nil {
+		return spawnbudget.Budget{}, false
+	}
+	b, ok, err := s.spawnBudgets.Get(ctx, namespace, agent)
+	if err != nil {
+		s.log.Error(err, "spawn: reading the declared spawn budget failed; falling back to the relayed one",
+			"agent", namespace+"/"+agent)
+		return spawnbudget.Budget{}, false
+	}
+	return b, ok
 }
 
 // enforceDelegateFence rejects a spawn whose target is outside the caller's AgentRegistry (M142.1,
@@ -290,10 +310,25 @@ func (s *Server) handleSpawnRun(w http.ResponseWriter, r *http.Request) {
 	// ceiling here — this is the AUTHORITATIVE server-side gate, so a pod skipping the launcher's guard
 	// and POSTing here directly is still bounded. effectiveMax = min(clientBudget, ceiling); the EXACT
 	// per-team budget is m52.C19b. (0 = unbudgeted stays 0 — the total ceiling is the backstop.)
-	clampedDepth, clampedTotal := clampSpawnBudget(req.MaxSpawnDepth, req.MaxTotalSpawns)
-	if clampedTotal != req.MaxTotalSpawns || clampedDepth != req.MaxSpawnDepth {
+	//
+	// C19b (M142.6): the clamp alone made the budget UN-INFLATABLE but not EXACT — a pod could still
+	// claim the platform ceiling, so a team declaring maxTotalSpawns:5 was bounded at the maximum rather
+	// than at 5. The controller now mirrors the team's DECLARED budget (it can read the AgentTeam CRD;
+	// the BFF cannot, ADR 0011), and that is authoritative when present. The relayed value is used only
+	// as a fallback for an agent the mirror does not know yet, and is still clamped.
+	reqDepth, reqTotal := req.MaxSpawnDepth, req.MaxTotalSpawns
+	if declared, ok := s.declaredSpawnBudget(r.Context(), parent.Namespace, parent.Agent); ok {
+		if declared.MaxSpawnDepth != reqDepth || declared.MaxTotalSpawns != reqTotal {
+			s.log.Info("bff: spawn: enforcing the team's DECLARED budget over the relayed one (C19b)",
+				"agent", parent.Namespace+"/"+parent.Agent, "relayedDepth", reqDepth, "relayedTotal", reqTotal,
+				"declaredDepth", declared.MaxSpawnDepth, "declaredTotal", declared.MaxTotalSpawns)
+		}
+		reqDepth, reqTotal = declared.MaxSpawnDepth, declared.MaxTotalSpawns
+	}
+	clampedDepth, clampedTotal := clampSpawnBudget(reqDepth, reqTotal)
+	if clampedTotal != reqTotal || clampedDepth != reqDepth {
 		s.log.Info("bff: spawn: clamped an over-ceiling spawn budget to the platform ceiling",
-			"root", rootRunID, "requestedDepth", req.MaxSpawnDepth, "requestedTotal", req.MaxTotalSpawns,
+			"root", rootRunID, "requestedDepth", reqDepth, "requestedTotal", reqTotal,
 			"depthCeiling", agentsv1beta1.MaxSpawnDepthCeiling, "totalCeiling", agentsv1beta1.MaxTotalSpawnsCeiling)
 	}
 	req.MaxSpawnDepth, req.MaxTotalSpawns = clampedDepth, clampedTotal

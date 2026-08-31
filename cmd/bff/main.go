@@ -64,6 +64,7 @@ import (
 	"github.com/ctxmesh/agentry/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agentry/internal/controlplane/publishedartifact"
 	"github.com/ctxmesh/agentry/internal/controlplane/sharedrun"
+	"github.com/ctxmesh/agentry/internal/controlplane/spawnbudget"
 	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agentry/internal/credplane"
 	"github.com/ctxmesh/agentry/internal/credresolve"
@@ -495,6 +496,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		// state-layer Valkey so "already bound" is the same answer on every replica; without an addr
 		// there is no exchange edge, and capabilities stay bearer.
 		RuncapBind:               runcapBindStore(log),
+		SpawnBudgets:             spawnbudget.NewPostgresStore(cpDB),
 		RequireProofOfPossession: strings.TrimSpace(os.Getenv("RUNCAP_REQUIRE_POP")) == "true",
 		ConvStore:                convStore,
 		PromptStore:              promptStore,
