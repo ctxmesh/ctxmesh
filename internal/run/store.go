@@ -30,6 +30,53 @@ import (
 // ErrNotFound is returned when a run id is unknown to the store.
 var ErrNotFound = errors.New("run: not found")
 
+// ClaimFilter excludes runs whose scope is under an active emergency stop (M146, ADR 0126).
+//
+// It is applied INSIDE the claim query, not after it. Claiming and then releasing would flip the run to
+// `running` and back, which is both a lie on the timeline and a busy-loop under a killed backlog; the
+// requirement is that a queued run under a kill STAYS QUEUED, untouched, until the kill is lifted.
+//
+// The shape is deliberately concrete (namespaces + agent refs, not a predicate func) so it can be
+// expressed in SQL and stay atomic under FOR UPDATE SKIP LOCKED. Tenant kills are resolved to their
+// member namespaces by the control plane before they get here — the run store knows namespaces and
+// agents, and nothing about tenants.
+//
+// The zero value excludes nothing, so every pre-M146 caller keeps its exact behaviour.
+type ClaimFilter struct {
+	// HaltAll is a fleet stop: claim nothing at all.
+	HaltAll bool
+	// Namespaces are halted wholesale.
+	Namespaces []string
+	// Agents are halted individually.
+	Agents []AgentRef
+}
+
+// AgentRef names one agent workload.
+type AgentRef struct{ Namespace, Agent string }
+
+// Empty reports whether the filter excludes nothing — checked first everywhere, so a healthy platform
+// pays nothing for the feature existing.
+func (f ClaimFilter) Empty() bool {
+	return !f.HaltAll && len(f.Namespaces) == 0 && len(f.Agents) == 0
+}
+
+// Excludes reports whether a run in (namespace, agent) is under a kill — the in-memory twin of the SQL
+// predicate the durable store builds, and the run-create gate's check (layer c).
+func (f ClaimFilter) Excludes(namespace, agent string) bool {
+	if f.HaltAll {
+		return true
+	}
+	if slices.Contains(f.Namespaces, namespace) {
+		return true
+	}
+	for _, a := range f.Agents {
+		if a.Namespace == namespace && a.Agent == agent {
+			return true
+		}
+	}
+	return false
+}
+
 // ErrNoQueuedRun is returned by ClaimQueued/ClaimReclaimable when there is no claimable run — the
 // worker backs off and polls again (it is not an error condition).
 var ErrNoQueuedRun = errors.New("run: no queued run to claim")
@@ -99,7 +146,7 @@ type Store interface {
 	// KEDA-scaled worker pool drains the queue without two workers grabbing the same run (m32.2).
 	// Returns ErrNoQueuedRun when the queue is empty. A status change auto-emits its `state` event,
 	// exactly like Update.
-	ClaimQueued(workerID string, lease time.Duration) (*Run, error)
+	ClaimQueued(workerID string, lease time.Duration, filter ClaimFilter) (*Run, error)
 	// Heartbeat renews the lease on a run still leased by workerID (and still running), extending it
 	// by `lease`, so a healthy long run is not falsely reclaimed. Returns ErrLeaseLost if the run is
 	// no longer leased by this worker (already reclaimed) or ErrNotFound if it is gone (m32.3).
@@ -108,7 +155,7 @@ type Store interface {
 	// worker died) to workerID and returns it, so a live worker resumes it from its last checkpoint.
 	// The run stays `running` (no state change). Returns ErrNoQueuedRun when none is reclaimable —
 	// the headline resume-on-pod-loss path (m32.3).
-	ClaimReclaimable(workerID string, lease time.Duration) (*Run, error)
+	ClaimReclaimable(workerID string, lease time.Duration, filter ClaimFilter) (*Run, error)
 	// ReleaseLease expires the lease on a run still leased by workerID (still running) so a peer can
 	// reclaim it IMMEDIATELY (ClaimReclaimable takes an expired lease), rather than waiting a full
 	// lease-TTL. It is the graceful-drain counterpart of Heartbeat: on SIGTERM a worker that will not
@@ -508,7 +555,10 @@ func (m *memStore) Update(id string, fn func(*Run) error) (*Run, error) {
 	return cloneRun(working), nil
 }
 
-func (m *memStore) ClaimQueued(workerID string, lease time.Duration) (*Run, error) {
+func (m *memStore) ClaimQueued(workerID string, lease time.Duration, filter ClaimFilter) (*Run, error) {
+	if filter.HaltAll {
+		return nil, ErrNoQueuedRun // a fleet stop: claim nothing, leave the queue intact
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// Oldest queued run first (FIFO by CreatedAt), so the hot store matches the durable store's
@@ -517,6 +567,9 @@ func (m *memStore) ClaimQueued(workerID string, lease time.Duration) (*Run, erro
 	for _, e := range m.entries {
 		if e.run.Status != StatusQueued {
 			continue
+		}
+		if filter.Excludes(e.run.Namespace, e.run.Agent) {
+			continue // under an active kill — stays queued, untouched
 		}
 		if pick == nil || e.run.CreatedAt.Before(pick.run.CreatedAt) {
 			pick = e
@@ -566,7 +619,10 @@ func (m *memStore) ReleaseLease(id, workerID string) error {
 	return nil
 }
 
-func (m *memStore) ClaimReclaimable(workerID string, lease time.Duration) (*Run, error) {
+func (m *memStore) ClaimReclaimable(workerID string, lease time.Duration, filter ClaimFilter) (*Run, error) {
+	if filter.HaltAll {
+		return nil, ErrNoQueuedRun
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
@@ -578,6 +634,11 @@ func (m *memStore) ClaimReclaimable(workerID string, lease time.Duration) (*Run,
 			continue
 		}
 		if e.run.LeaseExpiresAt == nil || !e.run.LeaseExpiresAt.Before(now) {
+			continue
+		}
+		// A killed scope's ABANDONED run must not be reclaimed either — otherwise a kill merely
+		// changes which worker picks it up.
+		if filter.Excludes(e.run.Namespace, e.run.Agent) {
 			continue
 		}
 		if pick == nil || e.run.CreatedAt.Before(pick.run.CreatedAt) {

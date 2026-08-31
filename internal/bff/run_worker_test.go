@@ -284,7 +284,7 @@ func TestRunWorker_ResumesAbandonedRun(t *testing.T) {
 
 	// Simulate a worker that CLAIMED the run then died before executing: claim it with a tiny lease
 	// and never run it. The run is now `running` with an about-to-expire lease and no live worker.
-	claimed, err := s.runStore.ClaimQueued("dead-worker", 5*time.Millisecond)
+	claimed, err := s.runStore.ClaimQueued("dead-worker", 5*time.Millisecond, run.ClaimFilter{})
 	require.NoError(t, err)
 	require.Equal(t, created.ID, claimed.ID)
 	require.Equal(t, run.StatusRunning, claimed.Status)
