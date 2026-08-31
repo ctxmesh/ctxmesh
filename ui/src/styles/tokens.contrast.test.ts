@@ -31,12 +31,10 @@ type Pairs = { fg: string; bg: string; min: number; note: string }[];
 //     fails if an entry is fixed but left here, so it cannot silently rot.
 // DELETING AN ENTRY IS THE FIX. Raising a number here is not.
 const KNOWN_BELOW: Record<string, number> = {
-  "light:muted-foreground on surface-2": 4.27,
-  "light:success-foreground on success": 3.14,
-  "light:info-foreground on info": 3.58,
-  "light:border-strong on background": 1.54,
-  "dark:destructive-foreground on destructive": 4.01,
-  "dark:border-strong on background": 2.05,
+  // EMPTY, and it must stay empty. accept-m151.sh GATE 1b fails while this map
+  // has any entry — an allowlist that outlives the redesign is a gate pretending
+  // to be a rule. The six M12-palette failures it used to hold are fixed in the
+  // editorial palette, not carried.
 };
 
 // Every place the UI paints text or a meaningful boundary. Keep this list in
@@ -61,8 +59,37 @@ const PAIRS: Pairs = [
   { fg: "info-foreground", bg: "info", min: NORMAL_TEXT, note: "info badge label" },
   { fg: "popover-foreground", bg: "popover", min: NORMAL_TEXT, note: "text in a menu or dialog" },
   { fg: "card-foreground", bg: "card", min: NORMAL_TEXT, note: "panel text" },
-  { fg: "border-strong", bg: "background", min: NON_TEXT, note: "a boundary that must be seen" },
+  // WCAG 1.4.11 applies to boundaries that IDENTIFY a control. On this palette
+  // the card (#ffffff) and the paper (#f7f8f7) differ by 1.03:1, so adjacency
+  // identifies nothing and the border carries the whole job alone.
+  { fg: "input", bg: "background", min: NON_TEXT, note: "the edge of a field or outlined control, on paper" },
+  { fg: "input", bg: "card", min: NON_TEXT, note: "the edge of a field or outlined control, on a panel" },
   { fg: "ring", bg: "background", min: NON_TEXT, note: "the keyboard focus ring" },
+  { fg: "ring", bg: "card", min: NON_TEXT, note: "the focus ring on a panel" },
+  // NOT listed, deliberately: --border and --border-strong. They draw table row
+  // separators, panel frames, tree gutters and fence dashes — decoration that
+  // repeats information already carried in text, not a control boundary. Holding
+  // a hairline-and-paper language to 3:1 on every rule would replace the
+  // hairlines with heavy grey bars and destroy the design for no accessibility
+  // gain. Any control that needs a visible edge uses --input, checked above.
+
+  // M151 additions. `faint` is the ink step below muted-foreground and carries
+  // real information (timestamps, eyebrows, column heads), so it is held to the
+  // full text minimum — the whole point of splitting it from `ghost`, which is
+  // decoration and is deliberately NOT listed here.
+  { fg: "faint", bg: "background", min: NORMAL_TEXT, note: "timestamps and eyebrows on the ground" },
+  { fg: "faint", bg: "card", min: NORMAL_TEXT, note: "column heads on a panel" },
+  { fg: "faint", bg: "surface-2", min: NORMAL_TEXT, note: "meta on a collapsed row" },
+  // The tint-chip recipe: bg-{hue}-surface + text-{hue}. Every status chip in
+  // the console renders through exactly these four pairs.
+  { fg: "success", bg: "success-surface", min: NORMAL_TEXT, note: "ok chip" },
+  { fg: "warning", bg: "warning-surface", min: NORMAL_TEXT, note: "warn chip" },
+  { fg: "destructive", bg: "destructive-surface", min: NORMAL_TEXT, note: "crit chip" },
+  { fg: "info", bg: "info-surface", min: NORMAL_TEXT, note: "hold chip (violet — a person must decide)" },
+  // Pine on its own tint is the `progressing` chip and the selected nav item.
+  { fg: "accent-foreground", bg: "accent", min: NORMAL_TEXT, note: "progressing chip / selected nav" },
+  { fg: "primary", bg: "accent", min: NORMAL_TEXT, note: "link text on a selected row" },
+  { fg: "foreground", bg: "popover", min: NORMAL_TEXT, note: "menu and dialog text" },
 ];
 
 /** Pull `--name: H S% L%;` declarations out of one CSS block. */
