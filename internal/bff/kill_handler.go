@@ -24,6 +24,9 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	"github.com/ctxmesh/agentry/internal/controlplane/authz"
+
 	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agentry/internal/controlplane/killscope"
 )
@@ -40,8 +43,18 @@ import (
 // operator binds it deliberately. That is the point: a control that can halt the fleet should require an
 // explicit, auditable grant, not arrive implied by "operator".
 
-// verbKill is the custom RBAC verb gating every kill-switch mutation.
-const verbKill = "kill"
+// verbKill / subresourceKill gate every kill-switch mutation.
+//
+// The permission is a custom verb on the `agentdeployments/kill` SUBRESOURCE, not on agentdeployments
+// itself. That distinction is load-bearing and was found by the acceptance bar: agentry-operator holds
+// `verbs: ["*"]` on agentdeployments, so a bare custom verb there would have been implied by operator —
+// silently defeating the whole point of a separately-granted control. An RBAC rule naming a resource does
+// NOT cover its subresources, so `agentdeployments/kill` stays outside that wildcard and existing roles
+// need no change (narrowing a shipped role would have been a behavioural break for every install).
+const (
+	verbKill        = "kill"
+	subresourceKill = "kill"
+)
 
 // killRequest is the wire body for a kill or an un-kill.
 type killRequest struct {
@@ -100,7 +113,13 @@ func (s *Server) authorizeKill(ctx context.Context, caller client.Client, sc kil
 	if sc.Level == killscope.LevelAgent || sc.Level == killscope.LevelNamespace {
 		ns = sc.Namespace
 	}
-	return s.authorizeStore(ctx, caller, verbKill, resourceAgentDeployments, ns, "")
+	return s.authorizer.Authorize(ctx, caller, authz.Action{
+		Verb:        verbKill,
+		Group:       agentsv1alpha1.GroupVersion.Group,
+		Resource:    resourceAgentDeployments,
+		Subresource: subresourceKill,
+		Namespace:   ns,
+	})
 }
 
 // handleKill serves POST /api/kill — record an emergency stop.
