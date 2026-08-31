@@ -17,7 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"sigs.k8s.io/controller-runtime/pkg/log"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ctxmesh/agentry/internal/bootstrap"
 )
@@ -26,7 +26,7 @@ import (
 // that generates the platform capability keypair into the bff-capability Secret iff absent (never
 // re-keys), then rollout-restarts the consumers (M124/Gate A, ADR 0095). Returns a process exit code.
 func runEnsureCapabilityKey(ctx context.Context) int {
-	logger := log.Log.WithName("ensure-capability-key")
+	logger := logf.Log.WithName("ensure-capability-key")
 	ns := os.Getenv("POD_NAMESPACE")
 	if ns == "" {
 		logger.Error(fmt.Errorf("POD_NAMESPACE unset"), "cannot resolve the install namespace")
@@ -48,9 +48,9 @@ func runEnsureCapabilityKey(ctx context.Context) int {
 	// may be absent (dep tolerates NotFound).
 	consumers := []string{"agentry-bff", "agentry-controller-manager", "run-worker"}
 
-	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	cctx, cancel := context.WithTimeout(logf.IntoContext(ctx, logger), 60*time.Second)
 	defer cancel()
-	if _, err := bootstrap.EnsureCapabilityKey(cctx, sec, dep, ns, consumers, logger); err != nil {
+	if _, err := bootstrap.EnsureCapabilityKey(cctx, sec, dep, ns, consumers); err != nil {
 		logger.Error(err, "ensure-capability-key FAILED")
 		return 1
 	}
@@ -84,7 +84,10 @@ func (o *clientSecretOps) Create(ctx context.Context, ns, name, priv, pub string
 			// never-re-key guarantee comes from the get-before-create logic, NOT this annotation. NB: what
 			// actually destroys the key is `helm uninstall` deleting the chart-owned Namespace (see NOTES).
 			Annotations: map[string]string{"helm.sh/resource-policy": "keep"},
-			Labels:      map[string]string{"app.kubernetes.io/name": "agentry", "app.kubernetes.io/managed-by": "agentry-keygen"},
+			Labels: map[string]string{
+				"app.kubernetes.io/name":       "agentry",
+				"app.kubernetes.io/managed-by": "agentry-keygen",
+			},
 		},
 		Type: corev1.SecretTypeOpaque,
 		// stringData: the API stores the runcap base64 STRING verbatim as the value (do NOT hand-base64
@@ -99,7 +102,8 @@ func (o *clientSecretOps) SetPublicKey(ctx context.Context, ns, name, pub string
 	// A strategic-merge patch with stringData: the apiserver merges it into data — completes the public
 	// key without reading/rewriting (hence never touching) the private seed.
 	patch := fmt.Sprintf(`{"stringData":{%q:%q}}`, bootstrap.PublicKeyKey, pub)
-	_, err := o.cs.CoreV1().Secrets(ns).Patch(ctx, name, types.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{})
+	_, err := o.cs.CoreV1().Secrets(ns).Patch(
+		ctx, name, types.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{})
 	return err
 }
 
@@ -109,7 +113,8 @@ func (o *clientDeployOps) RolloutRestart(ctx context.Context, ns, name string) e
 	// Same trigger `kubectl rollout restart` uses: bump a pod-template annotation → a new ReplicaSet.
 	patch := fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":%q}}}}}`,
 		time.Now().Format(time.RFC3339))
-	_, err := o.cs.AppsV1().Deployments(ns).Patch(ctx, name, types.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{})
+	_, err := o.cs.AppsV1().Deployments(ns).Patch(
+		ctx, name, types.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil // a consumer (e.g. run-worker) may not be deployed — not an error.
 	}

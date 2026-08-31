@@ -451,7 +451,7 @@ func scheduledRefreshDecision(kb *agentsv1beta1.KnowledgeBase, now time.Time) (b
 	if kb.Status.LastIngestedAt != nil {
 		last = kb.Status.LastIngestedAt.Time
 	}
-	if a := kb.Status.LastScheduledIngestAt; a != nil && a.Time.After(last) {
+	if a := kb.Status.LastScheduledIngestAt; a != nil && a.After(last) {
 		last = a.Time
 	}
 	if last.IsZero() {

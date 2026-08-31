@@ -1065,7 +1065,7 @@ func withApprovals(input []byte, keys []string) []byte {
 		}
 		inputField = json.RawMessage(q)
 	}
-	out, err := json.Marshal(map[string]json.RawMessage{"input": inputField, "approvals": keysJSON})
+	out, err := json.Marshal(map[string]json.RawMessage{invokeInputField: inputField, "approvals": keysJSON})
 	if err != nil {
 		return input
 	}

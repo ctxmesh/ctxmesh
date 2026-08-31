@@ -140,7 +140,7 @@ func anthropicChat(ctx context.Context, c *http.Client, apiKey, baseURL, model, 
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", &providerError{status: http.StatusInternalServerError, msg: "failed to build generation request"}
+		return "", &providerError{status: http.StatusInternalServerError, msg: msgBuildGenerationReq}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
@@ -211,7 +211,7 @@ func openaiChat(ctx context.Context, c *http.Client, apiKey, baseURL, model, sys
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", &providerError{status: http.StatusInternalServerError, msg: "failed to build generation request"}
+		return "", &providerError{status: http.StatusInternalServerError, msg: msgBuildGenerationReq}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
@@ -241,6 +241,10 @@ func openaiChat(ctx context.Context, c *http.Client, apiKey, baseURL, model, sys
 // never reads the key (fixing prompt-to-agent/team for non-admin personas). An optional
 // MODEL_GATEWAY_KEY (LiteLLM master key) is attached when set; a per-caller `user` metadata tag rides
 // the request for spend attribution. Same response shape + error mapping as openaiChat.
+// msgBuildGenerationReq is the safe, caller-facing message for a generation request that could not be
+// marshalled — one spelling across every generation entry point.
+const msgBuildGenerationReq = "failed to build generation request"
+
 func chatCompleteViaGateway(ctx context.Context, c *http.Client, gatewayURL, model, systemPrompt, description, costTag, callerTag string) (string, error) {
 	if strings.TrimSpace(model) == "" {
 		return "", &providerError{status: http.StatusBadRequest, msg: "a generation model is required"}
@@ -263,7 +267,7 @@ func chatCompleteViaGateway(ctx context.Context, c *http.Client, gatewayURL, mod
 	payload := openaiChatRequest{Model: model, MaxTokens: maxGenerationTokens, Messages: msgs, Metadata: meta}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", &providerError{status: http.StatusInternalServerError, msg: "failed to build generation request"}
+		return "", &providerError{status: http.StatusInternalServerError, msg: msgBuildGenerationReq}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(gatewayURL, "/")+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {

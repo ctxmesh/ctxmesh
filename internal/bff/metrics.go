@@ -164,14 +164,22 @@ func (m *Metrics) checkpointRejected() {
 	m.checkpointRejects.Inc()
 }
 
+// The run-outcome label vocabulary normalizeOutcome maps onto — one spelling, one place.
+const (
+	outcomeSucceeded = "succeeded"
+	outcomeFailed    = "failed"
+	outcomeCancelled = "cancelled"
+	outcomeUnknown   = "unknown"
+)
+
 func normalizeOutcome(s string) string {
 	switch s {
-	case "succeeded", "failed", "cancelled":
+	case outcomeSucceeded, outcomeFailed, outcomeCancelled:
 		return s
 	case "canceled": // tolerate the US spelling
-		return "cancelled"
+		return outcomeCancelled
 	default:
-		return "unknown"
+		return outcomeUnknown
 	}
 }
 

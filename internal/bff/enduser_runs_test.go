@@ -216,7 +216,7 @@ func TestHandleEndUserMyRuns(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		var resp EndUserRunsResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-		ids := []string{}
+		ids := make([]string, 0, len(resp.Runs))
 		for _, r := range resp.Runs {
 			ids = append(ids, r.ID)
 		}
@@ -252,7 +252,7 @@ func TestHandleEndUserMyRuns(t *testing.T) {
 		s, rsp := newEndUserRunServer(t, "https://chatbot.ns1.example.com")
 		seed(*rsp)
 		s.endUserLimiter = newIPRateLimiter(0.0001, 2) // burst 2, negligible refill
-		for i := 0; i < 2; i++ {
+		for range 2 {
 			rec := httptest.NewRecorder()
 			s.handleEndUserMyRuns(rec, myRunsReq("chatbot.ns1.example.com", "an-oidc-id-token"))
 			require.Equal(t, http.StatusOK, rec.Code, "burst admits the first requests")

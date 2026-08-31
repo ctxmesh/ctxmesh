@@ -1434,7 +1434,7 @@ func newAgentDetail(
 	if sm := ad.Spec.SessionMemory; sm != nil {
 		scope := sm.Scope
 		if scope == "" {
-			scope = "session"
+			scope = sessionMemoryScopeSession
 		}
 		bindings = append(bindings, AgentBinding{
 			Kind:   "memory",

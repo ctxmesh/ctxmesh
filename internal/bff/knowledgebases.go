@@ -60,11 +60,8 @@ const (
 	// specify the KB's namespace. When absent, the BFF uses defaultCreateNamespace.
 	kbNamespaceHeader = "X-Namespace"
 
-	// kbSourceTypeUpload and kbSourceTypeObjectStorePrefix are the two supported
-	// source.type values for a KnowledgeBase (ADR 0061 Fork 4 v1). "url" (SSRF-prone)
-	// is DEFERRED.
-	kbSourceTypeUpload            = "upload"
-	kbSourceTypeObjectStorePrefix = "objectStorePrefix"
+	// The supported source.type values moved to internal/ingestion with ResolveKBSources (M140.4) —
+	// ingestion.SourceTypeUpload / ingestion.SourceTypeObjectStorePrefix are now the single definition.
 )
 
 // DocumentUploadResponse is returned (201) on a successful document upload.
@@ -365,6 +362,7 @@ func indexByte(s string, b byte) int {
 //	    rc, err := store.Get(ctx, info.Key)
 //	    // ... chunk, embed, index ...
 //	}
+//
 // ResolveKBSources is the canonical source enumerator, now in internal/ingestion (M140.4) — aliased here so
 // the existing BFF callers are unchanged while the KB controller's scheduled re-ingest shares the SAME
 // implementation (one source of truth, no drift).

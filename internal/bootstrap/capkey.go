@@ -10,8 +10,8 @@ import (
 	"crypto/ed25519"
 	"fmt"
 
-	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ctxmesh/agentry/internal/runcap"
 )
@@ -58,7 +58,12 @@ type DeployOps interface {
 // and, if it changed the Secret, rollout-restarts the consumers so their pods pick up the env at start
 // (on a fresh install the Deployments race the post-install hook and resolve env only at container
 // start — without the restart a pod that started key-less stays key-less forever).
-func EnsureCapabilityKey(ctx context.Context, sec SecretOps, dep DeployOps, ns string, consumers []string, log logr.Logger) (changed bool, err error) {
+// The logger is carried on the context (logf.IntoContext at the call site), not passed alongside it —
+// a function takes a context OR a logger, never both.
+func EnsureCapabilityKey(
+	ctx context.Context, sec SecretOps, dep DeployOps, ns string, consumers []string,
+) (changed bool, err error) {
+	log := logf.FromContext(ctx)
 	priv, pub, exists, err := sec.Get(ctx, ns, SecretName)
 	if err != nil {
 		return false, fmt.Errorf("get %s: %w", SecretName, err)

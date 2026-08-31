@@ -62,17 +62,34 @@ type WorkflowDetailResponse struct {
 	Nodes       []WorkflowNode `json:"nodes"`
 }
 
+// The canvas node/edge vocabulary this projection emits — one spelling per construct, so the Go
+// projection and the React canvas agree by construction.
+const (
+	stepKindMap    = "map"
+	stepKindLoop   = "loop"
+	stepKindChoice = "choice"
+	stepKindTask   = "task"
+
+	edgeKindNext    = "next"
+	edgeKindBranch  = "branch"
+	edgeKindDefault = "default"
+	edgeKindCatch   = "catch"
+	edgeKindMap     = "map"
+	edgeKindJoin    = "join"
+	edgeKindLoop    = "loop"
+)
+
 // stepKind classifies a step by which control-flow construct it carries.
 func stepKind(st *agentsv1beta1.WorkflowStep) string {
 	switch {
 	case st.Map != nil:
-		return "map"
+		return stepKindMap
 	case st.Loop != nil:
-		return "loop"
+		return stepKindLoop
 	case len(st.Branches) > 0:
-		return "choice"
+		return stepKindChoice
 	default:
-		return "task"
+		return stepKindTask
 	}
 }
 
@@ -93,28 +110,28 @@ func projectWorkflowDetail(wf *agentsv1beta1.Workflow) WorkflowDetailResponse {
 		st := &wf.Spec.Steps[i]
 		edges := []WorkflowEdge{}
 		if st.Next != "" {
-			edges = append(edges, WorkflowEdge{To: st.Next, Kind: "next"})
+			edges = append(edges, WorkflowEdge{To: st.Next, Kind: edgeKindNext})
 		}
 		for _, b := range st.Branches {
-			edges = append(edges, WorkflowEdge{To: b.To, Kind: "branch", Label: truncateExpr(b.When)})
+			edges = append(edges, WorkflowEdge{To: b.To, Kind: edgeKindBranch, Label: truncateExpr(b.When)})
 		}
 		if st.Default != "" {
-			edges = append(edges, WorkflowEdge{To: st.Default, Kind: "default", Label: "default"})
+			edges = append(edges, WorkflowEdge{To: st.Default, Kind: edgeKindDefault, Label: edgeKindDefault})
 		}
 		if st.OnError != "" {
-			edges = append(edges, WorkflowEdge{To: st.OnError, Kind: "catch", Label: "on error"})
+			edges = append(edges, WorkflowEdge{To: st.OnError, Kind: edgeKindCatch, Label: "on error"})
 		}
 		for _, c := range st.Catch {
-			edges = append(edges, WorkflowEdge{To: c.Next, Kind: "catch", Label: "catch " + strings.Join(c.Errors, ",")})
+			edges = append(edges, WorkflowEdge{To: c.Next, Kind: edgeKindCatch, Label: "catch " + strings.Join(c.Errors, ",")})
 		}
 		if st.Map != nil {
-			edges = append(edges, WorkflowEdge{To: st.Map.Do, Kind: "map", Label: "for each"})
+			edges = append(edges, WorkflowEdge{To: st.Map.Do, Kind: edgeKindMap, Label: "for each"})
 			if st.Map.Join != "" {
-				edges = append(edges, WorkflowEdge{To: st.Map.Join, Kind: "join", Label: "join"})
+				edges = append(edges, WorkflowEdge{To: st.Map.Join, Kind: edgeKindJoin, Label: edgeKindJoin})
 			}
 		}
 		if st.Loop != nil {
-			edges = append(edges, WorkflowEdge{To: st.Loop.Do, Kind: "loop", Label: "loop"})
+			edges = append(edges, WorkflowEdge{To: st.Loop.Do, Kind: edgeKindLoop, Label: edgeKindLoop})
 		}
 		nodes = append(nodes, WorkflowNode{
 			Name:     st.Name,

@@ -457,7 +457,8 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 	if cfg.StatelayerProxyURL != "" {
 		// F2 (ADR 0099): ENFORCE the per-agent/per-conversation budget against the durable statelayer-proxy
 		// (real across replicas; survives restarts) instead of the per-replica in-memory total. Fail-closed.
-		gp.enforcer = budget.NewEnforcerWithBackend(newHTTPTenantStore(cfg.StatelayerProxyURL, resolvePodTokenPath(cfg.PodTokenPath)), logf)
+		tenantStore := newHTTPTenantStore(cfg.StatelayerProxyURL, resolvePodTokenPath(cfg.PodTokenPath))
+		gp.enforcer = budget.NewEnforcerWithBackend(tenantStore, logf)
 		gp.control = newHTTPTenantStore(cfg.StatelayerProxyURL, resolvePodTokenPath(cfg.PodTokenPath))
 	}
 

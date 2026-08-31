@@ -24,6 +24,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -92,27 +93,74 @@ func main() {
 	}
 }
 
+// newInClusterClient builds the token-service's in-cluster client with the schemes it reads through:
+// core (grant Secrets, via credresolve) plus both agents API versions.
+func newInClusterClient() (client.Client, error) {
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{
+		clientgoscheme.AddToScheme, agentsv1alpha1.AddToScheme, agentsv1beta1.AddToScheme,
+	} {
+		if err := add(scheme); err != nil {
+			return nil, fmt.Errorf("build scheme: %w", err)
+		}
+	}
+	restCfg, err := ctrl.GetConfig()
+	if err != nil {
+		return nil, fmt.Errorf("in-cluster config: %w", err)
+	}
+	c, err := client.New(restCfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, fmt.Errorf("build client: %w", err)
+	}
+	return c, nil
+}
+
+// wireMemoryAndKnowledge attaches the token-service's pgvector-backed data planes to the server:
+// long-term memory (ADR 0045) and managed-RAG retrieval (ADR 0061), plus the two OPTIONAL
+// retrieval-quality stages (cross-encoder rerank, ADR 0117; LLM query-rewrite, M140.3). All of it hangs
+// off one condition — a reachable model gateway — because every stage needs the gateway embedder.
+func wireMemoryAndKnowledge(tsServer *credplane.Server, cpDB *sql.DB, log logr.Logger) {
+	// Long-term memory (ADR 0045): the token-service is the sole holder of the pgvector store + embeds via
+	// the gateway; agent launchers proxy memory.remember/search_agent here (no DB creds in agent pods). Enabled
+	// when the model gateway is reachable — reuses the already-open control-plane DB (cpDB).
+	if gwURL := strings.TrimSpace(os.Getenv("MODEL_GATEWAY_URL")); gwURL != "" {
+		embedder := credplane.NewGatewayEmbedder(
+			gwURL, os.Getenv("MODEL_GATEWAY_KEY"), &http.Client{Timeout: 30 * time.Second})
+		tsServer.WithMemory(agentmemory.NewPostgresStore(cpDB), embedder)
+		log.Info("long-term memory enabled (ADR 0045): pgvector store + gateway embeddings", "gateway", gwURL)
+		// Managed-RAG retrieval (ADR 0061 Fork 3 + governance #8): the token-service is the sole holder of the
+		// pgvector knowledge store; agent launchers proxy the READ path here (no DB creds in agent pods). The
+		// ingestion WRITE path is the run-worker holding its own store (m68.6). Reuses the same control-plane DB
+		// (cpDB) + gateway embedder as long-term memory — enabled on the same gateway-reachable condition.
+		tsServer.WithKnowledge(knowledge.NewPostgresStore(cpDB), embedder)
+		log.Info("managed-RAG retrieval enabled (ADR 0061): pgvector knowledge store + gateway embeddings", "gateway", gwURL)
+
+		// Cross-encoder rerank (M140.2, ADR 0117): an OPTIONAL retrieval-quality stage. Wired when a rerank
+		// service URL is set; only ACTIVATES per request when KNOWLEDGE_RERANK="true". Called directly (not via
+		// the gateway) — an internal pipeline stage, not a model call. Fail-open: a dead reranker never breaks
+		// retrieval (2s timeout + store-order fallback in the handler).
+		if rerankURL := strings.TrimSpace(os.Getenv("KNOWLEDGE_RERANK_URL")); rerankURL != "" {
+			tsServer.WithReranker(credplane.NewHTTPReranker(rerankURL, nil))
+			log.Info("cross-encoder rerank wired (M140.2, ADR 0117): rerank service reachable", "reranker", rerankURL)
+		}
+
+		// LLM query-rewrite (M140.3): an OPTIONAL retrieval-quality stage over the same gateway as the embedder.
+		// Wired when a rewrite model is set; only ACTIVATES per request when KNOWLEDGE_QUERY_REWRITE="true".
+		// Fail-open: a rewrite failure falls back to the raw query.
+		if rewriteModel := strings.TrimSpace(os.Getenv("KNOWLEDGE_REWRITE_MODEL")); rewriteModel != "" {
+			tsServer.WithRewriter(credplane.NewGatewayRewriter(gwURL, os.Getenv("MODEL_GATEWAY_KEY"), rewriteModel, nil))
+			log.Info("LLM query-rewrite wired (M140.3): gateway rewriter reachable", "model", rewriteModel)
+		}
+	}
+}
+
 func run(log logr.Logger) error {
 	credentialNS := strings.TrimSpace(os.Getenv("MCP_CREDENTIAL_NAMESPACE"))
 
 	// In-cluster client: reads grant Secrets (credresolve) + ToolRegistry auth-type.
-	scheme := runtime.NewScheme()
-	if err := clientgoscheme.AddToScheme(scheme); err != nil {
-		return fmt.Errorf("build scheme: %w", err)
-	}
-	if err := agentsv1alpha1.AddToScheme(scheme); err != nil {
-		return fmt.Errorf("add CRD scheme: %w", err)
-	}
-	if err := agentsv1beta1.AddToScheme(scheme); err != nil {
-		return fmt.Errorf("adding agents/v1beta1 to scheme: %w", err)
-	}
-	restCfg, err := ctrl.GetConfig()
+	k8sClient, err := newInClusterClient()
 	if err != nil {
-		return fmt.Errorf("in-cluster config: %w", err)
-	}
-	k8sClient, err := client.New(restCfg, client.Options{Scheme: scheme})
-	if err != nil {
-		return fmt.Errorf("build client: %w", err)
+		return err
 	}
 
 	// getTR fetches a server's ToolRegistry auth-type / org-scope; a missing registry
@@ -202,38 +250,7 @@ func run(log logr.Logger) error {
 	}
 
 	tsServer := credplane.NewServer(resolver, log)
-	// Long-term memory (ADR 0045): the token-service is the sole holder of the pgvector store + embeds via
-	// the gateway; agent launchers proxy memory.remember/search_agent here (no DB creds in agent pods). Enabled
-	// when the model gateway is reachable — reuses the already-open control-plane DB (cpDB).
-	if gwURL := strings.TrimSpace(os.Getenv("MODEL_GATEWAY_URL")); gwURL != "" {
-		embedder := credplane.NewGatewayEmbedder(
-			gwURL, os.Getenv("MODEL_GATEWAY_KEY"), &http.Client{Timeout: 30 * time.Second})
-		tsServer.WithMemory(agentmemory.NewPostgresStore(cpDB), embedder)
-		log.Info("long-term memory enabled (ADR 0045): pgvector store + gateway embeddings", "gateway", gwURL)
-		// Managed-RAG retrieval (ADR 0061 Fork 3 + governance #8): the token-service is the sole holder of the
-		// pgvector knowledge store; agent launchers proxy the READ path here (no DB creds in agent pods). The
-		// ingestion WRITE path is the run-worker holding its own store (m68.6). Reuses the same control-plane DB
-		// (cpDB) + gateway embedder as long-term memory — enabled on the same gateway-reachable condition.
-		tsServer.WithKnowledge(knowledge.NewPostgresStore(cpDB), embedder)
-		log.Info("managed-RAG retrieval enabled (ADR 0061): pgvector knowledge store + gateway embeddings", "gateway", gwURL)
-
-		// Cross-encoder rerank (M140.2, ADR 0117): an OPTIONAL retrieval-quality stage. Wired when a rerank
-		// service URL is set; only ACTIVATES per request when KNOWLEDGE_RERANK="true". Called directly (not via
-		// the gateway) — an internal pipeline stage, not a model call. Fail-open: a dead reranker never breaks
-		// retrieval (2s timeout + store-order fallback in the handler).
-		if rerankURL := strings.TrimSpace(os.Getenv("KNOWLEDGE_RERANK_URL")); rerankURL != "" {
-			tsServer.WithReranker(credplane.NewHTTPReranker(rerankURL, nil))
-			log.Info("cross-encoder rerank wired (M140.2, ADR 0117): rerank service reachable", "reranker", rerankURL)
-		}
-
-		// LLM query-rewrite (M140.3): an OPTIONAL retrieval-quality stage over the same gateway as the embedder.
-		// Wired when a rewrite model is set; only ACTIVATES per request when KNOWLEDGE_QUERY_REWRITE="true".
-		// Fail-open: a rewrite failure falls back to the raw query.
-		if rewriteModel := strings.TrimSpace(os.Getenv("KNOWLEDGE_REWRITE_MODEL")); rewriteModel != "" {
-			tsServer.WithRewriter(credplane.NewGatewayRewriter(gwURL, os.Getenv("MODEL_GATEWAY_KEY"), rewriteModel, nil))
-			log.Info("LLM query-rewrite wired (M140.3): gateway rewriter reachable", "model", rewriteModel)
-		}
-	}
+	wireMemoryAndKnowledge(tsServer, cpDB, log)
 	handler := tsServer.Handler()
 	listenAddr := envOr("TOKEN_SERVICE_LISTEN_ADDR", defaultListenAddr)
 	srv := &http.Server{Addr: listenAddr, Handler: handler, ReadHeaderTimeout: readHeaderTimeout}

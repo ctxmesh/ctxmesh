@@ -28,6 +28,10 @@ import (
 	"github.com/ctxmesh/agentry/internal/run"
 )
 
+// invokeInputField is the agent-invoke envelope's input field name — the one spelling shared by the
+// resume-body wrapper here and the approvals wrapper in runs_handler.go.
+const invokeInputField = "input"
+
 // Worker-pool defaults (m32.2, ADR 0034). The lease bounds how long a claimed run may run before a
 // peer may reclaim it (m32.3); it must exceed a run's execution timeout. The poll backoff is how
 // long an idle worker waits before re-checking an empty queue.
@@ -414,7 +418,7 @@ func resumeInvokeBody(input []byte, cursor string) ([]byte, bool) {
 		if !json.Valid(input) {
 			return input, false
 		}
-		body = map[string]json.RawMessage{"input": json.RawMessage(input)}
+		body = map[string]json.RawMessage{invokeInputField: json.RawMessage(input)}
 	}
 	body["checkpoint"] = json.RawMessage(cursor)
 	out, err := json.Marshal(body)

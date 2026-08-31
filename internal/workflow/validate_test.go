@@ -109,8 +109,10 @@ func TestValidate_Catch(t *testing.T) {
 	mapSpec := agentsv1beta1.WorkflowSpec{
 		RegistryRef: "support",
 		Steps: []agentsv1beta1.WorkflowStep{
-			{Name: "work", AgentRef: "a", Map: &agentsv1beta1.WorkflowMap{As: "x", Do: "handler", Over: "input.items"},
-				Catch: []agentsv1beta1.WorkflowCatch{{Errors: []string{"*"}, Next: "handler"}}},
+			{
+				Name: "work", AgentRef: "a", Map: &agentsv1beta1.WorkflowMap{As: "x", Do: "handler", Over: "input.items"},
+				Catch: []agentsv1beta1.WorkflowCatch{{Errors: []string{"*"}, Next: "handler"}},
+			},
 			{Name: "handler", AgentRef: "h"},
 		},
 	}

@@ -214,7 +214,7 @@ func (s *Server) handleRefine(w http.ResponseWriter, r *http.Request) {
 func (s *Server) refineAttempt(ctx context.Context, gen generationTarget, userMsg string) (string, []byte, error) {
 	// Route via the gateway (no caller key) when gen.viaGateway, else the direct provider call — one
 	// seam with generate/team-generate (M133). refineCostTag keeps refine spend separately attributable.
-	output, err := s.generationChat(ctx, gen, refineSystemPrompt, userMsg, refineCostTag, "")
+	output, err := s.generationChat(ctx, gen, refineSystemPrompt, userMsg, refineCostTag)
 	if err != nil {
 		return "", nil, err
 	}

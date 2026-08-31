@@ -226,7 +226,7 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	// Per-caller spend attribution (a "user" tag on the gateway request) is carded with the per-tenant
 	// virtual-keys work (m52) — it needs a SelfSubjectReview per generation and lands better alongside
 	// LiteLLM virtual keys; pass "" for now.
-	output, err := s.generationChat(r.Context(), gen, sysPrompt, req.Description, generationCostTag, "")
+	output, err := s.generationChat(r.Context(), gen, sysPrompt, req.Description, generationCostTag)
 	if err != nil {
 		if pe, isPE := isProviderError(err); isPE {
 			writeError(w, pe.status, pe.msg)
@@ -297,11 +297,12 @@ func generationGatewayURL() string { return strings.TrimSpace(os.Getenv("MODEL_G
 
 // generationChat runs ONE generation chat completion, routing through the gateway (no caller key) when
 // gen.viaGateway, else the direct caller-scoped-key provider call. One seam so agent-generate,
-// team-generate, and refine share identical authz semantics (Fable review). callerTag rides the gateway
-// request for per-caller spend attribution.
-func (s *Server) generationChat(ctx context.Context, gen generationTarget, systemPrompt, userMsg, costTag, callerTag string) (string, error) {
+// team-generate, and refine share identical authz semantics (Fable review). Spend is attributed by
+// costTag; the gateway's PER-CALLER attribution tag is not wired at this seam yet (carded m52.G11g), so
+// the empty tag below is deliberate — chatCompleteViaGateway omits the field rather than sending a blank.
+func (s *Server) generationChat(ctx context.Context, gen generationTarget, systemPrompt, userMsg, costTag string) (string, error) {
 	if gen.viaGateway {
-		return chatCompleteViaGateway(ctx, s.providerHTTP, gen.baseURL, gen.model, systemPrompt, userMsg, costTag, callerTag)
+		return chatCompleteViaGateway(ctx, s.providerHTTP, gen.baseURL, gen.model, systemPrompt, userMsg, costTag, "")
 	}
 	return chatComplete(ctx, s.providerHTTP, gen.provider, gen.apiKey, gen.baseURL, gen.model, systemPrompt, userMsg, costTag)
 }
