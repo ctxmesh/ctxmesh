@@ -6,6 +6,9 @@ import { Badge } from "@/components/ui/badge";
 //   byo-oauth → "You connect your account"
 //   shared    → "Uses a shared credential"
 //   none / absent → hidden (render nothing)
+//
+// Always the `open` Tag variant (M151 §5.6): this chip DECLARES a capability, it does not
+// report a state, so it may never carry a semantic hue (ok/warn/crit/hold) or the pine brand.
 
 interface CredentialSourceBadgeProps {
   credentialSource: string | undefined;
@@ -24,8 +27,7 @@ export function CredentialSourceBadge({ credentialSource, name }: CredentialSour
 
   return (
     <Badge
-      variant="outline"
-      className="text-[10px]"
+      variant="open"
       data-testid={name ? `cred-source-${name}` : undefined}
     >
       {label}

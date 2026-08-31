@@ -34,10 +34,13 @@ const ICONS: Record<ToastVariant, typeof Check> = {
   info: Info,
 };
 
+// Icon tone (M151 §5.14). `info` is deliberately NOT a hue: the --info slot now
+// carries the hold violet ("a person must decide", ADR 0128), and a neutral
+// notice has no status to annotate — so its icon is plain ink.
 const TONE: Record<ToastVariant, string> = {
   success: "text-success",
   error: "text-destructive",
-  info: "text-info",
+  info: "text-foreground",
 };
 
 export function Toast({
@@ -74,7 +77,7 @@ export function Toast({
           type="button"
           onClick={onDismiss}
           aria-label="Dismiss"
-          className="text-muted-foreground hover:text-foreground"
+          className="rounded-sm text-faint transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
         >
           <X className="h-4 w-4" />
         </button>

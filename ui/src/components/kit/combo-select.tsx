@@ -57,9 +57,11 @@ export function ComboSelect({
           placeholder={customPlaceholder}
           data-testid={testId}
         />
+        {/* The §2.3 inline-link treatment: pine text over a 1.5px pine-surface
+            rule that deepens to pine on hover — never a browser underline. */}
         <button
           type="button"
-          className="text-xs text-primary hover:underline"
+          className="rounded-sm border-b-[1.5px] border-accent text-xs text-primary transition-colors hover:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           onClick={() => {
             setCustom(false);
             onChange("");

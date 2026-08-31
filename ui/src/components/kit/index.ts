@@ -3,9 +3,10 @@
 // they become the vitest-covered production kit in m13.4. Import from
 // "@/components/kit" so surfaces never reach into individual files.
 
-export { DataTable } from "./data-table";
+export { DataTable, cellNum, CellEntity, CellId, truncateId } from "./data-table";
 export type {
   Column,
+  ColumnPriority,
   DataTableProps,
   DataTableError,
   SortState,
@@ -30,7 +31,13 @@ export type { ErrorStateProps } from "./error-state";
 export { ForbiddenInline } from "./forbidden-inline";
 export type { ForbiddenInlineProps } from "./forbidden-inline";
 
-export { StatusBadge, resolveStatus, humanizeStatusReason, type StatusTone } from "./status-badge";
+export {
+  StatusBadge,
+  resolveStatus,
+  humanizeStatusReason,
+  type StatusTone,
+  type StatusVariant,
+} from "./status-badge";
 export { VisibilityBadge } from "./visibility-badge";
 
 export { ComboSelect } from "./combo-select";
