@@ -2585,7 +2585,11 @@ export function formatRunStep(data: string): string {
     // JSON that isn't an object (a quoted string / number) → show its string form (the label).
     return typeof parsed === "string" ? parsed : raw;
   }
-  const meta = parsed as Partial<StepMeta>;
+  const meta = parsed as Partial<StepMeta> & { label?: unknown };
+  // A PLATFORM-emitted step frame (M143: the structured-output re-ask) carries a human `label`
+  // instead of the agent-loop's step/kind metadata. Render the label — without this branch an
+  // unrecognised frame falls through to `return raw` and the user is shown the JSON itself.
+  if (typeof meta.label === "string" && meta.label.trim() !== "") return meta.label;
   if (typeof meta.step !== "number" || (meta.kind !== "model" && meta.kind !== "tool")) {
     // A JSON object that is not the step-metadata shape → fall back to the raw text.
     return raw;

@@ -371,16 +371,7 @@ func (s *Server) handleSpawnRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// (6) Worker-dispatch mode (HA): leave the sub-run queued — a worker claims it and re-mints the
-	// capability from the inherited CallerUsername + Boundary. Otherwise (dev / single-pod) execute in
-	// process, minting the capability directly from the inherited identity (no caller connection needed).
-	if !s.runWorkerDispatch {
-		execCtx := contextWithConversationID(context.Background(), parent.ConversationID)
-		if capToken, minted := s.mintRunCapability(
-			parent.CallerUsername, parent.Namespace, req.SubAgent, parent.Boundary, subID); minted {
-			execCtx = contextWithRunCapability(execCtx, capToken)
-		}
-		go s.executeRun(execCtx, subID, subEndpoint, []byte(req.Input))
-	}
+	// (6) The sub-run is left queued for the worker pool, which re-mints the capability from the inherited
+	// CallerUsername + Boundary. One path since M143.1 (ADR 0125).
 	writeJSON(w, http.StatusAccepted, SpawnRunResponse{ID: subID, Status: string(run.StatusQueued)})
 }

@@ -31,11 +31,10 @@ func newHandoffServer(t *testing.T, source *run.Run) (*Server, *runcap.Signer, r
 	}
 	conv := run.NewMemConversationStore()
 	s := &Server{
-		capabilitySigner:  signer,
-		runStore:          store,
-		convStore:         conv,
-		runWorkerDispatch: true, // queue B; don't invoke a real endpoint in a unit test
-		log:               logr.Discard(),
+		capabilitySigner: signer,
+		runStore:         store,
+		convStore:        conv,
+		log:              logr.Discard(),
 	}
 	return s, signer, store, conv
 }

@@ -522,14 +522,13 @@ func TestCreateRun_PinsOutputSchema(t *testing.T) {
 
 	store := run.NewMemStore()
 	s := NewServer(Options{
-		CallerClients:     newFakeFactory(c),
-		Scheme:            testScheme(t),
-		Auth:              AllowAll{},
-		Adapters:          Adapters{Invoke: inv},
-		Version:           "test",
-		Log:               logr.Discard(),
-		RunStore:          store,
-		RunWorkerDispatch: true, // keep queued so we can read OutputSchema before execution mutates it
+		CallerClients: newFakeFactory(c),
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		Adapters:      Adapters{Invoke: inv},
+		Version:       "test",
+		Log:           logr.Discard(),
+		RunStore:      store,
 	})
 
 	created := createRun(t, s, InvokeRequest{Agent: "typed", Namespace: "prod", Input: json.RawMessage(`{}`)})
@@ -548,14 +547,13 @@ func TestCreateRun_NoRuntimeOutputSchemaIsEmpty(t *testing.T) {
 
 	store := run.NewMemStore()
 	s := NewServer(Options{
-		CallerClients:     newFakeFactory(c),
-		Scheme:            testScheme(t),
-		Auth:              AllowAll{},
-		Adapters:          Adapters{Invoke: inv},
-		Version:           "test",
-		Log:               logr.Discard(),
-		RunStore:          store,
-		RunWorkerDispatch: true,
+		CallerClients: newFakeFactory(c),
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		Adapters:      Adapters{Invoke: inv},
+		Version:       "test",
+		Log:           logr.Discard(),
+		RunStore:      store,
 	})
 
 	created := createRun(t, s, InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{}`)})
@@ -578,15 +576,14 @@ func TestCreateRun_RoutesToActiveAgentAfterHandoff(t *testing.T) {
 	conv := run.NewMemConversationStore()
 	require.NoError(t, conv.SetActiveAgent("chat-handed-off", "prod", "billing-agent", "A-1"))
 	s := NewServer(Options{
-		CallerClients:     newFakeFactory(c),
-		Scheme:            testScheme(t),
-		Auth:              AllowAll{},
-		Adapters:          Adapters{Invoke: inv},
-		Version:           "test",
-		Log:               logr.Discard(),
-		RunStore:          store,
-		ConvStore:         conv,
-		RunWorkerDispatch: true, // keep queued so we can read the routed agent before execution
+		CallerClients: newFakeFactory(c),
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		Adapters:      Adapters{Invoke: inv},
+		Version:       "test",
+		Log:           logr.Discard(),
+		RunStore:      store,
+		ConvStore:     conv,
 	})
 
 	// No explicit agent — only the conversationId. Routing resolves it to the active agent B.
@@ -607,15 +604,14 @@ func TestCreateRun_ExplicitAgentOverridesActivePointer(t *testing.T) {
 	conv := run.NewMemConversationStore()
 	require.NoError(t, conv.SetActiveAgent("chat-x", "prod", "billing-agent", "A-1"))
 	s := NewServer(Options{
-		CallerClients:     newFakeFactory(c),
-		Scheme:            testScheme(t),
-		Auth:              AllowAll{},
-		Adapters:          Adapters{Invoke: inv},
-		Version:           "test",
-		Log:               logr.Discard(),
-		RunStore:          store,
-		ConvStore:         conv,
-		RunWorkerDispatch: true,
+		CallerClients: newFakeFactory(c),
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		Adapters:      Adapters{Invoke: inv},
+		Version:       "test",
+		Log:           logr.Discard(),
+		RunStore:      store,
+		ConvStore:     conv,
 	})
 
 	created := createRun(t, s, InvokeRequest{Agent: "echo", Namespace: "prod", ConversationID: "chat-x", Input: json.RawMessage(`{}`)})

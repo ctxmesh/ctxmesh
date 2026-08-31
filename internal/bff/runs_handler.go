@@ -250,7 +250,8 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	// delegate sub-runs, workflow nodes, and their nested descendants — must be cancelled too, else durable
 	// suspend/resume (L7) leaves them burning tokens with no consumer (the blocking long-poll that used to
 	// reap them is gone). Best-effort, like the control marker.
-	s.cancelCascade(rn.ID, "cancelled: ancestor run cancelled (subtree cascade)")
+	// A user-initiated cancel: no worker identity is involved, so the G15 gate passes it through.
+	s.cancelCascade(r.Context(), rn.ID, "cancelled: ancestor run cancelled (subtree cascade)")
 	writeJSON(w, http.StatusOK, CreateRunResponse{ID: rn.ID, Status: string(updated.Status)})
 }
 
@@ -358,24 +359,11 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	// stored as the audit row's TraceID so "all invocations of run X / agent Y" is queryable. Best-effort.
 	s.auditInvoke(r.Context(), rn.CallerUsername, req.Agent, ns, runID)
 
-	// Worker-dispatch mode (ADR 0034): leave the run `queued` — a KEDA-scaled worker pool claims and
-	// executes it against the durable store, decoupled from this request (and this pod). Otherwise
-	// (dev / single-pod) execute in-process: detach the capability + conversationId onto a
-	// background context so execution survives the request returning (the request ctx cancels at 202).
-	if !s.runWorkerDispatch {
-		execCtx := contextWithRunCapability(
-			contextWithConversationID(context.Background(), conversationIDFromContext(r.Context())),
-			runCapabilityFromContext(r.Context()),
-		)
-		// Record mode (M78, ADR 0071 §1): carry the run id so the adapter stamps X-Ctxmesh-Record on
-		// the in-process (dev / single-pod) path too — the same per-run capture toggle the run-worker
-		// sets in dispatch mode. Only when this run opted in (req.Record, already gated record-capable).
-		if rn.Record {
-			execCtx = contextWithRecord(execCtx, runID)
-		}
-		go s.executeRun(execCtx, runID, endpoint, []byte(req.Input))
-	}
-
+	// The run is left `queued`; the worker pool claims and executes it against the run store, decoupled
+	// from this request and this pod (ADR 0034). There is exactly ONE run path since M143.1 (ADR 0125):
+	// the in-process branch that used to run here in dev/single-pod mode is gone, because two paths meant
+	// every durability property — fencing, reclaim, cancellation — had to be argued twice and was only
+	// ever proven on one of them.
 	writeJSON(w, http.StatusAccepted, CreateRunResponse{ID: runID, Status: string(run.StatusQueued)})
 }
 
@@ -513,15 +501,28 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 	// event + succeeded transition below, so a rejected answer is never surfaced as a successful
 	// assistant message. executeRun is shared with the durable worker, so this covers that path too.
 	if verr := validateTerminalOutput(started.OutputSchema, output); verr != nil {
-		s.log.Info("run: terminal output rejected by outputSchema", "run", runID, "reason", verr.Error())
-		if uErr := s.terminalTransitionFenced(ctx, runID, func(rn *run.Run) error {
-			rn.TraceID = traceID
-			rn.Error = verr.Error()
-			return rn.Transition(run.StatusFailed, now)
-		}); uErr != nil {
-			s.log.Error(uErr, "run: could not persist schema-validation failure", "run", runID)
+		// ONE platform-side re-ask before the run dies (m143.6, m52.J4). An SDK agent repairs
+		// in-loop and rarely lands here; a non-SDK / custom-loop agent — which the platform
+		// explicitly supports — had NO recovery tier at all, so a single near-miss killed the run.
+		// The re-ask is bounded to one extra invoke, on a run that was otherwise about to fail, and
+		// refuses itself when it cannot help (uncompilable schema, cancelled/self-fenced execution)
+		// — see reaskForOutputSchema. If it does not produce a conforming answer, the original
+		// fail-closed verdict below stands unchanged.
+		repaired, ok := s.reaskForOutputSchema(
+			ctx, runID, endpoint, input, started.OutputSchema, output, verr)
+		if ok {
+			output = repaired
+		} else {
+			s.log.Info("run: terminal output rejected by outputSchema", "run", runID, "reason", verr.Error())
+			if uErr := s.terminalTransitionFenced(ctx, runID, func(rn *run.Run) error {
+				rn.TraceID = traceID
+				rn.Error = verr.Error()
+				return rn.Transition(run.StatusFailed, now)
+			}); uErr != nil {
+				s.log.Error(uErr, "run: could not persist schema-validation failure", "run", runID)
+			}
+			return
 		}
-		return
 	}
 
 	// Success: emit the assistant message as a stream event BEFORE the terminal transition (which

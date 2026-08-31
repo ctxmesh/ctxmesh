@@ -27,7 +27,6 @@ package bff
 //     Returns 202 + {runId, status}. Unconfigured store/adapter → honest 501.
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -157,12 +156,7 @@ func (s *Server) handleExportDataset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Dispatch mode: leave `queued` for the worker pool. Dev/single-pod: run in-process so the export progresses
-	// without a running worker pool (the handleIngestKB precedent).
-	if !s.runWorkerDispatch {
-		go s.executeDatasetExport(context.Background(), runID)
-	}
-
+	// Left `queued` for the worker pool — one run path since M143.1 (ADR 0125).
 	writeJSON(w, http.StatusAccepted, ExportResponse{
 		RunID:  runID,
 		Status: string(run.StatusQueued),

@@ -46,11 +46,10 @@ func newGuardrailEventServer(t *testing.T) (*Server, *runcap.Signer, auditlog.St
 	_, signer, _ := newSpawnServer(t, nil)
 	store := auditlog.NewMemStore()
 	s := &Server{
-		capabilitySigner:  signer,
-		auditStore:        store,
-		runStore:          run.NewMemStore(),
-		runWorkerDispatch: true,
-		log:               logr.Discard(),
+		capabilitySigner: signer,
+		auditStore:       store,
+		runStore:         run.NewMemStore(),
+		log:              logr.Discard(),
 	}
 	return s, signer, store
 }
@@ -287,11 +286,10 @@ func TestGuardrailEvent_RealPostgresRoundTrip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, signer, _ := newSpawnServer(t, nil)
 			srv := &Server{
-				capabilitySigner:  signer,
-				auditStore:        tc.store,
-				runStore:          run.NewMemStore(),
-				runWorkerDispatch: true,
-				log:               logr.Discard(),
+				capabilitySigner: signer,
+				auditStore:       tc.store,
+				runStore:         run.NewMemStore(),
+				log:              logr.Discard(),
 			}
 			tok := mintGuardrailCap(t, signer)
 

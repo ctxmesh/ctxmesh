@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
@@ -211,12 +212,12 @@ func (s *Server) executeWorkflow(ctx context.Context, runID string) {
 
 	spec, err := parseWorkflowSnapshot(rn.SpecSnapshot)
 	if err != nil {
-		s.failWorkflow(runID, fmt.Sprintf("invalid workflow spec snapshot: %v", err))
+		s.failWorkflow(ctx, runID, fmt.Sprintf("invalid workflow spec snapshot: %v", err))
 		return
 	}
 	cursor, err := parseCursor(rn.Cursor)
 	if err != nil {
-		s.failWorkflow(runID, fmt.Sprintf("corrupt workflow cursor: %v", err))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("corrupt workflow cursor: %v", err))
 		return
 	}
 	// The workflow input feeds the CEL `input` variable for every edge + input binding this pass.
@@ -292,7 +293,7 @@ func (s *Server) resumeCurrentNode(
 	cur := &spec.Steps[stepIndex(spec, cursor.Current)]
 	prog := cursor.Nodes[cursor.Current]
 	if prog == nil {
-		s.failWorkflow(runID, fmt.Sprintf("workflow cursor names in-flight node %q with no progress record", cursor.Current))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow cursor names in-flight node %q with no progress record", cursor.Current))
 		return nil, false, true
 	}
 
@@ -315,19 +316,19 @@ func (s *Server) resumePlainNode(
 	cursor *workflowCursor, cur *agentsv1beta1.WorkflowStep, prog *nodeProgress,
 ) (next *agentsv1beta1.WorkflowStep, done, consumed bool) {
 	if prog.ChildID == "" {
-		s.failWorkflow(runID, fmt.Sprintf("workflow cursor names in-flight node %q with no launched sub-run", cur.Name))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow cursor names in-flight node %q with no launched sub-run", cur.Name))
 		return nil, false, true
 	}
 
 	// Idempotent: if we already recorded this node done (a re-claim after the wake but before we re-persisted
 	// Current=""), just advance from it. Otherwise read the child's terminal state.
 	if prog.State != cursorDone {
-		child, ok, terminal := s.loadTerminalChild(runID, cur.Name, prog.ChildID)
+		child, ok, terminal := s.loadTerminalChild(cursorFenceCtx(cursor), runID, cur.Name, prog.ChildID)
 		if !ok {
 			return nil, false, true // load failed → already failed the workflow.
 		}
 		if !terminal {
-			s.defensiveResuspend(runID, cur.Name, []string{prog.ChildID}, run.WaitAll)
+			s.defensiveResuspend(cursorFenceCtx(cursor), runID, cur.Name, []string{prog.ChildID}, run.WaitAll)
 			return nil, false, true
 		}
 		if child.Status != run.StatusSucceeded {
@@ -339,7 +340,7 @@ func (s *Server) resumePlainNode(
 			if len(cur.Catch) > 0 || cur.OnError != "" {
 				return s.routeCatch(runID, spec, cursor, cur, prog, child)
 			}
-			s.failExhaustedNode(runID, cur, prog, child)
+			s.failExhaustedNode(cursorFenceCtx(cursor), runID, cur, prog, child)
 			return nil, false, true // retries exhausted, no handler → fail-fasted.
 		}
 		s.recordNodeSuccess(runID, cursor.Current, prog, decodeNodeOutput(child), prog.ChildID)
@@ -377,14 +378,14 @@ func (s *Server) routeCatch(
 	}
 	if handler == "" {
 		// No catcher matched this failure class → fail-fast (ADR 0109 §3).
-		s.failExhaustedNode(runID, cur, prog, failed)
+		s.failExhaustedNode(cursorFenceCtx(cursor), runID, cur, prog, failed)
 		return nil, false, true
 	}
 
 	idx := stepIndex(spec, handler)
 	if idx < 0 {
 		// A dangling catcher target cannot occur for a validated spec; defend it honestly rather than panic.
-		s.failWorkflow(runID, fmt.Sprintf("workflow node %q references unknown catch/onError handler %q", cur.Name, handler))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow node %q references unknown catch/onError handler %q", cur.Name, handler))
 		return nil, false, true
 	}
 
@@ -413,13 +414,13 @@ func catchMatches(errorsList []string, code string) bool {
 // failExhaustedNode fail-fasts the workflow after a plain node's retries are exhausted and it has NO onError
 // handler — the original fail-fast behavior (unchanged), factored out of retryNode so the caller chooses
 // route-vs-fail-fast. It cancels surviving siblings and fails the workflow with the node's error.
-func (s *Server) failExhaustedNode(runID string, cur *agentsv1beta1.WorkflowStep, prog *nodeProgress, failed *run.Run) {
+func (s *Server) failExhaustedNode(ctx context.Context, runID string, cur *agentsv1beta1.WorkflowStep, prog *nodeProgress, failed *run.Run) {
 	reason := failed.Error
 	if reason == "" {
 		reason = fmt.Sprintf("node %q sub-run ended %s", cur.Name, failed.Status)
 	}
-	s.cancelCascade(runID, "cancelled: sibling node failed (workflow fail-fast)")
-	s.failWorkflow(runID, fmt.Sprintf("workflow node %q failed after %d attempt(s): %s", cur.Name, prog.Attempts+1, reason))
+	s.cancelCascade(ctx, runID, "cancelled: sibling node failed (workflow fail-fast)")
+	s.failWorkflow(ctx, runID, fmt.Sprintf("workflow node %q failed after %d attempt(s): %s", cur.Name, prog.Attempts+1, reason))
 }
 
 // advanceFrom computes the successor of a just-completed node and returns it (or done). It clears Current +
@@ -430,7 +431,7 @@ func (s *Server) advanceFrom(
 ) (next *agentsv1beta1.WorkflowStep, done, consumed bool) {
 	nextName, err := s.nodeSuccessor(cur, cursor)
 	if err != nil {
-		s.failWorkflow(runID, fmt.Sprintf("workflow node %q: evaluating edges: %v", cur.Name, err))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow node %q: evaluating edges: %v", cur.Name, err))
 		return nil, false, true
 	}
 	cursor.Current = ""
@@ -457,10 +458,10 @@ func (s *Server) nodeSuccessor(step *agentsv1beta1.WorkflowStep, cursor *workflo
 // loadTerminalChild loads a node's sub-run and reports whether it is loadable + terminal. On a load error it
 // fail-fasts the workflow and returns ok=false. terminal=false (with ok=true) means the wake fired but the
 // child is not terminal yet (a defensive case the caller re-suspends on).
-func (s *Server) loadTerminalChild(runID, nodeName, childID string) (child *run.Run, ok, terminal bool) {
+func (s *Server) loadTerminalChild(ctx context.Context, runID, nodeName, childID string) (child *run.Run, ok, terminal bool) {
 	child, err := s.runStore.Get(childID)
 	if err != nil {
-		s.failWorkflow(runID, fmt.Sprintf("workflow node %q: could not load its sub-run %q: %v", nodeName, childID, err))
+		s.failWorkflow(ctx, runID, fmt.Sprintf("workflow node %q: could not load its sub-run %q: %v", nodeName, childID, err))
 		return nil, false, false
 	}
 	return child, true, child.Status.IsTerminal()
@@ -470,13 +471,13 @@ func (s *Server) loadTerminalChild(runID, nodeName, childID string) (child *run.
 // should not happen, but proceed on a non-answer is worse). It re-suspends under the node's REAL mode
 // (ADR 0075 §1): a fail-fast / any-success node must not silently degrade to plain WaitAll on a re-suspend,
 // or a later item outcome could fail to wake it early. Best-effort; a fail is surfaced.
-func (s *Server) defensiveResuspend(runID, nodeName string, childIDs []string, mode run.WaitMode) {
+func (s *Server) defensiveResuspend(ctx context.Context, runID, nodeName string, childIDs []string, mode run.WaitMode) {
 	s.log.Info("workflow: awaited node not terminal on resume; re-suspending", "run", runID, "node", nodeName, "children", childIDs, "mode", mode)
 	if _, err := s.runStore.Suspend(runID, childIDs, mode, nil); err != nil {
 		if cur, gErr := s.runStore.Get(runID); gErr == nil && cur.Status == run.StatusWaiting {
 			return
 		}
-		s.failWorkflow(runID, fmt.Sprintf("workflow node %q: re-suspend failed: %v", nodeName, err))
+		s.failWorkflow(ctx, runID, fmt.Sprintf("workflow node %q: re-suspend failed: %v", nodeName, err))
 	}
 }
 
@@ -513,15 +514,15 @@ func (s *Server) retryNode(
 	attempt := prog.Attempts + 1 // the next attempt (1-based for retries; attempt 0 was the original).
 	input, err := s.buildNodeInput(cur, cursor)
 	if err != nil {
-		s.failWorkflow(runID, fmt.Sprintf("workflow node %q: building retry input: %v", cur.Name, err))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow node %q: building retry input: %v", cur.Name, err))
 		return false
 	}
 	childID := run.SpawnRunID(runID, cur.Name, fmt.Sprintf("retry:%d", attempt))
-	if !s.reserveNodeSpawn(runID, rn) {
+	if !s.reserveNodeSpawn(cursorFenceCtx(cursor), runID, rn) {
 		return false // budget exhausted → fail-fasted.
 	}
 	if err := s.spawnWorkflowNode(rn, cur, childID, input); err != nil {
-		s.failWorkflow(runID, fmt.Sprintf("workflow node %q: launching retry sub-run: %v", cur.Name, err))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow node %q: launching retry sub-run: %v", cur.Name, err))
 		return false
 	}
 	prog.State = cursorLaunched
@@ -585,17 +586,17 @@ func (s *Server) enterPlainNode(
 ) {
 	input, err := s.buildNodeInput(node, cursor)
 	if err != nil {
-		s.failWorkflow(runID, fmt.Sprintf("workflow node %q: building input: %v", node.Name, err))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow node %q: building input: %v", node.Name, err))
 		return
 	}
 	// Idempotent launch: a deterministic sub-run id (attempt-0 index "0") so a reclaimed executor re-launching
 	// finds the existing sub-run instead of double-spawning.
 	childID := run.SpawnRunID(runID, node.Name, workflowIterationIndex)
-	if !s.reserveNodeSpawn(runID, rn) {
+	if !s.reserveNodeSpawn(cursorFenceCtx(cursor), runID, rn) {
 		return
 	}
 	if err := s.spawnWorkflowNode(rn, node, childID, input); err != nil {
-		s.failWorkflow(runID, fmt.Sprintf("workflow node %q: launching its sub-run: %v", node.Name, err))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow node %q: launching its sub-run: %v", node.Name, err))
 		return
 	}
 	cursor.Nodes[node.Name] = &nodeProgress{State: cursorLaunched, ChildID: childID}
@@ -612,7 +613,7 @@ func (s *Server) enterPlainNode(
 func (s *Server) suspendOnChildren(runID, nodeName string, childIDs []string, mode run.WaitMode, cursor *workflowCursor) bool {
 	cursorJSON, err := cursor.marshal()
 	if err != nil {
-		s.failWorkflow(runID, fmt.Sprintf("workflow node %q: encoding cursor: %v", nodeName, err))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow node %q: encoding cursor: %v", nodeName, err))
 		return false
 	}
 	if _, err := s.runStore.Suspend(runID, childIDs, mode, func(r *run.Run) error {
@@ -629,7 +630,7 @@ func (s *Server) suspendOnChildren(runID, nodeName string, childIDs []string, mo
 		if cur, gErr := s.runStore.Get(runID); gErr == nil && cur.Status == run.StatusWaiting {
 			return true // already waiting (a reclaim re-suspended) — idempotent.
 		}
-		s.failWorkflow(runID, fmt.Sprintf("workflow node %q: suspending on its sub-run(s): %v", nodeName, err))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow node %q: suspending on its sub-run(s): %v", nodeName, err))
 		return false
 	}
 	for _, cid := range childIDs {
@@ -646,7 +647,7 @@ func (s *Server) suspendOnChildren(runID, nodeName string, childIDs []string, mo
 // with no budget block (MaxTotalSpawns == 0) skips the gate (unbounded is the CRD's own default-less case, but
 // the CRD defaults MaxTotalSpawns to 20). Fails CLOSED — a store error denies the launch. Returns true when the
 // launch is within budget; false when it already fail-fasted the workflow.
-func (s *Server) reserveNodeSpawn(runID string, rn *run.Run) bool {
+func (s *Server) reserveNodeSpawn(ctx context.Context, runID string, rn *run.Run) bool {
 	spec, err := parseWorkflowSnapshot(rn.SpecSnapshot)
 	if err != nil || spec.Budget == nil || spec.Budget.MaxTotalSpawns <= 0 {
 		return true // no budget configured → no dynamic gate (the CRD default fills this in for real workflows).
@@ -658,12 +659,12 @@ func (s *Server) reserveNodeSpawn(runID string, rn *run.Run) bool {
 	ok, rErr := s.runStore.ReserveSpawn(root, int(spec.Budget.MaxTotalSpawns))
 	if rErr != nil {
 		s.log.Error(rErr, "workflow: spawn budget reservation failed", "run", runID, "root", root)
-		s.failWorkflow(runID, "workflow node launch denied: spawn budget check failed") // fail closed
+		s.failWorkflow(ctx, runID, "workflow node launch denied: spawn budget check failed") // fail closed
 		return false
 	}
 	if !ok {
-		s.cancelCascade(runID, "cancelled: sibling node failed (workflow fail-fast)")
-		s.failWorkflow(runID, fmt.Sprintf("workflow node launch denied: total spawn budget (%d) exhausted", spec.Budget.MaxTotalSpawns))
+		s.cancelCascade(ctx, runID, "cancelled: sibling node failed (workflow fail-fast)")
+		s.failWorkflow(ctx, runID, fmt.Sprintf("workflow node launch denied: total spawn budget (%d) exhausted", spec.Budget.MaxTotalSpawns))
 		return false
 	}
 	return true
@@ -692,17 +693,17 @@ func (s *Server) enterMapNode(
 ) {
 	spec, err := parseWorkflowSnapshot(rn.SpecSnapshot)
 	if err != nil {
-		s.failWorkflow(runID, fmt.Sprintf("workflow map node %q: invalid spec snapshot: %v", node.Name, err))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow map node %q: invalid spec snapshot: %v", node.Name, err))
 		return
 	}
-	doStep := s.mapDoStep(runID, spec, node)
+	doStep := s.mapDoStep(cursorFenceCtx(cursor), runID, spec, node)
 	if doStep == nil {
 		return // already fail-fasted (dangling map.do — a validation invariant, defended here).
 	}
 
 	items, err := s.evalMapList(node, cursor)
 	if err != nil {
-		s.failWorkflow(runID, fmt.Sprintf("workflow map node %q: evaluating map.over: %v", node.Name, err))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow map node %q: evaluating map.over: %v", node.Name, err))
 		return
 	}
 
@@ -711,15 +712,15 @@ func (s *Server) enterMapNode(
 	for i, item := range items {
 		input, err := s.buildMapItemInput(doStep, node.Map.As, item, cursor)
 		if err != nil {
-			s.failWorkflow(runID, fmt.Sprintf("workflow map node %q: building item[%d] input: %v", node.Name, i, err))
+			s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow map node %q: building item[%d] input: %v", node.Name, i, err))
 			return
 		}
 		childID := run.SpawnRunID(runID, node.Name, fmt.Sprintf("map:%d", i))
-		if !s.reserveNodeSpawn(runID, rn) {
+		if !s.reserveNodeSpawn(cursorFenceCtx(cursor), runID, rn) {
 			return // budget exhausted mid-fan-out → fail-fasted (the map-bomb backstop).
 		}
 		if err := s.spawnWorkflowNode(rn, doStep, childID, input); err != nil {
-			s.failWorkflow(runID, fmt.Sprintf("workflow map node %q: launching item[%d] sub-run: %v", node.Name, i, err))
+			s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow map node %q: launching item[%d] sub-run: %v", node.Name, i, err))
 			return
 		}
 		children[i] = childID
@@ -782,7 +783,7 @@ func (s *Server) resumeMapNode(
 	}
 	mp := prog.Map
 	if mp == nil {
-		s.failWorkflow(runID, fmt.Sprintf("workflow map node %q: cursor has no map progress", cur.Name))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow map node %q: cursor has no map progress", cur.Name))
 		return nil, false, true
 	}
 
@@ -793,7 +794,7 @@ func (s *Server) resumeMapNode(
 	collected := make([]json.RawMessage, len(mp.Children))
 	allTerminal := true
 	for i, cid := range mp.Children {
-		child, ok, terminal := s.loadTerminalChild(runID, cur.Name, cid)
+		child, ok, terminal := s.loadTerminalChild(cursorFenceCtx(cursor), runID, cur.Name, cid)
 		if !ok {
 			return nil, false, true // load failed → already failed the workflow.
 		}
@@ -807,8 +808,8 @@ func (s *Server) resumeMapNode(
 			if reason == "" {
 				reason = fmt.Sprintf("item %d sub-run ended %s", i, child.Status)
 			}
-			s.cancelCascade(runID, "cancelled: sibling node failed (workflow fail-fast)")
-			s.failWorkflow(runID, fmt.Sprintf("workflow map node %q item %d failed: %s", cur.Name, i, reason))
+			s.cancelCascade(cursorFenceCtx(cursor), runID, "cancelled: sibling node failed (workflow fail-fast)")
+			s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow map node %q item %d failed: %s", cur.Name, i, reason))
 			return nil, false, true
 		}
 		collected[i] = decodeNodeOutput(child)
@@ -817,14 +818,14 @@ func (s *Server) resumeMapNode(
 		// The wake fired before every item is terminal (a spurious/early kick under fail-fast when the FIRST
 		// terminal child succeeded) — re-suspend defensively under the node's real mode so a later failure
 		// still wakes us early.
-		s.defensiveResuspend(runID, cur.Name, mp.Children, run.WaitAllFailFast)
+		s.defensiveResuspend(cursorFenceCtx(cursor), runID, cur.Name, mp.Children, run.WaitAllFailFast)
 		return nil, false, true
 	}
 
 	// All items succeeded → the map node's output is the ordered JSON list of the item outputs.
 	list, err := json.Marshal(collected)
 	if err != nil {
-		s.failWorkflow(runID, fmt.Sprintf("workflow map node %q: encoding collected outputs: %v", cur.Name, err))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow map node %q: encoding collected outputs: %v", cur.Name, err))
 		return nil, false, true
 	}
 	mp.Collected = collected
@@ -845,7 +846,7 @@ func (s *Server) resumeMapNodeAny(
 ) (next *agentsv1beta1.WorkflowStep, done, consumed bool) {
 	allTerminal := true
 	for i, cid := range mp.Children {
-		child, ok, terminal := s.loadTerminalChild(runID, cur.Name, cid)
+		child, ok, terminal := s.loadTerminalChild(cursorFenceCtx(cursor), runID, cur.Name, cid)
 		if !ok {
 			return nil, false, true // load failed → already failed the workflow.
 		}
@@ -856,10 +857,10 @@ func (s *Server) resumeMapNodeAny(
 		if child.Status == run.StatusSucceeded {
 			// FIRST success wins: its output (a single-element list) is the map's output; cancel the rest.
 			out := decodeNodeOutput(child)
-			s.cancelCascade(runID, "cancelled: sibling node failed (workflow fail-fast)")
+			s.cancelCascade(cursorFenceCtx(cursor), runID, "cancelled: sibling node failed (workflow fail-fast)")
 			list, err := json.Marshal([]json.RawMessage{out})
 			if err != nil {
-				s.failWorkflow(runID, fmt.Sprintf("workflow map node %q: encoding winning item %d output: %v", cur.Name, i, err))
+				s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow map node %q: encoding winning item %d output: %v", cur.Name, i, err))
 				return nil, false, true
 			}
 			mp.Collected = []json.RawMessage{out}
@@ -869,21 +870,21 @@ func (s *Server) resumeMapNodeAny(
 	}
 	if allTerminal {
 		// EXHAUSTION: every item is terminal and none succeeded → the any-of has no winner → fail the map.
-		s.failWorkflow(runID, fmt.Sprintf("workflow map node %q: all %d items failed (completion: any, no successful item)", cur.Name, len(mp.Children)))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow map node %q: all %d items failed (completion: any, no successful item)", cur.Name, len(mp.Children)))
 		return nil, false, true
 	}
 	// No success yet, some items still running → re-suspend defensively under the node's real mode so the
 	// next success (or the last failure = exhaustion) wakes us. This covers a reclaim/spurious kick.
-	s.defensiveResuspend(runID, cur.Name, mp.Children, run.WaitAnySuccess)
+	s.defensiveResuspend(cursorFenceCtx(cursor), runID, cur.Name, mp.Children, run.WaitAnySuccess)
 	return nil, false, true
 }
 
 // mapDoStep resolves a map node's `do` step (the per-item work). A dangling do is a validation invariant
 // (checkStep enforces it); we defend it here rather than panic on an unknown index.
-func (s *Server) mapDoStep(runID string, spec *agentsv1beta1.WorkflowSpec, node *agentsv1beta1.WorkflowStep) *agentsv1beta1.WorkflowStep {
+func (s *Server) mapDoStep(ctx context.Context, runID string, spec *agentsv1beta1.WorkflowSpec, node *agentsv1beta1.WorkflowStep) *agentsv1beta1.WorkflowStep {
 	idx := stepIndex(spec, node.Map.Do)
 	if idx < 0 {
-		s.failWorkflow(runID, fmt.Sprintf("workflow map node %q references unknown do step %q", node.Name, node.Map.Do))
+		s.failWorkflow(ctx, runID, fmt.Sprintf("workflow map node %q references unknown do step %q", node.Name, node.Map.Do))
 		return nil
 	}
 	return &spec.Steps[idx]
@@ -981,16 +982,16 @@ func (s *Server) resumeLoopNode(
 	}
 	lp := prog.Loop
 	if lp == nil || lp.ChildID == "" {
-		s.failWorkflow(runID, fmt.Sprintf("workflow loop node %q: cursor has no in-flight iteration", cur.Name))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow loop node %q: cursor has no in-flight iteration", cur.Name))
 		return nil, false, true
 	}
 
-	child, ok, terminal := s.loadTerminalChild(runID, cur.Name, lp.ChildID)
+	child, ok, terminal := s.loadTerminalChild(cursorFenceCtx(cursor), runID, cur.Name, lp.ChildID)
 	if !ok {
 		return nil, false, true
 	}
 	if !terminal {
-		s.defensiveResuspend(runID, cur.Name, []string{lp.ChildID}, run.WaitAll)
+		s.defensiveResuspend(cursorFenceCtx(cursor), runID, cur.Name, []string{lp.ChildID}, run.WaitAll)
 		return nil, false, true
 	}
 	if child.Status != run.StatusSucceeded {
@@ -1000,8 +1001,8 @@ func (s *Server) resumeLoopNode(
 		if reason == "" {
 			reason = fmt.Sprintf("iteration %d sub-run ended %s", lp.Iteration, child.Status)
 		}
-		s.cancelCascade(runID, "cancelled: sibling node failed (workflow fail-fast)")
-		s.failWorkflow(runID, fmt.Sprintf("workflow loop node %q iteration %d failed: %s", cur.Name, lp.Iteration, reason))
+		s.cancelCascade(cursorFenceCtx(cursor), runID, "cancelled: sibling node failed (workflow fail-fast)")
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow loop node %q iteration %d failed: %s", cur.Name, lp.Iteration, reason))
 		return nil, false, true
 	}
 
@@ -1009,7 +1010,7 @@ func (s *Server) resumeLoopNode(
 	output := decodeNodeOutput(child)
 	stop, err := s.evalLoopUntil(cur, cursor, output)
 	if err != nil {
-		s.failWorkflow(runID, fmt.Sprintf("workflow loop node %q: evaluating loop.until: %v", cur.Name, err))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow loop node %q: evaluating loop.until: %v", cur.Name, err))
 		return nil, false, true
 	}
 	// Exit when `until` is true OR the next iteration would exceed maxIterations (the hard bound).
@@ -1034,27 +1035,27 @@ func (s *Server) launchLoopIteration(
 ) {
 	spec, err := parseWorkflowSnapshot(rn.SpecSnapshot)
 	if err != nil {
-		s.failWorkflow(runID, fmt.Sprintf("workflow loop node %q: invalid spec snapshot: %v", node.Name, err))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow loop node %q: invalid spec snapshot: %v", node.Name, err))
 		return
 	}
 	idx := stepIndex(spec, node.Loop.Do)
 	if idx < 0 {
-		s.failWorkflow(runID, fmt.Sprintf("workflow loop node %q references unknown do step %q", node.Name, node.Loop.Do))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow loop node %q references unknown do step %q", node.Name, node.Loop.Do))
 		return
 	}
 	doStep := &spec.Steps[idx]
 
 	input, err := s.buildNodeInput(doStep, cursor)
 	if err != nil {
-		s.failWorkflow(runID, fmt.Sprintf("workflow loop node %q: building iteration input: %v", node.Name, err))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow loop node %q: building iteration input: %v", node.Name, err))
 		return
 	}
 	childID := run.SpawnRunID(runID, node.Name, fmt.Sprintf("loop:%d", prog.Loop.Iteration))
-	if !s.reserveNodeSpawn(runID, rn) {
+	if !s.reserveNodeSpawn(cursorFenceCtx(cursor), runID, rn) {
 		return // budget exhausted → fail-fasted (the runaway-loop backstop).
 	}
 	if err := s.spawnWorkflowNode(rn, doStep, childID, input); err != nil {
-		s.failWorkflow(runID, fmt.Sprintf("workflow loop node %q: launching iteration %d: %v", node.Name, prog.Loop.Iteration, err))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow loop node %q: launching iteration %d: %v", node.Name, prog.Loop.Iteration, err))
 		return
 	}
 	prog.State = cursorLaunched
@@ -1167,15 +1168,8 @@ func (s *Server) spawnWorkflowNode(
 		return fmt.Errorf("creating the node sub-run: %w", err)
 	}
 
-	// Non-dispatch (dev/single-pod / test-without-worker-pool): execute the sub-run in-process so the node
-	// makes progress without a running worker pool. In dispatch mode leave it queued for the pool.
-	if !s.runWorkerDispatch {
-		execCtx := contextWithConversationID(context.Background(), wf.ConversationID)
-		if capToken, minted := s.mintRunCapability(wf.CallerUsername, wf.Namespace, node.AgentRef, wf.Boundary, childID); minted {
-			execCtx = contextWithRunCapability(execCtx, capToken)
-		}
-		go s.executeRun(execCtx, childID, endpoint, input)
-	}
+	// The node's child run is left queued for the worker pool, which re-mints its capability from the
+	// workflow's inherited identity. One run path since M143.1 (ADR 0125).
 	return nil
 }
 
@@ -1203,7 +1197,7 @@ func (s *Server) completeWorkflow(runID string, spec *agentsv1beta1.WorkflowSpec
 func (s *Server) gatePlanApproval(runID string, cursor *workflowCursor) {
 	cursorJSON, err := cursor.marshal()
 	if err != nil {
-		s.failWorkflow(runID, fmt.Sprintf("workflow plan-approval gate: encoding cursor: %v", err))
+		s.failWorkflow(cursorFenceCtx(cursor), runID, fmt.Sprintf("workflow plan-approval gate: encoding cursor: %v", err))
 		return
 	}
 	if _, err := s.runStore.Update(runID, func(r *run.Run) error {
@@ -1232,8 +1226,8 @@ func (s *Server) gatePlanApproval(runID string, cursor *workflowCursor) {
 
 // failWorkflow transitions the workflow run to `failed` with reason via the normal terminal path (waking a
 // parent if the workflow is itself a sub-run). It is the executor's fail-fast + honest-error sink.
-func (s *Server) failWorkflow(runID, reason string) {
-	if err := s.terminalTransition(runID, func(r *run.Run) error {
+func (s *Server) failWorkflow(ctx context.Context, runID, reason string) {
+	if err := s.terminalTransitionFenced(ctx, runID, func(r *run.Run) error {
 		if r.Status.IsTerminal() {
 			return fmt.Errorf("already %s", r.Status) // idempotent: don't re-fail a terminal run.
 		}
@@ -1245,6 +1239,27 @@ func (s *Server) failWorkflow(runID, reason string) {
 	}
 }
 
+// holdsRunLease reports whether the caller is still the worker that holds runID's lease. It is the same
+// question terminalTransitionFenced asks, exposed for writes that are not a terminal transition — the
+// cancel cascade being the one that matters, since it writes to OTHER runs entirely.
+//
+// A ctx with no worker id answers true: that is a caller with no lease identity to check (a direct API
+// cancel, a test), and refusing those would break the deliberate paths rather than the raced ones.
+func (s *Server) holdsRunLease(ctx context.Context, runID string) bool {
+	if selfFenced(ctx) {
+		return false // cannot prove ownership ⇒ never cascade (M143.3)
+	}
+	workerID := workerIDFromContext(ctx)
+	if workerID == "" {
+		return true
+	}
+	rn, err := s.runStore.Get(runID)
+	if err != nil {
+		return false // cannot verify ⇒ do not perform a destructive cascade
+	}
+	return rn.WorkerID == workerID
+}
+
 // cancelCascade cancels the ENTIRE SUBTREE rooted at rootID — every non-terminal DESCENDANT (L9, ADR 0091),
 // not just its direct children. Durable suspend/resume (L7) removed the blocking long-poll that used to reap a
 // canceled parent's nested-blocking descendants, so a depth-1 cancel would leak grandchildren burning tokens
@@ -1252,7 +1267,17 @@ func (s *Server) failWorkflow(runID, reason string) {
 // too (every non-terminal state → cancelled is a legal transition). `reason` is stamped on each cancelled run's
 // Error. rootID itself is NOT cancelled here — the caller already transitioned it (a fail-fast node / a user
 // cancel); only its descendants are. Best-effort + idempotent (a descendant already terminal is skipped).
-func (s *Server) cancelCascade(rootID, reason string) {
+func (s *Server) cancelCascade(ctx context.Context, rootID, reason string) {
+	// GATED on the fence (M143.2, G15). The cascade is the most destructive thing the executor does — it
+	// walks an entire subtree and cancels every live descendant. A worker that lost its lease and then
+	// hit a node failure would otherwise cancel the work its REPLACEMENT is legitimately running: the
+	// zombie's fail-fast destroying the peer's healthy retry. Fencing the terminal write alone was not
+	// enough, because the cascade is a separate set of writes on OTHER runs.
+	if !s.holdsRunLease(ctx, rootID) {
+		s.log.Info("workflow: cancel cascade fenced — a peer reclaimed the run's lease (G15)",
+			"root", rootID, "reason", reason)
+		return
+	}
 	// Index non-root runs by parent for an O(1) frontier walk over the subtree.
 	childrenOf := map[string][]*run.Run{}
 	for _, r := range s.runStore.List() {
@@ -1311,15 +1336,42 @@ func (s *Server) terminalTransition(runID string, apply func(*run.Run) error) er
 // internal signal (never a header), unlike the header-attaching ctx values in invoke.go.
 type workerIDCtxKey struct{}
 
-// contextWithWorkerID stamps the run-worker's id on ctx (executeClaimedRun) so executeRun's terminal
-// writes can be fenced on this worker still holding the lease. An INLINE (non-worker) execution — the
-// create/resume/spawn/workflow-node `go executeRun` paths — carries no worker id, so the fence is a
-// no-op there (those runs are not lease-fenced; their terminal write is unconditional as before).
+// contextWithWorkerID stamps the run-worker's id on ctx (executeClaimedRun) so a run's terminal writes —
+// and, since M143.2, its FAIL writes and cancel cascade — can be fenced on this worker still holding the
+// lease.
+//
+// Since M143.1 (ADR 0125) retired the in-process run path, a ctx with NO worker id no longer means "an
+// inline execution": every execution is a worker execution. It now means a caller with no lease identity
+// to check — a direct API cancel, or a test — and those are deliberately not fenced, because refusing
+// them would break the deliberate paths rather than the raced ones.
 func contextWithWorkerID(ctx context.Context, workerID string) context.Context {
 	return context.WithValue(ctx, workerIDCtxKey{}, workerID)
 }
 
-// workerIDFromContext returns the run-worker id carried on ctx, or "" for an inline execution.
+// selfFenceCtxKey carries a flag the HEARTBEAT sets when it self-fences (M143.3, m52.G17).
+//
+// It exists because a self-fence is not the same as a definitive lease loss. When a peer reclaims, the
+// run's worker_id changes and the ordinary fence refuses our writes. But when we self-fence — a sustained
+// renew outage means we can no longer PROVE we hold the lease — the peer may not have reclaimed yet, so
+// worker_id still matches us and the fence would happily let a zombie write its obituary over work a peer
+// is about to take. ADR 0098 noted this window as self-mitigating (the same outage usually fails the
+// write too); "usually" is not a guarantee, and this closes it.
+type selfFenceCtxKey struct{}
+
+// contextWithSelfFence attaches the shared flag. The heartbeat sets it; the fenced writers read it.
+func contextWithSelfFence(ctx context.Context, fenced *atomic.Bool) context.Context {
+	return context.WithValue(ctx, selfFenceCtxKey{}, fenced)
+}
+
+// selfFenced reports whether this execution has fenced itself out. Once true, it never writes again:
+// a worker that cannot prove it holds the lease must not record an outcome for the run.
+func selfFenced(ctx context.Context) bool {
+	f, _ := ctx.Value(selfFenceCtxKey{}).(*atomic.Bool)
+	return f != nil && f.Load()
+}
+
+// workerIDFromContext returns the run-worker id carried on ctx, or "" for a caller with no lease
+// identity (a direct API path or a test).
 func workerIDFromContext(ctx context.Context) string {
 	id, _ := ctx.Value(workerIDCtxKey{}).(string)
 	return id
@@ -1352,6 +1404,12 @@ func cursorFenceCtx(c *workflowCursor) context.Context {
 // logged, never surfaced as a run failure (the peer owns the run and terminates it authoritatively).
 // An inline execution (no worker id on ctx) is exactly terminalTransition — unconditional as before.
 func (s *Server) terminalTransitionFenced(ctx context.Context, runID string, apply func(*run.Run) error) error {
+	// A self-fenced worker is out regardless of what the run row still says about ownership (M143.3).
+	if selfFenced(ctx) {
+		s.log.Info("run: terminal write suppressed — this worker self-fenced and cannot prove it holds the lease (G17)",
+			"run", runID)
+		return nil
+	}
 	workerID := workerIDFromContext(ctx)
 	if workerID == "" {
 		return s.terminalTransition(runID, apply)

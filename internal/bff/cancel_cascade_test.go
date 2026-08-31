@@ -17,6 +17,7 @@ limitations under the License.
 package bff
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -49,7 +50,7 @@ func TestCancelCascade_Subtree(t *testing.T) {
 	mk("sibling", "root") // another direct child
 	mk("unrelated", "")   // a separate tree — must NEVER be touched
 
-	s.cancelCascade("root", "test subtree cancel")
+	s.cancelCascade(context.Background(), "root", "test subtree cancel")
 
 	assertStatus := func(id string, want run.Status) {
 		t.Helper()
