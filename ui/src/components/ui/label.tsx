@@ -20,7 +20,7 @@ type LabelProps = React.ComponentProps<"label"> & {
 
 const LABEL_VARIANTS: Record<NonNullable<LabelProps["variant"]>, string> = {
   default: "text-sm font-medium text-foreground",
-  key: "font-mono text-xs uppercase tracking-wide text-faint",
+  key: "font-mono text-2xs uppercase tracking-wide text-faint",
 };
 
 const Label = React.forwardRef<HTMLLabelElement, LabelProps>(

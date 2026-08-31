@@ -74,7 +74,12 @@ export type ColumnPriority = 1 | 2 | 3 | 4;
  * priority → responsive visibility (§4.4). Written as literal class strings so
  * Tailwind's content scanner sees them.
  */
-const PRIORITY_CLASS: Record<ColumnPriority, string> = {
+/**
+ * Priority -> responsive class. Exported because TreeTable applies the SAME
+ * budget: two tables that drop columns at different widths would be two design
+ * systems wearing one name, and the duplication was already drifting.
+ */
+export const PRIORITY_CLASS: Record<ColumnPriority, string> = {
   1: "", //                        always visible
   2: "hidden md:table-cell", //    hidden below 768
   3: "hidden lg:table-cell", //    hidden below 1024
@@ -200,7 +205,7 @@ export interface Column<T> {
  * wins; otherwise `hideOnMobile` means priority 2 (its old meaning, "hidden
  * below md"); otherwise the column is priority 1 and never drops.
  */
-function columnPriority<T>(col: Column<T>): ColumnPriority {
+export function columnPriority<T>(col: Column<T>): ColumnPriority {
   if (col.priority !== undefined) return col.priority;
   return col.hideOnMobile ? 2 : 1;
 }
