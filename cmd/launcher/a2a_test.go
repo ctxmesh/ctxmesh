@@ -83,7 +83,7 @@ func newTestA2AServer(
 		t.Fatal(err)
 	}
 
-	s := newA2AServer(cfg, tp.Tracer(tracerName), propagation.TraceContext{})
+	s := newA2AServer(cfg, tp.Tracer(tracerName), propagation.TraceContext{}, nil)
 	// Route every target to the fake peer's base URL (the forward path appends
 	// /invoke).
 	s.resolveHost = func(string) string { return peerURL.Scheme + "://" + peerURL.Host }
@@ -334,7 +334,7 @@ func TestA2AChainedHopDoesNotAliasIncomingPath(t *testing.T) {
 	t.Parallel()
 	cfg := baseCfg()
 	cfg.SelfName = "research"
-	s := newA2AServer(cfg, noop.NewTracerProvider().Tracer("x"), propagation.TraceContext{})
+	s := newA2AServer(cfg, noop.NewTracerProvider().Tracer("x"), propagation.TraceContext{}, nil)
 
 	incoming := &envelope{Path: []string{"orchestrator"}, Depth: 1}
 	original := append([]string(nil), incoming.Path...)
@@ -742,7 +742,7 @@ func TestA2AUnknownTarget(t *testing.T) {
 	t.Parallel()
 	// Point resolveHost at a name guaranteed to NXDOMAIN.
 	_, tp := newTestTracer(t)
-	s := newA2AServer(baseCfg(), tp.Tracer(tracerName), propagation.TraceContext{})
+	s := newA2AServer(baseCfg(), tp.Tracer(tracerName), propagation.TraceContext{}, nil)
 	s.resolveHost = func(target string) string {
 		return "http://" + target + ".this-domain-does-not-exist.invalid"
 	}
@@ -759,7 +759,7 @@ func TestA2ABlockedTargetFastFails(t *testing.T) {
 	// A closed port on localhost: the dial is refused immediately (the
 	// NetworkPolicy "connection refused" shape) → typed blocked, no hang.
 	_, tp := newTestTracer(t)
-	s := newA2AServer(baseCfg(), tp.Tracer(tracerName), propagation.TraceContext{})
+	s := newA2AServer(baseCfg(), tp.Tracer(tracerName), propagation.TraceContext{}, nil)
 	s.resolveHost = func(string) string { return "http://127.0.0.1:1" } // port 1: refused.
 
 	rr := callA2A(t, s, context.Background(), "blocked-peer", `{}`, nil)

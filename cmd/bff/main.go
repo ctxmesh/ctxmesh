@@ -48,6 +48,7 @@ import (
 
 	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	"github.com/ctxmesh/agentry/internal/asyncbus"
 	"github.com/ctxmesh/agentry/internal/bff"
 	"github.com/ctxmesh/agentry/internal/controlplane"
 	"github.com/ctxmesh/agentry/internal/controlplane/agentcapability"
@@ -424,14 +425,18 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	knowledgeStore := knowledge.NewPostgresStore(cpDB)
 	ingestEmbedder := newIngestEmbedder(log)
 
+	// The durable async backend for A2A hops (M141.4, ADR 0121). Built once and used for BOTH halves:
+	// the publish edge an agent hands a hop to, and the dispatcher that delivers it. Absent config ⇒
+	// nil ⇒ neither is wired, and Knative Eventing stays the only async path (today's behaviour).
+	asyncBus := newAsyncBus(log)
+	if asyncBus != nil {
+		defer func() { _ = asyncBus.Close() }()
+	}
+
 	// Scanned-PDF OCR (M140.5, ADR 0119): the executor OCRs an image-only PDF via this offline service when its
 	// born-digital text is insufficient. Wired from INGEST_OCR_URL; unset ⇒ nil ⇒ a scanned PDF stays honestly
 	// PartiallyIngested (strictly additive).
-	var ingestOCR ocr.OCR
-	if ocrURL := strings.TrimSpace(os.Getenv("INGEST_OCR_URL")); ocrURL != "" {
-		ingestOCR = ocr.NewHTTPOCR(ocrURL, nil)
-		log.Info("scanned-PDF OCR enabled (M140.5): OCR service wired", "ocr", ocrURL)
-	}
+	ingestOCR := newIngestOCR(log)
 
 	// Dataset store (M69, ADR 0062 Fork 1): rides the same cpDB (migration 0007 applied by controlplane.Migrate).
 	// The dataset-export executor (m69.2) writes it directly (governance #8: the trusted run-worker holds cpDB +
@@ -482,8 +487,12 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		AgentCapabilities:       agentcapability.NewPostgresStore(cpDB),
 		DiscoveryReranker:       discoveryReranker(log),
 		DiscoveryEmbeddingRoute: strings.TrimSpace(os.Getenv("DISCOVERY_EMBEDDING_ROUTE")),
-		ConvStore:               convStore,
-		PromptStore:             promptStore,
+		// Async A2A backend (M141.4, ADR 0121): the durable bus an agent hands a hop to. nil ⇒ the
+		// publish edge is absent and the dispatcher never starts, so Knative Eventing remains the only
+		// async path — exactly today's behaviour.
+		AsyncPublisher: asyncBus,
+		ConvStore:      convStore,
+		PromptStore:    promptStore,
 		// Production git-pointer prompt resolver (m121.3, ADR 0008) — the drop-in for the
 		// fixture Resolver, so GET /api/promptversions/{ns}/{name}/diff resolves REAL content
 		// from git (github.com raw). PROMPT_GIT_TOKEN (a PAT via a Secret, never committed)
@@ -558,6 +567,12 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 
 	maybeStartOnlineScorer(ctx, srv, adapters)
 	maybeStartCostRollupWorker(ctx, srv)
+	// Async A2A dispatcher (M141.4, ADR 0121): consumes durable hops and delivers them over HTTP, so the
+	// agent-side contract is unchanged by the backend swap. No bus ⇒ no dispatcher.
+	if asyncBus != nil {
+		srv.StartAsyncDispatcher(ctx, bff.AsyncDispatcherConfig{Subscriber: asyncBus})
+		log.Info("async A2A dispatcher started (ADR 0121)")
+	}
 	maybeStartRecipeOverlay(ctx, srv)
 
 	errCh := make(chan error, 1)
@@ -754,6 +769,57 @@ func discoveryReranker(log logr.Logger) credplane.Reranker {
 	}
 	log.Info("capability discovery: cross-encoder rerank wired (ADR 0117)", "reranker", rerankURL)
 	return credplane.NewHTTPReranker(rerankURL, nil)
+}
+
+// newIngestOCR wires the offline OCR service for scanned-PDF ingestion (M140.5, ADR 0119) from
+// INGEST_OCR_URL. Unset ⇒ nil ⇒ a scanned PDF stays honestly PartiallyIngested (strictly additive).
+func newIngestOCR(log logr.Logger) ocr.OCR {
+	ocrURL := strings.TrimSpace(os.Getenv("INGEST_OCR_URL"))
+	if ocrURL == "" {
+		return nil
+	}
+	log.Info("scanned-PDF OCR enabled (M140.5): OCR service wired", "ocr", ocrURL)
+	return ocr.NewHTTPOCR(ocrURL, nil)
+}
+
+// newAsyncBus connects the durable async backend for A2A hops (M141.4, ADR 0121) when ASYNC_BACKEND
+// names one. Today that is "jetstream" (NATS_URL, optional NATS_CREDENTIALS_FILE); the seam keeps another
+// broker a config swap rather than a code change.
+//
+// A configured-but-unreachable broker returns nil with a LOUD log rather than crashing the BFF: async A2A
+// is one feature among many here, and taking the whole console down because a broker is late to start
+// would be a worse outcome than the honest degrade (the publish edge is simply absent, so a producer gets
+// a clear 404 instead of a silent black hole).
+func newAsyncBus(log logr.Logger) *asyncbus.JetStreamBus {
+	backend := strings.ToLower(strings.TrimSpace(os.Getenv("ASYNC_BACKEND")))
+	if backend == "" {
+		return nil
+	}
+	if backend != "jetstream" {
+		log.Info("async A2A backend NOT started: unknown ASYNC_BACKEND", "backend", backend)
+		return nil
+	}
+	natsURL := strings.TrimSpace(os.Getenv("NATS_URL"))
+	if natsURL == "" {
+		log.Info("async A2A backend NOT started: ASYNC_BACKEND=jetstream needs NATS_URL")
+		return nil
+	}
+	// A bounded connect: a broker that never answers must not hold up BFF start-up.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	bus, err := asyncbus.NewJetStream(ctx, asyncbus.JetStreamOptions{
+		URL:             natsURL,
+		CredentialsFile: strings.TrimSpace(os.Getenv("NATS_CREDENTIALS_FILE")),
+		Replicas:        envInt(os.Getenv("NATS_STREAM_REPLICAS")),
+	})
+	if err != nil {
+		log.Error(err, "async A2A backend NOT started: the broker is unreachable — "+
+			"async hops cannot be published until it is", "url", natsURL)
+		return nil
+	}
+	log.Info("async A2A backend connected (ADR 0121): durable hops enabled",
+		"backend", backend, "url", natsURL)
+	return bus
 }
 
 // newIngestEmbedder builds the gateway embedder the KB ingestion executor uses to embed chunk texts directly

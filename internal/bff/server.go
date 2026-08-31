@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ctxmesh/agentry/internal/asyncbus"
 	"github.com/ctxmesh/agentry/internal/controlplane/agentcapability"
 	"github.com/ctxmesh/agentry/internal/controlplane/agentmemory"
 	"github.com/ctxmesh/agentry/internal/controlplane/alertstore"
@@ -176,6 +177,14 @@ type Server struct {
 	// discoveryEmbeddingRoute names the ModelRoute the capability query + descriptors embed through (the
 	// offline embedder, ADR 0116). Empty ⇒ discovery cannot embed and the edge serves an honest 501.
 	discoveryEmbeddingRoute string
+
+	// asyncPublisher is the durable async-backend publisher the A2A publish edge hands hops to (M141.4,
+	// ADR 0121). An agent pod never holds a broker connection — the control plane does — so this is how
+	// an async hop becomes durable. nil ⇒ the publish edge is not wired at all.
+	asyncPublisher asyncbus.Publisher
+	// agentURL resolves an agent's in-cluster address for async delivery. nil ⇒ the cluster-DNS default;
+	// set only by tests, which point it at an httptest server.
+	agentURL func(agent, namespace string) string
 
 	// datasetStore is the control-plane Postgres store for eval datasets (M69, ADR 0062 Fork 1), built from
 	// cpDB. The dataset-export executor (m69.2) WRITES it DIRECTLY — EnsureDataset/AppendCase — copying
@@ -592,6 +601,9 @@ type Options struct {
 	// DiscoveryEmbeddingRoute names the ModelRoute discovery embeds through (DISCOVERY_EMBEDDING_ROUTE).
 	// Empty ⇒ the discovery edge answers 501 rather than guessing a model.
 	DiscoveryEmbeddingRoute string
+	// AsyncPublisher is the durable async backend for A2A hops (M141.4, ADR 0121). Optional — nil ⇒
+	// POST /api/internal/async/publish is not registered. Constructed in cmd/bff/main.go.
+	AsyncPublisher asyncbus.Publisher
 
 	Log logr.Logger
 }
@@ -654,6 +666,7 @@ func NewServer(opts Options) *Server {
 		agentCapabilities:        opts.AgentCapabilities,
 		discoveryReranker:        opts.DiscoveryReranker,
 		discoveryEmbeddingRoute:  strings.TrimSpace(opts.DiscoveryEmbeddingRoute),
+		asyncPublisher:           opts.AsyncPublisher,
 		ocr:                      opts.OCR,
 		judgeCounters:            &judgeCounter{},
 		enrichCache:              newTraceEnrichCache(),
@@ -820,6 +833,9 @@ func (s *Server) Handler() http.Handler {
 	// Capability discovery (M141, ADR 0120): the same internal, capability-authenticated class as spawn —
 	// the caller is a launcher relaying its run capability, not a browser bearer token.
 	s.registerDiscoverRoute(api)
+	// Async A2A publish (M141.4, ADR 0121): the same capability-authenticated class — an agent hands a
+	// durable hop to the platform because it holds no broker connection of its own.
+	s.registerAsyncPublishRoute(api)
 	// Guardrail block ingest (m66.9, ADR 0059 §9): capability-authorized durable compliance record.
 	// Wired alongside the spawn edge — both are internal launcher-to-BFF endpoints authenticated on
 	// the run capability, not a browser bearer token.

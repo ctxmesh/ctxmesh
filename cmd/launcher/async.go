@@ -60,6 +60,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 const (
@@ -389,12 +391,19 @@ func newProxyInvoker(proxyPort int, client *http.Client) func(context.Context, e
 // specs/eventing-scaling.md §"Edge cases: Oversize payload"). A nil off (no
 // OBJECT_STORE_ADDR) or a sub-threshold payload passes through inline unchanged.
 //
+// capToken (M141.4, ADR 0121) is the run capability relayed when brokerURL is the platform's async
+// publish edge instead of a Knative Broker: that edge authenticates on it and derives the sender's
+// namespace + registry from the control plane, so no broker credential ever reaches an agent pod. Empty
+// for a direct-to-Broker publish, which is unchanged.
+//
 // It uses the CloudEvents HTTP binding (binary content mode) so the broker sees a
 // well-formed event with the ce-id/ce-type/ce-source headers a Trigger filters
 // on. A non-2xx broker response is an error (the event was not accepted); a
 // transport failure likewise — the caller treats publish as best-effort and
 // surfaces the typed error, never a bare hang.
-func publishEnvelope(ctx context.Context, client *http.Client, brokerURL string, env envelope, off *offloader) error {
+func publishEnvelope(
+	ctx context.Context, client *http.Client, brokerURL, capToken string, env envelope, off *offloader,
+) error {
 	if off != nil {
 		offloaded, wasOffloaded, err := off.maybeOffload(ctx, env.Payload)
 		if err != nil {
@@ -420,6 +429,13 @@ func publishEnvelope(ctx context.Context, client *http.Client, brokerURL string,
 	// (binary content mode by default).
 	if err := cehttp.WriteRequest(ctx, cloudevents.ToMessage(&evt), req); err != nil {
 		return fmt.Errorf("write CloudEvent to request: %w", err)
+	}
+	// M141.4: when the destination is the platform's async PUBLISH EDGE rather than a Knative Broker,
+	// relay the run capability — that edge authenticates on it and derives the sender's namespace +
+	// registry from the control plane, so an agent pod needs no broker credentials of its own
+	// (ADR 0121). Publishing straight at a Broker URL is unchanged: empty token, no header.
+	if capToken != "" {
+		req.Header.Set(runcap.HeaderName, capToken)
 	}
 
 	resp, err := client.Do(req)

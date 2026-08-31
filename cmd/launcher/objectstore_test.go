@@ -326,7 +326,7 @@ func TestPublishEnvelope_Offloads(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := publishEnvelope(context.Background(), srv.Client(), srv.URL, env, off); err != nil {
+	if err := publishEnvelope(context.Background(), srv.Client(), srv.URL, "", env, off); err != nil {
 		t.Fatalf("publishEnvelope: %v", err)
 	}
 	if gotEvent == nil {
@@ -371,7 +371,7 @@ func TestPublishEnvelope_StoreDown_TypedError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := publishEnvelope(context.Background(), srv.Client(), srv.URL, env, off)
+	err := publishEnvelope(context.Background(), srv.Client(), srv.URL, "", env, off)
 	if err == nil {
 		t.Fatal("expected a typed error when the store is down on publish")
 	}
@@ -400,7 +400,7 @@ func TestPublishEnvelope_NoOffloader_InlinePassthrough(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := publishEnvelope(context.Background(), srv.Client(), srv.URL, env, nil); err != nil {
+	if err := publishEnvelope(context.Background(), srv.Client(), srv.URL, "", env, nil); err != nil {
 		t.Fatalf("publishEnvelope: %v", err)
 	}
 	delivered, err := cloudEventToEnvelope(*gotEvent)
