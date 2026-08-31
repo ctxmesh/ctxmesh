@@ -33,6 +33,16 @@ type RunControlPublisher interface {
 	// Publish SETs the control verb for a run with a bounded TTL. A failure is returned for the caller
 	// to LOG (never fatal to the cancel response — the status flip already happened).
 	Publish(ctx context.Context, namespace, runID, verb string) error
+
+	// PublishScope SETs (verb != "") or CLEARS (verb == "") the marker for an arbitrary SCOPE key —
+	// the kill switch's accelerator (M146, ADR 0126). The key comes from killscope.Scope.MarkerKey and
+	// must match internal/statelayer.scopeKeys byte for byte.
+	//
+	// A scope marker carries NO TTL, unlike the per-run one: a run marker may safely expire because the
+	// run itself is short-lived and its durable status is authoritative, whereas a scope stop lasts
+	// until an operator lifts it. An expiring fleet kill would silently un-kill itself, which is the
+	// failure this whole feature exists to prevent.
+	PublishScope(ctx context.Context, key, verb string) error
 }
 
 // controlVerbCancel is the ONLY control verb v1 handles (real-kill). Future verbs (nudge / take-over)
@@ -103,3 +113,13 @@ func (s *Server) publishCancelMarker(ctx context.Context, namespace, runID strin
 
 // interface assertion.
 var _ RunControlPublisher = (*redisRunControlPublisher)(nil)
+
+func (p *redisRunControlPublisher) PublishScope(ctx context.Context, key, verb string) error {
+	ctx, cancel := context.WithTimeout(ctx, controlPublishTimeout)
+	defer cancel()
+	if verb == "" {
+		return p.rdb.Del(ctx, key).Err()
+	}
+	// No TTL: a scope stop lasts until it is lifted (see the interface doc).
+	return p.rdb.Set(ctx, key, verb, 0).Err()
+}

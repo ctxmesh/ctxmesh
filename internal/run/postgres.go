@@ -920,7 +920,31 @@ func lockRunsOrdered(ctx context.Context, tx *sql.Tx, ids []string) error {
 	return nil
 }
 
-func (p *pgStore) ClaimQueued(workerID string, lease time.Duration) (*Run, error) {
+// claimExclusion renders a ClaimFilter as an additional SQL predicate plus the args it needs, appended
+// to the caller's existing arg list so the placeholder numbers line up. Everything is parameterized —
+// no identifier or value is ever interpolated into the statement text.
+//
+// It returns "" for an empty filter, so the healthy platform runs the exact pre-M146 query.
+func claimExclusion(filter ClaimFilter, args []any) (string, []any) {
+	if filter.Empty() {
+		return "", args
+	}
+	var b strings.Builder
+	for _, ns := range filter.Namespaces {
+		args = append(args, ns)
+		fmt.Fprintf(&b, " AND namespace <> $%d", len(args))
+	}
+	for _, a := range filter.Agents {
+		args = append(args, a.Namespace, a.Agent)
+		fmt.Fprintf(&b, " AND NOT (namespace = $%d AND agent = $%d)", len(args)-1, len(args))
+	}
+	return b.String(), args
+}
+
+func (p *pgStore) ClaimQueued(workerID string, lease time.Duration, filter ClaimFilter) (*Run, error) {
+	if filter.HaltAll {
+		return nil, ErrNoQueuedRun // a fleet stop: claim nothing, leave the queue intact
+	}
 	ctx := context.Background()
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -933,14 +957,17 @@ func (p *pgStore) ClaimQueued(workerID string, lease time.Duration) (*Run, error
 	// and flip to running in the one statement.
 	now := p.clock()
 	exp := now.Add(lease)
-	const claim = `UPDATE runs SET status=$1, worker_id=$2, lease_expires_at=$3, version=version+1, updated_at=$4
+	// The kill exclusion goes INSIDE the sub-select so it stays atomic with FOR UPDATE SKIP LOCKED —
+	// filtering after the claim would already have flipped the run to `running`.
+	args := []any{string(StatusRunning), workerID, exp.UTC(), now.UTC(), string(StatusQueued)}
+	pred, args := claimExclusion(filter, args)
+	claim := `UPDATE runs SET status=$1, worker_id=$2, lease_expires_at=$3, version=version+1, updated_at=$4
 		WHERE id = (
-			SELECT id FROM runs WHERE status=$5 ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1
+			SELECT id FROM runs WHERE status=$5` + pred + ` ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1
 		)
 		RETURNING id`
 	var id string
-	err = tx.QueryRowContext(ctx, claim,
-		string(StatusRunning), workerID, exp.UTC(), now.UTC(), string(StatusQueued)).Scan(&id)
+	err = tx.QueryRowContext(ctx, claim, args...).Scan(&id)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, ErrNoQueuedRun
@@ -1004,7 +1031,10 @@ func (p *pgStore) ReleaseLease(id, workerID string) error {
 	return nil
 }
 
-func (p *pgStore) ClaimReclaimable(workerID string, lease time.Duration) (*Run, error) {
+func (p *pgStore) ClaimReclaimable(workerID string, lease time.Duration, filter ClaimFilter) (*Run, error) {
+	if filter.HaltAll {
+		return nil, ErrNoQueuedRun
+	}
 	ctx := context.Background()
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1017,16 +1047,19 @@ func (p *pgStore) ClaimReclaimable(workerID string, lease time.Duration) (*Run, 
 	// Re-lease the oldest running run whose lease has expired (its worker is presumed dead). FOR
 	// UPDATE SKIP LOCKED so two live workers never reclaim the same run. It stays `running` (no
 	// state change, no version bump) — the worker resumes it from its last checkpoint.
-	const claim = `UPDATE runs SET worker_id=$1, lease_expires_at=$2, updated_at=$3, attempts = attempts + 1
+	// A killed scope's ABANDONED run must not be reclaimed either — otherwise a kill merely changes
+	// which worker picks it up.
+	args := []any{workerID, exp.UTC(), now.UTC(), string(StatusRunning), now.UTC()}
+	pred, args := claimExclusion(filter, args)
+	claim := `UPDATE runs SET worker_id=$1, lease_expires_at=$2, updated_at=$3, attempts = attempts + 1
 		WHERE id = (
 			SELECT id FROM runs
-			WHERE status=$4 AND lease_expires_at IS NOT NULL AND lease_expires_at < $5
+			WHERE status=$4 AND lease_expires_at IS NOT NULL AND lease_expires_at < $5` + pred + `
 			ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1
 		)
 		RETURNING id`
 	var id string
-	err = tx.QueryRowContext(ctx, claim,
-		workerID, exp.UTC(), now.UTC(), string(StatusRunning), now.UTC()).Scan(&id)
+	err = tx.QueryRowContext(ctx, claim, args...).Scan(&id)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, ErrNoQueuedRun

@@ -311,6 +311,29 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 			"record requested but the gateway is not interposed — the agent is not record-capable (set spec.record on the AgentDeployment)")
 		return
 	}
+	// Layer (c) of the scoped kill switch (M146, ADR 0126 §3): refuse the run when its scope is under an
+	// active emergency stop. Placed AFTER agent resolution — so the namespace is the resolved one, not a
+	// caller-supplied hint — and BEFORE the run is minted, so a killed scope never gains a queued run
+	// that would execute the moment the kill is lifted.
+	killNS := req.Namespace
+	if killNS == "" {
+		killNS = defaultCreateNamespace
+	}
+	// spec.suspend is read STRAIGHT off the resolved deployment here (M146.6). The create edge already
+	// holds the object — it resolved it through the CALLER's client — so this needs no mirror and, more
+	// importantly, cannot lag one: an agent suspended a moment ago refuses immediately rather than
+	// after the controller's next reconcile.
+	if deploy.Spec.Suspend {
+		s.log.Info("kill gate: refusing a run — the agent is suspended (spec.suspend)",
+			"namespace", killNS, "agent", req.Agent)
+		writeError(w, killRefusalStatus,
+			"this agent is suspended (spec.suspend is set on its AgentDeployment) — new runs are refused")
+		return
+	}
+	if s.refuseIfKilled(w, r.Context(), killNS, req.Agent) {
+		return
+	}
+
 	r, ok = attachConversationID(w, r, req.ConversationID)
 	if !ok {
 		return

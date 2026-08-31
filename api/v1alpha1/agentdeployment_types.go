@@ -381,6 +381,20 @@ type AgentDeploymentSpec struct {
 	// +optional
 	Record bool `json:"record,omitempty"`
 
+	// suspend stops this agent DECLARATIVELY (M146, ADR 0126 §4). A suspended agent accepts no new
+	// runs and its queued runs are not claimed — the same halt the imperative kill switch applies,
+	// but expressed as INTENT rather than as an incident action.
+	//
+	// The two are deliberately different tools. The kill switch is for "stop now": fast, no spec write,
+	// no reconcile race, and it can express a tenant- or fleet-wide stop that no per-object field can.
+	// This field is for "stay off": it survives a GitOps re-apply, which the imperative marker does not
+	// — without it, the next `kubectl apply` would silently un-suspend an agent someone deliberately
+	// turned off, the worst possible failure mode for a safety control.
+	//
+	// Default false ⇒ every existing AgentDeployment is byte-unchanged.
+	// +optional
+	Suspend bool `json:"suspend,omitempty"`
+
 	// endUserAccess opts THIS agent into being reachable by END-USERS via the standalone /chat runtime
 	// (M137/EU1b, ADR 0107 — the second of the two keys). End-user access requires BOTH the agent's
 	// tenant to enable an end-user IdP (Tenant.spec.endUserIdentity.enabled — WHO may log in) AND this

@@ -51,11 +51,16 @@ const (
 // Action is a K8s-RBAC-shaped authorization query: a verb on a (group, resource) in a namespace, and an
 // optional resource name. It maps 1:1 to authorizationv1.ResourceAttributes.
 type Action struct {
-	Verb      string
-	Group     string
-	Resource  string
-	Namespace string
-	Name      string // optional (a named-resource check)
+	Verb     string
+	Group    string
+	Resource string
+	// Subresource scopes the check to a SUBRESOURCE (e.g. "kill" on agentdeployments). This is not
+	// cosmetic: an RBAC rule naming `agentdeployments` — even with verbs ["*"] — does NOT grant
+	// `agentdeployments/kill`, so a subresource is how a permission is kept OUT of an existing role's
+	// wildcard. Empty ⇒ the resource itself (every pre-M146 caller is unchanged).
+	Subresource string
+	Namespace   string
+	Name        string // optional (a named-resource check)
 }
 
 // Authorizer decides whether a caller may perform an Action. The caller is identified by the
@@ -75,11 +80,12 @@ func (SSARAuthorizer) Authorize(ctx context.Context, caller client.Client, a Act
 	review := &authzv1.SelfSubjectAccessReview{
 		Spec: authzv1.SelfSubjectAccessReviewSpec{
 			ResourceAttributes: &authzv1.ResourceAttributes{
-				Verb:      a.Verb,
-				Group:     a.Group,
-				Resource:  a.Resource,
-				Namespace: a.Namespace,
-				Name:      a.Name,
+				Verb:        a.Verb,
+				Group:       a.Group,
+				Resource:    a.Resource,
+				Subresource: a.Subresource,
+				Namespace:   a.Namespace,
+				Name:        a.Name,
 			},
 		},
 	}

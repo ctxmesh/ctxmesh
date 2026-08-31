@@ -17,6 +17,7 @@ limitations under the License.
 package statelayer
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"testing"
@@ -153,4 +154,133 @@ func TestControlGet_CannotReadAnotherNamespacesRun(t *testing.T) {
 	require.Equal(t, http.StatusOK, stranger.Code)
 	assert.JSONEq(t, `{"control":""}`, stranger.Body.String(),
 		"a cross-namespace read must return nothing — and be indistinguishable from an absent marker")
+}
+
+// ─── M146 scope hierarchy (ADR 0126) ──────────────────────────────────────────────────────────────
+// Before M146 the platform could stop ONE run and nothing larger. The hierarchy is walked SERVER-SIDE
+// from the verified pod identity, so `GET /control/{runID}` keeps its exact wire contract and an
+// already-deployed launcher gains scope kills with no image rebuild.
+
+// fakeTenantResolver maps namespace → tenant without a cluster. errNS forces the infrastructure-error
+// path so a test can prove an unresolvable tenant SKIPS that scope rather than failing the whole read.
+type fakeTenantResolver struct {
+	byNS  map[string]string
+	errNS map[string]bool
+}
+
+func (f fakeTenantResolver) TenantID(_ context.Context, namespace string) (string, error) {
+	if f.errNS[namespace] {
+		return "", errors.New("tenant resolver unreachable")
+	}
+	return f.byNS[namespace], nil
+}
+
+// newScopedProxy builds a control proxy whose pod token authenticates as agent `agent-<name>` in ns, and
+// whose namespace resolves to the given tenant — the identity the hierarchy is derived from.
+func newScopedProxy(t *testing.T, tok, ns, agent, tenant string) (*Server, *miniredis.Miniredis) {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	s, err := NewServer(Options{
+		Store:            NewRedisStore(mr.Addr(), "", ""),
+		ControlStore:     NewRedisControlStore(mr.Addr(), "", ""),
+		PodAuthenticator: fakePodAuth{byToken: map[string]string{tok: ns}, saByToken: map[string]string{tok: "agent-" + agent}},
+		TenantResolver:   fakeTenantResolver{byNS: map[string]string{ns: tenant}},
+	})
+	require.NoError(t, err)
+	return s, mr
+}
+
+// THE BAR: a kill written at ANY scope covering the run is seen by that run — one write, whole blast
+// radius. Each scope is asserted on its own so a single over-broad match cannot pass for all five.
+func TestControlGet_AKillAtAnyScopeCoversTheRun(t *testing.T) {
+	for _, tc := range []struct{ name, key string }{
+		{"run", "run:team-a:run-1:control"},
+		{"agent", "agent:team-a:support-bot:control"},
+		{"namespace", "ns:team-a:control"},
+		{"tenant", "tenant:acme:control"},
+		{"fleet", "fleet:control"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, mr := newScopedProxy(t, "pod-tok", "team-a", "support-bot", "acme")
+			require.NoError(t, mr.Set(tc.key, "cancel"))
+
+			rec := do(t, s, "GET", "/control/run-1", "pod-tok", "", nil)
+			require.Equal(t, http.StatusOK, rec.Code)
+			assert.Contains(t, rec.Body.String(), "cancel",
+				"a kill at the %s scope must reach every run beneath it", tc.name)
+		})
+	}
+}
+
+// The discriminating half: a kill on a SIBLING scope must NOT stop this run. A switch that stops
+// everything is indistinguishable from a broken platform, so the test above proves nothing without this.
+func TestControlGet_ASiblingScopeKillIsNotSeen(t *testing.T) {
+	for _, tc := range []struct{ name, key string }{
+		{"another run", "run:team-a:run-OTHER:control"},
+		{"another agent in the same namespace", "agent:team-a:billing-bot:control"},
+		{"another namespace", "ns:team-b:control"},
+		{"another tenant", "tenant:globex:control"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, mr := newScopedProxy(t, "pod-tok", "team-a", "support-bot", "acme")
+			require.NoError(t, mr.Set(tc.key, "cancel"))
+
+			rec := do(t, s, "GET", "/control/run-1", "pod-tok", "", nil)
+			require.Equal(t, http.StatusOK, rec.Code)
+			assert.NotContains(t, rec.Body.String(), "cancel",
+				"a kill scoped to %s must not stop an unrelated run", tc.name)
+		})
+	}
+}
+
+// An untenanted namespace (or no resolver) SKIPS the tenant scope rather than guessing one — and every
+// other scope still works. Guessing a tenant here would let one namespace's kill leak into another's.
+func TestControlGet_NoTenantSkipsThatScopeAndStillWorks(t *testing.T) {
+	mr := miniredis.RunT(t)
+	s, err := NewServer(Options{
+		Store:            NewRedisStore(mr.Addr(), "", ""),
+		ControlStore:     NewRedisControlStore(mr.Addr(), "", ""),
+		PodAuthenticator: fakePodAuth{byToken: map[string]string{"pod-tok": "team-a"}, saByToken: map[string]string{"pod-tok": "agent-support-bot"}},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, mr.Set("tenant::control", "cancel")) // the key a naive empty-tenant build would read
+	rec := do(t, s, "GET", "/control/run-1", "pod-tok", "", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "cancel", "an empty tenant must not synthesise a scope key")
+
+	require.NoError(t, mr.Set("ns:team-a:control", "cancel"))
+	rec = do(t, s, "GET", "/control/run-1", "pod-tok", "", nil)
+	assert.Contains(t, rec.Body.String(), "cancel", "the remaining scopes must still be honoured")
+}
+
+// Precedence is cheapest-first, so a per-run cancel keeps the ordering it always had even when a wider
+// scope is also set — the hierarchy must not change what a single-run cancel means.
+func TestControlGet_ScopesAreWalkedCheapestFirst(t *testing.T) {
+	s, mr := newScopedProxy(t, "pod-tok", "team-a", "support-bot", "acme")
+	require.NoError(t, mr.Set("run:team-a:run-1:control", "cancel"))
+	require.NoError(t, mr.Set("fleet:control", "some-future-verb"))
+
+	rec := do(t, s, "GET", "/control/run-1", "pod-tok", "", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "cancel")
+	assert.NotContains(t, rec.Body.String(), "some-future-verb",
+		"the most specific scope wins — a per-run cancel is not overridden by a wider marker")
+}
+
+// Scope keys are built ONLY from the verified identity, never from the request, so a caller cannot widen
+// its own blast radius by naming someone else's namespace/agent/tenant in the run id.
+func TestScopeKeys_BuiltOnlyFromVerifiedIdentity(t *testing.T) {
+	keys := scopeKeys(ControlScope{Namespace: "team-a", Agent: "support-bot", Tenant: "acme", RunID: "run-1"})
+	assert.Equal(t, []string{
+		"run:team-a:run-1:control",
+		"agent:team-a:support-bot:control",
+		"ns:team-a:control",
+		"tenant:acme:control",
+		"fleet:control",
+	}, keys, "the exact cross-package key contract — the BFF writer must match these byte for byte")
+
+	bare := scopeKeys(ControlScope{Namespace: "team-a", RunID: "run-1"})
+	assert.NotContains(t, bare, "agent:team-a::control", "an empty agent must not synthesise a key")
+	assert.NotContains(t, bare, "tenant::control", "an empty tenant must not synthesise a key")
 }

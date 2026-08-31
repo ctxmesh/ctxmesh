@@ -177,7 +177,7 @@ func (s *Server) handleGuardrailEvent(w http.ResponseWriter, r *http.Request) {
 			"detector":      req.Detector,
 			"scan_point":    req.ScanPoint,
 			"content_hash":  req.ContentHash,
-			"agent":         req.Agent,
+			scopeTypeAgent:  req.Agent,
 			"policy_action": req.PolicyAction,
 		},
 	})
