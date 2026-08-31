@@ -42,14 +42,14 @@ func envValue(c corev1.Container, name string) (corev1.EnvVar, bool) {
 func TestEgressDigest_UrlEditDoesNotRoll(t *testing.T) {
 	v1 := []toolmanifest.Route{{Name: "s", TargetURL: "https://v1.example", OAuth: true}}
 	v2 := []toolmanifest.Route{{Name: "s", TargetURL: "https://v2.example", OAuth: true}}
-	d1 := egressDigest("img", "bnd", v1, false)
+	d1 := egressDigest("img", "bnd", v1, false, EgressTimeouts{})
 	require.NotEmpty(t, d1)
-	assert.Equal(t, d1, egressDigest("img", "bnd", v2, false),
+	assert.Equal(t, d1, egressDigest("img", "bnd", v2, false, EgressTimeouts{}),
 		"J7: a URL edit must NOT change the egress digest (no roll — the URL hot-reloads via the ConfigMap)")
-	assert.Empty(t, egressDigest("img", "bnd", nil, false), "no routes ⇒ empty digest (no sidecar)")
-	assert.NotEqual(t, d1, egressDigest("img2", "bnd", v1, false), "an image change still rolls")
-	assert.NotEqual(t, d1, egressDigest("img", "bnd", v1, true), "toggling record mode still rolls")
-	assert.NotEqual(t, d1, egressDigest("img", "bnd2", v1, false), "a boundary change still rolls")
+	assert.Empty(t, egressDigest("img", "bnd", nil, false, EgressTimeouts{}), "no routes ⇒ empty digest (no sidecar)")
+	assert.NotEqual(t, d1, egressDigest("img2", "bnd", v1, false, EgressTimeouts{}), "an image change still rolls")
+	assert.NotEqual(t, d1, egressDigest("img", "bnd", v1, true, EgressTimeouts{}), "toggling record mode still rolls")
+	assert.NotEqual(t, d1, egressDigest("img", "bnd2", v1, false, EgressTimeouts{}), "a boundary change still rolls")
 }
 
 // TestEgressSidecarContainer_RoutesFileSupersedesEnv proves J7's container wiring: given a routes mount
@@ -216,18 +216,71 @@ func TestEgressRoutesJSON(t *testing.T) {
 
 func TestEgressDigest(t *testing.T) {
 	routes := []toolmanifest.Route{{Name: "scalekit", TargetURL: "https://a", OAuth: true}}
-	assert.Empty(t, egressDigest("img", "r:squad-a", nil, false), "no routes ⇒ no digest (pod template unchanged)")
+	assert.Empty(t, egressDigest("img", "r:squad-a", nil, false, EgressTimeouts{}), "no routes ⇒ no digest (pod template unchanged)")
 
-	base := egressDigest("img", "r:squad-a", routes, false)
+	base := egressDigest("img", "r:squad-a", routes, false, EgressTimeouts{})
 	assert.NotEmpty(t, base)
 	// J7: a route URL change does NOT roll the pod — the real URL rides the hot-reloaded
 	// <agent>-egress-routes ConfigMap (excluded from the digest), so the edit takes effect live.
-	assert.Equal(t, base, egressDigest("img", "r:squad-a", []toolmanifest.Route{{Name: "scalekit", TargetURL: "https://b", OAuth: true}}, false),
+	assert.Equal(t, base, egressDigest("img", "r:squad-a", []toolmanifest.Route{{Name: "scalekit", TargetURL: "https://b", OAuth: true}}, false, EgressTimeouts{}),
 		"J7: a URL edit must not change the egress digest")
 	// A sidecar image change rolls the pod.
-	assert.NotEqual(t, base, egressDigest("img2", "r:squad-a", routes, false))
+	assert.NotEqual(t, base, egressDigest("img2", "r:squad-a", routes, false, EgressTimeouts{}))
 	// A boundary (registry membership) change rolls the pod — the EGRESS_BOUNDARY env must land.
-	assert.NotEqual(t, base, egressDigest("img", "r:squad-b", routes, false))
+	assert.NotEqual(t, base, egressDigest("img", "r:squad-b", routes, false, EgressTimeouts{}))
 	// Toggling record mode rolls the pod — the RECORD_CAPABLE + object-store env must land.
-	assert.NotEqual(t, base, egressDigest("img", "r:squad-a", routes, true))
+	assert.NotEqual(t, base, egressDigest("img", "r:squad-a", routes, true, EgressTimeouts{}))
+}
+
+// ─── M146.7: the tool-call timeouts are pod-template env, so they MUST roll a revision ────────────
+// m52.M143-knobs. EGRESS_STREAM_IDLE_TIMEOUT and EGRESS_RESPONSE_HEADER_TIMEOUT were read by the
+// sidecar and set by nothing. Giving them a chart value is only half the job: sidecar env is
+// pod-template state, and an env change that does NOT move the revision name is silently dropped by
+// reconcileKnativeService's CreateOrUpdate guard — the M4 landmine. An operator would edit the value,
+// see the reconcile succeed, and get the old timeout forever.
+func TestEgressDigest_ATimeoutChangeRollsTheRevision(t *testing.T) {
+	routes := []toolmanifest.Route{{Name: "echo"}}
+
+	base := egressDigest("img", "boundary", routes, false, EgressTimeouts{})
+	idle := egressDigest("img", "boundary", routes, false, EgressTimeouts{StreamIdle: "45s"})
+	header := egressDigest("img", "boundary", routes, false, EgressTimeouts{ResponseHeader: "30s"})
+	both := egressDigest("img", "boundary", routes, false, EgressTimeouts{ResponseHeader: "30s", StreamIdle: "45s"})
+
+	assert.NotEqual(t, base, idle, "changing the idle timeout must roll a new revision")
+	assert.NotEqual(t, base, header, "changing the header timeout must roll a new revision")
+	assert.NotEqual(t, idle, header, "the two timeouts are distinct inputs, not one knob")
+	assert.NotEqual(t, both, idle)
+
+	// Idempotence: the same values must produce the same digest, or every reconcile would roll.
+	assert.Equal(t, both, egressDigest("img", "boundary", routes, false,
+		EgressTimeouts{ResponseHeader: "30s", StreamIdle: "45s"}))
+	// And an agent with NO timeouts configured keeps its pre-M146 revision name byte-for-byte.
+	assert.Equal(t, base, egressDigest("img", "boundary", routes, false, EgressTimeouts{}))
+}
+
+// The timeouts reach the sidecar as env, and are ABSENT when unset so the sidecar's own defaults apply
+// (an empty env var would parse as invalid and silently fall back, which reads the same but is not).
+func TestEgressSidecar_TimeoutEnvIsSetOnlyWhenConfigured(t *testing.T) {
+	const routesJSON = `[{"name":"echo"}]`
+	withTimeouts := egressSidecarContainer(OBOEgressConfig{
+		SidecarImage: "img", ResponseHeaderTimeout: "30s", StreamIdleTimeout: "45s",
+	}, "ns", "ns/agent", "", routesJSON, false, false, nil, nil, nil, nil)
+	env := envByNameC(withTimeouts.Env)
+	assert.Equal(t, "30s", env["EGRESS_RESPONSE_HEADER_TIMEOUT"])
+	assert.Equal(t, "45s", env["EGRESS_STREAM_IDLE_TIMEOUT"])
+
+	bare := egressSidecarContainer(OBOEgressConfig{SidecarImage: "img"}, "ns", "ns/agent", "", routesJSON, false, false, nil, nil, nil, nil)
+	bareEnv := envByNameC(bare.Env)
+	_, hasHeader := bareEnv["EGRESS_RESPONSE_HEADER_TIMEOUT"]
+	_, hasIdle := bareEnv["EGRESS_STREAM_IDLE_TIMEOUT"]
+	assert.False(t, hasHeader, "unset ⇒ absent, so the sidecar applies its own default")
+	assert.False(t, hasIdle)
+}
+
+func envByNameC(env []corev1.EnvVar) map[string]string {
+	out := make(map[string]string, len(env))
+	for _, e := range env {
+		out[e.Name] = e.Value
+	}
+	return out
 }

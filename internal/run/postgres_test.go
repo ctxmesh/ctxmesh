@@ -326,7 +326,7 @@ func TestPostgresStore_ClaimQueuedConcurrent(t *testing.T) {
 	for w := range workers {
 		go func() {
 			defer wg.Done()
-			r, err := s.ClaimQueued("worker-"+string(rune('A'+w)), time.Minute)
+			r, err := s.ClaimQueued("worker-"+string(rune('A'+w)), time.Minute, ClaimFilter{})
 			mu.Lock()
 			defer mu.Unlock()
 			if errors.Is(err, ErrNoQueuedRun) {
@@ -360,12 +360,12 @@ func TestPostgresStore_ReclaimExpiredLease(t *testing.T) {
 
 	require.NoError(t, s.Create(New("r1", "ns", "a", nil, "", t0)))
 
-	claimed, err := s.ClaimQueued("w1", time.Minute) // lease expires at t0+1m
+	claimed, err := s.ClaimQueued("w1", time.Minute, ClaimFilter{}) // lease expires at t0+1m
 	require.NoError(t, err)
 	require.Equal(t, "w1", claimed.WorkerID)
 
 	// Fresh lease → not reclaimable.
-	_, err = s.ClaimReclaimable("w2", time.Minute)
+	_, err = s.ClaimReclaimable("w2", time.Minute, ClaimFilter{})
 	assert.ErrorIs(t, err, ErrNoQueuedRun, "a fresh lease is not reclaimable")
 
 	// Heartbeat at t0+30s renews the lease to t0+90s.
@@ -374,12 +374,12 @@ func TestPostgresStore_ReclaimExpiredLease(t *testing.T) {
 
 	// At t0+70s the ORIGINAL lease would have expired, but the heartbeat pushed it to t0+90s.
 	advance(40 * time.Second)
-	_, err = s.ClaimReclaimable("w2", time.Minute)
+	_, err = s.ClaimReclaimable("w2", time.Minute, ClaimFilter{})
 	assert.ErrorIs(t, err, ErrNoQueuedRun, "heartbeat kept the lease alive")
 
 	// At t0+100s the renewed lease has expired → a peer reclaims it, still running.
 	advance(30 * time.Second)
-	reclaimed, err := s.ClaimReclaimable("w2", time.Minute)
+	reclaimed, err := s.ClaimReclaimable("w2", time.Minute, ClaimFilter{})
 	require.NoError(t, err)
 	assert.Equal(t, "r1", reclaimed.ID)
 	assert.Equal(t, "w2", reclaimed.WorkerID, "re-leased to the reclaiming worker")
@@ -400,18 +400,18 @@ func TestPostgresStore_ReleaseLease(t *testing.T) {
 	s.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return current }
 
 	require.NoError(t, s.Create(New("r1", "ns", "a", nil, "", t0)))
-	claimed, err := s.ClaimQueued("w1", time.Minute) // lease expires at t0+1m — not yet reclaimable
+	claimed, err := s.ClaimQueued("w1", time.Minute, ClaimFilter{}) // lease expires at t0+1m — not yet reclaimable
 	require.NoError(t, err)
 	require.Equal(t, "w1", claimed.WorkerID)
 
 	// A non-holder's release is a no-op — the lease stays fresh, still not reclaimable.
 	require.NoError(t, s.ReleaseLease("r1", "w-other"))
-	_, err = s.ClaimReclaimable("w2", time.Minute)
+	_, err = s.ClaimReclaimable("w2", time.Minute, ClaimFilter{})
 	assert.ErrorIs(t, err, ErrNoQueuedRun, "a foreign release must not free the lease")
 
 	// The holder releases → immediately reclaimable (no TTL wait), resumed running by the peer.
 	require.NoError(t, s.ReleaseLease("r1", "w1"))
-	reclaimed, err := s.ClaimReclaimable("w2", time.Minute)
+	reclaimed, err := s.ClaimReclaimable("w2", time.Minute, ClaimFilter{})
 	require.NoError(t, err)
 	assert.Equal(t, "r1", reclaimed.ID)
 	assert.Equal(t, "w2", reclaimed.WorkerID, "released lease re-leased to the reclaiming peer")
@@ -448,7 +448,7 @@ func pgMkWaitingParent(t *testing.T, s *pgStore, children []string, mode WaitMod
 func TestPostgresStore_Suspend_RoundTrip(t *testing.T) {
 	s := openPGStore(t)
 	require.NoError(t, s.Create(New("p", "ns", "wf", nil, "", t0)))
-	claimed, err := s.ClaimQueued("w1", time.Minute) // running + a lease
+	claimed, err := s.ClaimQueued("w1", time.Minute, ClaimFilter{}) // running + a lease
 	require.NoError(t, err)
 	require.Equal(t, "p", claimed.ID)
 	require.NotNil(t, claimed.LeaseExpiresAt)
@@ -470,9 +470,9 @@ func TestPostgresStore_Suspend_RoundTrip(t *testing.T) {
 	assert.Nil(t, got.LeaseExpiresAt)
 
 	// A waiting run is not claimable and not reclaimable (it holds no lease).
-	_, err = s.ClaimQueued("w2", time.Minute)
+	_, err = s.ClaimQueued("w2", time.Minute, ClaimFilter{})
 	assert.ErrorIs(t, err, ErrNoQueuedRun, "a waiting run is not queued → not claimed")
-	_, err = s.ClaimReclaimable("w2", time.Minute)
+	_, err = s.ClaimReclaimable("w2", time.Minute, ClaimFilter{})
 	assert.ErrorIs(t, err, ErrNoQueuedRun, "a waiting run holds no lease → not reclaimable")
 }
 
@@ -503,7 +503,7 @@ func TestPostgresStore_TransactionalWake_AllMode(t *testing.T) {
 	assert.Empty(t, p.WaitOn, "wait record cleared on resume")
 
 	// The woken parent is now claimable by the existing worker pool (the resume loop).
-	reclaim, err := s.ClaimQueued("w", time.Minute)
+	reclaim, err := s.ClaimQueued("w", time.Minute, ClaimFilter{})
 	require.NoError(t, err)
 	assert.Equal(t, "p", reclaim.ID)
 	assert.Equal(t, StatusRunning, reclaim.Status)
@@ -536,7 +536,7 @@ func TestPostgresStore_Wake_Idempotent(t *testing.T) {
 	require.NotNil(t, woke)
 
 	// Parent claimed → running.
-	_, err = s.ClaimQueued("w", time.Minute)
+	_, err = s.ClaimQueued("w", time.Minute, ClaimFilter{})
 	require.NoError(t, err)
 
 	// Duplicate completion of c2 must be a no-op: the parent stays running, wait set intact.
@@ -693,7 +693,7 @@ func TestPostgresStore_FailFast_SecondFailAfterParentRunning(t *testing.T) {
 	require.NotNil(t, woke, "first failure wakes the fail-fast parent")
 
 	// The pool re-claims the parent → running.
-	claimed, err := s.ClaimQueued("w", time.Minute)
+	claimed, err := s.ClaimQueued("w", time.Minute, ClaimFilter{})
 	require.NoError(t, err)
 	require.Equal(t, "p", claimed.ID)
 	require.Equal(t, StatusRunning, claimed.Status)

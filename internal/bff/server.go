@@ -40,6 +40,7 @@ import (
 	"github.com/ctxmesh/agentry/internal/controlplane/costrollup"
 	"github.com/ctxmesh/agentry/internal/controlplane/dataset"
 	"github.com/ctxmesh/agentry/internal/controlplane/enduseragent"
+	"github.com/ctxmesh/agentry/internal/controlplane/killscope"
 	"github.com/ctxmesh/agentry/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agentry/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/agentry/internal/controlplane/onlinescore"
@@ -195,7 +196,16 @@ type Server struct {
 	// spawnBudgets is the controller-mirrored DECLARED per-team spawn budget (M142.6, m52.C19b). The
 	// authoritative number for the spawn gate — the relayed one comes from the pod the budget bounds.
 	// nil ⇒ fall back to the clamped relayed value (C19 behaviour).
-	spawnBudgets             spawnbudget.Store
+	spawnBudgets spawnbudget.Store
+
+	// killScopes is the AUTHORITATIVE record of active emergency stops (M146, ADR 0126). The worker
+	// reads it before claiming (layer b) and the run-create edge reads it before accepting (layer c);
+	// BOTH fail closed, and neither consults the state layer — so an unreachable Valkey cannot
+	// resurrect a killed scope. nil ⇒ the feature is inert and the platform behaves exactly as pre-M146.
+	killScopes killscope.Store
+	// killFilter memoises the expanded claim exclusion for killFilterTTL — the claim loop runs
+	// continuously and the kill set is normally empty.
+	killFilter               killFilterCache
 	runcapBind               RuncapBindStore
 	proofOnce                sync.Once
 	popVerifier              *runcap.ProofVerifier
@@ -532,6 +542,11 @@ type Options struct {
 	// GET /api/catalog degrades to own-ns + public only (fail-closed), never a panic.
 	NamespaceTenantStore namespacetenant.Store
 
+	// KillScopes records active emergency stops (M146, ADR 0126). Optional: nil leaves the kill switch
+	// inert rather than failing closed on every claim, so an install that never provisions it is
+	// byte-compatible with pre-M146.
+	KillScopes killscope.Store
+
 	// EndUserVerifier verifies end-user OIDC ID tokens (M137/EU1b, ADR 0106); nil ⇒ end-user OIDC off.
 	// SAIssuer is the cluster service-account issuer, refused as an end-user issuer.
 	EndUserVerifier endUserTokenVerifier
@@ -692,6 +707,7 @@ func NewServer(opts Options) *Server {
 		requireProofOfPossession: opts.RequireProofOfPossession,
 		runcapBind:               opts.RuncapBind,
 		spawnBudgets:             opts.SpawnBudgets,
+		killScopes:               opts.KillScopes,
 		ocr:                      opts.OCR,
 		judgeCounters:            &judgeCounter{},
 		enrichCache:              newTraceEnrichCache(),
@@ -903,6 +919,14 @@ func (s *Server) Handler() http.Handler {
 		// a reviewer's pending inbox, each row deep-linking to /runs/:id. Persona gate: one
 		// caller-scoped SSAR on `workflows` (plan_approval is workflow-only), never per-row.
 		authed.HandleFunc("GET /api/approvals", s.handleApprovals)
+
+		// The scoped kill switch (M146, ADR 0126). Every mutation is gated by the caller-scoped `kill`
+		// verb (see kill_handler.go) — NOT by an existing persona — and audited on every outcome
+		// including denial. The list is readable by any authenticated caller so the console can render
+		// the "this scope is stopped" banner to the people affected by it.
+		authed.HandleFunc("POST /api/kill", s.handleKill)
+		authed.HandleFunc("POST /api/kill/lift", s.handleUnkill)
+		authed.HandleFunc("GET /api/kills", s.handleListKills)
 		// Cost forecast (M70, ADR 0063 D3): linear run-rate month-end projection from
 		// the durable cost-rollup ledger. Caller-scoped SSAR on `costrollups` (persona
 		// gate â no per-row leak). nil store â 501. ?tenant= required.

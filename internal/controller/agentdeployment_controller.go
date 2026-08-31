@@ -50,6 +50,7 @@ import (
 	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
 	"github.com/ctxmesh/agentry/internal/controlplane/agentcapability"
 	"github.com/ctxmesh/agentry/internal/controlplane/enduseragent"
+	"github.com/ctxmesh/agentry/internal/controlplane/killscope"
 	"github.com/ctxmesh/agentry/internal/controlplane/spawnbudget"
 	"github.com/ctxmesh/agentry/internal/eval"
 	"github.com/ctxmesh/agentry/internal/gateway"
@@ -280,6 +281,15 @@ type AgentDeploymentReconciler struct {
 	// Nil ⇒ no control-plane DB (envtest) — the sync is a no-op.
 	SpawnBudgetStore spawnbudget.Store
 
+	// KillScopeStore is where the controller PROJECTS `spec.suspend` (M146.6, ADR 0126 §4). The BFF
+	// cannot read the AgentDeployment CRD with its own service account (ADR 0011 keeps it at
+	// `rules: []`), so the declarative intent has to reach the worker and the run-create edge through
+	// the control plane — the same mirror pattern as ns→tenant (ADR 0067), the end-user exposure
+	// mirror (ADR 0107), the capability registry (ADR 0120) and the spawn budget (M142.6). nil ⇒ the
+	// projection is skipped and spec.suspend is enforced only at the create edge, which reads the CRD
+	// through the CALLER's client and therefore never needed the mirror.
+	KillScopeStore killscope.Store
+
 	// CollectorImage / DiscoveryImage override the injected OTel-collector / tool-discovery
 	// sidecar images (audit OPS-1; from COLLECTOR_IMAGE / DISCOVERY_IMAGE env, mirror of
 	// EGRESS_SIDECAR_IMAGE). Empty ⇒ the project-default constants — which are dev.local/*
@@ -467,6 +477,35 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		log.Info("Waiting for KnowledgeBase refs to settle before rolling a revision",
 			"name", deploy.Name, "requeueAfter", wait.String())
 		return ctrl.Result{RequeueAfter: wait}, nil
+	}
+
+	// Project `spec.suspend` into the control plane (M146.6, ADR 0126 §4) so the halt reaches the
+	// worker's claim loop and the run-create edge, neither of which can read this CRD. Written under
+	// SourceSpec so it can never clobber — or be lifted by — an operator's imperative stop on the same
+	// agent: the two are different intents that happen to name the same workload.
+	//
+	// Best-effort: a projection failure must not block the reconcile (the agent's workload is otherwise
+	// healthy and the create edge still enforces suspend directly from the spec), but it IS logged
+	// loudly, because a suspend that did not reach the worker is a safety control that silently did
+	// half its job.
+	if r.KillScopeStore != nil {
+		suspendScope := killscope.Scope{
+			Level: killscope.LevelAgent, Namespace: deploy.Namespace, Agent: deploy.Name,
+			Source: killscope.SourceSpec,
+		}
+		var sErr error
+		if deploy.Spec.Suspend {
+			sErr = r.KillScopeStore.Kill(ctx, killscope.Kill{
+				Scope: suspendScope, Reason: "spec.suspend is set on the AgentDeployment",
+				Principal: "controller/spec.suspend",
+			})
+		} else {
+			_, sErr = r.KillScopeStore.Unkill(ctx, suspendScope)
+		}
+		if sErr != nil {
+			log.Error(sErr, "WARNING: could not project spec.suspend — the worker may still claim this agent's queued runs",
+				"name", deploy.Name, "namespace", deploy.Namespace, "suspend", deploy.Spec.Suspend)
+		}
 	}
 
 	// ── Step 3: Reconcile the workload by execution model ─────────────────────
@@ -1747,7 +1786,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// create/delete of a different workload KIND (handled by the per-model
 	// reconcilers), not a revision roll within the ksvc.
 	toolDigest := toolmanifest.StructuralDigest(sidecarTools, hasBindings)
-	if ed := egressDigest(r.OBOEgress.SidecarImage, agentEgressBoundary(deploy, membership), egressRoutes, recordCapable); ed != "" {
+	if ed := egressDigest(r.OBOEgress.SidecarImage, agentEgressBoundary(deploy, membership), egressRoutes, recordCapable,
+		EgressTimeouts{ResponseHeader: r.OBOEgress.ResponseHeaderTimeout, StreamIdle: r.OBOEgress.StreamIdleTimeout}); ed != "" {
 		// The egress sidecar (image + routes — the real URLs now live in pod env, not the
 		// hot-path manifest) is pod-template state, so fold it into the tool component: adding/
 		// removing the sidecar or changing a route rolls a new revision. Inert when the agent has

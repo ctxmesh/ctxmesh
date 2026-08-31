@@ -853,6 +853,20 @@ spec:
                     - shared
                     type: string
                 type: object
+              suspend:
+                description: |-
+                  suspend stops this agent DECLARATIVELY (M146, ADR 0126 §4). A suspended agent accepts no new
+                  runs and its queued runs are not claimed — the same halt the imperative kill switch applies,
+                  but expressed as INTENT rather than as an incident action.
+
+                  The two are deliberately different tools. The kill switch is for "stop now": fast, no spec write,
+                  no reconcile race, and it can express a tenant- or fleet-wide stop that no per-object field can.
+                  This field is for "stay off": it survives a GitOps re-apply, which the imperative marker does not
+                  — without it, the next `kubectl apply` would silently un-suspend an agent someone deliberately
+                  turned off, the worst possible failure mode for a safety control.
+
+                  Default false ⇒ every existing AgentDeployment is byte-unchanged.
+                type: boolean
               tracePolicy:
                 description: |-
                   tracePolicy optionally extends the always-on trace-redaction policy
@@ -1994,6 +2008,20 @@ spec:
                     - shared
                     type: string
                 type: object
+              suspend:
+                description: |-
+                  suspend stops this agent DECLARATIVELY (M146, ADR 0126 §4). A suspended agent accepts no new
+                  runs and its queued runs are not claimed — the same halt the imperative kill switch applies,
+                  but expressed as INTENT rather than as an incident action.
+
+                  The two are deliberately different tools. The kill switch is for "stop now": fast, no spec write,
+                  no reconcile race, and it can express a tenant- or fleet-wide stop that no per-object field can.
+                  This field is for "stay off": it survives a GitOps re-apply, which the imperative marker does not
+                  — without it, the next `kubectl apply` would silently un-suspend an agent someone deliberately
+                  turned off, the worst possible failure mode for a safety control.
+
+                  Default false ⇒ every existing AgentDeployment is byte-unchanged.
+                type: boolean
               tracePolicy:
                 description: |-
                   tracePolicy optionally extends the always-on trace-redaction policy

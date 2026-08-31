@@ -65,6 +65,16 @@ type OBOEgressConfig struct {
 	// TokenServiceURL, when set, makes the sidecar DELEGATE resolution to the central token
 	// service (the scaling split); empty ⇒ the sidecar embeds the backend (first working cut).
 	TokenServiceURL string
+	// ResponseHeaderTimeout and StreamIdleTimeout bound a tool call's two distinct hangs (M146.7,
+	// m52.M143-knobs). Both were previously read from the sidecar's env by cmd/egress-sidecar and set
+	// by NOTHING — sane defaults, but no supported way for an operator with a legitimately slow tool
+	// to change them short of hand-editing a Knative revision the controller would overwrite.
+	//
+	// They are NOT interchangeable: ResponseHeaderTimeout (M126 F3) covers "connects but never
+	// responds" and is DISARMED the moment headers arrive; StreamIdleTimeout (M143.4) bounds the gap
+	// BETWEEN bytes, which a healthy stream resets on every read. Empty ⇒ the sidecar's own defaults.
+	ResponseHeaderTimeout string
+	StreamIdleTimeout     string
 }
 
 // egressSidecarContainer builds the injecting egress proxy container for an agent pod. It
@@ -119,6 +129,15 @@ func egressSidecarContainer(
 	}
 	if cfg.TokenServiceURL != "" {
 		env = append(env, corev1.EnvVar{Name: "TOKEN_SERVICE_URL", Value: cfg.TokenServiceURL})
+	}
+	// The two tool-call timeouts (M146.7). STATIC env, and folded into egressDigest below — a sidecar
+	// env change that does NOT move the revision name is silently dropped by the CreateOrUpdate guard
+	// (the M4 landmine), so an operator would edit the chart value and see nothing happen.
+	if cfg.ResponseHeaderTimeout != "" {
+		env = append(env, corev1.EnvVar{Name: "EGRESS_RESPONSE_HEADER_TIMEOUT", Value: cfg.ResponseHeaderTimeout})
+	}
+	if cfg.StreamIdleTimeout != "" {
+		env = append(env, corev1.EnvVar{Name: "EGRESS_STREAM_IDLE_TIMEOUT", Value: cfg.StreamIdleTimeout})
 	}
 	// Record mode (M78, ADR 0071 §1/C1): give the sidecar a fixture sink + flip on capture.
 	// RECORD_CAPABLE=true forces the C2 fail-closed at startup if OBJECT_STORE_ADDR is unset —
@@ -177,6 +196,12 @@ func egressRoutesJSON(routes []toolmanifest.Route) string {
 	return string(b)
 }
 
+// EgressTimeouts carries the two tool-call bounds into the digest (M146.7).
+type EgressTimeouts struct {
+	ResponseHeader string
+	StreamIdle     string
+}
+
 // egressDigest folds the injected egress sidecar (image + record flag + boundary + routes PRESENCE)
 // into the pod-template structural digest, so adding/removing the sidecar, toggling record mode (which
 // adds RECORD_CAPABLE + object-store env), or a boundary change rolls a new revision. Empty when no
@@ -186,7 +211,7 @@ func egressRoutesJSON(routes []toolmanifest.Route) string {
 // <agent>-egress-routes ConfigMap the sidecar hot-reloads, so a remote-tool-URL edit does NOT roll the
 // revision (it takes effect live). Only the PRESENCE of routes is folded; a route NAME add/remove is a
 // tool-manifest change already captured by toolmanifest.StructuralDigest, which rolls independently.
-func egressDigest(image, boundary string, routes []toolmanifest.Route, recordCapable bool) string {
+func egressDigest(image, boundary string, routes []toolmanifest.Route, recordCapable bool, timeouts EgressTimeouts) string {
 	if len(routes) == 0 {
 		return ""
 	}
@@ -196,8 +221,13 @@ func egressDigest(image, boundary string, routes []toolmanifest.Route, recordCap
 		Boundary      string `json:"boundary"`
 		RecordCapable bool   `json:"recordCapable"`
 		HasRoutes     bool   `json:"hasRoutes"` // J7: presence only — the URLs ride the hot-reloaded ConfigMap.
+		// M146.7: the timeouts are pod-template ENV, not hot-reloaded config, so unlike the route URLs
+		// they MUST fold in — otherwise editing a chart value leaves the running sidecar on the old
+		// value forever with no sign anything was ignored.
+		HeaderTimeout string `json:"headerTimeout"`
+		IdleTimeout   string `json:"idleTimeout"`
 	}
-	b, err := json.Marshal(shape{Image: image, ListenAddr: egressSidecarListenAddr, Boundary: boundary, RecordCapable: recordCapable, HasRoutes: len(routes) > 0})
+	b, err := json.Marshal(shape{Image: image, ListenAddr: egressSidecarListenAddr, Boundary: boundary, RecordCapable: recordCapable, HasRoutes: len(routes) > 0, HeaderTimeout: timeouts.ResponseHeader, IdleTimeout: timeouts.StreamIdle})
 	if err != nil {
 		return "invalid"
 	}
