@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { ErrorState } from "./error-state";
+import { ErrorState, type ForbiddenPermission } from "./error-state";
 
 // ForbiddenInline — the reusable 403 primitive (ADR 0012, ui-foundation §2–3).
 // When a caller-scoped /api/* request returns 403 (K8s RBAC denied — ADR 0011),
@@ -11,9 +11,10 @@ import { ErrorState } from "./error-state";
 // same everywhere and always names the next step.
 //
 // It is a thin, opinionated wrapper — NOT a fork of ErrorState — so the "always
-// a next action" invariant and the token-only styling come for free. Pass the
-// denied `resource` (e.g. "agents") for the friendly, resource-named message and
-// an optional `action` (e.g. "Switch namespace").
+// a next action" invariant, the calm M151 §5.8 styling and the token-only
+// colour come for free. Pass the denied `resource` (e.g. "agents") for the
+// friendly, resource-named message, `permission` when the denial is on a write
+// (create/update/delete — §7 A4), and an optional `action` ("Switch namespace").
 
 export interface ForbiddenInlineProps {
   /** What the caller tried to do, e.g. "list agents in team-a". Drives the copy. */
@@ -28,6 +29,11 @@ export interface ForbiddenInlineProps {
   detail?: string;
   /** The resource denied, e.g. "agents" — drives the friendly "view <resource>" copy (M100). */
   resource?: string;
+  /**
+   * Which permission is missing on `resource` (default "read"). A denied create/edit/delete says
+   * so, so the user asks an admin for the role they actually need (§7 A4).
+   */
+  permission?: ForbiddenPermission;
   /** Optional next action (e.g. "Switch namespace", "Request access"). */
   action?: { label: string; onClick?: () => void };
   className?: string;
@@ -38,6 +44,7 @@ export function ForbiddenInline({
   description,
   detail,
   resource,
+  permission,
   action,
   className,
 }: ForbiddenInlineProps) {
@@ -48,6 +55,7 @@ export function ForbiddenInline({
       description={description}
       detail={detail}
       resource={resource}
+      permission={permission}
       action={action}
       className={className}
     />

@@ -22,6 +22,13 @@ import {
   type Column,
   type WizardStep,
 } from "@/components/kit";
+// The §4.5/§4.8 cell helpers live on the DataTable module; the kit barrel does
+// not re-export them yet (index.ts is owned by the kit-barrel pass).
+import {
+  CellEntity,
+  CellId,
+  truncateId,
+} from "@/components/kit/data-table";
 
 // Production-kit behavior proofs (m13.4). These go beyond the m13.1 skeleton
 // render proofs: controlled discipline (parent owns state), each visual state,
@@ -246,6 +253,178 @@ describe("DataTable — controlled + states", () => {
       />,
     );
     expect(screen.getByText("agent-9")).toBeInTheDocument();
+  });
+});
+
+// ── The column budget + the fit contract (M151 §4.4 / §4.5 / §4.6 / §4.8) ────
+// Every list in the console renders through this component, so these are the
+// assertions that keep 20-odd pages fitting. They pin the MECHANICS (priority →
+// breakpoint class, own-container scrolling), not the pixels — the pixel gate is
+// the visual/fit run.
+
+describe("DataTable — column budget + fit", () => {
+  const budget: Column<Row>[] = [
+    { id: "name", header: "Name", priority: 1, cell: (r) => r.name },
+    { id: "p2", header: "P2", priority: 2, cell: () => "b" },
+    { id: "p3", header: "P3", priority: 3, cell: () => "c" },
+    { id: "p4", header: "P4", priority: 4, cell: () => "d" },
+  ];
+
+  function headClass(name: string) {
+    return screen.getByRole("columnheader", { name }).className;
+  }
+
+  it("maps priority 1–4 to the mechanical hide-below-breakpoint classes", () => {
+    render(
+      <DataTable columns={budget} rows={mkRows(1)} rowKey={(r) => r.id} />,
+    );
+    // p1 never drops.
+    expect(headClass("Name")).not.toContain("hidden");
+    // p2 below md (768), p3 below lg (1024), p4 below xl (1280).
+    expect(headClass("P2")).toContain("hidden md:table-cell");
+    expect(headClass("P3")).toContain("hidden lg:table-cell");
+    expect(headClass("P4")).toContain("hidden xl:table-cell");
+    // Cells carry the SAME class as their head — a column drops as one piece.
+    const row = screen.getAllByRole("row")[1];
+    const cells = within(row).getAllByRole("cell");
+    expect(cells[0].className).not.toContain("hidden");
+    expect(cells[1].className).toContain("hidden md:table-cell");
+    expect(cells[2].className).toContain("hidden lg:table-cell");
+    expect(cells[3].className).toContain("hidden xl:table-cell");
+  });
+
+  it("bridges the deprecated hideOnMobile to priority 2 (pages migrate later)", () => {
+    render(
+      <DataTable
+        columns={[
+          { id: "name", header: "Name", cell: (r: Row) => r.name },
+          { id: "legacy", header: "Legacy", hideOnMobile: true, cell: () => "x" },
+        ]}
+        rows={mkRows(1)}
+        rowKey={(r) => r.id}
+      />,
+    );
+    // Identical rendering to the old binary flag: hidden below md.
+    expect(headClass("Legacy")).toContain("hidden md:table-cell");
+    expect(headClass("Name")).not.toContain("hidden");
+  });
+
+  it("an explicit priority wins over hideOnMobile", () => {
+    render(
+      <DataTable
+        columns={[
+          {
+            id: "both",
+            header: "Both",
+            hideOnMobile: true,
+            priority: 4,
+            cell: () => "x",
+          },
+        ]}
+        rows={mkRows(1)}
+        rowKey={(r) => r.id}
+      />,
+    );
+    expect(headClass("Both")).toContain("hidden xl:table-cell");
+    expect(headClass("Both")).not.toContain("md:table-cell");
+  });
+
+  it("numeric columns render the cell-num register and right-align their head", () => {
+    render(
+      <DataTable
+        columns={[
+          { id: "name", header: "Name", cell: (r: Row) => r.name },
+          { id: "cost", header: "Cost", numeric: true, cell: () => "$0.0330" },
+        ]}
+        rows={mkRows(1)}
+        rowKey={(r) => r.id}
+      />,
+    );
+    // Head right-aligns onto the digit column.
+    expect(headClass("Cost")).toContain("text-right");
+    const cell = within(screen.getAllByRole("row")[1]).getAllByRole("cell")[1];
+    // Money is mono, tabular, right-aligned and — critically — NEVER wrapped or
+    // truncated (§4.5).
+    expect(cell.className).toContain("font-mono");
+    expect(cell.className).toContain("tabular-nums");
+    expect(cell.className).toContain("text-right");
+    expect(cell.className).toContain("whitespace-nowrap");
+    expect(cell.className).not.toContain("truncate");
+  });
+
+  it("scrolls wide content in its OWN container — never on the page body", () => {
+    const { container } = render(
+      <DataTable
+        columns={cols}
+        rows={mkRows(3)}
+        rowKey={(r) => r.id}
+        tableClassName="min-w-[52rem]"
+      />,
+    );
+    const frame = container.querySelector("table")!.parentElement!;
+    // §4.6: the frame scrolls sideways itself…
+    expect(frame.className).toContain("overflow-x-auto");
+    // …and it must never CLIP (the old overflow-hidden hid unreachable cells).
+    expect(frame.className).not.toContain("overflow-hidden");
+    // …and it can always be shrunk by a flex/grid parent, so table content
+    // cannot widen document.body.
+    expect(frame.className).toContain("min-w-0");
+    expect(frame.className).toContain("max-w-full");
+    expect(container.firstElementChild!.className).toContain("min-w-0");
+    expect(container.firstElementChild!.className).toContain("max-w-full");
+    // The archetype min-width lands on the TABLE, inside that frame.
+    expect(container.querySelector("table")!.className).toContain(
+      "min-w-[52rem]",
+    );
+  });
+
+  it("tints a halted row and exposes data-halted", () => {
+    render(
+      <DataTable
+        columns={cols}
+        rows={mkRows(2)}
+        rowKey={(r) => r.id}
+        rowHalted={(r) => r.name === "agent-1"}
+      />,
+    );
+    const halted = screen.getByText("agent-1").closest("tr")!;
+    const live = screen.getByText("agent-0").closest("tr")!;
+    expect(halted).toHaveAttribute("data-halted", "true");
+    expect(halted.className).toContain("bg-destructive-surface");
+    expect(live).not.toHaveAttribute("data-halted");
+    expect(live.className).not.toContain("bg-destructive-surface");
+  });
+});
+
+// ── §4.5 truncation helpers ─────────────────────────────────────────────────
+
+describe("DataTable cell helpers — truncation rules", () => {
+  it("middle-truncates long ids (head 8 + … + tail 4) and keeps short ones whole", () => {
+    // ≤16 chars renders whole — no ellipsis, no title.
+    expect(truncateId("P1euQVd4I3f2")).toBe("P1euQVd4I3f2");
+    // Longer: the TAIL survives, because tails disambiguate ids.
+    expect(truncateId("P1euQVd4xxxxxxxxxxI3f2")).toBe("P1euQVd4…I3f2");
+  });
+
+  it("CellId keeps the full id recoverable in title when it truncates", () => {
+    const long = "0123456789abcdef0123";
+    const { rerender } = render(<CellId id={long} />);
+    expect(screen.getByText("01234567…0123")).toHaveAttribute("title", long);
+    rerender(<CellId id="short-id" />);
+    expect(screen.getByText("short-id")).not.toHaveAttribute("title");
+  });
+
+  it("CellEntity puts the namespace on its own line and titles the truncated name", () => {
+    render(
+      <CellEntity name="checkout-summariser" namespace="team-a" />,
+    );
+    const name = screen.getByText("checkout-summariser");
+    expect(name.className).toContain("truncate");
+    expect(name).toHaveAttribute("title", "checkout-summariser");
+    // The namespace is a separate element (never shares the name's line, §4.5).
+    const ns = screen.getByText("team-a");
+    expect(ns).not.toBe(name);
+    expect(ns.className).toContain("text-faint");
   });
 });
 

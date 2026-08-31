@@ -92,12 +92,15 @@ export function ConfirmDialog({
       >
         <div className="flex shrink-0 items-start gap-4">
           {destructive && (
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-destructive/15 text-destructive">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-destructive-surface text-destructive">
               <AlertTriangle className="h-5 w-5" />
             </div>
           )}
           <div className="min-w-0 flex-1">
-            <h2 id={titleId} className="text-lg font-semibold tracking-snug">
+            <h2
+              id={titleId}
+              className="font-serif text-lg font-medium tracking-snug"
+            >
               {title}
             </h2>
             {description && (
@@ -109,7 +112,7 @@ export function ConfirmDialog({
         </div>
 
         {impact && (
-          <div className="mt-4 max-h-[50vh] min-h-0 overflow-y-auto rounded-md border bg-surface-2/60 p-3 text-sm">
+          <div className="mt-4 max-h-[50vh] min-h-0 overflow-y-auto rounded-md border bg-surface-2 p-3 text-sm">
             {impact}
           </div>
         )}

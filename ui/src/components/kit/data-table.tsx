@@ -45,6 +45,124 @@ import { cn } from "@/lib/utils";
 // (default 60) the body windows the rendered rows to the visible slice + an
 // overscan, so a 200-row page stays smooth. Off by default for small pages
 // (keeps the DOM simple + fully present for tests/AT on typical windows).
+//
+// ── FIT: the page body never scrolls sideways (M151 §4.6) ───────────────────
+// Every list in the console renders through this component, so the table is
+// where "does the page fit?" is won or lost. Three mechanisms, all mechanical:
+//   1. COLUMN BUDGET (§4.4). `Column.priority` (1–4) declares how essential a
+//      column is; the table maps it to a `hidden <bp>:table-cell` class. Below
+//      1280 the p4 columns leave, below 1024 the p3s, below 768 the p2s. p1
+//      never leaves. Dropped ≠ lost — the row still opens its drawer/detail.
+//   2. OWN-CONTAINER SCROLLING (§4.6). Residual width scrolls INSIDE the
+//      table's bordered frame (`overflow-x-auto`), never on `document.body`.
+//      The frame was `overflow-hidden` before, which silently CLIPPED wide
+//      cells — data the user could not reach. Auto scrolls instead of hiding.
+//   3. UNCONDITIONAL SHRINKABILITY. The root and the frame carry `min-w-0
+//      max-w-full` so a flex/grid parent can never be widened by table content
+//      (a flex item defaults to `min-width:auto` = its content's min-content
+//      width — that single default is the classic source of body overflow).
+// Acceptance (§4.6): at 360px, `document.body.scrollWidth === innerWidth`.
+
+/**
+ * Column budget priority (§4.4). 1 = never dropped (the entity, its state, and
+ * the Next step always survive); 4 = the first to go. Dropping is mechanical —
+ * see PRIORITY_CLASS.
+ */
+export type ColumnPriority = 1 | 2 | 3 | 4;
+
+/**
+ * priority → responsive visibility (§4.4). Written as literal class strings so
+ * Tailwind's content scanner sees them.
+ */
+const PRIORITY_CLASS: Record<ColumnPriority, string> = {
+  1: "", //                        always visible
+  2: "hidden md:table-cell", //    hidden below 768
+  3: "hidden lg:table-cell", //    hidden below 1024
+  4: "hidden xl:table-cell", //    hidden below 1280
+};
+
+/**
+ * `cell-num` (§4.8 / §5.10) — the numeric cell register. Every digit the
+ * machine owns is mono and tabular so columns of numbers align on their
+ * decimal; `whitespace-nowrap` is what keeps MONEY whole (§4.5: money is never
+ * truncated, wrapped, or elided). Applied automatically to `numeric` columns;
+ * exported for cells that render numbers outside a numeric column.
+ */
+export const cellNum =
+  "font-mono tabular-nums text-right whitespace-nowrap text-sm text-secondary-foreground";
+
+/** Longest id that renders whole; above this it middle-truncates (§4.5). */
+const ID_WHOLE_MAX = 16;
+const ID_HEAD = 8;
+const ID_TAIL = 4;
+
+/**
+ * Middle-truncate a run/trace id or UUID (§4.5): head 8 + … + tail 4
+ * (`P1euQVd4…I3f2`). Ids are NEVER end-ellipsised — the tail is what
+ * disambiguates two ids that share a prefix.
+ */
+export function truncateId(id: string): string {
+  if (id.length <= ID_WHOLE_MAX) return id;
+  return `${id.slice(0, ID_HEAD)}…${id.slice(-ID_TAIL)}`;
+}
+
+/**
+ * `cell-id` — a run/trace id in a table cell (§4.5). Mono, never wrapped,
+ * middle-truncated when long, with the full id in `title` so it stays
+ * recoverable by hover and by the accessibility tree.
+ */
+export function CellId({
+  id,
+  className,
+}: {
+  id: string;
+  className?: string;
+}) {
+  const shown = truncateId(id);
+  return (
+    <span
+      className={cn("whitespace-nowrap font-mono text-xs", className)}
+      title={shown === id ? undefined : id}
+    >
+      {shown}
+    </span>
+  );
+}
+
+/**
+ * `cell-entity` (§5.10) — the two-line entity cell: the resource name over its
+ * namespace. The namespace never shares the name's line (§4.5). The name
+ * truncates with an end-ellipsis and keeps the full string in `title`; it is
+ * never `break-all`-ed. Give the column a `max-w-*` in `Column.className` for
+ * the truncation to bite (an auto-layout table otherwise widens to fit).
+ */
+export function CellEntity({
+  name,
+  namespace,
+  title,
+  className,
+}: {
+  name: React.ReactNode;
+  namespace?: React.ReactNode;
+  /** Full value for the tooltip; defaults to `name` when it is a string. */
+  title?: string;
+  className?: string;
+}) {
+  const nameTitle = title ?? (typeof name === "string" ? name : undefined);
+  const nsTitle = typeof namespace === "string" ? namespace : undefined;
+  return (
+    <div className={cn("min-w-0", className)}>
+      <div className="truncate text-sm font-semibold" title={nameTitle}>
+        {name}
+      </div>
+      {namespace !== undefined && namespace !== null && namespace !== "" && (
+        <div className="truncate font-mono text-xs text-faint" title={nsTitle}>
+          {namespace}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export interface Column<T> {
   /** Stable key — also the sort key sent to the BFF when `sortable`. */
@@ -53,10 +171,38 @@ export interface Column<T> {
   /** Cell renderer. Keep it presentational; row-click owns navigation. */
   cell: (row: T) => React.ReactNode;
   sortable?: boolean;
-  /** Tailwind width/alignment classes for the column (e.g. "w-40 text-right"). */
+  /** Tailwind width/alignment classes for the column (e.g. "w-40 max-w-[16rem]"). */
   className?: string;
-  /** Hide below md — non-essential columns collapse on narrow viewports. */
+  /**
+   * Column budget (§4.4). 1 = never dropped · 2 = hidden below `md` (768) ·
+   * 3 = below `lg` (1024) · 4 = below `xl` (1280). Defaults to 1.
+   * Dropped ≠ lost: the row's drawer/detail still renders every field.
+   */
+  priority?: ColumnPriority;
+  /**
+   * Numeric column (§4.8): cells render in the `cell-num` register (mono,
+   * tabular, right-aligned, never wrapped) and the column head right-aligns to
+   * match. Use for counts, durations, and money.
+   */
+  numeric?: boolean;
+  /**
+   * @deprecated Migration alias for `priority: 2` (§4.4). Kept so the ~20
+   * pages that still pass `hideOnMobile` keep rendering identically while they
+   * migrate column-by-column. REMOVE this field — and the `columnPriority`
+   * fallback below — once no caller references it
+   * (`grep -rn hideOnMobile ui/src` returns only this file).
+   */
   hideOnMobile?: boolean;
+}
+
+/**
+ * The one place the deprecated alias is bridged: an explicit `priority` always
+ * wins; otherwise `hideOnMobile` means priority 2 (its old meaning, "hidden
+ * below md"); otherwise the column is priority 1 and never drops.
+ */
+function columnPriority<T>(col: Column<T>): ColumnPriority {
+  if (col.priority !== undefined) return col.priority;
+  return col.hideOnMobile ? 2 : 1;
 }
 
 export type SortDir = "asc" | "desc";
@@ -112,6 +258,12 @@ export interface DataTableProps<T> {
   onRowClick?: (row: T) => void;
   /** Trailing per-row actions (RBAC-gated by the parent: pass none for viewers). */
   rowActions?: (row: T) => React.ReactNode;
+  /**
+   * Marks a row whose entity is stopped/halted (§5.10): the row takes the
+   * destructive tint at rest so a dead agent is legible at a glance in a long
+   * list, and exposes `data-halted` for tests and visual regression.
+   */
+  rowHalted?: (row: T) => boolean;
 
   /** Teaching empty state when the unfiltered list is genuinely empty. */
   empty?: EmptyStateProps;
@@ -123,9 +275,20 @@ export interface DataTableProps<T> {
   virtualizeThreshold?: number;
   /** Estimated row height (px) for virtualization math. */
   rowHeight?: number;
+  /**
+   * Classes for the `<table>` itself — in practice the archetype's `min-w-*`
+   * from the §4.4 budget totals (e.g. `min-w-[52rem]`), which makes a wide
+   * table scroll in its own frame rather than squash its columns. The frame
+   * always clips to the page: this can never widen `document.body`.
+   */
+  tableClassName?: string;
   className?: string;
 }
 
+// 44px = 12px pad + 20px line + 12px pad (§4.1). LOAD-BEARING: the
+// virtualization math (spacer heights, visible window) is computed from it, and
+// the editorial redesign keeps it deliberately. Do not change without redoing
+// the windowing math and re-measuring the row rhythm.
 const DEFAULT_ROW_HEIGHT = 44;
 const OVERSCAN = 8;
 
@@ -147,11 +310,13 @@ export function DataTable<T>({
   rangeLabel,
   onRowClick,
   rowActions,
+  rowHalted,
   empty,
   toolbar,
   ariaLabel = "Data table",
   virtualizeThreshold = 60,
   rowHeight = DEFAULT_ROW_HEIGHT,
+  tableClassName,
   className,
 }: DataTableProps<T>) {
   const showSearch = onQueryChange !== undefined;
@@ -224,9 +389,11 @@ export function DataTable<T>({
     visibleRows.map((row, i) => {
       const index = offset + i;
       const focused = index === focusedRow;
+      const halted = rowHalted?.(row) ?? false;
       return (
         <tr
           key={rowKey(row)}
+          data-halted={halted ? "true" : undefined}
           tabIndex={onRowClick ? (focused ? 0 : -1) : undefined}
           aria-selected={onRowClick ? focused : undefined}
           onFocus={() => setFocusedRow(index)}
@@ -236,17 +403,26 @@ export function DataTable<T>({
           onClick={onRowClick ? () => onRowClick(row) : undefined}
           style={virtualize ? { height: rowHeight } : undefined}
           className={cn(
-            "border-b border-border/60 last:border-0 transition-colors outline-none",
+            // Rows are separated by the SOFT rule, not the panel frame: the
+            // table reads as one object with internal divisions (§2.7 —
+            // elevation is rules, not shadows).
+            "border-b border-border-soft transition-colors outline-none last:border-0",
+            halted && "bg-destructive-surface",
             onRowClick &&
-              "cursor-pointer hover:bg-surface-2/70 focus-visible:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring",
+              "cursor-pointer focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+            onRowClick &&
+              (halted
+                ? "hover:bg-destructive-surface/70 focus-visible:bg-destructive-surface/70"
+                : "hover:bg-surface-2/50 focus-visible:bg-surface-2"),
           )}
         >
           {columns.map((col) => (
             <td
               key={col.id}
               className={cn(
-                "px-4 py-3 align-middle",
-                col.hideOnMobile && "hidden md:table-cell",
+                "px-4 py-3 align-middle text-sm",
+                PRIORITY_CLASS[columnPriority(col)],
+                col.numeric && cellNum,
                 col.className,
               )}
             >
@@ -271,12 +447,16 @@ export function DataTable<T>({
   const genuinelyEmpty = !loading && !error && rows.length === 0 && !isFiltered && !hasNext;
 
   return (
-    <div className={cn("space-y-3", className)}>
+    // min-w-0: a flex/grid parent must be able to shrink this below its content
+    // (§4.6). max-w-full: and it never exceeds that parent.
+    <div className={cn("min-w-0 max-w-full space-y-3", className)}>
       {/* Toolbar: filter bar (q) + parent-supplied controls. */}
       {(showSearch || toolbar) && (
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-3">
           {showSearch && (
-            <div className="relative min-w-[16rem] flex-1">
+            // Prefers 16rem but SHRINKS below it (flex-basis + min-w-0) — a hard
+            // `min-w-[16rem]` is itself a fit failure on a 360px viewport.
+            <div className="relative min-w-0 flex-[1_1_16rem]">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
                 value={query ?? ""}
@@ -299,14 +479,24 @@ export function DataTable<T>({
             : undefined
         }
         className={cn(
-          "overflow-hidden rounded-lg border bg-card shadow-card",
+          // The frame: a bordered card, no shadow (--shadow-card is `none`;
+          // elevation on-page is rules, §2.7). overflow-x-auto — NOT
+          // overflow-hidden: wide tables scroll HERE, inside their own
+          // container, and are never clipped away or pushed onto the body
+          // (§4.6). min-w-0/max-w-full make that promise unconditional.
+          "min-w-0 max-w-full overflow-x-auto rounded-lg border bg-card shadow-card",
           virtualize && "max-h-[32rem] overflow-y-auto",
         )}
       >
-        <table className="w-full text-left text-sm" aria-label={ariaLabel}>
+        <table
+          className={cn("w-full text-left text-sm", tableClassName)}
+          aria-label={ariaLabel}
+        >
           {!genuinelyEmpty && (
           <thead>
-            <tr className="border-b bg-surface-2/60">
+            {/* Header sits on the card, separated by the frame rule — no fill
+                band (§5.10). */}
+            <tr className="border-b border-border bg-card">
               {columns.map((col) => {
                 const active = sort?.columnId === col.id;
                 return (
@@ -323,8 +513,13 @@ export function DataTable<T>({
                         : undefined
                     }
                     className={cn(
-                      "px-4 py-2.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground",
-                      col.hideOnMobile && "hidden md:table-cell",
+                      // The uppercase-mono register (§3.2): 10px, tracked open,
+                      // faint — a label, not a heading competing with the data.
+                      "whitespace-nowrap px-4 py-2.5 font-mono text-2xs font-medium uppercase tracking-wide text-faint",
+                      // Numeric heads right-align onto their digit column (§4.8).
+                      col.numeric && "text-right",
+                      active && "text-foreground",
+                      PRIORITY_CLASS[columnPriority(col)],
                       col.className,
                     )}
                   >
@@ -440,8 +635,10 @@ export function DataTable<T>({
           one page. Next is driven by `hasNext` (⇐ nextCursor), so it stays live
           on an empty filtered window when more pages exist. */}
       {showPagination && (
-        <div className="flex items-center justify-between px-1 text-xs text-muted-foreground">
-          <span>{rangeLabel ?? `${rows.length} shown`}</span>
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 px-1 text-xs text-muted-foreground">
+          <span className="min-w-0 truncate font-mono tabular-nums">
+            {rangeLabel ?? `${rows.length} shown`}
+          </span>
           <div className="flex items-center gap-2">
             <Button
               variant="outline"

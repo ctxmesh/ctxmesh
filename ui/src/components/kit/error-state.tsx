@@ -5,15 +5,37 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 // ErrorState — an error primitive that ALWAYS offers a next action (kit,
-// m13.1 → real m13.4). No dead-end red text: a failed load shows what broke +
-// a Retry (or a role-specific fix). The 403 variant is first-class because
-// RBAC-aware chrome (spec §3) must "explain-and-suggest, never a blank screen".
+// m13.1 → real m13.4; restyled M151 §5.8). No dead-end red text: a failed load
+// shows what broke + a Retry (or a role-specific fix). The 403 variant is
+// first-class because RBAC-aware chrome (spec §3) must "explain-and-suggest,
+// never a blank screen".
+//
+// The two variants are two different truths and are drawn differently on
+// purpose (M151 §7):
+//   • "error"     — it broke. Crit tint, the raw reason in a mono well, Retry.
+//   • "forbidden" — a permission boundary: EXPECTED, routine, and not a
+//                   failure. Calm neutral frame + a lock (M99 C1), and copy
+//                   that names the missing permission instead of "something
+//                   went wrong". Never red, never an alarm.
 //
 // Production invariant (m13.4): the component is guaranteed to render at least
 // one actionable affordance. `error` defaults to a Retry; `forbidden` (which
 // has no retry) falls back to a description that names the next step. If a
 // caller somehow supplies neither retry nor action nor description, we still
 // render a default explanation so the surface is never a dead end.
+
+/** What the caller was denied — drives the verb in the 403 copy (§7, A1/A4). */
+export type ForbiddenPermission = "read" | "create" | "update" | "delete";
+
+// Heading verb ("permission to VIEW agents") vs the RBAC verb the admin must
+// actually grant ("a role that can READ agents"). They differ for `read` on
+// purpose: users think in "view", roles are written in "read".
+const HEADING_VERB: Record<ForbiddenPermission, string> = {
+  read: "view",
+  create: "create",
+  update: "edit",
+  delete: "delete",
+};
 
 export interface ErrorStateProps {
   variant?: "error" | "forbidden";
@@ -30,6 +52,13 @@ export interface ErrorStateProps {
    * Ignored on the `error` variant.
    */
   resource?: string;
+  /**
+   * Which permission is missing on `resource` — defaults to "read". A create/edit/delete surface
+   * denied at 403 must say so ("Ask an admin for a role that can create teams", §7 A4): a write
+   * denial rendered as a read denial sends the user to ask for the wrong role.
+   * Ignored on the `error` variant.
+   */
+  permission?: ForbiddenPermission;
   onRetry?: () => void;
   retryLabel?: string;
   /** Extra action (e.g. "Request access", "Switch namespace"). */
@@ -43,6 +72,7 @@ export function ErrorState({
   description,
   detail,
   resource,
+  permission = "read",
   onRetry,
   retryLabel = "Retry",
   action,
@@ -56,7 +86,7 @@ export function ErrorState({
     title ??
     (forbidden
       ? resource
-        ? `You don't have permission to view ${resource}`
+        ? `You don't have permission to ${HEADING_VERB[permission]} ${resource}`
         : "You don't have access"
       : "Something went wrong");
 
@@ -68,7 +98,7 @@ export function ErrorState({
     description ??
     (forbidden
       ? resource
-        ? `Ask an admin for a role that can read ${resource}.`
+        ? `Ask an admin for a role that can ${permission} ${resource}.`
         : "Ask an admin to grant access, or switch to a namespace you can read."
       : hasButtonAction
         ? undefined
@@ -86,29 +116,29 @@ export function ErrorState({
       className={cn(
         "flex flex-col items-center justify-center rounded-lg border px-6 py-12 text-center",
         forbidden
-          ? "border-border bg-muted/30"
-          : "border-destructive/40 bg-destructive/5",
+          ? "border-border bg-surface-2/40"
+          : "border-destructive/40 bg-destructive-surface/40",
         className,
       )}
     >
       <div
         className={cn(
-          "mb-4 flex h-12 w-12 items-center justify-center rounded-xl",
+          "mb-4 flex h-12 w-12 items-center justify-center rounded-lg",
           forbidden
-            ? "bg-muted text-muted-foreground"
-            : "bg-destructive/15 text-destructive",
+            ? "bg-surface-2 text-muted-foreground"
+            : "bg-destructive-surface text-destructive",
         )}
       >
         <Icon className="h-6 w-6" />
       </div>
-      <h3 className="text-lg font-semibold tracking-snug">{heading}</h3>
+      <h3 className="font-serif text-lg font-medium">{heading}</h3>
       {resolvedDescription && (
         <p className="mt-1.5 max-w-md text-sm text-muted-foreground">
           {resolvedDescription}
         </p>
       )}
       {showDetail && (
-        <pre className="mt-4 max-w-md overflow-x-auto rounded-md bg-surface-3 px-3 py-2 text-left text-xs text-muted-foreground">
+        <pre className="mt-4 max-w-md overflow-x-auto rounded-md bg-surface-3 px-3 py-2 text-left font-mono text-xs text-muted-foreground">
           {detail}
         </pre>
       )}

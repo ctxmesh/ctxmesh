@@ -53,9 +53,10 @@ export function ResourceLink({
 }) {
   const path = namespace && name ? resourcePath(kind, namespace, name) : null;
   if (!path) {
-    // Honest non-link: no detail page (or missing coordinates) → plain text.
+    // Honest non-link: no detail page (or missing coordinates) → plain mono ink,
+    // explicitly NOT underlined — the resting underline is the promise of a destination.
     return (
-      <span className={className} data-testid={testId}>
+      <span className={cn("font-mono no-underline", className)} data-testid={testId}>
         {name}
       </span>
     );
@@ -64,7 +65,9 @@ export function ResourceLink({
     <Link
       to={path}
       className={cn(
-        "text-primary underline-offset-2 hover:underline",
+        // The ONE link treatment console-wide (§2.3/§5.7): pine text over a resting
+        // pine-surface rule that firms to pine on hover — not a decoration-underline.
+        "font-mono text-primary border-b border-accent hover:border-primary",
         className,
       )}
       data-testid={testId}

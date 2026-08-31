@@ -155,7 +155,7 @@ export function CommandPalette({
       />
       <div className="relative w-full max-w-xl overflow-hidden rounded-xl border bg-popover shadow-overlay">
         <div className="flex items-center gap-3 border-b px-4">
-          <Search className="h-4 w-4 text-muted-foreground" />
+          <Search className="h-4 w-4 text-faint" />
           <input
             ref={inputRef}
             value={q}
@@ -170,9 +170,9 @@ export function CommandPalette({
             aria-expanded="true"
             aria-controls="cmdk-list"
             aria-activedescendant={activeId}
-            className="h-12 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+            className="h-12 w-full bg-transparent text-sm outline-none placeholder:font-mono placeholder:text-ghost"
           />
-          <kbd className="hidden rounded border bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground sm:inline">
+          <kbd className="hidden rounded-sm border bg-surface-2 px-1.5 py-0.5 font-mono text-2xs text-faint sm:inline">
             ESC
           </kbd>
         </div>
@@ -192,7 +192,7 @@ export function CommandPalette({
           {groups.map(([group, items]) => (
             <div key={group || "_"} className="mb-1">
               {group && (
-                <p className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                <p className="px-3 pb-1 pt-2 font-mono text-2xs uppercase tracking-wide text-faint">
                   {group}
                 </p>
               )}
@@ -221,15 +221,15 @@ export function CommandPalette({
                         : "text-foreground hover:bg-surface-2",
                     )}
                   >
-                    {Icon && <Icon className="h-4 w-4 text-muted-foreground" />}
+                    {Icon && <Icon className="h-4 w-4 text-faint" />}
                     <span className="flex-1 truncate">{item.label}</span>
                     {item.hint && (
-                      <span className="text-xs text-muted-foreground">
+                      <span className="font-mono text-xs text-faint">
                         {item.hint}
                       </span>
                     )}
                     {isActive && (
-                      <CornerDownLeft className="h-3.5 w-3.5 text-muted-foreground" />
+                      <CornerDownLeft className="h-3.5 w-3.5 text-faint" />
                     )}
                   </button>
                 );
