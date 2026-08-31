@@ -4,4 +4,9 @@
 # add ~100MB of churn to a public repo on every run).
 visual/shots/
 visual/.artifacts/
-visual/report/playwright.json
+visual/report/*
+# Two reports ARE evidence and are kept: the honest before-picture, and the
+# state at acceptance. Everything else is a mid-milestone snapshot that would
+# otherwise accumulate one stale file per task.
+!visual/report/baseline.json
+!visual/report/populated.json

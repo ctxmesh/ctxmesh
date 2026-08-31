@@ -4,66 +4,158 @@ import {
   NAV_SECTIONS,
   NAV_ITEMS,
   navRoute,
+  navSectionOf,
   FIRST_RUN_CHECKLIST,
 } from "@/lib/nav";
 
-// The intent-shaped IA (m20.8): the object-shaped CRD surfaces (Model routes,
-// Secret bindings, Registries) are demoted OUT of the primary nav into an "Advanced"
-// section, so a first-run user sees intent (Providers → Agents → …), not Kubernetes
-// nouns. Providers stays primary (the model home).
+// The M151 IA: six sections — Home / Agents / Library / Govern / Activity /
+// Admin — replacing Overview / Build / Tools / Observe / Platform / Advanced.
+//
+// These tests were rewritten, not deleted. Each older assertion is carried
+// forward as the same INTENT expressed against the new shape (the m20.8
+// CRD-noun demotion, the m23.7 consolidation, the m25 S8 "New agent is a page
+// action" rule, the m76.1 catalog taxonomy, the m54.4 checklist derivation),
+// plus the two properties the new IA is judged on: nothing was lost, and Govern
+// is the fattest section.
 
 const sectionOf = (label: string) =>
   NAV_SECTIONS.find((s) => s.items.some((i) => i.label === label))?.heading;
 
-describe("intent-shaped nav (m20.8)", () => {
-  it("demotes Model routes / Secret bindings / Registries into Advanced", () => {
-    expect(sectionOf("Model routes")).toBe("Advanced");
-    expect(sectionOf("Secret bindings")).toBe("Advanced");
-    expect(sectionOf("Registries")).toBe("Advanced");
+const labelsOf = (heading: string) =>
+  NAV_SECTIONS.find((s) => s.heading === heading)?.items.map((i) => i.label) ?? [];
+
+describe("the six-section IA (M151 §4.2)", () => {
+  it("is exactly Home / Agents / Library / Govern / Activity / Admin, in that order", () => {
+    expect(NAV_SECTIONS.map((s) => s.heading)).toEqual([
+      "Home",
+      "Agents",
+      "Library",
+      "Govern",
+      "Activity",
+      "Admin",
+    ]);
   });
 
-  it("keeps Providers primary (not Advanced)", () => {
-    const providers = sectionOf("Providers");
-    expect(providers).toBeDefined();
-    expect(providers).not.toBe("Advanced");
+  it("makes Govern the fattest section — governance is the thesis, not a footnote", () => {
+    const govern = NAV_SECTIONS.find((s) => s.heading === "Govern")!;
+    for (const section of NAV_SECTIONS) {
+      if (section.heading === "Govern") continue;
+      expect(govern.items.length).toBeGreaterThan(section.items.length);
+    }
   });
 
-  it("Advanced sits at the bottom of the nav", () => {
-    expect(NAV_SECTIONS[NAV_SECTIONS.length - 1].heading).toBe("Advanced");
+  it("gives every item a unique id and every routed item a unique route", () => {
+    const ids = NAV_ITEMS.map((i) => i.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    const routes = NAV_ITEMS.map((i) => i.route).filter(Boolean);
+    expect(new Set(routes).size).toBe(routes.length);
   });
 
-  it("does not surface a CRD noun in the primary Platform section", () => {
-    const platform = NAV_SECTIONS.find((s) => s.heading === "Platform");
-    const labels = platform?.items.map((i) => i.label) ?? [];
-    expect(labels).not.toContain("Model routes");
-    expect(labels).not.toContain("Secret bindings");
+  it("gives every item an icon (the 1024–1279 rail is icons only)", () => {
+    for (const item of NAV_ITEMS) expect(item.icon).toBeTruthy();
+  });
+
+  it("navSectionOf resolves the owning section (the breadcrumb's middle crumb)", () => {
+    expect(navSectionOf("approvals")).toBe("Govern");
+    expect(navSectionOf("runs")).toBe("Activity");
+    expect(navSectionOf("does-not-exist")).toBeUndefined();
   });
 });
 
-// The m23.7 consolidation (audit B3/B5): ONE primary create entry ("New agent"),
-// with the raw hand-authoring "Config builder" demoted to Advanced; and the three
-// MCP/tool surfaces grouped into a dedicated "Tools" section out of "Build".
-describe("nav consolidation (m23.7)", () => {
-  const buildLabels = () =>
-    NAV_SECTIONS.find((s) => s.heading === "Build")?.items.map((i) => i.label) ??
-    [];
+// The re-house is only correct if NOTHING was dropped on the way. Every
+// destination the pre-M151 nav carried is listed here by id; each must still be
+// reachable from some section.
+describe("every pre-M151 destination still lands somewhere", () => {
+  const LEGACY_IDS = [
+    "topology",
+    "providers",
+    "agents",
+    "teams",
+    "gallery",
+    "playground",
+    "prompts",
+    "evals",
+    "mcp-servers",
+    "mcp-approvals",
+    "tool-catalog",
+    "runs",
+    "my-shares",
+    "approvals",
+    "cost",
+    "datasets",
+    "audit",
+    "alerts",
+    "tenants",
+    "guardrails",
+    "workflows",
+    "knowledgebases",
+    "config",
+    "registries",
+    "routes",
+    "secrets",
+  ];
 
-  it("does NOT put 'New agent' in the nav (m25 S8 — it's a page action); Config builder is Advanced", () => {
-    // New agent moved to a top-right button ON the Agents page, so it is no longer a
-    // sidebar item (in Build or anywhere).
-    expect(buildLabels()).not.toContain("New agent");
-    expect(NAV_ITEMS.map((i) => i.label)).not.toContain("New agent");
-    expect(buildLabels()).not.toContain("Config builder");
-    expect(sectionOf("Config builder")).toBe("Advanced");
+  it.each(LEGACY_IDS)("keeps %s", (id) => {
+    const item = NAV_ITEMS.find((i) => i.id === id);
+    expect(item, `nav id "${id}" disappeared in the M151 re-house`).toBeDefined();
+    expect(item?.route).toBeTruthy();
   });
 
-  it("groups the MCP/tool surfaces into a dedicated Tools section (not Build)", () => {
-    // m25 S10: the MCP entry is a list page "MCP Servers" (Add is in-page), not
-    // "Add MCP server".
-    expect(sectionOf("MCP Servers")).toBe("Tools");
-    expect(sectionOf("MCP approvals")).toBe("Tools");
-    expect(sectionOf("Tool catalog")).toBe("Tools");
-    expect(buildLabels()).not.toContain("MCP Servers");
+  it("renames the index from Dashboard to Home without moving its route", () => {
+    // The page is the same surface (spec §6.1 A11); only the name changed.
+    expect(NAV_ITEMS.find((i) => i.id === "dashboard")).toBeUndefined();
+    expect(navRoute("home")).toBe("/");
+  });
+});
+
+// m20.8's intent, restated: a first-run user meets INTENT (agents, tools,
+// governance), never Kubernetes nouns. The nouns now live in Admin — last, and
+// out of the daily sections.
+describe("intent-shaped nav (m20.8, carried forward)", () => {
+  it("keeps the raw CRD surfaces in Admin, at the bottom", () => {
+    expect(sectionOf("Model routes")).toBe("Admin");
+    expect(sectionOf("Secret bindings")).toBe("Admin");
+    expect(NAV_SECTIONS[NAV_SECTIONS.length - 1].heading).toBe("Admin");
+  });
+
+  it("keeps CRD nouns out of the sections daily work happens in", () => {
+    for (const heading of ["Home", "Agents", "Library", "Activity"]) {
+      expect(labelsOf(heading)).not.toContain("Model routes");
+      expect(labelsOf(heading)).not.toContain("Secret bindings");
+    }
+  });
+
+  it("moves Registries to Govern — an allow-list is a control, not plumbing", () => {
+    expect(sectionOf("Registries")).toBe("Govern");
+  });
+
+  it("keeps Providers first in Admin and first in the run-up to a first agent", () => {
+    // m49.2's onboarding-order fix now lives in the Home checklist rather than in
+    // nav position: step one links straight at the connect wizard.
+    expect(labelsOf("Admin")[0]).toBe("Providers");
+    expect(FIRST_RUN_CHECKLIST[0].to).toBe(`${navRoute("providers")}/connect`);
+  });
+});
+
+// The m23.7 / m25 S8 consolidation: ONE primary create entry (a page action, not
+// a nav item), and the MCP/tool surfaces grouped together — now inside Library,
+// which is what the old "Tools" section became.
+describe("nav consolidation (m23.7 / m25 S8, carried forward)", () => {
+  it("does NOT put 'New agent' in the nav — it is the Agents page's action", () => {
+    expect(NAV_ITEMS.map((i) => i.label)).not.toContain("New agent");
+    expect(labelsOf("Agents")).not.toContain("New agent");
+  });
+
+  it("keeps the hand-authoring Config builder out of the agent-creation flow", () => {
+    expect(labelsOf("Agents")).not.toContain("Config builder");
+    expect(sectionOf("Config builder")).toBe("Library");
+  });
+
+  it("groups the MCP/tool surfaces in Library, with the approval queue in Govern", () => {
+    expect(sectionOf("MCP servers")).toBe("Library");
+    expect(sectionOf("Tool catalog")).toBe("Library");
+    // The approval QUEUE is a human gate, so it sits with the other queues.
+    expect(sectionOf("MCP approvals")).toBe("Govern");
     expect(NAV_ITEMS.map((i) => i.label)).not.toContain("Add MCP server");
   });
 });
@@ -82,13 +174,42 @@ describe("catalog taxonomy (m76.1)", () => {
   });
 
   it("mcp-servers nav item stays (owned list, not discovery)", () => {
-    expect(NAV_ITEMS.find((i) => i.id === "mcp-servers")).toBeDefined();
     expect(navRoute("mcp-servers")).toBe("/tools/mcp-servers");
   });
 
   it("tool-catalog nav item stays (bind-time picker, not discovery)", () => {
-    expect(NAV_ITEMS.find((i) => i.id === "tool-catalog")).toBeDefined();
     expect(navRoute("tool-catalog")).toBe("/tools/catalog");
+  });
+});
+
+// Counts are DATA. The IA declares which backend answers each one and what the
+// number means, because the meaning is what fixes the colour (§4.2).
+describe("live counts are declared by the IA, not invented by the shell", () => {
+  it("marks Approvals as a waiting-on-a-person count", () => {
+    expect(NAV_ITEMS.find((i) => i.id === "approvals")?.count).toEqual({
+      source: "approvals",
+      tone: "waiting",
+    });
+  });
+
+  it("marks Stops as an in-force count, in Govern", () => {
+    const stops = NAV_ITEMS.find((i) => i.id === "stops");
+    expect(stops?.count).toEqual({ source: "stops", tone: "stopped" });
+    expect(navSectionOf("stops")).toBe("Govern");
+  });
+
+  it("gives no other item a count — nothing renders a number no backend answers", () => {
+    expect(NAV_ITEMS.filter((i) => i.count).map((i) => i.id).sort()).toEqual([
+      "approvals",
+      "stops",
+    ]);
+  });
+
+  it("leaves Stops routeless until its page ships (spec §6.2 gap 2, m151.7)", () => {
+    // A routeless item walks to /soon/<id> — the honest "arrives in M151"
+    // placeholder — rather than pretending a surface exists.
+    expect(NAV_ITEMS.find((i) => i.id === "stops")?.route).toBeUndefined();
+    expect(NAV_ITEMS.find((i) => i.id === "stops")?.milestone).toBe("M151");
   });
 });
 
@@ -99,6 +220,10 @@ describe("first-run checklist derives from nav (m54.4)", () => {
     expect(navRoute("providers")).toBe("/providers");
     expect(navRoute("playground")).toBe("/playground");
     expect(() => navRoute("does-not-exist")).toThrow(/no routed nav item/);
+  });
+
+  it("throws for a nav id that exists but has no route (a /soon placeholder)", () => {
+    expect(() => navRoute("stops")).toThrow(/no routed nav item/);
   });
 
   it("each checklist step's route is anchored to its nav surface", () => {

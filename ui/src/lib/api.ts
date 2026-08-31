@@ -2050,6 +2050,51 @@ export interface ApprovalQueueItem {
   waitingSince?: string; // RFC3339 — when the run entered requires_action
 }
 
+// ── The scoped kill switch (ADR 0126, spec §5.23) ────────────────────────────
+// The console's frame carries a Stop control on every page, so these three
+// shapes mirror internal/bff/kill_handler.go exactly.
+//
+// The wire LEVEL vocabulary is the backend's (agent | namespace | tenant |
+// fleet), not the UI's. The kit's StopControl speaks in what a person picks —
+// "this agent / this team / workspace / everything" — and the shell maps between
+// them. Do not rename these: they are the API.
+
+/** The scope levels a stop can be recorded at (killscope.Level). */
+export type StopLevel = "agent" | "namespace" | "tenant" | "fleet";
+
+/** POST /api/kill and POST /api/kill/lift take the same body. `reason` is
+ *  REQUIRED on a kill (the backend 400s without it) — it becomes the audit line
+ *  and the sentence everyone whose work stopped will read. */
+export interface StopScopeRequest {
+  level: StopLevel;
+  /** Required for agent/namespace levels, forbidden otherwise. */
+  namespace?: string;
+  /** Required for the agent level. */
+  agent?: string;
+  /** Required for the tenant level. */
+  tenant?: string;
+  reason?: string;
+}
+
+/** The outcome. `applied` false on a lift means the scope was not stopped — an
+ *  honest no-op rather than a success that did nothing. */
+export interface StopScopeResponse {
+  scope: string;
+  applied: boolean;
+}
+
+/** One live stop (GET /api/kills). An install with no kill store configured
+ *  answers `[]` — which is a real, known "nothing is stopped", not an unknown. */
+export interface ActiveStop {
+  scope: string;
+  level: StopLevel;
+  namespace?: string;
+  agent?: string;
+  tenant?: string;
+  reason: string;
+  principal: string;
+}
+
 // MySharesItem mirrors the BFF's MySharesItem DTO (internal/bff/shares.go).
 // Returned by GET /api/my/shares — the caller's own share links across ALL runs.
 // NOTE: there is no token field — the backend never returns the token after creation.
@@ -5484,6 +5529,51 @@ export const api = {
       );
     }
     return (await res.json()) as ApprovalQueueItem[];
+  },
+
+  // listStops reads the active scoped stops (GET /api/kills, ADR 0126). The frame
+  // renders their number beside the Govern → Stops nav item, so this is polled by
+  // the shell on every page. Reading is not privileged (knowing that work is halted
+  // is not a secret; RECORDING or lifting a stop needs the `kill` verb), and an
+  // install with no kill store answers an empty array rather than a 501 — so an
+  // empty result genuinely means "nothing is stopped", not "we could not tell".
+  listStops: async (signal?: AbortSignal): Promise<ActiveStop[]> => {
+    const res = await apiFetch("/api/kills", {
+      headers: { Accept: "application/json" },
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `listStops failed (${res.status})`),
+        res.status,
+      );
+    }
+    const data = (await res.json()) as ActiveStop[] | null;
+    return Array.isArray(data) ? data : [];
+  },
+
+  // stopScope records an emergency stop (POST /api/kill, ADR 0126). It is gated by
+  // its OWN RBAC verb — `kill` on the agentdeployments/kill subresource — which is
+  // bound to nobody by default, so a 403 here is the expected answer for most
+  // callers and MUST be surfaced verbatim rather than swallowed: the operator has
+  // to know the fleet did not stop.
+  stopScope: async (
+    req: StopScopeRequest,
+    signal?: AbortSignal,
+  ): Promise<StopScopeResponse> => {
+    const res = await apiFetch("/api/kill", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `the stop was not recorded (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as StopScopeResponse;
   },
 
   // getSharedRun fetches the public shared-run view (GET /api/shared/runs/{token}).

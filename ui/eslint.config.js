@@ -61,6 +61,10 @@ export default tseslint.config(
       "src/design/**/*.{ts,tsx}",
       "src/lib/capabilities.tsx",
       "src/lib/namespace.tsx",
+      // Same pattern again (M151): ThemeProvider + useTheme co-located with the
+      // pure helpers that read/apply the theme, which the chrome-less routes and
+      // the module-load bootstrap call without mounting a component.
+      "src/lib/theme.tsx",
     ],
     rules: {
       "react-refresh/only-export-components": "off",
