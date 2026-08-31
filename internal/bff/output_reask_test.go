@@ -85,6 +85,8 @@ func TestReask_ANearMissIsRecoveredByOneReask(t *testing.T) {
 	body := runEventsBody(t, s, created.ID)
 	assert.Contains(t, body, "output_schema_reask",
 		"the repair must be visible on the run's stream, not an unexplained extra round-trip")
+	assert.Contains(t, body, "Re-asking",
+		"and must carry a HUMAN label — a step frame with no label renders as raw JSON in the console")
 }
 
 // The re-ask is a RECOVERY tier, not an escape from the control: an agent that is still wrong on the
