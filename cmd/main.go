@@ -59,6 +59,7 @@ import (
 	"github.com/ctxmesh/agentry/internal/audit"
 	"github.com/ctxmesh/agentry/internal/controller"
 	"github.com/ctxmesh/agentry/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane/agentcapability"
 	"github.com/ctxmesh/agentry/internal/controlplane/alertstore"
 	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agentry/internal/controlplane/costrollup"
@@ -501,6 +502,10 @@ func main() {
 		// End-user AGENT exposure mirror (M137/EU1b, ADR 0107): the reconciler writes an endUserAccess
 		// agent's endpoint + spec here so the BFF resolves an end-user run without a K8s read.
 		EndUserAgentStore: enduseragent.NewPostgresStore(cpDB),
+		// Capability registry (M141, ADR 0120): the reconciler registers an agent's capability descriptor
+		// here so the BFF's discovery path can rank a registry's agents against a capability query — again
+		// with no K8s read on the BFF SA.
+		AgentCapabilityStore: agentcapability.NewPostgresStore(cpDB),
 		// Injected sidecar image overrides (audit OPS-1): empty ⇒ the dev.local defaults,
 		// which ImagePullBackOff off a kind cluster, so a real install sets these.
 		CollectorImage: strings.TrimSpace(os.Getenv("COLLECTOR_IMAGE")),

@@ -47,6 +47,7 @@ import (
 
 	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	"github.com/ctxmesh/agentry/internal/controlplane/agentcapability"
 	"github.com/ctxmesh/agentry/internal/controlplane/enduseragent"
 	"github.com/ctxmesh/agentry/internal/eval"
 	"github.com/ctxmesh/agentry/internal/gateway"
@@ -260,6 +261,12 @@ type AgentDeploymentReconciler struct {
 	// control-plane DB (envtest) — the mirror sync is a no-op.
 	EndUserAgentStore enduseragent.Store
 
+	// AgentCapabilityStore is the CAPABILITY REGISTRY mirror (M141, ADR 0120). The reconciler registers an
+	// agent's capability descriptor here iff spec.capabilities is set, and prunes it otherwise / on delete,
+	// so the BFF's discovery path ranks candidates WITHOUT a K8s read (ADR 0011). Nil ⇒ no control-plane DB
+	// (envtest) — the registration sync is a no-op.
+	AgentCapabilityStore agentcapability.Store
+
 	// CollectorImage / DiscoveryImage override the injected OTel-collector / tool-discovery
 	// sidecar images (audit OPS-1; from COLLECTOR_IMAGE / DISCOVERY_IMAGE env, mirror of
 	// EGRESS_SIDECAR_IMAGE). Empty ⇒ the project-default constants — which are dev.local/*
@@ -379,6 +386,8 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			// M137/EU1b (ADR 0107): prune the end-user exposure mirror for a deleted agent (the row is a
 			// Postgres mirror, not K8s-owned, so owner-ref GC doesn't reach it).
 			r.pruneEndUserAgentMirror(ctx, req.Namespace, req.Name)
+			// M141 (ADR 0120): likewise de-register the deleted agent from the capability registry.
+			r.pruneCapabilityRegistration(ctx, req.Namespace, req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching AgentDeployment: %w", err)
@@ -2398,6 +2407,8 @@ func (r *AgentDeploymentReconciler) syncStatus(
 		endpoint = deploy.Status.URL
 	}
 	r.syncEndUserAgentMirror(ctx, deploy, endpoint)
+	// M141 (ADR 0120): register the agent's capability descriptor so peers can discover it by what it does.
+	r.syncCapabilityRegistration(ctx, deploy, readyStatus == metav1.ConditionTrue)
 
 	return r.Status().Update(ctx, deploy)
 }
@@ -2441,6 +2452,9 @@ func (r *AgentDeploymentReconciler) setReadyFalse(
 	// M137/EU1b (ADR 0107): a not-Ready agent mirrors with an EMPTY endpoint (the BFF 409s it) if it is
 	// exposed; an unexposed agent is pruned. syncEndUserAgentMirror handles both from spec.endUserAccess.
 	r.syncEndUserAgentMirror(ctx, deploy, "")
+	// M141 (ADR 0120): a not-Ready agent stays REGISTERED but flagged not-ready — discovery can rank it and
+	// let the caller decide, which beats it vanishing from the candidate set on a transient blip.
+	r.syncCapabilityRegistration(ctx, deploy, false)
 	if err := r.Status().Update(ctx, deploy); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
@@ -2478,6 +2492,69 @@ func (r *AgentDeploymentReconciler) pruneEndUserAgentMirror(ctx context.Context,
 	}
 	if err := r.EndUserAgentStore.Delete(ctx, namespace, name); err != nil {
 		logf.FromContext(ctx).Error(err, "end-user agent mirror prune failed", "agent", namespace+"/"+name)
+	}
+}
+
+// syncCapabilityRegistration registers the agent in the control-plane CAPABILITY REGISTRY (M141, ADR 0120).
+// A row is written when the agent is a registry MEMBER or carries a capability descriptor (or both), and
+// carries two separable facts:
+//
+//   - the registry SCOPE — so the discovery path can resolve "which registry is this caller discovering
+//     within?" from the control plane instead of trusting what the calling pod claims. This is also why a
+//     member with NO descriptor still gets a row: the natural discovery caller is an orchestrator, and an
+//     orchestrator rarely advertises a capability of its own.
+//   - the DESCRIPTOR — a non-empty description is what makes the agent a discovery CANDIDATE (the store's
+//     List filters on it), so advertising stays opt-in.
+//
+// An agent that is neither a member nor described is pruned. Best-effort: a store error is logged and
+// re-converges on the next reconcile, exactly like the end-user mirror; it never fails the reconcile.
+func (r *AgentDeploymentReconciler) syncCapabilityRegistration(
+	ctx context.Context, deploy *agentsv1alpha1.AgentDeployment, ready bool,
+) {
+	if r.AgentCapabilityStore == nil {
+		return
+	}
+	// The registry read is best-effort: on a transient list failure keep the EXISTING registration rather
+	// than rewriting it with an empty (and therefore scope-less) row.
+	membership, err := resolveAgentRegistry(ctx, r.Client, deploy)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "capability registration skipped: registry membership unresolved",
+			"agent", deploy.Namespace+"/"+deploy.Name)
+		return
+	}
+	description, tags := "", []string(nil)
+	if desc := deploy.Spec.Capabilities; desc != nil {
+		description, tags = strings.TrimSpace(desc.Description), desc.Tags
+	}
+	if !membership.IsMember && description == "" {
+		// Nothing to record: no scope to resolve and nothing advertised.
+		r.pruneCapabilityRegistration(ctx, deploy.Namespace, deploy.Name)
+		return
+	}
+	row := agentcapability.AgentCapability{
+		Namespace:   deploy.Namespace,
+		Agent:       deploy.Name,
+		Description: description,
+		Tags:        tags,
+		Ready:       ready,
+	}
+	if membership.IsMember {
+		row.RegistryID = membership.RegistryID
+	}
+	if err := r.AgentCapabilityStore.Set(ctx, row); err != nil {
+		logf.FromContext(ctx).Error(err, "capability registration failed; will re-converge next reconcile",
+			"agent", deploy.Namespace+"/"+deploy.Name)
+	}
+}
+
+// pruneCapabilityRegistration de-registers an agent from the capability registry (its descriptor was
+// cleared, or the agent was deleted) — it becomes undiscoverable while staying reachable by name.
+func (r *AgentDeploymentReconciler) pruneCapabilityRegistration(ctx context.Context, namespace, name string) {
+	if r.AgentCapabilityStore == nil {
+		return
+	}
+	if err := r.AgentCapabilityStore.Delete(ctx, namespace, name); err != nil {
+		logf.FromContext(ctx).Error(err, "capability de-registration failed", "agent", namespace+"/"+name)
 	}
 }
 
