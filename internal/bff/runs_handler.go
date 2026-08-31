@@ -358,24 +358,11 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	// stored as the audit row's TraceID so "all invocations of run X / agent Y" is queryable. Best-effort.
 	s.auditInvoke(r.Context(), rn.CallerUsername, req.Agent, ns, runID)
 
-	// Worker-dispatch mode (ADR 0034): leave the run `queued` — a KEDA-scaled worker pool claims and
-	// executes it against the durable store, decoupled from this request (and this pod). Otherwise
-	// (dev / single-pod) execute in-process: detach the capability + conversationId onto a
-	// background context so execution survives the request returning (the request ctx cancels at 202).
-	if !s.runWorkerDispatch {
-		execCtx := contextWithRunCapability(
-			contextWithConversationID(context.Background(), conversationIDFromContext(r.Context())),
-			runCapabilityFromContext(r.Context()),
-		)
-		// Record mode (M78, ADR 0071 §1): carry the run id so the adapter stamps X-Ctxmesh-Record on
-		// the in-process (dev / single-pod) path too — the same per-run capture toggle the run-worker
-		// sets in dispatch mode. Only when this run opted in (req.Record, already gated record-capable).
-		if rn.Record {
-			execCtx = contextWithRecord(execCtx, runID)
-		}
-		go s.executeRun(execCtx, runID, endpoint, []byte(req.Input))
-	}
-
+	// The run is left `queued`; the worker pool claims and executes it against the run store, decoupled
+	// from this request and this pod (ADR 0034). There is exactly ONE run path since M143.1 (ADR 0125):
+	// the in-process branch that used to run here in dev/single-pod mode is gone, because two paths meant
+	// every durability property — fencing, reclaim, cancellation — had to be argued twice and was only
+	// ever proven on one of them.
 	writeJSON(w, http.StatusAccepted, CreateRunResponse{ID: runID, Status: string(run.StatusQueued)})
 }
 

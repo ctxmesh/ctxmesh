@@ -237,17 +237,10 @@ func (s *Server) createWorkflowInstanceRun(
 	// CREATE-TIME GUARD (m83.1, m52.L8): a workflow instance advances ONE node per claim and then SUSPENDS
 	// to `waiting`; the NEXT advance happens only when the transactional wake re-queues the run and a
 	// run-worker RE-CLAIMS it (run_worker.go executeClaimedRun → executeWorkflow). In in-process mode
-	// (!runWorkerDispatch — no durable store + worker pool) there is NO pool to re-claim the woken run, so a
-	// workflow stalls after its first node and never reaches `succeeded`. Since every workflow needs at least
-	// a launch advance + a collect advance, this stall is UNCONDITIONAL here. Fail-fast at create (422) with a
-	// clear typed error rather than minting a run that silently stalls — the request is well-formed but this
-	// mode cannot serve it (matching the inline-invalid-spec 422 precedent above).
-	if !s.runWorkerDispatch {
-		writeError(w, http.StatusUnprocessableEntity,
-			"workflow execution requires worker-dispatch (a durable run store + RUN_WORKER_DISPATCH); "+
-				"this server is running in in-process mode and cannot complete a multi-node workflow")
-		return
-	}
+	// (Until M143.1 this returned 422: the in-process run path had no pool to re-claim a woken run, so a
+	// workflow stalled after its first node and could never reach `succeeded` — an entire feature that did
+	// not work on one of the two run paths. Retiring that path (ADR 0125) removed the guard along with the
+	// mode it guarded against.)
 
 	// Snapshot the resolved WorkflowSpec to JSON (the executor drives this pinned snapshot, not a live
 	// CR — a live CR edit after instance creation must not change the running graph; an inline plan is
@@ -318,12 +311,8 @@ func (s *Server) createWorkflowInstanceRun(
 		return
 	}
 
-	// Worker-dispatch mode: leave `queued` for the pool. Dev/single-pod: execute in-process so the
-	// workflow advances without a running worker pool.
-	if !s.runWorkerDispatch {
-		go s.executeWorkflow(context.Background(), runID) // inline (dev/single-pod) — unfenced
-	}
-
+	// Left `queued` for the pool, which executes it under a lease. One run path since M143.1 (ADR 0125) —
+	// note the old inline branch was explicitly UNFENCED, so workflow progress had no reclaim safety on it.
 	writeJSON(w, http.StatusAccepted, CreateRunResponse{ID: runID, Status: string(run.StatusQueued)})
 }
 

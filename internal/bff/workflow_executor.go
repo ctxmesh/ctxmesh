@@ -1167,15 +1167,8 @@ func (s *Server) spawnWorkflowNode(
 		return fmt.Errorf("creating the node sub-run: %w", err)
 	}
 
-	// Non-dispatch (dev/single-pod / test-without-worker-pool): execute the sub-run in-process so the node
-	// makes progress without a running worker pool. In dispatch mode leave it queued for the pool.
-	if !s.runWorkerDispatch {
-		execCtx := contextWithConversationID(context.Background(), wf.ConversationID)
-		if capToken, minted := s.mintRunCapability(wf.CallerUsername, wf.Namespace, node.AgentRef, wf.Boundary, childID); minted {
-			execCtx = contextWithRunCapability(execCtx, capToken)
-		}
-		go s.executeRun(execCtx, childID, endpoint, input)
-	}
+	// The node's child run is left queued for the worker pool, which re-mints its capability from the
+	// workflow's inherited identity. One run path since M143.1 (ADR 0125).
 	return nil
 }
 

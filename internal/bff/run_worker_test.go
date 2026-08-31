@@ -230,13 +230,12 @@ func TestRunWorker_DrainsQueue(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
 	inv := &fakeInvokeAdapter{traceID: "tr-w", resp: []byte(`{"output":"worked","consent_required":[]}`)}
 	s := NewServer(Options{
-		CallerClients:     newFakeFactory(c),
-		Scheme:            testScheme(t),
-		Auth:              AllowAll{},
-		Adapters:          Adapters{Invoke: inv},
-		Version:           "test",
-		RunWorkerDispatch: true,
-		Log:               logr.Discard(),
+		CallerClients: newFakeFactory(c),
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		Adapters:      Adapters{Invoke: inv},
+		Version:       "test",
+		Log:           logr.Discard(),
 	})
 
 	created := createRun(t, s, InvokeRequest{
@@ -273,13 +272,12 @@ func TestRunWorker_ResumesAbandonedRun(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
 	inv := &fakeInvokeAdapter{traceID: "tr-r", resp: []byte(`{"output":"resumed","consent_required":[]}`)}
 	s := NewServer(Options{
-		CallerClients:     newFakeFactory(c),
-		Scheme:            testScheme(t),
-		Auth:              AllowAll{},
-		Adapters:          Adapters{Invoke: inv},
-		Version:           "test",
-		RunWorkerDispatch: true,
-		Log:               logr.Discard(),
+		CallerClients: newFakeFactory(c),
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		Adapters:      Adapters{Invoke: inv},
+		Version:       "test",
+		Log:           logr.Discard(),
 	})
 
 	created := createRun(t, s, InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{"input":"hi"}`)})
