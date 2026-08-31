@@ -26,20 +26,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The real publisher SETs `run:{id}:control = cancel` with a bounded TTL — the exact key the state-layer
-// proxy's /control endpoint reads back (statelayer.controlKey). If either side's key format drifts, this
-// test (and the statelayer control test) fail loudly.
+// The real publisher SETs `run:{ns}:{id}:control = cancel` with a bounded TTL — the exact key the
+// state-layer proxy's /control endpoint reads back (statelayer.controlKey). If either side's key format
+// drifts, this test (and the statelayer control test) fail loudly. The NAMESPACE is in the key so the
+// proxy can scope the read to the caller's own namespace (M142.3, C15).
 func TestRedisRunControlPublisher_SetsCancelMarkerWithTTL(t *testing.T) {
 	mr := miniredis.RunT(t)
 	pub := NewRedisRunControlPublisher(mr.Addr())
 
-	require.NoError(t, pub.Publish(context.Background(), "run-abc", controlVerbCancel))
+	require.NoError(t, pub.Publish(context.Background(), "team-ns", "run-abc", controlVerbCancel))
 
-	got, err := mr.Get("run:run-abc:control")
+	got, err := mr.Get("run:team-ns:run-abc:control")
 	require.NoError(t, err)
 	assert.Equal(t, "cancel", got, "the marker verb is exactly \"cancel\"")
 
-	ttl := mr.TTL("run:run-abc:control")
+	ttl := mr.TTL("run:team-ns:run-abc:control")
 	assert.Positive(t, ttl, "the marker is set with a TTL so it self-expires (never lingers forever)")
 	assert.LessOrEqual(t, ttl, controlMarkerTTL, "the TTL is bounded by controlMarkerTTL")
 }
@@ -49,9 +50,9 @@ func TestPublishCancelMarker_WithPublisher_SetsMarker(t *testing.T) {
 	mr := miniredis.RunT(t)
 	s := &Server{runControl: NewRedisRunControlPublisher(mr.Addr()), log: logr.Discard()}
 
-	s.publishCancelMarker(context.Background(), "run-xyz")
+	s.publishCancelMarker(context.Background(), "team-ns", "run-xyz")
 
-	got, err := mr.Get("run:run-xyz:control")
+	got, err := mr.Get("run:team-ns:run-xyz:control")
 	require.NoError(t, err)
 	assert.Equal(t, "cancel", got)
 }
@@ -61,6 +62,6 @@ func TestPublishCancelMarker_WithPublisher_SetsMarker(t *testing.T) {
 func TestPublishCancelMarker_NilPublisher_NoOp(t *testing.T) {
 	s := &Server{runControl: nil, log: logr.Discard()}
 	assert.NotPanics(t, func() {
-		s.publishCancelMarker(context.Background(), "run-none")
+		s.publishCancelMarker(context.Background(), "team-ns", "run-none")
 	}, "a nil publisher must degrade to a soft cancel, never panic")
 }

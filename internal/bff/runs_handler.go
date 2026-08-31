@@ -245,7 +245,7 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	// — polling the pod-authed proxy — aborts the in-flight model call at call-boundary granularity instead
 	// of waiting for the worker to observe the terminal status. Best-effort: a nil publisher (no
 	// STATELAYER_ADDR) or a Valkey blip degrades to today's soft cancel, never an error on the cancel path.
-	s.publishCancelMarker(r.Context(), rn.ID)
+	s.publishCancelMarker(r.Context(), rn.Namespace, rn.ID)
 	// Cancel the whole SUBTREE (L9, ADR 0091): a canceled supervisor/workflow's non-terminal descendants —
 	// delegate sub-runs, workflow nodes, and their nested descendants — must be cancelled too, else durable
 	// suspend/resume (L7) leaves them burning tokens with no consumer (the blocking long-poll that used to

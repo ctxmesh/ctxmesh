@@ -51,9 +51,17 @@ func (s *Server) handleControlGet(w http.ResponseWriter, r *http.Request) {
 	// Agent-auth FIRST — reject an unauthenticated OR non-agent caller before touching Valkey. Mirror the
 	// quota/dedup endpoints (authenticateAgentNamespace, m79.2/C7): a verified-but-non-agent SA (e.g. the
 	// namespace `default`) is 403'd, not let in — closing the C12 gap where any pod in a tenant namespace
-	// could read /control. Only the AUTHORIZATION gate matters (is this a real agent?), not the namespace
-	// — the agent supplies its own run id — so the returned ns is discarded.
-	if _, err := s.authenticateAgentNamespace(ctx, bearerToken(r)); err != nil {
+	// could read /control.
+	//
+	// The namespace is now KEPT, not discarded (M142.3, C15). Authentication alone left the read
+	// unscoped: any verified agent could name any run id and learn whether it was being cancelled — a
+	// cross-tenant read in a shared state layer. The namespace comes from the pod's own verified identity
+	// and is what the key is built from, so a cross-namespace read is structurally impossible rather than
+	// merely refused. The proxy cannot check per-agent ownership directly: it holds no run→agent mapping,
+	// and its runcap verifier was deliberately retired (ADR 0052 §C6) so a compromised proxy carries no
+	// user credential — a property worth more than the finer-grained check would be.
+	ns, err := s.authenticateAgentNamespace(ctx, bearerToken(r))
+	if err != nil {
 		writeAgentAuthError(w, err)
 		return
 	}
@@ -64,7 +72,7 @@ func (s *Server) handleControlGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	verb, err := s.control.Control(ctx, runID)
+	verb, err := s.control.Control(ctx, ns, runID)
 	if err != nil {
 		// A backend error → 502; the launcher's control client fails OPEN (no verb ⇒ don't cancel), so a
 		// Valkey blip never spuriously kills a live run.
