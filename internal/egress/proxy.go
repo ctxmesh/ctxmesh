@@ -92,6 +92,11 @@ type ProxyConfig struct {
 	RoutesHolder *RouteHolder
 	// Transport is the RoundTripper for the upstream forward (nil ⇒ http.DefaultTransport).
 	Transport http.RoundTripper
+	// StreamIdleTimeout bounds the gap between bytes on a STREAMING tool response (M143.4, m52.G18).
+	// F3's ResponseHeaderTimeout is satisfied and disarmed the moment headers arrive, so a
+	// streamable-http server that then goes silent would stream nothing, forever, wedging the run's
+	// managed loop. Zero ⇒ no idle bound (an operator's explicit choice, not a default to substitute).
+	StreamIdleTimeout time.Duration
 	// Log is the structured logger.
 	Log logr.Logger
 	// Recorder, when non-nil, is the M78 record-mode TOOL capture (ADR 0071 §1/C1): every tool
@@ -212,7 +217,12 @@ func NewProxy(cfg ProxyConfig) *Proxy {
 		// byte the same response incl. SSE/streamable-http framing. nil-recorder / non-recorded call
 		// ⇒ this hook is a no-op (nil capture in the context). Best-effort: a read error skips
 		// capture, never fails the forward.
-		ModifyResponse: p.captureResponse,
+		ModifyResponse: func(resp *http.Response) error {
+			// The idle watchdog wraps the body BEFORE the recorder's capture hook, so a stalled stream
+			// fails the read rather than parking the capture on it too.
+			resp.Body = newIdleTimeoutReader(resp.Body, cfg.StreamIdleTimeout)
+			return p.captureResponse(resp)
+		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			// F3 (M126/Gate C): a hung MCP server (connects but never responds) surfaces here as a
 			// transport timeout (ResponseHeaderTimeout on the cloned Transport) — fail the tool call as a

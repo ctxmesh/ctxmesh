@@ -204,7 +204,7 @@ func (s *Server) executeIngestion(ctx context.Context, runID string) {
 	if s.knowledgeStore == nil || s.embedder == nil {
 		// Degrade honestly (the DocStore-nil→501 pattern): the wiring is absent, so we cannot embed/write. Fail
 		// the run with a clear reason rather than panic on a nil store.
-		s.failIngestion(runID, ingestionFailed, "ingestion unavailable: knowledge store or embedder not configured (set CONTROLPLANE_DSN + MODEL_GATEWAY_URL)")
+		s.failIngestion(ctx, runID, ingestionFailed, "ingestion unavailable: knowledge store or embedder not configured (set CONTROLPLANE_DSN + MODEL_GATEWAY_URL)")
 		return
 	}
 
@@ -214,17 +214,17 @@ func (s *Server) executeIngestion(ctx context.Context, runID string) {
 		// run terminates `failed` AND the corpus-status projection is attempted, rather than a bare return that
 		// leaves the run `running` and the KB stuck `Ingesting` forever (an m68.14-class out-of-band failure).
 		s.log.Error(err, "ingestion: could not load the run", "run", runID)
-		s.failIngestion(runID, ingestionFailed, fmt.Sprintf("loading the ingestion run: %v", err))
+		s.failIngestion(ctx, runID, ingestionFailed, fmt.Sprintf("loading the ingestion run: %v", err))
 		return
 	}
 
 	var spec IngestionSpec
 	if uErr := json.Unmarshal([]byte(rn.IngestionSpec), &spec); uErr != nil {
-		s.failIngestion(runID, ingestionFailed, fmt.Sprintf("invalid ingestion spec snapshot: %v", uErr))
+		s.failIngestion(ctx, runID, ingestionFailed, fmt.Sprintf("invalid ingestion spec snapshot: %v", uErr))
 		return
 	}
 	if strings.TrimSpace(spec.KnowledgeBase) == "" {
-		s.failIngestion(runID, ingestionFailed, "ingestion spec has no knowledgeBase")
+		s.failIngestion(ctx, runID, ingestionFailed, "ingestion spec has no knowledgeBase")
 		return
 	}
 
@@ -243,7 +243,7 @@ func (s *Server) executeIngestion(ctx context.Context, runID string) {
 			s.log.Error(capErr, "ingestion: storage hard-cap lookup failed; allowing (fail-open)",
 				"run", runID, "ns", spec.Namespace, "kb", spec.KnowledgeBase)
 		} else if exceeded {
-			s.failIngestion(runID, ingestionStorageQuotaExceeded, fmt.Sprintf(
+			s.failIngestion(ctx, runID, ingestionStorageQuotaExceeded, fmt.Sprintf(
 				"tenant storage hard cap reached for namespace %q — the corpus is at or over its configured "+
 					"limit; delete documents or raise the tenant's storage.corpusBytesHardCap before re-ingesting", spec.Namespace))
 			return
@@ -252,13 +252,13 @@ func (s *Server) executeIngestion(ctx context.Context, runID string) {
 
 	cursor, err := parseIngestionCursor(rn.Cursor)
 	if err != nil {
-		s.failIngestion(runID, ingestionFailed, fmt.Sprintf("corrupt ingestion cursor: %v", err))
+		s.failIngestion(ctx, runID, ingestionFailed, fmt.Sprintf("corrupt ingestion cursor: %v", err))
 		return
 	}
 
 	// (1) Ensure the corpus partition exists (idempotent — safe on every run / resume).
 	if eErr := s.knowledgeStore.EnsureCorpus(ctx, spec.Namespace, spec.KnowledgeBase); eErr != nil {
-		s.failIngestion(runID, ingestionFailed, fmt.Sprintf("ensure corpus: %v", eErr))
+		s.failIngestion(ctx, runID, ingestionFailed, fmt.Sprintf("ensure corpus: %v", eErr))
 		return
 	}
 	_ = s.runStore.AppendEvent(runID, run.EventStep, "ingestion-started:"+spec.KnowledgeBase)
@@ -295,7 +295,7 @@ func (s *Server) executeIngestion(ctx context.Context, runID string) {
 		// resumes at the next document.
 		cursor.Done[doc.Key] = true
 		if pErr := s.persistIngestionCursor(runID, cursor); pErr != nil {
-			s.failIngestion(runID, ingestionFailed, fmt.Sprintf("persisting cursor after document %q: %v", doc.Key, pErr))
+			s.failIngestion(ctx, runID, ingestionFailed, fmt.Sprintf("persisting cursor after document %q: %v", doc.Key, pErr))
 			return
 		}
 	}
@@ -340,7 +340,7 @@ func (s *Server) ingestOneDocument(
 		if s.cancelledMidDoc(ctx, runID, doc.Key) {
 			return ingestReclaimable, false
 		}
-		s.failIngestion(runID, ingestionFailed, fmt.Sprintf("fetching document %q: %v", doc.Key, err))
+		s.failIngestion(ctx, runID, ingestionFailed, fmt.Sprintf("fetching document %q: %v", doc.Key, err))
 		return 0, true
 	}
 
@@ -352,7 +352,7 @@ func (s *Server) ingestOneDocument(
 	chunks, sufficient, err := ingest.ExtractAndChunk(doc.ContentType, filename, data, chunkCfg, ingest.MinSufficientChars)
 	if err != nil {
 		// A HARD extraction error (unsupported type, malformed input) fails the run fast (fail-fast on a genuine error).
-		s.failIngestion(runID, ingestionFailed, fmt.Sprintf("extracting document %q: %v", doc.Key, err))
+		s.failIngestion(ctx, runID, ingestionFailed, fmt.Sprintf("extracting document %q: %v", doc.Key, err))
 		return 0, true
 	}
 	// OCR fallback (M140.5, ADR 0119): a scanned (image-only) PDF has no text layer, so the born-digital
@@ -377,7 +377,7 @@ func (s *Server) ingestOneDocument(
 			if s.cancelledMidDoc(ctx, runID, doc.Key) {
 				return ingestReclaimable, false
 			}
-			s.failIngestion(runID, ingestionFailed, fmt.Sprintf("sweeping orphans for empty document %q: %v", doc.Key, sErr))
+			s.failIngestion(ctx, runID, ingestionFailed, fmt.Sprintf("sweeping orphans for empty document %q: %v", doc.Key, sErr))
 			return 0, true
 		}
 		_ = s.runStore.AppendEvent(runID, run.EventStep, "ingestion-partial:"+doc.Key)
@@ -401,7 +401,7 @@ func (s *Server) ingestOneDocument(
 		if s.cancelledMidDoc(ctx, runID, doc.Key) {
 			return ingestReclaimable, false
 		}
-		s.failIngestion(runID, ingestionFailed, fmt.Sprintf("sweeping orphans for document %q: %v", doc.Key, sErr))
+		s.failIngestion(ctx, runID, ingestionFailed, fmt.Sprintf("sweeping orphans for document %q: %v", doc.Key, sErr))
 		return 0, true
 	}
 
@@ -447,7 +447,7 @@ func (s *Server) embedAndUpsertChunks(
 			switch credplane.EmbedStatus(err) {
 			case 402:
 				// BUDGET exhausted → fail-soft, resumable (the cursor is preserved). ADR 0061 Fork 2.
-				s.failIngestion(runID, ingestionBudgetExceeded,
+				s.failIngestion(ctx, runID, ingestionBudgetExceeded,
 					fmt.Sprintf("tenant budget exceeded while embedding document %q: %v", doc.Key, err))
 				return 0, 0, true
 			case 429:
@@ -459,13 +459,13 @@ func (s *Server) embedAndUpsertChunks(
 				if s.cancelledMidDoc(ctx, runID, doc.Key) {
 					return 0, ingestReclaimable, false
 				}
-				s.failIngestion(runID, ingestionFailed,
+				s.failIngestion(ctx, runID, ingestionFailed,
 					fmt.Sprintf("embedding document %q: %v", doc.Key, err))
 				return 0, 0, true
 			}
 		}
 		if len(vecs) != len(batch) {
-			s.failIngestion(runID, ingestionFailed,
+			s.failIngestion(ctx, runID, ingestionFailed,
 				fmt.Sprintf("embedding document %q: got %d vectors for %d chunks", doc.Key, len(vecs), len(batch)))
 			return 0, 0, true
 		}
@@ -497,7 +497,7 @@ func (s *Server) embedAndUpsertChunks(
 			if s.cancelledMidDoc(ctx, runID, doc.Key) {
 				return 0, ingestReclaimable, false
 			}
-			s.failIngestion(runID, ingestionFailed, fmt.Sprintf("upserting chunks for document %q: %v", doc.Key, uErr))
+			s.failIngestion(ctx, runID, ingestionFailed, fmt.Sprintf("upserting chunks for document %q: %v", doc.Key, uErr))
 			return 0, 0, true
 		}
 		upserted += len(records)
@@ -622,7 +622,7 @@ func (s *Server) completeIngestion(ctx context.Context, runID string, spec Inges
 
 	outcomeJSON, err := json.Marshal(outcome)
 	if err != nil {
-		s.failIngestion(runID, ingestionFailed, fmt.Sprintf("encoding ingestion outcome: %v", err))
+		s.failIngestion(ctx, runID, ingestionFailed, fmt.Sprintf("encoding ingestion outcome: %v", err))
 		return
 	}
 	cursorJSON, _ := cursor.marshal()
@@ -644,7 +644,7 @@ func (s *Server) completeIngestion(ctx context.Context, runID string, spec Inges
 // failIngestion records a terminal FAILURE outcome (with the coded reason) on the run + transitions it to
 // `failed`. It is the executor's fail-fast + honest-error + fail-soft (BudgetExceeded) sink. The cursor is left
 // intact by this call (it was persisted per-document), so a resumable failure (429/402) keeps its progress.
-func (s *Server) failIngestion(runID string, reason ingestionReason, message string) {
+func (s *Server) failIngestion(ctx context.Context, runID string, reason ingestionReason, message string) {
 	outcome := IngestionOutcome{Reason: reason, Message: message}
 	var ns, kb string // captured for the corpus-status channel projection below.
 	// Enrich the outcome with the counts we can cheaply read from the run's spec + cursor (best-effort — a fail
@@ -695,7 +695,7 @@ func (s *Server) failIngestion(runID string, reason ingestionReason, message str
 	}
 
 	_ = s.runStore.AppendEvent(runID, run.EventStep, "ingestion-failed:"+string(reason))
-	if err := s.terminalTransition(runID, func(r *run.Run) error {
+	if err := s.terminalTransitionFenced(ctx, runID, func(r *run.Run) error {
 		if r.Status.IsTerminal() {
 			return fmt.Errorf("already %s", r.Status) // idempotent — don't re-fail a terminal run.
 		}

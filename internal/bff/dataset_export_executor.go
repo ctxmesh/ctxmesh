@@ -180,7 +180,7 @@ func (s *Server) executeDatasetExport(ctx context.Context, runID string) {
 	// Degrade honestly (the DocStore-nil→501 pattern): the dataset store or the Langfuse adapter is absent, so we
 	// cannot read traces / write cases. Fail the run with a clear reason rather than panic on a nil dependency.
 	if s.datasetStore == nil || s.adapters.Langfuse == nil {
-		s.failExport(runID, "export unavailable: dataset store or Langfuse adapter not configured (set CONTROLPLANE_DSN + LANGFUSE_HOST/keys)")
+		s.failExport(ctx, runID, "export unavailable: dataset store or Langfuse adapter not configured (set CONTROLPLANE_DSN + LANGFUSE_HOST/keys)")
 		return
 	}
 
@@ -192,24 +192,24 @@ func (s *Server) executeDatasetExport(ctx context.Context, runID string) {
 
 	var spec ExportSpec
 	if uErr := json.Unmarshal([]byte(rn.ExportSpec), &spec); uErr != nil {
-		s.failExport(runID, fmt.Sprintf("invalid export spec snapshot: %v", uErr))
+		s.failExport(ctx, runID, fmt.Sprintf("invalid export spec snapshot: %v", uErr))
 		return
 	}
 	if strings.TrimSpace(spec.DatasetName) == "" {
-		s.failExport(runID, "export spec has no datasetName")
+		s.failExport(ctx, runID, "export spec has no datasetName")
 		return
 	}
 
 	cursor, err := parseExportCursor(rn.Cursor)
 	if err != nil {
-		s.failExport(runID, fmt.Sprintf("corrupt export cursor: %v", err))
+		s.failExport(ctx, runID, fmt.Sprintf("corrupt export cursor: %v", err))
 		return
 	}
 
 	// (1) Ensure the dataset exists (idempotent — safe on every run / resume).
 	ds, eErr := s.datasetStore.EnsureDataset(ctx, spec.DatasetNamespace, spec.DatasetName)
 	if eErr != nil {
-		s.failExport(runID, fmt.Sprintf("ensure dataset %s/%s: %v", spec.DatasetNamespace, spec.DatasetName, eErr))
+		s.failExport(ctx, runID, fmt.Sprintf("ensure dataset %s/%s: %v", spec.DatasetNamespace, spec.DatasetName, eErr))
 		return
 	}
 	_ = s.runStore.AppendEvent(runID, run.EventStep, "export-started:"+spec.DatasetName)
@@ -233,14 +233,14 @@ func (s *Server) executeDatasetExport(ctx context.Context, runID string) {
 			Cursor: cursor.Page,
 		})
 		if fErr != nil {
-			s.failExport(runID, fmt.Sprintf("querying Langfuse traces (page cursor %q): %v", cursor.Page, fErr))
+			s.failExport(ctx, runID, fmt.Sprintf("querying Langfuse traces (page cursor %q): %v", cursor.Page, fErr))
 			return
 		}
 
 		for _, r := range page.Runs {
 			appended, aErr := s.exportOneTrace(ctx, ds.ID, r.TraceID, detectors)
 			if aErr != nil {
-				s.failExport(runID, fmt.Sprintf("exporting trace %q: %v", r.TraceID, aErr))
+				s.failExport(ctx, runID, fmt.Sprintf("exporting trace %q: %v", r.TraceID, aErr))
 				return
 			}
 			cursor.Documents++
@@ -252,7 +252,7 @@ func (s *Server) executeDatasetExport(ctx context.Context, runID string) {
 		// Advance the cursor to the next page and persist it (so a reclaim resumes past the pages we finished).
 		cursor.Page = page.NextCursor
 		if pErr := s.persistExportCursor(runID, cursor); pErr != nil {
-			s.failExport(runID, fmt.Sprintf("persisting cursor after a page: %v", pErr))
+			s.failExport(ctx, runID, fmt.Sprintf("persisting cursor after a page: %v", pErr))
 			return
 		}
 		if page.NextCursor == "" {
@@ -379,7 +379,7 @@ func (s *Server) completeExport(ctx context.Context, runID string, spec ExportSp
 	}
 	outcomeJSON, err := json.Marshal(outcome)
 	if err != nil {
-		s.failExport(runID, fmt.Sprintf("encoding export outcome: %v", err))
+		s.failExport(ctx, runID, fmt.Sprintf("encoding export outcome: %v", err))
 		return
 	}
 	cursorJSON, _ := cursor.marshal()
@@ -401,7 +401,7 @@ func (s *Server) completeExport(ctx context.Context, runID string, spec ExportSp
 // failExport records a terminal FAILURE outcome on the run + transitions it to `failed`. It is the executor's
 // fail-fast + honest-error sink. The cursor is left intact by this call (it was persisted per page), so a
 // re-triggered export resumes past the pages that completed.
-func (s *Server) failExport(runID, message string) {
+func (s *Server) failExport(ctx context.Context, runID, message string) {
 	outcome := ExportOutcome{Reason: exportFailed, Message: message}
 	// Enrich the outcome with the counts we can cheaply read from the run's cursor (best-effort — a fail path must
 	// not itself fail).
@@ -421,7 +421,7 @@ func (s *Server) failExport(runID, message string) {
 	}
 
 	_ = s.runStore.AppendEvent(runID, run.EventStep, "export-failed")
-	if err := s.terminalTransition(runID, func(r *run.Run) error {
+	if err := s.terminalTransitionFenced(ctx, runID, func(r *run.Run) error {
 		if r.Status.IsTerminal() {
 			return fmt.Errorf("already %s", r.Status) // idempotent — don't re-fail a terminal run.
 		}

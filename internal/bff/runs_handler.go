@@ -250,7 +250,8 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	// delegate sub-runs, workflow nodes, and their nested descendants — must be cancelled too, else durable
 	// suspend/resume (L7) leaves them burning tokens with no consumer (the blocking long-poll that used to
 	// reap them is gone). Best-effort, like the control marker.
-	s.cancelCascade(rn.ID, "cancelled: ancestor run cancelled (subtree cascade)")
+	// A user-initiated cancel: no worker identity is involved, so the G15 gate passes it through.
+	s.cancelCascade(r.Context(), rn.ID, "cancelled: ancestor run cancelled (subtree cascade)")
 	writeJSON(w, http.StatusOK, CreateRunResponse{ID: rn.ID, Status: string(updated.Status)})
 }
 
