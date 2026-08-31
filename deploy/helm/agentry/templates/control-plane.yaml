@@ -346,7 +346,7 @@ rules:
 - apiGroups:
   - agents.ctxmesh.ai
   resources:
-  - agentdeployments
+  - agentdeployments/kill
   verbs:
   - kill
 ---
