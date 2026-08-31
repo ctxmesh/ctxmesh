@@ -58,6 +58,10 @@ type MintRequest struct {
 	Boundary string
 	RunID    string
 	TTL      time.Duration
+	// KeyThumbprint binds the capability to a sender's key (RFC 7800 `cnf.jkt`). Empty ⇒ a legacy
+	// BEARER capability, where possession alone is authority. Non-empty ⇒ sender-constrained: a verifier
+	// additionally demands a proof-of-possession signed by that key (M142.5, ADR 0124).
+	KeyThumbprint string
 }
 
 // Mint returns a signed run capability (an EdDSA JWT). It refuses to mint an incomplete
@@ -81,6 +85,12 @@ func (s *Signer) Mint(req MintRequest) (string, error) {
 	}
 	if strings.TrimSpace(req.Agent) != "" {
 		claims.Act = &actClaim{Sub: req.Agent}
+	}
+	// RFC 7800 confirmation: binding the capability to a key is what stops possession from BEING
+	// authority (M142.5, ADR 0124). Minting without one is still allowed — that is a legacy bearer
+	// capability, and the verifier says so rather than silently accepting a downgrade.
+	if tp := strings.TrimSpace(req.KeyThumbprint); tp != "" {
+		claims.Cnf = &cnfClaim{JKT: tp}
 	}
 
 	headerJSON, err := json.Marshal(jwtHeader{Alg: algEdDSA, Typ: typJWT})
@@ -229,6 +239,9 @@ func (v *Verifier) Verify(token string) (Capability, error) {
 	}
 	if claims.Act != nil {
 		out.Agent = claims.Act.Sub
+	}
+	if claims.Cnf != nil {
+		out.KeyThumbprint = claims.Cnf.JKT
 	}
 	return out, nil
 }

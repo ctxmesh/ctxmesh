@@ -25,6 +25,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -182,6 +183,18 @@ type Server struct {
 	// ADR 0121). An agent pod never holds a broker connection — the control plane does — so this is how
 	// an async hop becomes durable. nil ⇒ the publish edge is not wired at all.
 	asyncPublisher asyncbus.Publisher
+
+	// Sender-constrained run capabilities (M142.5, ADR 0124). popVerifier's replay set is what makes a
+	// proof single-use, so it MUST be shared across requests — a per-request verifier would remember
+	// nothing. requireProofOfPossession is the rollout posture for legacy BEARER capabilities: false
+	// accepts them with a log, true refuses them. A capability that IS bound always needs a valid proof,
+	// under either posture.
+	// runcapBind records which key each run's capability was bound to — single-use, so the first bind
+	// wins and a leaked bearer token cannot be re-bound by whoever finds it. nil ⇒ no exchange edge.
+	runcapBind               RuncapBindStore
+	proofOnce                sync.Once
+	popVerifier              *runcap.ProofVerifier
+	requireProofOfPossession bool
 	// agentURL resolves an agent's in-cluster address for async delivery. nil ⇒ the cluster-DNS default;
 	// set only by tests, which point it at an httptest server.
 	agentURL func(agent, namespace string) string
@@ -604,6 +617,14 @@ type Options struct {
 	// AsyncPublisher is the durable async backend for A2A hops (M141.4, ADR 0121). Optional — nil ⇒
 	// POST /api/internal/async/publish is not registered. Constructed in cmd/bff/main.go.
 	AsyncPublisher asyncbus.Publisher
+	// RequireProofOfPossession refuses a legacy BEARER run capability at the internal edges (M142.5,
+	// ADR 0124). From RUNCAP_REQUIRE_POP; default false so a mixed-version fleet keeps working while the
+	// mechanism is live for everything that can present a proof.
+	RequireProofOfPossession bool
+	// RuncapBind records capability→key bindings for the exchange edge (M142.5, ADR 0124). Optional —
+	// nil ⇒ POST /api/internal/runcap/bind is not registered, so no exchange is offered that could not
+	// be made single-use. Constructed in cmd/bff/main.go over the state-layer Valkey.
+	RuncapBind RuncapBindStore
 
 	Log logr.Logger
 }
@@ -667,6 +688,8 @@ func NewServer(opts Options) *Server {
 		discoveryReranker:        opts.DiscoveryReranker,
 		discoveryEmbeddingRoute:  strings.TrimSpace(opts.DiscoveryEmbeddingRoute),
 		asyncPublisher:           opts.AsyncPublisher,
+		requireProofOfPossession: opts.RequireProofOfPossession,
+		runcapBind:               opts.RuncapBind,
 		ocr:                      opts.OCR,
 		judgeCounters:            &judgeCounter{},
 		enrichCache:              newTraceEnrichCache(),
@@ -836,6 +859,9 @@ func (s *Server) Handler() http.Handler {
 	// Async A2A publish (M141.4, ADR 0121): the same capability-authenticated class — an agent hands a
 	// durable hop to the platform because it holds no broker connection of its own.
 	s.registerAsyncPublishRoute(api)
+	// The capability BIND exchange (M142.5, ADR 0124): where a launcher trades its bearer capability for
+	// one bound to its own key. Single-use, so the first bind is authoritative.
+	s.registerRuncapBindRoute(api)
 	// Guardrail block ingest (m66.9, ADR 0059 §9): capability-authorized durable compliance record.
 	// Wired alongside the spawn edge — both are internal launcher-to-BFF endpoints authenticated on
 	// the run capability, not a browser bearer token.

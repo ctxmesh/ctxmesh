@@ -491,8 +491,13 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		// publish edge is absent and the dispatcher never starts, so Knative Eventing remains the only
 		// async path — exactly today's behaviour.
 		AsyncPublisher: asyncBus,
-		ConvStore:      convStore,
-		PromptStore:    promptStore,
+		// Sender-constrained run capabilities (M142.5, ADR 0124). The bind store rides the shared
+		// state-layer Valkey so "already bound" is the same answer on every replica; without an addr
+		// there is no exchange edge, and capabilities stay bearer.
+		RuncapBind:               runcapBindStore(log),
+		RequireProofOfPossession: strings.TrimSpace(os.Getenv("RUNCAP_REQUIRE_POP")) == "true",
+		ConvStore:                convStore,
+		PromptStore:              promptStore,
 		// Production git-pointer prompt resolver (m121.3, ADR 0008) — the drop-in for the
 		// fixture Resolver, so GET /api/promptversions/{ns}/{name}/diff resolves REAL content
 		// from git (github.com raw). PROMPT_GIT_TOKEN (a PAT via a Secret, never committed)
@@ -769,6 +774,21 @@ func discoveryReranker(log logr.Logger) credplane.Reranker {
 	}
 	log.Info("capability discovery: cross-encoder rerank wired (ADR 0117)", "reranker", rerankURL)
 	return credplane.NewHTTPReranker(rerankURL, nil)
+}
+
+// runcapBindStore builds the capability→key bind store over the shared state-layer Valkey (M142.5,
+// ADR 0124). It must be SHARED across BFF replicas: the binding is single-use, and a per-replica record
+// would let the same capability be bound once on each replica — which is not a boundary at all. No
+// STATELAYER_ADDR ⇒ nil ⇒ the exchange edge is not registered and capabilities remain bearer tokens.
+func runcapBindStore(log logr.Logger) bff.RuncapBindStore {
+	addr := strings.TrimSpace(os.Getenv("STATELAYER_ADDR"))
+	if addr == "" {
+		log.Info("run-capability binding DISABLED: STATELAYER_ADDR unset — capabilities stay bearer tokens")
+		return nil
+	}
+	log.Info("run-capability binding enabled (ADR 0124): single-use exchange over the state layer")
+	return bff.NewRedisRuncapBindStore(addr,
+		strings.TrimSpace(os.Getenv("STATELAYER_USERNAME")), os.Getenv("STATELAYER_PASSWORD"))
 }
 
 // newIngestOCR wires the offline OCR service for scanned-PDF ingestion (M140.5, ADR 0119) from

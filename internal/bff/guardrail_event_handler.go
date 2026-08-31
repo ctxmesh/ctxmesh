@@ -43,7 +43,6 @@ import (
 	"strings"
 
 	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
-	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 // auditActionGuardrailBlock is the stable action kind written to audit_log for a guardrail
@@ -117,15 +116,11 @@ func (s *Server) handleGuardrailEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// (1) Authenticate on the RELAYED capability — never a caller bearer token.
-	token := strings.TrimSpace(r.Header.Get(runcap.HeaderName))
-	if token == "" {
-		writeError(w, http.StatusUnauthorized, "missing run capability")
-		return
-	}
-	capab, err := s.capabilitySigner.Verifier().Verify(token)
-	if err != nil {
-		// A forged/expired/wrong-audience capability. Fail closed; never leak why beyond "invalid".
-		writeError(w, http.StatusUnauthorized, "invalid run capability")
+	// Sender-constrained: the capability must verify AND, when it is bound to a key, carry a
+	// proof-of-possession for this request (M142.5, ADR 0124) — so a copied token is not authority.
+	capab, capErr := s.verifyRuncapWithProof(r)
+	if capErr != nil {
+		writeError(w, http.StatusUnauthorized, capErr.Error())
 		return
 	}
 

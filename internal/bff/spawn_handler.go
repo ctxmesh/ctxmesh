@@ -28,7 +28,6 @@ import (
 
 	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
 	"github.com/ctxmesh/agentry/internal/run"
-	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 // SpawnRunRequest is the launcher's create-a-sub-run body (M64, ADR 0057 Door 2). The LAUNCHER (platform
@@ -107,14 +106,11 @@ func (s *Server) handleReadSpawnedRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "sub-run await requires the run capability signer + run store")
 		return
 	}
-	token := strings.TrimSpace(r.Header.Get(runcap.HeaderName))
-	if token == "" {
-		writeError(w, http.StatusUnauthorized, "missing run capability")
-		return
-	}
-	capab, err := s.capabilitySigner.Verifier().Verify(token)
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid run capability")
+	// Sender-constrained: the capability must verify AND, when it is bound to a key, carry a
+	// proof-of-possession for this request (M142.5, ADR 0124) — so a copied token is not authority.
+	capab, capErr := s.verifyRuncapWithProof(r)
+	if capErr != nil {
+		writeError(w, http.StatusUnauthorized, capErr.Error())
 		return
 	}
 	sub, err := s.runStore.Get(r.PathValue("id"))
@@ -211,15 +207,11 @@ func (s *Server) handleSpawnRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// (1) Authenticate on the RELAYED capability — never a caller token.
-	token := strings.TrimSpace(r.Header.Get(runcap.HeaderName))
-	if token == "" {
-		writeError(w, http.StatusUnauthorized, "missing run capability")
-		return
-	}
-	capab, err := s.capabilitySigner.Verifier().Verify(token)
-	if err != nil {
-		// A forged / expired / wrong-audience capability. Fail closed; never leak why beyond "invalid".
-		writeError(w, http.StatusUnauthorized, "invalid run capability")
+	// Sender-constrained: the capability must verify AND, when it is bound to a key, carry a
+	// proof-of-possession for this request (M142.5, ADR 0124) — so a copied token is not authority.
+	capab, capErr := s.verifyRuncapWithProof(r)
+	if capErr != nil {
+		writeError(w, http.StatusUnauthorized, capErr.Error())
 		return
 	}
 

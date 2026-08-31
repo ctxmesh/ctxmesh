@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/ctxmesh/agentry/internal/run"
-	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 // handoff_handler.go — the BFF's HANDOFF (transfer-of-control) edge (M67, ADR 0060 §5). Handoff is a
@@ -119,14 +118,11 @@ func (s *Server) handleHandoffRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// (1) Authenticate on the RELAYED capability — never a caller token.
-	token := strings.TrimSpace(r.Header.Get(runcap.HeaderName))
-	if token == "" {
-		writeError(w, http.StatusUnauthorized, "missing run capability")
-		return
-	}
-	capab, err := s.capabilitySigner.Verifier().Verify(token)
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid run capability")
+	// Sender-constrained: the capability must verify AND, when it is bound to a key, carry a
+	// proof-of-possession for this request (M142.5, ADR 0124) — so a copied token is not authority.
+	capab, capErr := s.verifyRuncapWithProof(r)
+	if capErr != nil {
+		writeError(w, http.StatusUnauthorized, capErr.Error())
 		return
 	}
 
