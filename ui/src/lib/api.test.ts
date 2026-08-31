@@ -523,6 +523,18 @@ describe("formatRunStep (M78 live step-visibility, ADR 0071 §4)", () => {
     expect(formatRunStep("plan-rejected")).toBe("plan-rejected");
   });
 
+  it("renders a PLATFORM step frame's human label (M143 structured-output re-ask)", () => {
+    // Without the label branch this frame would hit the raw-text fallback below and the user would
+    // be shown `{"kind":"output_schema_reask",…}` in the step indicator.
+    expect(
+      formatRunStep('{"kind":"output_schema_reask","label":"Re-asking — the answer didn\'t match the required format"}'),
+    ).toBe("Re-asking — the answer didn't match the required format");
+  });
+
+  it("ignores a blank label rather than blanking the step indicator", () => {
+    expect(formatRunStep('{"label":"   "}')).toBe('{"label":"   "}');
+  });
+
   it("falls back to the raw text for a malformed / non-step JSON object, never throws", () => {
     expect(formatRunStep('{"unexpected":true}')).toBe('{"unexpected":true}');
     expect(formatRunStep("{not json")).toBe("{not json");

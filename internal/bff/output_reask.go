@@ -152,8 +152,10 @@ func (s *Server) reaskForOutputSchema(
 		"run", runID, "reason", verr.Error())
 	// Make the repair visible on the run's own stream: a user watching a run that suddenly takes a
 	// second round-trip should see WHY, not an unexplained pause.
+	// A `label` makes it render as human text in the console's step indicator; without one, a step
+	// frame the UI does not recognise falls back to showing the RAW JSON to the user.
 	_ = s.runStore.AppendEvent(runID, run.EventStep,
-		`{"kind":"output_schema_reask","detail":"terminal output did not conform; re-asking once"}`)
+		`{"kind":"output_schema_reask","label":"Re-asking — the answer didn't match the required format"}`)
 
 	resp, _, err := s.adapters.Invoke.Invoke(ctx, endpoint, body)
 	if err != nil {
