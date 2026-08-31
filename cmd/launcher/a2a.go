@@ -192,6 +192,13 @@ type a2aConfig struct {
 	// Injected by the m6.4 controller from the registry guards.hopBudget CRD
 	// field. Default: defaultHopBudget (32) when the env is absent or zero.
 	HopBudget int
+
+	// AsyncPublishURL is the platform's async PUBLISH EDGE (ASYNC_PUBLISH_URL, M141.4/ADR 0121) — where
+	// a fire-and-forget hop goes to become durable. An agent pod holds no broker credential of its own,
+	// so the launcher hands the CloudEvent to the control plane and the control plane talks to the bus.
+	// Empty ⇒ POST /a2a/{target}?mode=async answers 501 and only the synchronous path exists (today's
+	// behaviour, unchanged).
+	AsyncPublishURL string
 }
 
 // A2AEnabled reports whether the outbound /a2a listener should be started —
@@ -246,14 +253,15 @@ func loadA2AConfig(lookup func(string) string, agentName string) (a2aConfig, err
 	}
 
 	return a2aConfig{
-		RegistryID:     regID,
-		Port:           port,
-		SelfName:       agentName,
-		Role:           lookup("AGENT_ROLE"),
-		Namespace:      lookup("POD_NAMESPACE"),
-		AllowedCallers: parseCallerList(lookup("AGENT_ALLOWED_CALLERS")),
-		MaxDepth:       maxDepth,
-		HopBudget:      hopBudget,
+		RegistryID:      regID,
+		Port:            port,
+		SelfName:        agentName,
+		Role:            lookup("AGENT_ROLE"),
+		Namespace:       lookup("POD_NAMESPACE"),
+		AllowedCallers:  parseCallerList(lookup("AGENT_ALLOWED_CALLERS")),
+		MaxDepth:        maxDepth,
+		HopBudget:       hopBudget,
+		AsyncPublishURL: strings.TrimSpace(lookup("ASYNC_PUBLISH_URL")),
 	}, nil
 }
 
@@ -325,18 +333,24 @@ func a2aMessageIDFromEnvelope(envJSON string) string {
 type a2aServer struct {
 	cfg    a2aConfig
 	client *http.Client // reused across all outbound calls — never per-request.
-	tracer trace.Tracer
-	prop   propagation.TextMapPropagator
+	// offload replaces an oversize async payload with a content-addressed $ref before publishing, so a
+	// big task rides the bus as a small event. nil (no object store) ⇒ payloads publish inline.
+	offload *offloader
+	tracer  trace.Tracer
+	prop    propagation.TextMapPropagator
 	// resolveHost maps a target agent name to its base URL. Injectable so unit
 	// tests can point it at an httptest server instead of cluster DNS.
 	resolveHost func(target string) string
 }
 
-func newA2AServer(cfg a2aConfig, tracer trace.Tracer, prop propagation.TextMapPropagator) *a2aServer {
+func newA2AServer(
+	cfg a2aConfig, tracer trace.Tracer, prop propagation.TextMapPropagator, off *offloader,
+) *a2aServer {
 	s := &a2aServer{
-		cfg:    cfg,
-		tracer: tracer,
-		prop:   prop,
+		offload: off,
+		cfg:     cfg,
+		tracer:  tracer,
+		prop:    prop,
 		// One shared client with bounded dial + overall timeout. The Transport
 		// pools connections; a per-request context deadline (a2aRequestTimeout)
 		// is the primary bound, Timeout is belt-and-braces.
@@ -451,7 +465,43 @@ func (s *a2aServer) handleCall(w http.ResponseWriter, r *http.Request) {
 	// an unattended/dev run (the callee resolves org/public only).
 	capToken := r.Header.Get(runcap.HeaderName)
 
+	// ASYNC mode (M141.4, ADR 0121): the same envelope, the same guards, but handed to the durable bus
+	// instead of forwarded now. Deliberately the same code path down to here — an async hop that skipped
+	// the depth/cycle/hop-budget guards would be a way to launder a call the synchronous path refuses.
+	if strings.EqualFold(r.URL.Query().Get("mode"), a2aModeAsync) {
+		s.publishAsync(ctx, w, span, env, capToken)
+		return
+	}
+
 	s.forward(ctx, w, span, env, capToken)
+}
+
+// a2aModeAsync selects the durable fire-and-forget hop on the A2A surface.
+const a2aModeAsync = "async"
+
+// publishAsync hands the envelope to the platform's async publish edge and answers 202.
+//
+// It is fire-and-forget by contract: the caller gets "durably accepted", NOT an answer, because the
+// callee may not even be running yet. A publish failure is surfaced as an error rather than swallowed —
+// an agent that believes it dispatched work when it did not is the worst outcome available here.
+func (s *a2aServer) publishAsync(
+	ctx context.Context, w http.ResponseWriter, span trace.Span, env envelope, capToken string,
+) {
+	if s.cfg.AsyncPublishURL == "" {
+		s.fail(w, span, http.StatusNotImplemented, errBadRequest,
+			"async A2A is not configured on this cluster (no async backend)")
+		return
+	}
+	span.SetAttributes(attribute.Bool("a2a.async", true))
+	if err := publishEnvelope(ctx, s.client, s.cfg.AsyncPublishURL, capToken, env, s.offload); err != nil {
+		span.RecordError(err)
+		s.fail(w, span, http.StatusBadGateway, errUpstreamFailure, "async publish failed: "+err.Error())
+		return
+	}
+	span.SetStatus(codes.Ok, "")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_, _ = w.Write([]byte(`{"accepted":true,"messageId":"` + env.MessageID + `"}`))
 }
 
 // buildEnvelope constructs the outgoing envelope. See the file header for the

@@ -84,6 +84,10 @@ func main() {
 	// proxy port so the agent.invoke span + user container see it as a call. nil
 	// when the agent is not a registry member — its request path is unchanged.
 	var consumer asyncHandler
+	// The offloader is shared by BOTH async directions: the consumer rehydrates a $ref payload before
+	// invoking the agent, and the M141.4 async PRODUCER offloads an oversize payload before publishing —
+	// so a big task rides the bus as a small event either way. Declared out here so both can see it.
+	var off *offloader
 	if cfg.A2AEnabled() {
 		// The seen-set prefers the state-layer proxy (M53, ADR 0050 §6): it presents
 		// the pod token and the proxy scopes the seen-key by namespace + holds the
@@ -100,7 +104,6 @@ func main() {
 		// construction error (bad addr) is logged and the consumer runs WITHOUT
 		// offload — a producer without a store never emits a $ref, so a nil
 		// offloader is safe (nothing to rehydrate). nil when disabled.
-		var off *offloader
 		if cfg.ObjectStoreEnabled() {
 			store, oErr := newMinioStore(cfg.ObjectStore.Addr, cfg.ObjectStore.AccessKey, cfg.ObjectStore.SecretKey)
 			if oErr != nil {
@@ -146,7 +149,7 @@ func main() {
 	if cfg.A2AEnabled() {
 		a2aSrv = &http.Server{
 			Addr:    fmt.Sprintf(":%d", cfg.A2A.Port),
-			Handler: newA2AServer(cfg.A2A, tracer, prop).handler(),
+			Handler: newA2AServer(cfg.A2A, tracer, prop, off).handler(),
 		}
 	}
 

@@ -1421,6 +1421,12 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			corev1.EnvVar{Name: "AGENT_REGISTRY_ID", Value: membership.RegistryID},
 			corev1.EnvVar{Name: "A2A_MAX_DEPTH", Value: strconv.Itoa(int(membership.MaxDepth))},
 			corev1.EnvVar{Name: "A2A_HOP_BUDGET", Value: strconv.Itoa(int(membership.HopBudget))},
+			// M141.4 (ADR 0121): where a fire-and-forget hop goes to become durable. The agent pod holds
+			// no broker credential — it hands the CloudEvent to the control plane, which owns the
+			// connection. Injected for every registry member; the BFF only serves the edge when an async
+			// backend is actually configured, so an install without one answers 404 and the launcher's
+			// `?mode=async` degrades to an honest refusal rather than a silent no-op.
+			corev1.EnvVar{Name: "ASYNC_PUBLISH_URL", Value: bffInternalURL + "/api/internal/async/publish"},
 		)
 		// Shared memory scope (ADR 0035, m33.3): a sessionMemory scope=shared keys the team
 		// scratchpad under this registry (mem:shared:{registry}:{conversationId}), so agents in the

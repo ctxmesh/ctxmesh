@@ -124,7 +124,7 @@ func TestCloudEventRoundTrip_OverHTTP(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := publishEnvelope(context.Background(), srv.Client(), srv.URL, in, nil); err != nil {
+	if err := publishEnvelope(context.Background(), srv.Client(), srv.URL, "", in, nil); err != nil {
 		t.Fatalf("publishEnvelope: %v", err)
 	}
 	if gotEvent == nil {
