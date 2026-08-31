@@ -170,10 +170,10 @@ describe("PromptsPage", () => {
 
     // Fill in from/to
     fireEvent.change(screen.getByTestId("diff-from-input"), {
-      target: { value: "v1" },
+      target: { value: "default/v1" },
     });
     fireEvent.change(screen.getByTestId("diff-to-input"), {
-      target: { value: "v2" },
+      target: { value: "default/v2" },
     });
     fireEvent.click(screen.getByTestId("diff-compare-btn"));
 
@@ -188,7 +188,9 @@ describe("PromptsPage", () => {
 
     // Diff lines rendered
     expect(screen.getByTestId("prompt-diff-lines")).toBeInTheDocument();
-    expect(screen.getByText("You are a helpful assistant.")).toBeInTheDocument();
+    // A context line belongs to both sides of the side-by-side well, so it
+    // renders once per column; a changed line renders on exactly one side.
+    expect(screen.getAllByText("You are a helpful assistant.")).toHaveLength(2);
     expect(screen.getByText("Please be brief.")).toBeInTheDocument();
     expect(screen.getByText("Please be thorough and detailed.")).toBeInTheDocument();
   });
@@ -198,10 +200,10 @@ describe("PromptsPage", () => {
     await screen.findByTestId("prompt-version-v1");
 
     fireEvent.change(screen.getByTestId("diff-from-input"), {
-      target: { value: "v1" },
+      target: { value: "default/v1" },
     });
     fireEvent.change(screen.getByTestId("diff-to-input"), {
-      target: { value: "v2" },
+      target: { value: "default/v2" },
     });
     fireEvent.click(screen.getByTestId("diff-compare-btn"));
 
@@ -222,10 +224,10 @@ describe("PromptsPage", () => {
     await screen.findByTestId("prompt-version-v1");
 
     fireEvent.change(screen.getByTestId("diff-from-input"), {
-      target: { value: "v1" },
+      target: { value: "default/v1" },
     });
     fireEvent.change(screen.getByTestId("diff-to-input"), {
-      target: { value: "v2" },
+      target: { value: "default/v2" },
     });
     fireEvent.click(screen.getByTestId("diff-compare-btn"));
 
@@ -245,10 +247,10 @@ describe("PromptsPage", () => {
     await screen.findByTestId("prompt-version-v1");
 
     fireEvent.change(screen.getByTestId("diff-from-input"), {
-      target: { value: "v1" },
+      target: { value: "default/v1" },
     });
     fireEvent.change(screen.getByTestId("diff-to-input"), {
-      target: { value: "v2" },
+      target: { value: "default/v2" },
     });
     fireEvent.click(screen.getByTestId("diff-compare-btn"));
 
@@ -263,6 +265,63 @@ describe("PromptsPage", () => {
     expect(screen.queryByTestId("prompt-diff")).not.toBeInTheDocument();
     // Distinct from not-found
     expect(screen.queryByTestId("prompt-diff-not-found")).not.toBeInTheDocument();
+  });
+
+  // ---- derived standing + the Next step column (§6.1 A1) -------------------
+
+  it("the newest version of a prompt offers the change to read; history needs nothing", async () => {
+    renderPage(EDITOR_CAPS);
+    await screen.findByTestId("prompt-version-v2");
+
+    // v2 is the most recently created version of my-prompt and v1 precedes it,
+    // so v2 is the row that asks something of a person.
+    expect(screen.getByTestId("next-step-v2")).toHaveTextContent(
+      "Review the change",
+    );
+    expect(screen.getByTestId("next-step-v1")).toHaveTextContent("Nothing needed");
+    expect(screen.getByText("newest")).toBeInTheDocument();
+    expect(screen.getByText("superseded")).toBeInTheDocument();
+
+    // "Newest" is a fact about THIS LIST, and the page says so rather than
+    // letting it be read as "the version in production".
+    expect(screen.getByTestId("prompts-quiet-note")).toBeInTheDocument();
+  });
+
+  it("a version with no recorded creation time claims no standing", async () => {
+    renderPage(EDITOR_CAPS, {
+      versions: [
+        { name: "u1", namespace: "default", ref: "aaa1111", promptName: "p" },
+        { name: "u2", namespace: "default", ref: "bbb2222", promptName: "p" },
+      ],
+    });
+    await screen.findByTestId("prompt-version-u1");
+
+    // No stamp ⇒ no derivable order. The page renders the honest dash rather
+    // than ranking the versions by their NAMES, and asks nothing of anyone.
+    expect(
+      screen.getAllByTitle(/cannot say where the version sits/).length,
+    ).toBe(2);
+    expect(screen.queryByText("newest")).not.toBeInTheDocument();
+    expect(screen.getByTestId("next-step-u1")).toHaveTextContent("Nothing needed");
+    expect(screen.getByTestId("next-step-u2")).toHaveTextContent("Nothing needed");
+  });
+
+  it("a 200 carrying no line array is NOT rendered as 'no differences'", async () => {
+    renderPage(EDITOR_CAPS, { diffBody: { resolveMode: "textual" } });
+    await screen.findByTestId("prompt-version-v1");
+
+    fireEvent.change(screen.getByTestId("diff-from-input"), {
+      target: { value: "default/v1" },
+    });
+    fireEvent.change(screen.getByTestId("diff-to-input"), {
+      target: { value: "default/v2" },
+    });
+    fireEvent.click(screen.getByTestId("diff-compare-btn"));
+
+    expect(await screen.findByTestId("prompt-diff-unreadable")).toBeInTheDocument();
+    // An unreadable answer is not an identical pair of versions.
+    expect(screen.queryByText(/No differences found/i)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("prompt-diff-lines")).not.toBeInTheDocument();
   });
 
   it("RBAC: viewer sees no create or delete buttons", async () => {
