@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ctxmesh/agentry/internal/run"
@@ -245,7 +246,9 @@ func (s *Server) deadLetterPoison(rn *run.Run) {
 		return
 	}
 	if rn.IsWorkflowInstance() {
-		s.cancelCascade(rn.ID, "cancelled: workflow dead-lettered (poison: max redeliveries)")
+		// The dead-letter cascade is a deliberate worker decision on a run it just poisoned, not a
+		// raced write: context.Background() carries no worker id, so the G15 gate passes it through.
+		s.cancelCascade(context.Background(), rn.ID, "cancelled: workflow dead-lettered (poison: max redeliveries)")
 	}
 }
 
@@ -327,7 +330,15 @@ func (s *Server) executeClaimedRun(
 	// reclaimed us) the heartbeat cancels execCtx (D3) so we stop; a transient heartbeat error just
 	// stops renewing and the run continues here, the idempotency key bounding any duplicate
 	// downstream effect (at-least-once, the honest lease guarantee).
-	stopHeartbeat := s.startHeartbeat(ctx, workerID, rn.ID, lease, cancelExec)
+	// M143.3 (m52.G17): the heartbeat raises this when it SELF-fences (a sustained renew outage), and the
+	// fenced writers refuse every write once it is set. A definitive lease loss is already covered by the
+	// ordinary fence — worker_id changed — but a self-fence happens BEFORE any peer reclaims, so the row
+	// still names us and the fence alone would let a zombie record an outcome for a run it can no longer
+	// prove it owns.
+	selfFence := &atomic.Bool{}
+	execCtx = contextWithSelfFence(execCtx, selfFence)
+
+	stopHeartbeat := s.startHeartbeat(ctx, workerID, rn.ID, lease, cancelExec, selfFence)
 	defer stopHeartbeat()
 
 	// D4: on graceful drain (the pool ctx is cancelled by SIGTERM), give the in-flight run a bounded
@@ -439,6 +450,7 @@ func resumeInvokeBody(input []byte, cursor string) ([]byte, bool) {
 // lease guarantee is preserved for everything except a proven hand-off to another worker).
 func (s *Server) startHeartbeat(
 	ctx context.Context, workerID, runID string, lease time.Duration, onLeaseLost func(),
+	selfFence *atomic.Bool,
 ) func() {
 	interval := lease / 3
 	if interval <= 0 {
@@ -483,7 +495,13 @@ func (s *Server) startHeartbeat(
 					// window where our terminal write could clobber before the peer reclaims is self-mitigated —
 					// the same DB outage fails that write too; the full cause-suppression is carded m52.G17.)
 					if time.Since(lastRenewed) > lease {
-						s.log.Error(err, "run-worker: heartbeat could not renew for a full lease — self-fencing (stopping execution)",
+						// Raise the self-fence BEFORE cancelling: the executor may reach a terminal write
+						// the instant its context dies, and the flag is what stops that write landing
+						// (M143.3, m52.G17 — closing the window ADR 0098 left as self-mitigating).
+						if selfFence != nil {
+							selfFence.Store(true)
+						}
+						s.log.Error(err, "run-worker: heartbeat could not renew for a full lease — self-fencing (stopping execution, suppressing outcome writes)",
 							"run", runID, "worker", workerID, "lease", lease)
 						if onLeaseLost != nil {
 							onLeaseLost()

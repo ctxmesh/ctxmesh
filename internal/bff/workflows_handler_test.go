@@ -62,14 +62,13 @@ func workflowFixture(name, namespace string, inputSchema *k8sruntime.RawExtensio
 func newWorkflowHandlerServer(t *testing.T, cl client.Client) *Server {
 	t.Helper()
 	return NewServer(Options{
-		CallerClients:     newFakeFactory(cl),
-		Scheme:            testScheme(t),
-		Auth:              AllowAll{},
-		Adapters:          Adapters{Invoke: &fakeInvokeAdapter{resp: []byte(`{"output":"ok"}`)}},
-		RunStore:          run.NewMemStore(),
-		RunWorkerDispatch: true, // leave runs queued; no background goroutines spawn children
-		Log:               logr.Discard(),
-		Version:           "test",
+		CallerClients: newFakeFactory(cl),
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		Adapters:      Adapters{Invoke: &fakeInvokeAdapter{resp: []byte(`{"output":"ok"}`)}},
+		RunStore:      run.NewMemStore(),
+		Log:           logr.Discard(),
+		Version:       "test",
 	})
 }
 
@@ -244,14 +243,13 @@ func TestCreateWorkflowRun_MissingWorkflow(t *testing.T) {
 func newInProcessWorkflowHandlerServer(t *testing.T, cl client.Client) *Server {
 	t.Helper()
 	return NewServer(Options{
-		CallerClients:     newFakeFactory(cl),
-		Scheme:            testScheme(t),
-		Auth:              AllowAll{},
-		Adapters:          Adapters{Invoke: &fakeInvokeAdapter{resp: []byte(`{"output":"ok"}`)}},
-		RunStore:          run.NewMemStore(),
-		RunWorkerDispatch: false, // in-process mode — no worker pool to re-claim a woken workflow run
-		Log:               logr.Discard(),
-		Version:           "test",
+		CallerClients: newFakeFactory(cl),
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		Adapters:      Adapters{Invoke: &fakeInvokeAdapter{resp: []byte(`{"output":"ok"}`)}},
+		RunStore:      run.NewMemStore(),
+		Log:           logr.Discard(),
+		Version:       "test",
 	})
 }
 
@@ -259,10 +257,14 @@ func newInProcessWorkflowHandlerServer(t *testing.T, cl client.Client) *Server {
 // with 422 (no run minted) for BOTH the CR endpoint and the inline endpoint, because a multi-advance workflow
 // cannot complete without a worker pool to re-claim the woken run (m83.1, m52.L8). The paired dispatch-on case
 // is unchanged (still 202) — covered by the happy-path tests above.
-func TestCreateWorkflowRun_InProcessMode_Rejected(t *testing.T) {
-	const wantMsg = "workflow execution requires worker-dispatch (a durable run store + RUN_WORKER_DISPATCH); " +
-		"this server is running in in-process mode and cannot complete a multi-node workflow"
-
+// M143.1 (ADR 0125) INVERTED this test. It used to assert a 422: the in-process run path had no worker
+// pool to re-claim a woken run, so a workflow stalled after its first node and could never reach
+// `succeeded` — an entire feature that did not work on one of the two run paths, guarded by an error
+// message rather than fixed.
+//
+// Retiring that path removed the guard along with the mode it guarded against. What must hold now is the
+// opposite: a workflow create is ACCEPTED and queued, on both entry points, with a run actually minted.
+func TestCreateWorkflowRun_IsAcceptedOnTheSingleRunPath(t *testing.T) {
 	// CR path: POST /api/workflows/{name}/runs.
 	t.Run("cr_path", func(t *testing.T) {
 		wf := workflowFixture("my-workflow", "prod", nil)
@@ -270,10 +272,9 @@ func TestCreateWorkflowRun_InProcessMode_Rejected(t *testing.T) {
 		s := newInProcessWorkflowHandlerServer(t, cl)
 
 		rec := postWorkflowRun(t, s, "my-workflow", WorkflowRunRequest{Namespace: "prod"})
-		assert.Equal(t, http.StatusUnprocessableEntity, rec.Code,
-			"in-process mode must reject a CR-path workflow create with 422")
-		assert.Contains(t, rec.Body.String(), wantMsg, "the 422 body must carry the typed guard message")
-		assert.Zero(t, countStoreRuns(s), "no run must be minted when the guard fires")
+		assert.Equal(t, http.StatusAccepted, rec.Code,
+			"a workflow create is accepted — there is no longer a mode that cannot complete one")
+		assert.Equal(t, 1, countStoreRuns(s), "and the run is minted, queued for the worker pool")
 	})
 
 	// Inline path: POST /api/workflows/runs.
@@ -290,10 +291,8 @@ func TestCreateWorkflowRun_InProcessMode_Rejected(t *testing.T) {
 			},
 		}
 		rec := postInlineWorkflowRun(t, s, InlineWorkflowRunRequest{Spec: spec, Namespace: "prod"})
-		assert.Equal(t, http.StatusUnprocessableEntity, rec.Code,
-			"in-process mode must reject an inline workflow create with 422")
-		assert.Contains(t, rec.Body.String(), wantMsg, "the 422 body must carry the typed guard message")
-		assert.Zero(t, countStoreRuns(s), "no run must be minted when the guard fires")
+		assert.Equal(t, http.StatusAccepted, rec.Code, "the inline path is accepted too")
+		assert.Equal(t, 1, countStoreRuns(s))
 	})
 }
 

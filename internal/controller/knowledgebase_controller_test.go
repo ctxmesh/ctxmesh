@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,6 +32,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -399,7 +401,11 @@ func TestKnowledgeBinding_DanglingRef_SetsCondition(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, agent))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
 
-	reconcileNN(t, newReconciler(), agentName, ns)
+	// M143 m143.5: a dangling ref is HELD for the settle window first (see the settle tests below).
+	// This test is about what happens once the wait is over, so it runs with the window disabled.
+	r := newReconciler()
+	r.KnowledgeSettleWindow = -1
+	reconcileNN(t, r, agentName, ns)
 
 	// Condition check: KnowledgeBasesResolved must be False/DanglingRef.
 	var liveAgent agentsv1alpha1.AgentDeployment
@@ -1032,4 +1038,144 @@ func TestKnowledgeBase_FinalizerLifecycle_NilStores(t *testing.T) {
 	err := k8sClient.Get(testCtx, types.NamespacedName{Name: "kb-nil-stores", Namespace: ns}, &gone)
 	assert.True(t, apierrors.IsNotFound(err),
 		"nil stores must not block deletion — the finalizer must be released")
+}
+
+// ─── KB settle gate (M143 m143.5, m52.G12) ────────────────────────────────────────────────────────
+// Applying an AgentDeployment and its KnowledgeBase together is the normal case, and the two land in
+// the cache a beat apart. Pre-M143 the reconciler treated the not-yet-visible KB as ABSENT: it
+// published a KB-less revision, then published a second one when the KB appeared and the digest
+// suffix changed. That raced Knative's revision creation (RevisionNameTaken on a healthy agent) and
+// meanwhile served retrieval-off answers silently.
+
+// THE BAR: a KB-bound agent whose KnowledgeBase has not landed yet gets ONE revision — the one WITH
+// the corpus — not a KB-less revision followed by a corrected one.
+func TestKnowledgeSettle_OneRevisionNotThree(t *testing.T) {
+	const ns = "default"
+	const agentName = "kb-settle-agent"
+	const kbName = "kb-settle-corpus"
+
+	agent := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: ns},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/echo-agent:latest", ExecutionModel: "serving", Port: 8080,
+			KnowledgeBases: []agentsv1alpha1.KnowledgeBaseRef{{Name: kbName}},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, agent))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+
+	// The KB is not there yet — exactly the create-order race.
+	r := newReconciler()
+	res := reconcileNN(t, r, agentName, ns)
+	assert.Positive(t, res.RequeueAfter,
+		"an unresolved KnowledgeBase ref must HOLD the revision and requeue, not deploy without it")
+
+	var ksvc servingv1.Service
+	err := k8sClient.Get(testCtx, types.NamespacedName{Name: agentName, Namespace: ns}, &ksvc)
+	require.True(t, apierrors.IsNotFound(err),
+		"no ksvc may be published while the KB refs are still settling — publishing one is what "+
+			"created the second, corrected revision a beat later")
+
+	var live agentsv1alpha1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: agentName, Namespace: ns}, &live))
+	cond := apimeta.FindStatusCondition(live.Status.Conditions, "KnowledgeBasesResolved")
+	require.NotNil(t, cond)
+	assert.Equal(t, "Settling", cond.Reason, "the hold must be visible, not a silent stall")
+
+	// The KnowledgeBase lands.
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: kbName, Namespace: ns},
+		Spec: agentsv1beta1.KnowledgeBaseSpec{
+			EmbeddingRoute: "demo-embed",
+			Source:         agentsv1beta1.KnowledgeBaseSource{Type: "upload"},
+			Chunking:       agentsv1beta1.ChunkingConfig{Size: 256, Overlap: 32, Splitter: "markdown"},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, kb))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, kb) })
+
+	reconcileNN(t, r, agentName, ns)
+
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: agentName, Namespace: ns}, &ksvc))
+	envMap := envByName(ksvc.Spec.Template.Spec.Containers[0].Env)
+	assert.Equal(t, "true", envMap["KNOWLEDGE_BASE_ENABLED"],
+		"the FIRST revision ever published must already carry the corpus")
+	first := ksvc.Spec.Template.Name
+
+	// Re-reconciling is a no-op: the revision name must not move, or the churn is back.
+	reconcileNN(t, r, agentName, ns)
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: agentName, Namespace: ns}, &ksvc))
+	assert.Equal(t, first, ksvc.Spec.Template.Name, "a settled agent must not roll a new revision")
+
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: agentName, Namespace: ns}, &live))
+	cond = apimeta.FindStatusCondition(live.Status.Conditions, "KnowledgeBasesResolved")
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status,
+		"a resolved ref must CLEAR the condition — pre-M143 nothing ever set it True, so an agent "+
+			"whose KB arrived a second late carried a stale 'not found' for the rest of its life")
+}
+
+// The wait is BOUNDED: a KnowledgeBase that is genuinely gone must not wedge the agent forever.
+// Past the window the reconciler deploys degraded-but-honest, which is the pre-M143 behavior — now
+// reached deliberately rather than instantly.
+func TestKnowledgeSettle_AWindowThatElapsesDeploysAnyway(t *testing.T) {
+	const ns = "default"
+	const agentName = "kb-settle-expired"
+
+	agent := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: ns},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/echo-agent:latest", ExecutionModel: "serving", Port: 8080,
+			KnowledgeBases: []agentsv1alpha1.KnowledgeBaseRef{{Name: "deleted-corpus"}},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, agent))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+
+	r := newReconciler()
+	r.KnowledgeSettleWindow = 50 * time.Millisecond
+	res := reconcileNN(t, r, agentName, ns) // first observation starts the clock
+	require.Positive(t, res.RequeueAfter)
+
+	require.Eventually(t, func() bool {
+		if reconcileNN(t, r, agentName, ns).RequeueAfter > 0 {
+			return false
+		}
+		var ksvc servingv1.Service
+		return k8sClient.Get(testCtx,
+			types.NamespacedName{Name: agentName, Namespace: ns}, &ksvc) == nil
+	}, 5*time.Second, 50*time.Millisecond,
+		"once the settle window elapses the agent must deploy WITHOUT the missing corpus")
+
+	var live agentsv1alpha1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: agentName, Namespace: ns}, &live))
+	cond := apimeta.FindStatusCondition(live.Status.Conditions, "KnowledgeBasesResolved")
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, "DanglingRef", cond.Reason,
+		"deploying without the corpus must be reported as a dangling ref, not as Settling forever")
+}
+
+// An agent with no spec.knowledgeBases is untouched by the gate — no extra reads, no condition, no
+// requeue. The pre-M68 path must stay byte-identical.
+func TestKnowledgeSettle_NoKnowledgeBasesIsUnaffected(t *testing.T) {
+	const ns = "default"
+	const agentName = "kb-settle-none"
+
+	agent := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: ns},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/echo-agent:latest", ExecutionModel: "serving", Port: 8080,
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, agent))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+
+	res := reconcileNN(t, newReconciler(), agentName, ns)
+	assert.Zero(t, res.RequeueAfter, "the settle gate must be inert without knowledgeBases")
+
+	var live agentsv1alpha1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: agentName, Namespace: ns}, &live))
+	assert.Nil(t, apimeta.FindStatusCondition(live.Status.Conditions, "KnowledgeBasesResolved"),
+		"no KB refs ⇒ no KnowledgeBasesResolved condition at all")
 }

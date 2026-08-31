@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -66,13 +67,37 @@ func (f *fakeInvokeAdapter) Invoke(ctx context.Context, endpoint string, body []
 // drive the token flow.
 func newInvokeServer(t *testing.T, factory CallerClientFactory, inv InvokeAdapter) *Server {
 	t.Helper()
-	return NewServer(Options{
+	s := NewServer(Options{
 		CallerClients: factory,
 		Scheme:        testScheme(t),
 		Auth:          AllowAll{},
 		Adapters:      Adapters{Invoke: inv},
 		Version:       "test",
 		Log:           logr.Discard(),
+	})
+	startTestRunWorkers(t, s)
+	return s
+}
+
+// startTestRunWorkers runs a small worker pool for the test's lifetime.
+//
+// It exists because M143.1 (ADR 0125) retired the in-process run path: creating a run now only ENQUEUES
+// it, and the pool is the single thing that executes. Before that, a handler test got execution for free
+// as a side effect of POSTing — which was precisely the problem, since the path the tests exercised was
+// not the path production used. Tests now drive the same path as production.
+func startTestRunWorkers(t *testing.T, s *Server) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	wait := s.StartRunWorkers(ctx, RunWorkerConfig{Concurrency: 2, Lease: 30 * time.Second})
+	t.Cleanup(func() {
+		cancel()
+		done := make(chan struct{})
+		go func() { wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Log("run-worker pool did not drain within 10s")
+		}
 	})
 }
 

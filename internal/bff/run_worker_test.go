@@ -68,7 +68,7 @@ func TestStartHeartbeat_CancelsExecOnLeaseLost(t *testing.T) {
 			s := &Server{runStore: &leaseHeartbeatStore{hbErr: tc.hbErr}}
 			lostCh := make(chan struct{}, 1)
 			stop := s.startHeartbeat(context.Background(), "worker-a", "run-1", 30*time.Millisecond,
-				func() { lostCh <- struct{}{} })
+				func() { lostCh <- struct{}{} }, nil)
 			defer stop()
 			select {
 			case <-lostCh:
@@ -92,7 +92,7 @@ func TestStartHeartbeat_TransientKeepsRenewing(t *testing.T) {
 	// lease 300ms (interval 100ms) — the observation window (250ms) is SHORTER than the lease, so the
 	// F4 self-fence does not fire; we prove renewal keeps retrying through transient errors (F-2).
 	stop := s.startHeartbeat(context.Background(), "worker-a", "run-1", 300*time.Millisecond,
-		func() { lostCh <- struct{}{} })
+		func() { lostCh <- struct{}{} }, nil)
 	defer stop()
 
 	time.Sleep(250 * time.Millisecond) // ~2 ticks, < lease
@@ -117,7 +117,7 @@ func TestStartHeartbeat_SelfFencesAfterLeaseOutage(t *testing.T) {
 	s := &Server{runStore: store, log: logr.Discard()}
 	lostCh := make(chan struct{}, 1)
 	stop := s.startHeartbeat(context.Background(), "worker-a", "run-1", 60*time.Millisecond, // interval 20ms
-		func() { lostCh <- struct{}{} })
+		func() { lostCh <- struct{}{} }, nil)
 	defer stop()
 
 	select {
@@ -230,13 +230,12 @@ func TestRunWorker_DrainsQueue(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
 	inv := &fakeInvokeAdapter{traceID: "tr-w", resp: []byte(`{"output":"worked","consent_required":[]}`)}
 	s := NewServer(Options{
-		CallerClients:     newFakeFactory(c),
-		Scheme:            testScheme(t),
-		Auth:              AllowAll{},
-		Adapters:          Adapters{Invoke: inv},
-		Version:           "test",
-		RunWorkerDispatch: true,
-		Log:               logr.Discard(),
+		CallerClients: newFakeFactory(c),
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		Adapters:      Adapters{Invoke: inv},
+		Version:       "test",
+		Log:           logr.Discard(),
 	})
 
 	created := createRun(t, s, InvokeRequest{
@@ -273,13 +272,12 @@ func TestRunWorker_ResumesAbandonedRun(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
 	inv := &fakeInvokeAdapter{traceID: "tr-r", resp: []byte(`{"output":"resumed","consent_required":[]}`)}
 	s := NewServer(Options{
-		CallerClients:     newFakeFactory(c),
-		Scheme:            testScheme(t),
-		Auth:              AllowAll{},
-		Adapters:          Adapters{Invoke: inv},
-		Version:           "test",
-		RunWorkerDispatch: true,
-		Log:               logr.Discard(),
+		CallerClients: newFakeFactory(c),
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		Adapters:      Adapters{Invoke: inv},
+		Version:       "test",
+		Log:           logr.Discard(),
 	})
 
 	created := createRun(t, s, InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{"input":"hi"}`)})

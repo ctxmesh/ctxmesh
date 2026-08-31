@@ -432,6 +432,8 @@ func newExportEndpointServer(t *testing.T, lf LangfuseAdapter) (*Server, dataset
 		DatasetStore:  ds,
 		Adapters:      Adapters{Langfuse: lf},
 	})
+	// One run path since M143.1: an export only progresses when the pool executes it.
+	startTestRunWorkers(t, s)
 	return s, ds
 }
 

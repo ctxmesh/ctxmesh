@@ -521,12 +521,7 @@ func (s *Server) handleIngestKB(w http.ResponseWriter, r *http.Request) {
 	// run — the terminal phase still lands via the controller.
 	setKBIngesting(r.Context(), caller, &kb, runID)
 
-	// Dispatch mode: leave `queued` for the worker pool. Dev/single-pod: run in-process so ingestion progresses
-	// without a running worker pool (the workflows_handler precedent).
-	if !s.runWorkerDispatch {
-		go s.executeIngestion(contextWithConversationID(context.Background(), ""), runID)
-	}
-
+	// Left `queued` for the worker pool — one run path since M143.1 (ADR 0125).
 	writeJSON(w, http.StatusAccepted, IngestResponse{
 		RunID:         runID,
 		Status:        string(run.StatusQueued),
