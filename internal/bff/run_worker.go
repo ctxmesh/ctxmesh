@@ -198,14 +198,22 @@ func (s *Server) claimNext(workerID string, lease time.Duration, reclaimFirst bo
 	// F-4: on the periodic reclaim-first tick, rescue an abandoned run BEFORE draining the queue so
 	// reclaim doesn't starve under backlog. A hit returns immediately; an empty reclaimable set falls
 	// through to the queue (the common case).
+	// Layer (b) of the kill switch (M146, ADR 0126): resolve what is stopped BEFORE claiming, and on a
+	// resolve failure decline to claim at all — fail-closed means "don't start new work", never "cancel
+	// running work". Empty (the normal state) is the pre-M146 query exactly.
+	filter, fErr := s.claimFilter(context.Background())
+	if fErr != nil {
+		return nil, fmt.Errorf("resolving the active kill set: %w", fErr)
+	}
+
 	if reclaimFirst {
-		if reclaimed, rErr := s.reclaim(workerID, lease); rErr == nil {
+		if reclaimed, rErr := s.reclaim(workerID, lease, filter); rErr == nil {
 			return reclaimed, nil
 		} else if !errors.Is(rErr, run.ErrNoQueuedRun) {
 			return nil, rErr
 		}
 	}
-	rn, err := s.runStore.ClaimQueued(workerID, lease)
+	rn, err := s.runStore.ClaimQueued(workerID, lease, filter)
 	if err == nil {
 		return rn, nil
 	}
@@ -213,13 +221,13 @@ func (s *Server) claimNext(workerID string, lease time.Duration, reclaimFirst bo
 		return nil, err
 	}
 	// Queue empty → reclaim (also the sole reclaim path on non-reclaim-first ticks).
-	return s.reclaim(workerID, lease)
+	return s.reclaim(workerID, lease, filter)
 }
 
 // reclaim re-leases the oldest abandoned (expired-lease) run + logs it (F-5's attempts increment
 // lives in the store). ErrNoQueuedRun ⇒ nothing to reclaim.
-func (s *Server) reclaim(workerID string, lease time.Duration) (*run.Run, error) {
-	reclaimed, err := s.runStore.ClaimReclaimable(workerID, lease)
+func (s *Server) reclaim(workerID string, lease time.Duration, filter run.ClaimFilter) (*run.Run, error) {
+	reclaimed, err := s.runStore.ClaimReclaimable(workerID, lease, filter)
 	if err == nil {
 		s.log.Info("run-worker: reclaimed an abandoned run (resume-on-pod-loss)", "run", reclaimed.ID, "worker", workerID)
 	}

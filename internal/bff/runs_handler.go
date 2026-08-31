@@ -311,6 +311,18 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 			"record requested but the gateway is not interposed — the agent is not record-capable (set spec.record on the AgentDeployment)")
 		return
 	}
+	// Layer (c) of the scoped kill switch (M146, ADR 0126 §3): refuse the run when its scope is under an
+	// active emergency stop. Placed AFTER agent resolution — so the namespace is the resolved one, not a
+	// caller-supplied hint — and BEFORE the run is minted, so a killed scope never gains a queued run
+	// that would execute the moment the kill is lifted.
+	killNS := req.Namespace
+	if killNS == "" {
+		killNS = defaultCreateNamespace
+	}
+	if s.refuseIfKilled(w, r.Context(), killNS, req.Agent) {
+		return
+	}
+
 	r, ok = attachConversationID(w, r, req.ConversationID)
 	if !ok {
 		return

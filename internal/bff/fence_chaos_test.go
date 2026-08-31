@@ -44,7 +44,7 @@ func TestFenceChaos_AZombiesObituaryCannotDestroyThePeersWork(t *testing.T) {
 			require.NoError(t, err)
 
 			// 1. Worker A claims the root off the queue and starts executing.
-			claimed, err := store.ClaimQueued("worker-A", time.Minute)
+			claimed, err := store.ClaimQueued("worker-A", time.Minute, run.ClaimFilter{})
 			require.NoError(t, err)
 			require.Equal(t, "chaos-root", claimed.ID)
 
@@ -53,7 +53,7 @@ func TestFenceChaos_AZombiesObituaryCannotDestroyThePeersWork(t *testing.T) {
 			require.NoError(t, store.ReleaseLease("chaos-root", "worker-A"))
 
 			// 3. B reclaims the abandoned run and drives it to a correct, successful finish.
-			reclaimed, err := store.ClaimReclaimable("worker-B", time.Minute)
+			reclaimed, err := store.ClaimReclaimable("worker-B", time.Minute, run.ClaimFilter{})
 			require.NoError(t, err)
 			require.Equal(t, "chaos-root", reclaimed.ID, "the abandoned run must be reclaimable")
 			require.NoError(t, s.terminalTransitionFenced(
@@ -107,7 +107,7 @@ func TestFenceChaos_TheLeaseHolderStillRecordsARealFailure(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			claimed, err := store.ClaimQueued("worker-A", time.Minute)
+			claimed, err := store.ClaimQueued("worker-A", time.Minute, run.ClaimFilter{})
 			require.NoError(t, err)
 			require.Equal(t, "held-root", claimed.ID)
 

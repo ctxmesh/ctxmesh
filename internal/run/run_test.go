@@ -109,19 +109,19 @@ func TestMemStore_ClaimQueued(t *testing.T) {
 	require.NoError(t, s.Create(New("old", "ns", "a", nil, "", t0)))
 	require.NoError(t, s.Create(New("new", "ns", "a", nil, "", t0.Add(time.Minute))))
 
-	claimed, err := s.ClaimQueued("worker-1", time.Minute)
+	claimed, err := s.ClaimQueued("worker-1", time.Minute, ClaimFilter{})
 	require.NoError(t, err)
 	assert.Equal(t, "old", claimed.ID, "oldest queued run claimed first")
 	assert.Equal(t, StatusRunning, claimed.Status, "claim flips queued→running")
 	assert.Equal(t, "worker-1", claimed.WorkerID)
 	require.NotNil(t, claimed.LeaseExpiresAt)
 
-	second, err := s.ClaimQueued("worker-2", time.Minute)
+	second, err := s.ClaimQueued("worker-2", time.Minute, ClaimFilter{})
 	require.NoError(t, err)
 	assert.Equal(t, "new", second.ID)
 
 	// Queue drained → ErrNoQueuedRun (a back-off signal, not a failure).
-	_, err = s.ClaimQueued("worker-3", time.Minute)
+	_, err = s.ClaimQueued("worker-3", time.Minute, ClaimFilter{})
 	assert.ErrorIs(t, err, ErrNoQueuedRun)
 }
 
@@ -219,17 +219,17 @@ func TestMemStore_RoundTripsSpawnLineage(t *testing.T) {
 func TestMemStore_ReleaseLeaseMakesReclaimable(t *testing.T) {
 	s := NewMemStore()
 	require.NoError(t, s.Create(New("r1", "ns", "a", nil, "", t0)))
-	_, err := s.ClaimQueued("w1", time.Minute)
+	_, err := s.ClaimQueued("w1", time.Minute, ClaimFilter{})
 	require.NoError(t, err)
 
 	// A foreign worker's release does nothing — the lease stays fresh, still not reclaimable.
 	require.NoError(t, s.ReleaseLease("r1", "w-other"))
-	_, err = s.ClaimReclaimable("w2", time.Minute)
+	_, err = s.ClaimReclaimable("w2", time.Minute, ClaimFilter{})
 	require.ErrorIs(t, err, ErrNoQueuedRun, "a foreign release must not free the lease")
 
 	// The holder releases → the run is immediately reclaimable, resumed running by the peer.
 	require.NoError(t, s.ReleaseLease("r1", "w1"))
-	reclaimed, err := s.ClaimReclaimable("w2", time.Minute)
+	reclaimed, err := s.ClaimReclaimable("w2", time.Minute, ClaimFilter{})
 	require.NoError(t, err)
 	assert.Equal(t, "r1", reclaimed.ID)
 	assert.Equal(t, "w2", reclaimed.WorkerID)
@@ -491,17 +491,17 @@ func TestMemStore_WaitingNotClaimed(t *testing.T) {
 	mkWaitingParent(t, s, []string{"c1"}, WaitAll)
 
 	// Only the waiting parent + its running child exist; neither is queued.
-	_, err := s.ClaimQueued("w", time.Minute)
+	_, err := s.ClaimQueued("w", time.Minute, ClaimFilter{})
 	assert.ErrorIs(t, err, ErrNoQueuedRun, "a waiting run is not claimable")
 
 	// The waiting run also holds no lease → not reclaimable.
-	_, err = s.ClaimReclaimable("w", time.Minute)
+	_, err = s.ClaimReclaimable("w", time.Minute, ClaimFilter{})
 	assert.ErrorIs(t, err, ErrNoQueuedRun)
 
 	// After the child completes, the parent is queued and NOW claimable.
 	_, _, err = s.CompleteAndWake("c1", completeChild)
 	require.NoError(t, err)
-	claimed, err := s.ClaimQueued("w", time.Minute)
+	claimed, err := s.ClaimQueued("w", time.Minute, ClaimFilter{})
 	require.NoError(t, err)
 	assert.Equal(t, "p", claimed.ID, "the woken parent is re-claimed by the pool")
 	assert.Equal(t, StatusRunning, claimed.Status)

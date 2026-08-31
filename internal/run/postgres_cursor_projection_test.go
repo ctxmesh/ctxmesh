@@ -81,7 +81,7 @@ func TestPgStore_ClaimHydratesCursorForResume(t *testing.T) {
 	_, err = s.Update(id, func(r *Run) error { r.Cursor = cp; return nil })
 	require.NoError(t, err)
 
-	claimed, err := s.ClaimQueued("w2", time.Minute)
+	claimed, err := s.ClaimQueued("w2", time.Minute, ClaimFilter{})
 	require.NoError(t, err)
 	require.Equal(t, id, claimed.ID)
 	assert.Equal(t, cp, claimed.Cursor, "the worker claim hydrates the checkpoint (resume unaffected by L12)")

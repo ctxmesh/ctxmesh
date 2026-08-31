@@ -37,9 +37,11 @@ const maxControlRunID = 256
 // (authenticateAgentNamespace, m79.2/C7): the agent pod presents its projected SA token and the proxy
 // verifies it is a real AGENT identity BEFORE any read — a verified-but-non-agent SA is 403'd (m52.C12,
 // closing the auth-only gap where any pod in a tenant namespace could read /control). This is a
-// NON-SECRET, run-scoped read (the verb is "cancel" or empty), so — unlike the quota endpoints — it does
-// NOT resolve a tenant: the agent supplies its OWN run id (from its verified capability) and reads only
-// that run's marker. The authorization gate is what matters; the run id is opaque and namespaces nothing.
+// NON-SECRET read (the verb is "cancel" or empty). Since M146 (ADR 0126) it answers for the whole SCOPE
+// HIERARCHY covering the run — run → agent → namespace → tenant → fleet — resolved server-side from the
+// verified pod identity, so `GET /control/{runID}` keeps its exact wire contract and an already-deployed
+// launcher gains scope kills without an image rebuild. It DOES resolve a tenant now (best-effort; see
+// below), unlike the pre-M146 run-only read.
 func (s *Server) handleControlGet(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), memoryOpTimeout)
 	defer cancel()
@@ -60,7 +62,12 @@ func (s *Server) handleControlGet(w http.ResponseWriter, r *http.Request) {
 	// merely refused. The proxy cannot check per-agent ownership directly: it holds no run→agent mapping,
 	// and its runcap verifier was deliberately retired (ADR 0052 §C6) so a compromised proxy carries no
 	// user credential — a property worth more than the finer-grained check would be.
-	ns, err := s.authenticateAgentNamespace(ctx, bearerToken(r))
+	// M146 (ADR 0126): derive the FULL identity, not just the namespace. The agent name comes from the
+	// same un-forgeable agent-<name> SA the namespace does, so widening the read to the agent/ns/tenant/
+	// fleet scopes costs no new trust — every scope is still derived from the verified pod, never named
+	// by the caller. The wire contract is unchanged (GET /control/{runID}), which is what lets an
+	// ALREADY-DEPLOYED agent inherit scope kills with no image rebuild.
+	ns, agent, err := s.authenticateAgentIdentity(ctx, bearerToken(r))
 	if err != nil {
 		writeAgentAuthError(w, err)
 		return
@@ -72,7 +79,18 @@ func (s *Server) handleControlGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	verb, err := s.control.Control(ctx, ns, runID)
+	// The tenant scope is best-effort: a resolver error or an untenanted namespace SKIPS that scope
+	// rather than failing the read. This layer is the fail-OPEN accelerator (ADR 0126 §2) — the
+	// fail-CLOSED layers that actually enforce a kill (stop-the-drain, refuse-create) read the control
+	// plane, so a tenant kill still holds even when this lookup cannot resolve it.
+	tenant, _, tErr := s.resolveTenant(ctx, ns)
+	if tErr != nil {
+		tenant = ""
+	}
+
+	verb, err := s.control.Control(ctx, ControlScope{
+		Namespace: ns, Agent: agent, Tenant: tenant, RunID: runID,
+	})
 	if err != nil {
 		// A backend error → 502; the launcher's control client fails OPEN (no verb ⇒ don't cancel), so a
 		// Valkey blip never spuriously kills a live run.
