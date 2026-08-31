@@ -83,7 +83,7 @@ func TestCredentialNamespaceRBACReadIsolation(t *testing.T) {
 		credNS       = "ae-credentials"
 		sourceNs     = "team-alpha"
 		server       = "weather-mcp"
-		credSubject  = "agentry-credential-component"
+		credSubject  = "ctxmesh-credential-component"
 		tenantUser   = "tenant-bob"
 		accessToken  = "ALICE-OAUTH-ACCESS-TOKEN"
 		grantForUser = "alice@example.com"

@@ -27,7 +27,7 @@ import (
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/lock"
 
-	"github.com/ctxmesh/agentry/internal/dbpool"
+	"github.com/ctxmesh/ctxmesh/internal/dbpool"
 )
 
 // migrationsFS embeds the control-plane schema. goose applies these in order (0001_, 0002_, …). The

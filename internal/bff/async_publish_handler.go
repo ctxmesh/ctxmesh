@@ -21,8 +21,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/ctxmesh/agentry/internal/asyncbus"
-	"github.com/ctxmesh/agentry/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // The async A2A PUBLISH edge (M141.4, ADR 0121) — where an agent hands a durable hop to the platform.
@@ -43,8 +43,8 @@ const (
 	// They are stamped here from the verified run and OVERWRITE anything the caller sent: a pod that
 	// could name its own registry could publish into a registry it was never a member of, and the
 	// dispatcher trusts these to decide where a message may be delivered.
-	headerAsyncNamespace = "X-Agentry-Async-Namespace"
-	headerAsyncRegistry  = "X-Agentry-Async-Registry"
+	headerAsyncNamespace = "X-Ctxmesh-Async-Namespace"
+	headerAsyncRegistry  = "X-Ctxmesh-Async-Registry"
 
 	// ceIDHeader / ceTypeHeader are the CloudEvent binary-mode attributes we read: the event id is the
 	// envelope's messageId (the idempotency key), and the type is the RECEIVER agent — which is how the

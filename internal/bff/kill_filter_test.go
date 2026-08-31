@@ -16,8 +16,8 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/killscope"
-	"github.com/ctxmesh/agentry/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/killscope"
+	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 // Layer (b) of the scoped kill switch (M146, ADR 0126 §3): a killed scope's queued runs must not be

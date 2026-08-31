@@ -21,7 +21,7 @@ import (
 	"math"
 	"slices"
 
-	"github.com/ctxmesh/agentry/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 // spanTypeSpan is the observation type for a tool-call span.

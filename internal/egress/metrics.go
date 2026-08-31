@@ -32,7 +32,7 @@ import (
 // Cardinality is bounded: one sidecar process serves ONE agent (or boundary), so the agent label is
 // process-constant and the tool label is bounded by the agent's tool set.
 var toolCallsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-	Name: "agentry_egress_tool_calls_total",
+	Name: "ctxmesh_egress_tool_calls_total",
 	Help: "Tool calls at the egress fan-out chokepoint by agent, tool, and outcome " +
 		"(forwarded | ceiling_denied) — the per-(agent,tool) observability for the M82.5 fan-out ceiling (J9).",
 }, []string{"agent", "tool", "outcome"})

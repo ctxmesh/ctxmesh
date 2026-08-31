@@ -14,7 +14,7 @@ import {
 // never logged, login validates via whoami (a non-200 → no session persisted),
 // and a persisted token survives a "refresh" (restore()).
 
-const TOKEN_KEY = "agentry.session.token";
+const TOKEN_KEY = "ctxmesh.session.token";
 
 // okWhoami / badWhoami are fetch stubs standing in for GET /api/whoami.
 function okWhoami(username = "alex.dev", groups = ["dev-team"]) {

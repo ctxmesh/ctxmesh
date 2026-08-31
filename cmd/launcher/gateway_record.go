@@ -46,8 +46,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ctxmesh/agentry/internal/objectstore"
-	"github.com/ctxmesh/agentry/internal/replay"
+	"github.com/ctxmesh/ctxmesh/internal/objectstore"
+	"github.com/ctxmesh/ctxmesh/internal/replay"
 )
 
 // recordHeaderName is the per-run capture toggle the BFF stamps on a recorded run's /invoke (when

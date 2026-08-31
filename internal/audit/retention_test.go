@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
 )
 
 // The retention pruner (m63.6, ADR 0056 §5): a leader-elected Runnable that deletes audit_log rows older

@@ -75,7 +75,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/ctxmesh/agentry/internal/telemetry"
+	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 )
 
 const (

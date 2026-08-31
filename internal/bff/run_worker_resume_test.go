@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 // TestResumeInvokeBody covers the L7 worker-side resume injection (ADR 0091, m108.3 + the m130

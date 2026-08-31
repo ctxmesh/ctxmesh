@@ -23,7 +23,7 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/knowledge"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
 )
 
 type fakeReranker struct {

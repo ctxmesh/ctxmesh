@@ -33,12 +33,12 @@ import (
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	"github.com/ctxmesh/agentry/internal/controlplane"
-	"github.com/ctxmesh/agentry/internal/controlplane/promptversion"
-	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
-	"github.com/ctxmesh/agentry/internal/expand"
-	"github.com/ctxmesh/agentry/internal/prompt"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/ctxmesh/internal/expand"
+	"github.com/ctxmesh/ctxmesh/internal/prompt"
 )
 
 // serializerCodec returns a decoder that reads a single-document manifest into

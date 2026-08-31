@@ -13,7 +13,7 @@ immutable `kubernetes.io/metadata.name` label, `failurePolicy: Fail`, CREATE+UPD
 
 ## Enable it
 
-1. Set `ENABLE_TENANT_LABEL_WEBHOOK=true` + `TENANT_WEBHOOK_CONTROLLER_SA=system:serviceaccount:<ns>:agentry-controller-manager`
+1. Set `ENABLE_TENANT_LABEL_WEBHOOK=true` + `TENANT_WEBHOOK_CONTROLLER_SA=system:serviceaccount:<ns>:ctxmesh-controller-manager`
    on the controller-manager Deployment (the manager then runs the cert-controller + registers
    `/validate-tenant-label` + creates the VWC after the cert is ready).
 2. Wire `service.yaml` here into `config/default/kustomization.yaml` (the webhook Service; the VWC is

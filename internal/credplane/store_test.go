@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ctxmesh/agentry/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 // writerResolver is a mockResolver that ALSO persists grants (a config-selected backend).

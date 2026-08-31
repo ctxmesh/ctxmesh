@@ -1,0 +1,89 @@
+# Production HA overlay for the ctxmesh chart.
+#
+#   helm install ctxmesh ./deploy/helm/ctxmesh -f values-production.yaml [+ your own overrides]
+#
+# The chart DEFAULT values (values.yaml) are the DEV/kind posture: single-replica
+# control-plane components, no PodDisruptionBudgets — correct for a single-node
+# cluster where >1 replica gives no HA (both pods land on the one node) and a
+# minAvailable PDB would WEDGE node drains. This overlay is the PRODUCTION posture:
+# it makes the components that must survive a voluntary disruption (node drain,
+# cluster upgrade) highly available.
+#
+# WHY THIS EXISTS — the M53 cutover (ADR 0050 §8 phase 3) is the DEFAULT: agents
+# route memory/quota/dedup through the state-layer proxy and hold no direct Valkey
+# path. Per ADR 0050 §5 the budget check fails CLOSED through the proxy hop, so a
+# proxy drain on a single-replica deployment 402s EVERY budget-capped agent for the
+# drain window. A production install MUST therefore run the proxy with >=2 replicas
+# + a PDB. This overlay does that (and the same for the other stateless servers).
+
+# profile: production makes the HA invariants HARD — `helm template` FAILS if this
+# overlay (or an operator override) leaves any of them unmet (ADR 0051, M55). This
+# file is self-consistent: it satisfies every invariant below.
+profile: production
+
+# Tenant-label admission webhook: DEFAULT-ON as of M134 (ADR 0102) — proven no-wedge fresh
+# on a cluster (bootstrap + restart + cert-kill + uninstall). Production runs it; the old
+# "unenforced-UNSAFE-acknowledged" ack is RETIRED (it acknowledged the webhook was OFF, which
+# is no longer true). To run production WITHOUT it, an operator sets
+# security.tenantLabelWebhook.enabled=false AND re-adds that ack (the ha-profile guard enforces it).
+# (OBO egress-TLS stays disabled in production — the Gate E delta, m52.G25 — the ha-profile guard
+#  refuses controllerManager.oboEgress.enabled here until the sidecar->token-service CA wiring lands.)
+
+# The state-layer proxy — the load-bearing one (ADR 0050 §5). >=2 + PDB is REQUIRED
+# at the default cutover.
+statelayerProxy:
+  replicas: 2
+
+# The state-layer BACKEND (OPS-4c). production forbids the dev in-cluster Valkey, so a real
+# backend must be declared or STATELAYER_ADDR points at a Service that isn't rendered (the
+# fail-closed proxy then 402s every budget-capped agent). This overlay ships the in-cluster
+# PERSISTENT Valkey (AOF-durable) so it renders + deploys self-contained. For true HA (replication
+# / failover) set statelayer.externalAddr to an operator-managed Valkey/managed Redis instead and
+# set persistence.enabled=false — the recommended production posture (ADR 0053).
+statelayer:
+  # externalAddr: my-valkey.prod.svc:6379   # <- prefer this (BYO-external HA) in real production
+  persistence:
+    enabled: true
+
+# The other stateless request-servers — plain HA (they hold no per-pod state).
+gateway:
+  replicas: 2
+tokenService:
+  replicas: 2
+  tls:
+    required: true # SEC-5: the credential plane must not serve plain HTTP in production
+
+# The controller-manager runs active/standby via leader election, so >=2 is a warm
+# standby (a failover, not load-sharing). Its own PDB is nested (control-plane-pdb.yaml).
+controllerManager:
+  replicas: 2
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+# The BFF — HA via run-worker dispatch (ADR 0051, M55). It scales >=2 because runs
+# are OFFLOADED to the durable run-worker (below), not executed in-process. REQUIRES
+# an operator-provided run-store Secret (bff.runStore.dsnSecretName, key `dsn`) with
+# an EXTERNAL, HA Postgres DSN — the run store must not be a bundled dev instance.
+bff:
+  replicas: 2
+  runStore:
+    enabled: true
+    dsnSecretName: run-store   # create this Secret with your managed-Postgres DSN
+    worker:
+      # A WARM pool (>=2) — a scale-from-0 cold start on an interactive run is the
+      # wrong trade, and a drain must not zero the pool (ADR 0051 Fork-C).
+      minReplicaCount: 2
+      maxReplicaCount: 10
+
+# The bundled dev data plane (Valkey + MinIO, deterministic dev creds) is FORBIDDEN
+# in production — bring your own externally-managed, HA data plane (PRD §23).
+devDataPlane:
+  enabled: false
+
+# Turn on the PodDisruptionBudgets for the stateless components ALONGSIDE their
+# replicas>1 above (bff / gateway / token-service / statelayer-proxy). minAvailable:1
+# keeps at least one pod through a drain. Each PDB renders only at replicas>=2 (m55.3).
+componentPodDisruptionBudgets:
+  enabled: true
+  minAvailable: 1

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package bff is the M12 Backend-for-Frontend for the agentry operator UI
+// Package bff is the M12 Backend-for-Frontend for the ctxmesh operator UI
 // (ADR 0010). It is a server-side layer in the Go control plane: it reuses the
 // controllers' client-go to read/write the agent CRDs, sits behind the M11
 // control-plane auth, and serves the static Vite SPA build. Credentials
@@ -33,7 +33,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 )
 
 // Agent lifecycle phases the BFF projects onto the UI DTO, derived from the
@@ -52,7 +52,7 @@ type HealthResponse struct {
 }
 
 // DevModeResponse is returned by GET /api/devmode (ADR 0021). true = the local
-// `agentry dev --ui` substrate (no login wall, cluster surfaces degraded).
+// `ctxmesh dev --ui` substrate (no login wall, cluster surfaces degraded).
 type DevModeResponse struct {
 	DevMode bool `json:"devMode"`
 }

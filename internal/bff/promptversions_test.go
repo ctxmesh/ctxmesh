@@ -31,7 +31,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/prompt"
+	"github.com/ctxmesh/ctxmesh/internal/prompt"
 )
 
 // pvNS is the namespace used in PromptVersion tests.

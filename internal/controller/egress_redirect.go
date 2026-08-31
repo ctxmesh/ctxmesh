@@ -84,8 +84,8 @@ type EgressRedirectConfig struct {
 // egressRedirectRules is the netfilter program, in order. It is a string constant rather than assembled
 // at runtime so the exact ruleset is reviewable in one place and asserted verbatim by tests.
 //
-//	-t nat -N AGENTRY_OUT              a chain of our own; never edit the built-ins in place
-//	-A OUTPUT -p tcp -j AGENTRY_OUT    all outbound TCP enters it
+//	-t nat -N CTXMESH_OUT              a chain of our own; never edit the built-ins in place
+//	-A OUTPUT -p tcp -j CTXMESH_OUT    all outbound TCP enters it
 //	--uid-owner <sidecar> -j RETURN    the sidecar's own calls leave the pod untouched
 //	-o lo -j RETURN                    in-pod loopback (launcher→sidecar, queue-proxy→app) is untouched
 //	-d <excluded> -j RETURN            the control plane the launcher must reach
@@ -96,18 +96,18 @@ type EgressRedirectConfig struct {
 // not reach the destination.
 func egressRedirectRules(excludeCIDRs []string) []string {
 	rules := []string{
-		"iptables -t nat -N AGENTRY_OUT",
-		"iptables -t nat -A OUTPUT -p tcp -j AGENTRY_OUT",
-		fmt.Sprintf("iptables -t nat -A AGENTRY_OUT -m owner --uid-owner %d -j RETURN", egressSidecarUID),
-		"iptables -t nat -A AGENTRY_OUT -o lo -j RETURN",
+		"iptables -t nat -N CTXMESH_OUT",
+		"iptables -t nat -A OUTPUT -p tcp -j CTXMESH_OUT",
+		fmt.Sprintf("iptables -t nat -A CTXMESH_OUT -m owner --uid-owner %d -j RETURN", egressSidecarUID),
+		"iptables -t nat -A CTXMESH_OUT -o lo -j RETURN",
 	}
 	for _, cidr := range excludeCIDRs {
 		if c := strings.TrimSpace(cidr); c != "" {
-			rules = append(rules, fmt.Sprintf("iptables -t nat -A AGENTRY_OUT -d %s -j RETURN", c))
+			rules = append(rules, fmt.Sprintf("iptables -t nat -A CTXMESH_OUT -d %s -j RETURN", c))
 		}
 	}
 	return append(rules,
-		fmt.Sprintf("iptables -t nat -A AGENTRY_OUT -p tcp -j REDIRECT --to-ports %d", egressRedirectPort))
+		fmt.Sprintf("iptables -t nat -A CTXMESH_OUT -p tcp -j REDIRECT --to-ports %d", egressRedirectPort))
 }
 
 // egressRedirectInitContainer builds the initContainer that installs the rules.

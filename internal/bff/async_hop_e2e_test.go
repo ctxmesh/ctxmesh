@@ -30,7 +30,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/asyncbus"
+	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
 )
 
 // THE M141 ASYNC BAR, end to end and against the REAL broker: an agent publishes a hop, it is DURABLY

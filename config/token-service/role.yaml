@@ -13,7 +13,7 @@ metadata:
   namespace: system
   labels:
     control-plane: token-service
-    app.kubernetes.io/name: agentry
+    app.kubernetes.io/name: ctxmesh
     app.kubernetes.io/managed-by: kustomize
 rules:
   # Per-user grant Secrets in the LOCKED credential namespace: read to resolve, CREATE a

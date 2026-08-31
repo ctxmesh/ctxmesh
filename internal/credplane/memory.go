@@ -21,8 +21,8 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/ctxmesh/agentry/internal/controlplane"
-	"github.com/ctxmesh/agentry/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
 )
 
 // The long-term-memory API paths (ADR 0045). The token-service is the ONLY holder of CONTROLPLANE_DSN + the

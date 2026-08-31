@@ -37,10 +37,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
-	"github.com/ctxmesh/agentry/internal/controlplane/knowledge"
-	"github.com/ctxmesh/agentry/internal/objectstore"
-	"github.com/ctxmesh/agentry/internal/run"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
+	"github.com/ctxmesh/ctxmesh/internal/objectstore"
+	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 // perUserKB returns an upload-source KnowledgeBase (named "my-kb" in the kbNS namespace) with perUser enabled.

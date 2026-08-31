@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ctxmesh/agentry/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 // handoff_handler.go — the BFF's HANDOFF (transfer-of-control) edge (M67, ADR 0060 §5). Handoff is a

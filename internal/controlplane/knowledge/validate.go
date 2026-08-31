@@ -23,7 +23,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/ctxmesh/agentry/internal/controlplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 )
 
 // validate enforces the store invariants before a chunk is written (ADR 0061 Fork 1 + ADR 0045 provenance): a

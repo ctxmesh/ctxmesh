@@ -13,7 +13,7 @@ import { api } from "@/lib/api";
 // S256 challenge (a known-answer vector), the authorize-URL shape, and the callback
 // exchange incl. the anti-CSRF state check and the one-shot flow.
 
-const FLOW_KEY = "agentry.oidc.flow";
+const FLOW_KEY = "ctxmesh.oidc.flow";
 
 afterEach(() => {
   sessionStorage.clear();
@@ -41,14 +41,14 @@ describe("buildAuthorizeUrl", () => {
   it("assembles an Auth-Code + PKCE (S256) authorize URL", () => {
     const url = new URL(
       buildAuthorizeUrl("https://dex.example.com/auth", {
-        clientId: "agentry-console",
+        clientId: "ctxmesh-console",
         redirectUri: "https://console.example.com/auth/callback",
         state: "st4te",
         challenge: "chal1234",
       }),
     );
     expect(url.searchParams.get("response_type")).toBe("code");
-    expect(url.searchParams.get("client_id")).toBe("agentry-console");
+    expect(url.searchParams.get("client_id")).toBe("ctxmesh-console");
     expect(url.searchParams.get("redirect_uri")).toBe(
       "https://console.example.com/auth/callback",
     );
@@ -61,7 +61,7 @@ describe("buildAuthorizeUrl", () => {
   it("honors an explicit scope (end-user flow: no groups)", () => {
     const url = new URL(
       buildAuthorizeUrl("https://dex-eu.example.com/auth", {
-        clientId: "agentry-enduser",
+        clientId: "ctxmesh-enduser",
         redirectUri: "https://chatbot.ns1.example.com/auth/callback",
         state: "s",
         challenge: "c",
@@ -90,7 +90,7 @@ describe("completeLogin", () => {
         state: "st4te",
         codeVerifier: "the-verifier",
         tokenEndpoint: "https://dex.example.com/token",
-        clientId: "agentry-console",
+        clientId: "ctxmesh-console",
         redirectUri: "https://console.example.com/auth/callback",
         returnTo: "/agents",
         ...over,

@@ -27,7 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 )
 
 // agentRegistryKind is the CRD kind name for an AgentRegistry (used in error
@@ -459,7 +459,7 @@ func (s *Server) handleCreateAgentRegistry(w http.ResponseWriter, r *http.Reques
 // --- PUT /api/agentregistries/{ns}/{name} ------------------------------------
 
 // handleUpdateAgentRegistry serves PUT /api/agentregistries/{ns}/{name} — edits
-// an AgentRegistry via SSA under the "agentry-console" field-manager
+// an AgentRegistry via SSA under the "ctxmesh-console" field-manager
 // (ForceOwnership). Only the editable spec fields are applied: memberSelector,
 // guards, roles. registryId is read from the live object and re-sent unchanged,
 // so it cannot be changed through this path — a submitted registryId is ignored

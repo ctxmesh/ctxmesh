@@ -41,7 +41,7 @@ function mcpCallbackOrigin(): string {
 // trace-id link (opens the run inspector ON DEMAND) and the inline per-user Connect banner
 // (ADR 0031) — connecting now RESUMES the same run rather than firing a second invisible call.
 //
-// Dev-mode (`agentry dev --ui`) has no cluster/run store — only /api/invoke works there —
+// Dev-mode (`ctxmesh dev --ui`) has no cluster/run store — only /api/invoke works there —
 // so the OLD synchronous invoke path is kept as a fallback, gated on the GET /api/devmode probe
 // (ADR 0093 §2). On a real cluster the durable path is used.
 //

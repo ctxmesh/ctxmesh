@@ -37,12 +37,12 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
-	"github.com/ctxmesh/agentry/internal/controlplane/alertstore"
-	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
-	"github.com/ctxmesh/agentry/internal/controlplane/costrollup"
-	"github.com/ctxmesh/agentry/internal/gateway/budget"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/alertstore"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/costrollup"
+	"github.com/ctxmesh/ctxmesh/internal/gateway/budget"
 )
 
 // alertPolicyRequeue is how often each AlertPolicy is re-evaluated. The window-based conditions

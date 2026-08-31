@@ -14,7 +14,7 @@ metadata:
   name: token-service-clusterrole
   labels:
     control-plane: token-service
-    app.kubernetes.io/name: agentry
+    app.kubernetes.io/name: ctxmesh
     app.kubernetes.io/managed-by: kustomize
 rules:
   - apiGroups: ["agents.ctxmesh.ai"]

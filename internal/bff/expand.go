@@ -19,11 +19,11 @@ package bff
 import (
 	"context"
 
-	"github.com/ctxmesh/agentry/internal/expand"
+	"github.com/ctxmesh/ctxmesh/internal/expand"
 )
 
 // coreExpandAdapter is the concrete ExpandAdapter (m12.6). It reuses the SAME
-// internal/expand mapping the `agentry expand` CLI uses — the config-builder
+// internal/expand mapping the `ctxmesh expand` CLI uses — the config-builder
 // form → agent.yaml → CRD round-trip goes through exactly one mapping, so the
 // server-side preview is byte-identical to the CLI (proven by the equivalence
 // test in internal/expand). It holds no credentials and no cluster access: it is

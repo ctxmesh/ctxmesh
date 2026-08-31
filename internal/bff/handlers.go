@@ -29,8 +29,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	"github.com/ctxmesh/agentry/internal/controlplane/authz"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 )
 
 // PromQL the dashboard cost/usage view runs through the Prometheus adapter. The
@@ -39,9 +39,9 @@ import (
 // stays server-side.
 const (
 	// promScaleQuery — current replica count per agent (Knative-served scale).
-	promScaleQuery = `sum by (agent) (agentry_agent_replicas)`
+	promScaleQuery = `sum by (agent) (ctxmesh_agent_replicas)`
 	// promLatencyQuery — p95 invoke latency (ms) per agent over 5m.
-	promLatencyQuery = `histogram_quantile(0.95, sum by (agent, le) (rate(agentry_invoke_latency_ms_bucket[5m])))`
+	promLatencyQuery = `histogram_quantile(0.95, sum by (agent, le) (rate(ctxmesh_invoke_latency_ms_bucket[5m])))`
 )
 
 // defaultRunLimit bounds GET /api/runs when the caller passes no ?limit.
@@ -83,7 +83,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handleDevMode serves GET /api/devmode (unauthenticated, ADR 0021): {devMode:true}
-// under `agentry dev --ui` (the local single-developer substrate — no login
+// under `ctxmesh dev --ui` (the local single-developer substrate — no login
 // wall, cluster surfaces honestly 501), false for the normal cluster BFF. The SPA
 // reads it before any session to decide login-gate vs dev chrome.
 func (s *Server) handleDevMode(w http.ResponseWriter, _ *http.Request) {

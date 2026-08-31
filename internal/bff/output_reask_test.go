@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/ctxmesh/agentry/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 // scriptedInvokeAdapter returns a different response per call, so a test can model an agent that

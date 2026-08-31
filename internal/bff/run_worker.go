@@ -26,7 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ctxmesh/agentry/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 // invokeInputField is the agent-invoke envelope's input field name — the one spelling shared by the

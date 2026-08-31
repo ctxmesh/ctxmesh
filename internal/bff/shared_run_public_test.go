@@ -30,8 +30,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/sharedrun"
-	"github.com/ctxmesh/agentry/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/sharedrun"
+	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 // fakeSharedRunStore is a hand-built sharedrun.Store for the PUBLIC-read tests. Unlike the mem store (whose

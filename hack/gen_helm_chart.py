@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate agentry Helm chart templates from `kustomize build config/default`.
+"""Generate ctxmesh Helm chart templates from `kustomize build config/default`.
 
 Reads the rendered kustomize output on stdin, splits it into individual resource
 documents, buckets each by component, and writes three template files:
@@ -22,7 +22,7 @@ kustomize render — only two textual substitutions are applied, and only to mak
 the two knobs an operator needs into Helm values:
 
   1. the controller image `controller:latest`  -> {{ controllerManager image }}
-  2. the install namespace `agentry`-> {{ .Values.namespace }}
+  2. the install namespace `ctxmesh`-> {{ .Values.namespace }}
 
 Both default (in values.yaml) to the exact kustomize strings, so with defaults
 `helm template` == `kustomize build config/default`. `make helm-verify` proves it.
@@ -33,7 +33,7 @@ import os
 import re
 import sys
 
-NS_KUSTOMIZE = "agentry"
+NS_KUSTOMIZE = "ctxmesh"
 IMG_KUSTOMIZE = "controller:latest"
 
 # The BFF's connect-a-provider kill-switch (ADR 0015). config/bff hardcodes the
@@ -136,9 +136,9 @@ CONSOLE_URL_ENV_HELM = (
 # a fresh install routes grants coherently instead of the legacy per-request-namespace path. The chart
 # DERIVES the env from bff.mcp.credentialNamespace ELSE the install namespace, but the *value* stays ""
 # (values.yaml) so templates/mcp-credentials.yaml's gate stays OFF — no extra Namespace/Role renders,
-# no drift + no broad-RBAC regression. Default render (value "", ns=agentry) == the literal.
+# no drift + no broad-RBAC regression. Default render (value "", ns=ctxmesh) == the literal.
 MCP_CREDENTIAL_NAMESPACE_ENV_KUSTOMIZE = (
-    "        - name: MCP_CREDENTIAL_NAMESPACE\n" "          value: agentry"
+    "        - name: MCP_CREDENTIAL_NAMESPACE\n" "          value: ctxmesh"
 )
 MCP_CREDENTIAL_NAMESPACE_ENV_HELM = (
     "        - name: MCP_CREDENTIAL_NAMESPACE\n"
@@ -258,15 +258,15 @@ MCP_CAPABILITY_AUDIENCE_ENV_HELM = (
 # TOKEN_SERVICE_URL (M124/Gate A): config now hardcodes the in-cluster token-service Service DNS (the
 # controller + BFF both delegate MCP grant writes / mint KB+OBO tokens against it — ADR 0029). The chart
 # DERIVES it from the install namespace + tokenService.tls.required (https under `profile: production`,
-# which SEC-5 requires). Default render (tls.required=false, ns=agentry) reproduces the
+# which SEC-5 requires). Default render (tls.required=false, ns=ctxmesh) reproduces the
 # kustomize literal EXACTLY (unquoted) → no drift. Un-set env silently disabled KB retrieval (audit G13).
 TOKEN_SERVICE_URL_ENV_KUSTOMIZE = (
     "        - name: TOKEN_SERVICE_URL\n"
-    "          value: http://agentry-token-service.agentry.svc:8443"
+    "          value: http://ctxmesh-token-service.ctxmesh.svc:8443"
 )
 TOKEN_SERVICE_URL_ENV_HELM = (
     "        - name: TOKEN_SERVICE_URL\n"
-    '          value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default (printf "%s://agentry-token-service.%s.svc:8443" (ternary "https" "http" .Values.tokenService.tls.required) .Values.namespace) }}'
+    '          value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default (printf "%s://ctxmesh-token-service.%s.svc:8443" (ternary "https" "http" .Values.tokenService.tls.required) .Values.namespace) }}'
 )
 
 # OPS-2 — the dev-data-plane gate on the manager. config/manager hardcodes "true" (== the kustomize
@@ -371,8 +371,8 @@ def substitute(doc: str) -> str:
     # value-matching namespace rule would need to run after this exact-string replace.
     # The FQDN literal appears exactly once (manager.yaml), so the replace can't over-match.
     doc = doc.replace(
-        f"agentry-statelayer-proxy.{NS_KUSTOMIZE}.svc",
-        "agentry-statelayer-proxy.{{ .Values.namespace }}.svc",
+        f"ctxmesh-statelayer-proxy.{NS_KUSTOMIZE}.svc",
+        "ctxmesh-statelayer-proxy.{{ .Values.namespace }}.svc",
     )
     # State-layer Valkey backend address STATELAYER_ADDR (OPS-4c). The kustomize literal is the
     # in-cluster Valkey Service (fixed namespace); template it so (a) a non-default-namespace install
@@ -382,9 +382,9 @@ def substitute(doc: str) -> str:
     # install namespace == kustomize on the default namespace (no drift). Appears once per backend
     # Deployment; the exact-string replace hits each.
     doc = doc.replace(
-        f"agentry-statelayer.{NS_KUSTOMIZE}.svc:6379",
+        f"ctxmesh-statelayer.{NS_KUSTOMIZE}.svc:6379",
         "{{ .Values.statelayer.externalAddr | "
-        'default (printf "agentry-statelayer.%s.svc:6379" .Values.namespace) }}',
+        'default (printf "ctxmesh-statelayer.%s.svc:6379" .Values.namespace) }}',
     )
     # BFF connect-a-provider kill-switch -> Helm value (ADR 0015). Only the BFF
     # deployment carries this exact env block; the default keeps the render at

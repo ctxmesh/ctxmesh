@@ -1,6 +1,6 @@
 """LangChain example agent — SDK-free deep-trace demo (M3/M4/M5/M6).
 
-This agent contains ZERO agentry SDK calls and ZERO manual OTel
+This agent contains ZERO ctxmesh SDK calls and ZERO manual OTel
 instrumentation. The base-python image's OpenInference auto-instrumentation
 (sitecustomize.py) emits the chain / llm / tool spans; the launcher emits the
 /invoke boundary span. Together they form the trace tree the M3 milestone
@@ -95,7 +95,7 @@ PORT = int(os.environ.get("AGENT_PORT", "8081"))
 # provider key — the gateway holds those (mock route needs none).
 GATEWAY_URL = os.environ.get(
     "MODEL_GATEWAY_URL",
-    "http://agentry-gateway.agentry.svc:4000",
+    "http://ctxmesh-gateway.ctxmesh.svc:4000",
 )
 MODEL_ROUTE = os.environ.get("MODEL_ROUTE", "default-model")
 

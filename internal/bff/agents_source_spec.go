@@ -22,7 +22,7 @@ import (
 
 	sigsyaml "sigs.k8s.io/yaml"
 
-	"github.com/ctxmesh/agentry/internal/expand"
+	"github.com/ctxmesh/ctxmesh/internal/expand"
 )
 
 // agentDeploymentKind is the CRD kind of the primary object a console create

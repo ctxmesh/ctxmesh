@@ -29,8 +29,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/credplane"
-	"github.com/ctxmesh/agentry/internal/discovery"
+	"github.com/ctxmesh/ctxmesh/internal/credplane"
+	"github.com/ctxmesh/ctxmesh/internal/discovery"
 )
 
 // The M141 gate, proven against the REAL models rather than a fake: an agent is discovered by CAPABILITY,
@@ -41,7 +41,7 @@ import (
 // It runs OFFLINE (ADR 0116/0117: the embedder and reranker are self-hosted in-cluster model services), so
 // there is no paid API and no provisioning gate — the only precondition is a reachable gateway:
 //
-//	kubectl port-forward -n agentry svc/agentry-gateway 4000:4000
+//	kubectl port-forward -n ctxmesh svc/ctxmesh-gateway 4000:4000
 //	DISCOVERY_LIVE_GATEWAY_URL=http://localhost:4000 DISCOVERY_LIVE_EMBEDDING_ROUTE=demo-embed \
 //	  go test -tags=integration ./internal/discovery/ -run Live
 //

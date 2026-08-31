@@ -24,9 +24,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
-	"github.com/ctxmesh/agentry/internal/run"
-	"github.com/ctxmesh/agentry/internal/workflow"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/workflow"
 )
 
 // ── The workflow executor (m67.3, ADR 0060 §2-3) ──────────────────────────────────────────────────────────

@@ -20,7 +20,7 @@ resources:
 - metrics_reader_role.yaml
 # For each CRD, "Admin", "Editor" and "Viewer" roles are scaffolded by
 # default, aiding admins in cluster management. Those roles are
-# not used by the agentry itself. You can comment the following lines
+# not used by the ctxmesh itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
 - agentversion_admin_role.yaml
 - agentversion_editor_role.yaml
@@ -33,7 +33,7 @@ resources:
 # scaffolds above). Bound to users/groups/ServiceAccounts by the cluster admin;
 # they make the RBAC authz story meaningful — a subject without the role is
 # denied, an anonymous request is rejected by the K8s API server's authn.
-- agentry_operator_role.yaml
-- agentry_developer_role.yaml
-- agentry_killswitch_role.yaml
-- agentry_viewer_role.yaml
+- ctxmesh_operator_role.yaml
+- ctxmesh_developer_role.yaml
+- ctxmesh_killswitch_role.yaml
+- ctxmesh_viewer_role.yaml

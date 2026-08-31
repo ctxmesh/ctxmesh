@@ -36,7 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 )
 
 // newRegistryReconciler builds an AgentRegistryReconciler on the envtest client.
@@ -226,7 +226,7 @@ func TestRegistry_TwoMembers_NetworkPolicyAndStatus(t *testing.T) {
 		"Langfuse egress must allow the langfuse-web :3000 port")
 
 	// Platform backends: model gateway / object store / state-layer PROXY / token-service
-	// all live in agentry.
+	// all live in ctxmesh.
 	assert.True(t, egressNS[agentEngineSystemNamespace],
 		"egress must allow the platform backends (gateway/object-store/proxy)")
 	assert.True(t, egressTCPPorts[modelGatewayPort], "egress must allow the model gateway :4000")
@@ -319,7 +319,7 @@ func TestRegistry_MemberEnvInjected(t *testing.T) {
 	// the deterministic DEV-ONLY credentials as STATIC env so its launcher can
 	// offload/rehydrate >256KiB async payloads. All three are constants, never
 	// valueFrom (asserted by the no-valueFrom loop below).
-	assert.Equal(t, "agentry-objectstore.agentry.svc:9000", envMap["OBJECT_STORE_ADDR"],
+	assert.Equal(t, "ctxmesh-objectstore.ctxmesh.svc:9000", envMap["OBJECT_STORE_ADDR"],
 		"OBJECT_STORE_ADDR must point at the dedicated dev MinIO Service")
 	assert.NotEmpty(t, envMap["OBJECT_STORE_ACCESS_KEY"], "OBJECT_STORE_ACCESS_KEY (dev cred) must be injected")
 	assert.NotEmpty(t, envMap["OBJECT_STORE_SECRET_KEY"], "OBJECT_STORE_SECRET_KEY (dev cred) must be injected")
@@ -413,7 +413,7 @@ func TestRegistry_MemberWithMemory_ProxyTokenInjected(t *testing.T) {
 		regName    = "dedup-mesh"
 		registryID = "dedup-mesh"
 		agentName  = "dedup-mesh-member"
-		proxyURL   = "http://agentry-statelayer-proxy.agentry.svc:8080"
+		proxyURL   = "http://ctxmesh-statelayer-proxy.ctxmesh.svc:8080"
 	)
 	mkRegistryMesh(t, regName, namespace, registryID, registryID)
 	agent := &agentsv1alpha1.AgentDeployment{
@@ -574,7 +574,7 @@ func TestMemory_FoldedSessionMemoryField(t *testing.T) {
 // and when perUser is off — so every existing agent is byte-for-byte unchanged.
 func TestMemory_PerUserSessionInjectsEnv(t *testing.T) {
 	const namespace = "default"
-	const proxyURL = "http://statelayer-proxy.agentry.svc:8080"
+	const proxyURL = "http://statelayer-proxy.ctxmesh.svc:8080"
 
 	mkAgent := func(name string, sm *agentsv1alpha1.SessionMemorySpec) *agentsv1alpha1.AgentDeployment {
 		return &agentsv1alpha1.AgentDeployment{

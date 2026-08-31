@@ -23,8 +23,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/authz"
-	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
 
 // resourceTenants is the RBAC resource name for the Tenant CRD (cluster-scoped,
@@ -141,7 +141,7 @@ func (s *Server) handleMCPPublish(w http.ResponseWriter, r *http.Request) {
 		// Platform-operator gate: SSAR update tenants, cluster-scoped, NO resource name.
 		// A principal who can update ANY Tenant (name="") is a platform operator — a
 		// strictly wider check than the org tier's per-tenant gate. Only operator
-		// ClusterRole holders (config/rbac/agentry_operator_role.yaml, verbs: *)
+		// ClusterRole holders (config/rbac/ctxmesh_operator_role.yaml, verbs: *)
 		// pass. Namespace is "" (cluster-scoped); Name is "" (any tenant = all tenants).
 		if aErr := s.authorizeStore(r.Context(), caller, authz.VerbUpdate, resourceTenants, "", ""); aErr != nil {
 			s.writeAuthzError(w, aErr, "publish the MCP server to public visibility (requires cluster-wide update tenants — platform operator)")

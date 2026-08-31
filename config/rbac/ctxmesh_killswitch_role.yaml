@@ -1,0 +1,36 @@
+# The kill-switch role (M146, ADR 0126 §5).
+#
+# `kill` is a CUSTOM verb on the `agentdeployments/kill` SUBRESOURCE. Kubernetes RBAC accepts arbitrary
+# verbs, so gating the emergency stop needs no new CRD and no new BFF privilege: the BFF runs the same
+# caller-scoped SelfSubjectAccessReview it uses for every other control-plane write, and its own service
+# account still holds `rules: []` (ADR 0011).
+#
+# The SUBRESOURCE is load-bearing, and the acceptance bar is what found it: ctxmesh-operator holds
+# `verbs: ["*"]` on agentdeployments, so a bare custom verb on the resource would have been implied by
+# operator — silently defeating the point of a separately-granted control. An RBAC rule naming a resource
+# does NOT cover its subresources, so `agentdeployments/kill` sits outside that wildcard and no existing
+# role had to be narrowed (which would have been a behavioural break for every install).
+#
+# This role is shipped and bound to NOBODY. That is deliberate. A control that can halt an entire tenant
+# or the whole fleet should require an explicit, auditable grant rather than arriving implied by
+# "operator" — the same reasoning that keeps it out of ctxmesh-developer and ctxmesh-operator.
+#
+# Bind it when you mean it:
+#   kubectl create clusterrolebinding oncall-killswitch \
+#     --clusterrole=ctxmesh-killswitch --user=<the on-call principal>
+#
+# Namespace-scoped stops (agent/namespace levels) are authorized in THAT namespace, so a RoleBinding
+# scopes an operator to stopping only their own namespace. Tenant and fleet stops are checked
+# cluster-wide, so halting more than one namespace requires cluster-wide authority — a narrower grant
+# cannot be escalated into a wider stop.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: killswitch
+  labels:
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/component: rbac
+rules:
+  - apiGroups: ["agents.ctxmesh.ai"]
+    resources: ["agentdeployments/kill"]
+    verbs: ["kill"]

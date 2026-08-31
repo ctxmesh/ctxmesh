@@ -35,8 +35,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/authz"
-	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
 
 // CatalogEntry is the discovery-only DTO for one entry in the cross-tenant MCP catalog.

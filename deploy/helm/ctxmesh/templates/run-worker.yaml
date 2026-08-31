@@ -1,0 +1,121 @@
+{{- /*
+Durable run-worker (ADR 0034 / ADR 0051, M55) — OPT-IN, Helm-only.
+
+Not part of config/default (kustomize), so with the default (bff.runStore.enabled=false)
+NOTHING renders and `helm template` still matches `kustomize build config/default`
+(helm-verify no-drift). Enable it (with an operator-provided run-store DSN Secret + the
+BFF dispatch env, gen_helm_chart) so the BFF can scale replicas>1: this separate
+Deployment claims + executes queued runs against the Postgres store, decoupled from any
+BFF replica. KEDA scales it on the queued-run backlog. Mirrors config/run-worker/.
+*/ -}}
+{{- if .Values.bff.runStore.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: run-worker
+  namespace: {{ .Values.namespace }}
+  labels:
+    control-plane: run-worker
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/component: run-worker
+    app.kubernetes.io/managed-by: Helm
+spec:
+  # Warm floor: seed the Deployment at the worker's minReplicaCount so at least that many
+  # workers claim runs from t=0 — before KEDA's HPA reconciles, and even if KEDA is absent
+  # (otherwise a fresh durable-path install queues runs forever). KEDA (the ScaledObject
+  # below) then scales ABOVE the floor on the queued-run backlog. Default floor is 1 (any
+  # durable-path install gets a live worker — Gate A / ADR 0095 dec-3); the production
+  # overlay raises it to 2 (a warm pool, ADR 0051 Fork-C); set worker.minReplicaCount=0 to
+  # opt back into scale-to-zero.
+  replicas: {{ .Values.bff.runStore.worker.minReplicaCount }}
+  selector:
+    matchLabels:
+      control-plane: run-worker
+      app.kubernetes.io/name: ctxmesh
+  template:
+    metadata:
+      labels:
+        control-plane: run-worker
+        app.kubernetes.io/name: ctxmesh
+    spec:
+      serviceAccountName: ctxmesh-bff
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: run-worker
+          # The run-worker IS the bff binary in worker mode (RUN_WORKER_CONCURRENCY>0), so it must use
+          # the SAME overridable image as the BFF. A hardcoded `bff:latest` here (this template is
+          # hand-maintained, so it never got gen_helm_chart's image→value rewrite) ErrImagePull's on any
+          # real registry — and `profile: production` REQUIRES this Deployment (runStore.enabled), so the
+          # documented prod path was dead-on-arrival (GA audit Ops P0-1, M124/Gate A).
+          image: {{ printf "%s:%s" .Values.bff.image.repository (.Values.bff.image.tag | default .Chart.AppVersion) }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RUN_STORE_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.bff.runStore.dsnSecretName }}
+                  key: dsn
+            # Workers EXECUTE runs (concurrency>0 starts the claim-loop pool). Dispatch
+            # is OFF here — the front-end BFF is what dispatches (RUN_WORKER_DISPATCH).
+            - name: RUN_WORKER_CONCURRENCY
+              value: {{ .Values.bff.runStore.worker.concurrency | quote }}
+            # MCP_OBO_REQUIRED (M124/Gate A, ADR 0095 §2): the worker re-mints run capabilities, so it
+            # fails CLOSED the same as the BFF — when OBO egress is enabled but the capability seed is
+            # absent, refuse to start rather than let sub-runs silently use the shared org/public credential.
+            - name: MCP_OBO_REQUIRED
+              value: {{ .Values.controllerManager.oboEgress.enabled | quote }}
+          envFrom:
+            # The worker runs the SAME bff binary, so it needs the SAME operator env the
+            # BFF gets from bff-adapters — most importantly CONTROLPLANE_DSN (required at
+            # startup, ADR 0044) + the adapter creds (m55.5 finding: the M32 worker config
+            # wired only bff-capability and CrashLooped on the missing CONTROLPLANE_DSN).
+            - secretRef:
+                name: bff-adapters
+                optional: true
+            # The capability signing key + audience (shared with the BFF, ADR 0030) so
+            # the worker can re-mint each run's capability from its stored caller identity.
+            - secretRef:
+                name: bff-capability
+                optional: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: run-worker
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/component: run-worker
+    app.kubernetes.io/managed-by: Helm
+spec:
+  scaleTargetRef:
+    name: run-worker
+    kind: Deployment
+    apiVersion: apps/v1
+  minReplicaCount: {{ .Values.bff.runStore.worker.minReplicaCount }}
+  maxReplicaCount: {{ .Values.bff.runStore.worker.maxReplicaCount }}
+  cooldownPeriod: 60
+  triggers:
+    - type: postgresql
+      name: queued-runs
+      metadata:
+        connectionFromEnv: RUN_STORE_DSN
+        query: "SELECT count(*) FROM runs WHERE status = 'queued'"
+        targetQueryValue: "5"
+        activationTargetQueryValue: "0"
+{{- end }}

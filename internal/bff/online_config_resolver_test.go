@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/onlinescore"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
 )
 
 // fakeConfigReader is a canned onlineConfigReader for the cpDB-backed resolver tests: it returns a fixed

@@ -29,19 +29,19 @@ metadata:
   namespace: system
   labels:
     control-plane: objectstore
-    app.kubernetes.io/name: agentry
+    app.kubernetes.io/name: ctxmesh
     app.kubernetes.io/managed-by: kustomize
 spec:
   replicas: 1
   selector:
     matchLabels:
       control-plane: objectstore
-      app.kubernetes.io/name: agentry
+      app.kubernetes.io/name: ctxmesh
   template:
     metadata:
       labels:
         control-plane: objectstore
-        app.kubernetes.io/name: agentry
+        app.kubernetes.io/name: ctxmesh
     spec:
       containers:
         - name: minio

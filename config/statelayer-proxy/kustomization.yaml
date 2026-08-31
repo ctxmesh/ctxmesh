@@ -1,6 +1,6 @@
 # State-layer proxy — Deployment + Service + SA + tenant-reader RBAC (M51/M53,
-# ADR 0050). Flows into config/default (namespace agentry, namePrefix
-# agentry-).
+# ADR 0050). Flows into config/default (namespace ctxmesh, namePrefix
+# ctxmesh-).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
