@@ -325,7 +325,9 @@ def test_delegate_tool_present_when_enabled(client, discovery_stub: DiscoveryStu
     dt = next(t for t in tools if t.name == "delegate_to")
     assert dt.mode == "delegate"
     assert dt.input_schema["properties"]["sub_agent"]["enum"] == ["researcher", "coder"]
-    assert dt.input_schema["required"] == ["sub_agent", "task"]
+    # Only `task` is required since M141.4: the model supplies a roster `sub_agent` OR a free-text
+    # `capability` (see test_delegate_tool_schema_offers_name_or_capability).
+    assert dt.input_schema["required"] == ["task"]
     assert "researcher: searches the web" in dt.description
 
 
@@ -540,3 +542,69 @@ def test_mcp_headers_omits_record_when_not_recorded():
 
     headers = _mcp_headers(session_id=None)  # no record_scope active
     assert RECORD_HEADER not in headers
+
+
+def test_delegate_by_capability_sends_the_query_not_a_name(client, monkeypatch):
+    """delegate(capability=...) (M141.4, ADR 0120) carries the capability QUERY in the body so the
+    launcher resolves who can do the work — the SDK never has to know the agent's name."""
+    captured = {}
+
+    class _Resp:
+        def json(self):
+            return {"ok": True, "answer": "the brief", "subAgent": "summarizer", "subRun": "sub-9"}
+
+    def fake_request(method, url, *, body=None, headers=None, timeout=None, expect=None):
+        captured.update(body=json.loads(body))
+        return _Resp()
+
+    monkeypatch.setattr("ctxmesh.tools._http.request", fake_request)
+    monkeypatch.setattr("ctxmesh.tools.current_capability", lambda: "cap-token")
+
+    out = client.tools.delegate(
+        sub_agent="", task="summarize it", step="2", call_id="c9", capability="summarize a long PDF"
+    )
+
+    assert captured["body"]["capability"] == "summarize a long PDF"
+    assert captured["body"]["subAgent"] == ""
+    assert out["subAgent"] == "summarizer", "the launcher echoes the agent it resolved"
+
+
+def test_delegate_by_name_omits_the_capability_field(client, monkeypatch):
+    """A by-name delegation must not carry an empty `capability`: its presence is what selects the
+    discovery path, so sending it always would make every call look like a capability query."""
+    captured = {}
+
+    class _Resp:
+        def json(self):
+            return {"ok": True, "answer": "done"}
+
+    def fake_request(method, url, *, body=None, headers=None, timeout=None, expect=None):
+        captured.update(body=json.loads(body))
+        return _Resp()
+
+    monkeypatch.setattr("ctxmesh.tools._http.request", fake_request)
+    monkeypatch.setattr("ctxmesh.tools.current_capability", lambda: "cap-token")
+
+    client.tools.delegate(sub_agent="researcher", task="find it", step="2", call_id="c9")
+
+    assert "capability" not in captured["body"]
+
+
+def test_delegate_tool_schema_offers_name_or_capability(client, discovery_stub, monkeypatch):
+    """The synthetic delegate_to tool exposes BOTH ways to pick a sub-agent: an enum-constrained
+    roster name, or a free-text capability. Only `task` is required — a model that knows the roster
+    names one, a model that does not describes what it needs."""
+    monkeypatch.setenv("DELEGATE_ENABLED", "true")
+    monkeypatch.setenv(
+        "DELEGATE_ROSTER", json.dumps([{"name": "researcher", "description": "finds things"}])
+    )
+
+    tool = next(t for t in client.tools.list() if t.name == "delegate_to")
+    props = tool.input_schema["properties"]
+
+    assert props["sub_agent"]["enum"] == ["researcher"], "a named target stays roster-constrained"
+    assert "capability" in props, "delegating by capability is offered alongside the name"
+    assert "enum" not in props["capability"], "a capability is free text, not a fixed vocabulary"
+    assert tool.input_schema["required"] == ["task"], (
+        "only the task is required — the model supplies a name OR a capability"
+    )

@@ -57,10 +57,16 @@ var terminalRunStatuses = map[string]bool{
 
 // delegateRequest is the supervisor SDK's delegate_to body.
 type delegateRequest struct {
-	SubAgent string          `json:"subAgent"`
-	Input    json.RawMessage `json:"input"`
-	Step     string          `json:"step"`   // supervisor loop iteration (idempotency)
-	CallID   string          `json:"callId"` // the model's tool-call id (idempotency)
+	SubAgent string `json:"subAgent"`
+	// Capability delegates by WHAT the sub-agent must be able to do rather than by its name (M141.4,
+	// ADR 0120). Used only when SubAgent is empty: the launcher asks the platform's discovery edge to rank
+	// the caller's registry by this capability and delegates to the best match. It exists because a
+	// supervisor should be able to say "I need something that can summarize a PDF" without having been
+	// wired, at authoring time, to the name of the agent that can.
+	Capability string          `json:"capability,omitempty"`
+	Input      json.RawMessage `json:"input"`
+	Step       string          `json:"step"`   // supervisor loop iteration (idempotency)
+	CallID     string          `json:"callId"` // the model's tool-call id (idempotency)
 	// Suspend asks for the L7 durable-suspend path (ADR 0091): the launcher resolves + budget-checks the
 	// delegation and returns a suspend-SIGNAL (endpoint, no spawn, no block) so the SDK can collect the
 	// turn's delegations and SUSPEND once. Honored only at depth 0 (a root supervisor); a depth>0 request
@@ -72,10 +78,14 @@ type delegateRequest struct {
 // receives as the tool result (ok=false + error), or (L7) a suspend-signal the SDK turns into a durable
 // suspend.
 type delegateResponse struct {
-	OK     bool   `json:"ok"`
-	SubRun string `json:"subRun,omitempty"`
-	Answer string `json:"answer,omitempty"`
-	Error  string `json:"error,omitempty"`
+	OK bool `json:"ok"`
+	// SubAgent echoes the agent actually delegated to. It matters for delegate-by-capability (M141.4):
+	// the caller named a capability, not an agent, so without this it would never learn WHO ran — and the
+	// L7 suspend path would checkpoint an empty target, stranding the child run.
+	SubAgent string `json:"subAgent,omitempty"`
+	SubRun   string `json:"subRun,omitempty"`
+	Answer   string `json:"answer,omitempty"`
+	Error    string `json:"error,omitempty"`
 	// Suspend + Endpoint are the L7 suspend-signal (ADR 0091): the launcher budget-checked and RESOLVED the
 	// target endpoint but did NOT spawn or block. The SDK collects these and suspends once; the BFF worker
 	// creates the child run at Endpoint inside the suspend transaction (m108.4b).
@@ -110,6 +120,9 @@ type bffSpawnBody struct {
 type spawnClient interface {
 	Spawn(ctx context.Context, capToken string, body bffSpawnBody) (subRunID string, err error)
 	Await(ctx context.Context, capToken, subRunID string) (spawnedRunResult, error)
+	// Discover ranks the caller's registry by capability and returns the best-matching agent names, best
+	// first. Empty (no error) means nobody advertises the capability — an honest answer, not a failure.
+	Discover(ctx context.Context, capToken, capability string, topK int) ([]string, error)
 	handoffClient
 }
 
@@ -152,6 +165,43 @@ func (c *httpSpawnClient) Spawn(ctx context.Context, capToken string, body bffSp
 		return "", err
 	}
 	return out.ID, nil
+}
+
+// Discover relays a capability query to the BFF's capability-authorized discovery edge (M141.2). The
+// launcher passes the run capability through and does NOT get to choose the candidate set: the BFF
+// resolves the caller's registry from the control plane, so a compromised pod cannot widen its own reach
+// by asking about someone else's registry.
+func (c *httpSpawnClient) Discover(ctx context.Context, capToken, capability string, topK int) ([]string, error) {
+	raw, _ := json.Marshal(map[string]any{wireKeyQuery: capability, wireKeyTopK: topK})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.bffURL+"/api/internal/discover",
+		bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(runcap.HeaderName, capToken)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<10))
+		return nil, fmt.Errorf("discovery rejected (%d): %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+	var out struct {
+		Agents []struct {
+			Name string `json:"name"`
+		} `json:"agents"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(out.Agents))
+	for _, a := range out.Agents {
+		names = append(names, a.Name)
+	}
+	return names, nil
 }
 
 func (c *httpSpawnClient) Await(ctx context.Context, capToken, subRunID string) (spawnedRunResult, error) {
@@ -197,6 +247,26 @@ func (c *httpSpawnClient) poll1(ctx context.Context, capToken, subRunID string) 
 		return spawnedRunResult{}, false, err
 	}
 	return spawnedRunResult{Status: out.Status, Answer: out.Answer, Error: out.Error}, terminalRunStatuses[out.Status], nil
+}
+
+// discoverTopK is how many candidates the launcher asks for when delegating by capability. It takes the
+// top one, but asks for a few: the extras cost nothing and make the refusal message able to say what the
+// runner-up was, which is far more useful to a model than a bare "no match".
+const discoverTopK = 3
+
+// resolveByCapability turns "I need something that can do X" into a concrete sub-agent name via the
+// platform's discovery edge. The launcher deliberately does NOT rank locally: the BFF resolves the
+// caller's registry from the control plane, so a compromised pod cannot nominate its own candidate set.
+func (s *delegateServer) resolveByCapability(ctx context.Context, capToken, capability string) (string, error) {
+	names, err := s.client.Discover(ctx, capToken, capability, discoverTopK)
+	if err != nil {
+		return "", fmt.Errorf("could not resolve an agent for %q: %w", capability, err)
+	}
+	if len(names) == 0 {
+		return "", fmt.Errorf("no agent in your registry advertises %q — name a sub-agent instead, "+
+			"or have one publish that capability", capability)
+	}
+	return names[0], nil
 }
 
 // delegateConfig is the delegate endpoint's config (parsed from env alongside the A2A config).
@@ -382,16 +452,35 @@ func (s *delegateServer) handleDelegate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	req.SubAgent = strings.TrimSpace(req.SubAgent)
+	req.Capability = strings.TrimSpace(req.Capability)
 	req.Step = strings.TrimSpace(req.Step)
 	req.CallID = strings.TrimSpace(req.CallID)
-	if req.SubAgent == "" || req.Step == "" || req.CallID == "" {
-		writeDelegate(w, delegateResponse{OK: false, Error: "subAgent, step, and callId are required"})
+	if req.Step == "" || req.CallID == "" {
+		writeDelegate(w, delegateResponse{OK: false, Error: "step and callId are required"})
+		return
+	}
+	if req.SubAgent == "" && req.Capability == "" {
+		writeDelegate(w, delegateResponse{OK: false, Error: "name a subAgent or describe the capability you need"})
 		return
 	}
 	capToken := strings.TrimSpace(r.Header.Get(runcap.HeaderName))
 	if capToken == "" {
 		writeDelegate(w, delegateResponse{OK: false, Error: "no run capability — delegation needs an authenticated run"})
 		return
+	}
+
+	// Delegate BY CAPABILITY (M141.4): with no name given, ask the platform who can do this. Resolution
+	// happens BEFORE the spawn guard so the guard sees the real target — its per-target accounting and the
+	// ancestry cycle check are meaningless against a placeholder. An honest refusal (nobody advertises the
+	// capability, or discovery is unavailable) comes back as a tool result the model can react to, never
+	// as a silent fallback to some arbitrary agent.
+	if req.SubAgent == "" {
+		resolved, dErr := s.resolveByCapability(r.Context(), capToken, req.Capability)
+		if dErr != nil {
+			writeDelegate(w, delegateResponse{OK: false, Error: dErr.Error()})
+			return
+		}
+		req.SubAgent = resolved
 	}
 
 	// Spawn-tree context (from the run-worker's headers; first-hop defaults for a root supervisor).
@@ -429,7 +518,9 @@ func (s *delegateServer) handleDelegate(w http.ResponseWriter, r *http.Request) 
 	// The blocking spawn+await path below STAYS: the resume re-dispatch rides it (short-circuiting on the
 	// already-terminal child), and a non-suspend delegation still blocks as before.
 	if req.Suspend {
-		writeDelegate(w, delegateResponse{OK: true, Suspend: true, Endpoint: s.targetURL(req.SubAgent)})
+		writeDelegate(w, delegateResponse{
+			OK: true, Suspend: true, SubAgent: req.SubAgent, Endpoint: s.targetURL(req.SubAgent),
+		})
 		return
 	}
 
@@ -457,7 +548,7 @@ func (s *delegateServer) handleDelegate(w http.ResponseWriter, r *http.Request) 
 		writeDelegate(w, delegateResponse{OK: false, SubRun: subRunID, Error: errMsg})
 		return
 	}
-	writeDelegate(w, delegateResponse{OK: true, SubRun: subRunID, Answer: res.Answer})
+	writeDelegate(w, delegateResponse{OK: true, SubAgent: req.SubAgent, SubRun: subRunID, Answer: res.Answer})
 }
 
 func writeDelegate(w http.ResponseWriter, resp delegateResponse) {

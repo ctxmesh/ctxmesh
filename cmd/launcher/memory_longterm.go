@@ -225,7 +225,8 @@ func (p *longTermProxy) handleSearch(w http.ResponseWriter, r *http.Request) {
 	)
 	payload := map[string]any{
 		"namespace": p.namespace, "agentName": p.agent, "scope": p.scope, "subject": subject,
-		"query": body.Query, "topK": body.TopK, "threshold": body.Threshold, "embeddingModel": p.embeddingModel,
+		wireKeyQuery: body.Query, wireKeyTopK: body.TopK, "threshold": body.Threshold,
+		wireKeyEmbeddingModel: p.embeddingModel,
 	}
 	var out json.RawMessage
 	if err := p.post(ctx, "/v1/memory/search", payload, &out); err != nil {

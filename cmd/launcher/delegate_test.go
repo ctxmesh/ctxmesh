@@ -46,6 +46,13 @@ type fakeSpawnClient struct {
 	gotHandoffBody bffHandoffBody
 	handoffRes     handoffResult
 	handoffErr     error
+
+	// discovery (m141.4) — delegate-by-capability
+	discovered     int
+	gotCapability  string
+	gotDiscoverCap string
+	discoverNames  []string
+	discoverErr    error
 }
 
 func (f *fakeSpawnClient) Spawn(_ context.Context, capToken string, body bffSpawnBody) (string, error) {
@@ -59,6 +66,13 @@ func (f *fakeSpawnClient) Spawn(_ context.Context, capToken string, body bffSpaw
 		f.subRunID = "sub-xyz"
 	}
 	return f.subRunID, nil
+}
+
+func (f *fakeSpawnClient) Discover(_ context.Context, capToken, capability string, _ int) ([]string, error) {
+	f.discovered++
+	f.gotDiscoverCap = capToken
+	f.gotCapability = capability
+	return f.discoverNames, f.discoverErr
 }
 
 func (f *fakeSpawnClient) Await(_ context.Context, _, _ string) (spawnedRunResult, error) {
