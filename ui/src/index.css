@@ -3,6 +3,25 @@
  * :root custom properties Tailwind's theme maps onto. */
 @import "./styles/tokens.css";
 
+/* Typefaces — SELF-HOSTED, bundled by Vite into dist/assets (M151 §3.3).
+ *
+ * Before M151 no webfont loaded at all: tokens.css named "Inter" and
+ * "JetBrains Mono" while the repo shipped no font file and index.html linked no
+ * stylesheet, so every console screen ever rendered in the OS fallback face.
+ *
+ * A CDN <link> is not an option — ctxmesh installs air-gapped, and an offline
+ * install must render identically to a connected one. These are the variable
+ * packages: one file per family per style covers the whole weight range, and
+ * unicode-range keeps a browser from downloading a subset it will not draw.
+ * All three families are SIL OFL 1.1; the licence texts ship inside the
+ * packages, which is why they are consumed as dependencies rather than
+ * hand-vendored woff2. */
+@import "@fontsource-variable/newsreader/wght.css";
+@import "@fontsource-variable/newsreader/wght-italic.css";
+@import "@fontsource-variable/public-sans/wght.css";
+@import "@fontsource-variable/public-sans/wght-italic.css";
+@import "@fontsource-variable/jetbrains-mono/wght.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
