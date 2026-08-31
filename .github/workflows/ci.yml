@@ -143,6 +143,10 @@ jobs:
         with:
           node-version-file: ui/.nvmrc
       - name: Activate pnpm (corepack, pinned by package.json)
+        # working-directory is load-bearing: `packageManager` is declared in ui/package.json and there
+        # is no root package.json, so `corepack prepare --activate` from the repo root has nothing to
+        # read and fails. Masked since ~M79 because the pipeline never got past `lint` (m52.G3).
+        working-directory: ui
         run: corepack enable && corepack prepare --activate
       - name: Install UI deps (frozen lockfile)
         working-directory: ui
@@ -186,6 +190,11 @@ jobs:
       # No-drift gate: the committed chart == generated from config/, AND
       # `helm template` (default values) == `kustomize build config/default`.
       # Catches chart drift on every PR — cheap, no cluster.
+      # hack/check-crd-version-parity.sh imports PyYAML; setup-python provides the interpreter but not
+      # the package, so the parity gate failed on `import yaml`. Masked since ~M79 (m52.G3) because the
+      # pipeline never reached this job.
+      - name: Install PyYAML (the CRD parity gate needs it)
+        run: python3 -m pip install --quiet pyyaml
       - name: Helm no-drift gate (chart == kustomize build)
         run: make helm-verify
       - name: helm lint

@@ -1,7 +1,7 @@
-resources:
-- manager.yaml
 # The empty webhook serving-cert Secret the cert-controller rotator POPULATES (it never creates it —
 # the M134 first-boot fix). Shipped unconditionally; the manager volume-mounts it. See the file header.
+resources:
+- manager.yaml
 - webhook-cert-secret.yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
