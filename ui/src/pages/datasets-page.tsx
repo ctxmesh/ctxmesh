@@ -1,8 +1,24 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronLeft, Database, Tag } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronLeft, Database, Filter, Tag } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 
-import { DataTable, type Column, type DataTableError } from "@/components/kit";
+import {
+  CellEntity,
+  ClosingNote,
+  DataTable,
+  FilterChipRow,
+  NextStepLink,
+  PageHeader,
+  QuantityValue,
+  QuietNote,
+  UnknownValue,
+  nextStepRank,
+  type Column,
+  type DataTableError,
+  type EmptyStateProps,
+  type FilterChip,
+  type NextStepTone,
+} from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,25 +39,30 @@ import {
   type AppendLabelRequest,
 } from "@/lib/api";
 
-// DatasetsPage — the labeling dataset list + detail surface (m69.3, ADR 0062 Fork 5).
+// DatasetsPage — the labeling dataset list + detail surface (m69.3, ADR 0062 Fork 5;
+// the list re-housed on the editorial system in M151 as archetype A1).
 //
-// The dataset store (CONTROLPLANE_DSN) is optional: both pages degrade calmly with a
-// "not configured" message when the store is absent (501-calm from the BFF). The list
-// also degrades calmly when the Langfuse adapter is absent (listDatasets returns empty).
+// THE PAGE'S WHOLE POINT IS THAT IT NEVER CLAIMS MORE THAN THE BACKEND CAN ANSWER.
+// The dataset store (CONTROLPLANE_DSN) is OPTIONAL. When it is absent the BFF answers
+// 501 — and 501 here is CALM, not an error: nothing broke, this install simply has no
+// place to keep datasets. The honest rendering is a QuietNote naming what is absent and
+// why, never a red error and never an implied zero.
 //
-// List page: shows name, case count, created-at → clicking a row navigates to the
-// detail page where labels can be appended. The store-absent 501 is surfaced as a calm
-// "not configured" message, not as an error.
+// One caveat is load-bearing and is stated in the note rather than hidden: `api.listDatasets`
+// currently ABSORBS the 501 and returns `{ items: [] }`, so an empty list is genuinely
+// ambiguous between "the store is not configured" and "no datasets have been created".
+// The page therefore refuses to claim either, and says so. (The `unavailable` branch below
+// is the specced rendering and goes live the moment api.ts stops swallowing the 501.)
 //
-// Detail page: lists draft-head cases + the latest label per case. Each case has a
-// label form (pass/fail/flag + optional correction + note → POST
-// /api/datasets/{name}/cases/{caseId}/labels). The author is always the server-assigned
-// caller identity (never a client field).
+// List page: name, case count, created-at → a row-click opens the detail page where labels
+// are appended. Detail page: draft-head cases + the latest label per case; the author is
+// always the server-assigned caller identity (never a client field).
 //
 // data-testid contract:
 //   datasets-page             — list root container
 //   datasets-table            — the DataTable (aria-label="Datasets")
-//   dataset-row-{name}        — each list row
+//   dataset-row-{name}        — each list row's entity cell
+//   datasets-quiet-note       — the calm "cannot be answered" note
 //   dataset-detail-page       — detail root container
 //   case-row-{id}             — each case card
 //   label-form-{caseId}       — the label form for a case
@@ -63,6 +84,15 @@ function formatDate(ts?: string): string {
   }
 }
 
+// formatStamp is the §4.5 table register for a timestamp: same year → "Aug 29",
+// older → "2025-08-29", with the full value in `title`.
+function formatStamp(ts: string): string {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  if (d.getFullYear() !== new Date().getFullYear()) return d.toISOString().slice(0, 10);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
   return `${s.slice(0, max)}…`;
@@ -75,11 +105,36 @@ function truncate(s: string, max: number): string {
 type ListLoadState =
   | { kind: "loading" }
   | { kind: "ready"; items: DatasetSummary[] }
+  // The store is not configured (501). NOT an error — §7.1's "not configured".
+  | { kind: "unavailable" }
   | { kind: "error"; message: string; forbidden: boolean };
+
+interface NextStep {
+  label: string;
+  tone: NextStepTone;
+}
+
+/**
+ * The row's next action (§7.2), verb-first and ≤22 characters.
+ *
+ * A dataset with no cases cannot be labelled, so it needs a person. A dataset that
+ * HAS cases needs nothing *from this list* — how many of those cases still want a
+ * label is not in the list response, and inventing "12 to label" would be exactly
+ * the claim this page exists to refuse. The QuietNote says so out loud.
+ */
+function datasetNextStep(d: DatasetSummary): NextStep {
+  if (typeof d.caseCount !== "number") return { label: "Open the dataset", tone: "default" };
+  if (d.caseCount === 0) return { label: "Add the first case", tone: "default" };
+  return { label: "", tone: "none" };
+}
+
+const DS_VIEWS = ["all", "empty", "populated"] as const;
+type DSView = (typeof DS_VIEWS)[number];
 
 export function DatasetsPage() {
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
+  const [view, setView] = useState<DSView>("all");
   const [loadState, setLoadState] = useState<ListLoadState>({ kind: "loading" });
   const abortRef = useRef<AbortController | null>(null);
 
@@ -92,12 +147,18 @@ export function DatasetsPage() {
       .listDatasets(controller.signal)
       .then((res) => {
         if (controller.signal.aborted) return;
-        // api.listDatasets absorbs 501 (unconfigured store) and returns {items:[]} —
-        // so the page always lands on "ready" and shows the teaching empty state.
         setLoadState({ kind: "ready", items: res.items });
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted) return;
+        // 501 is CALM (§7.1): the store is not wired, nothing failed. It renders a
+        // QuietNote, never the error state. Unreachable while api.listDatasets
+        // absorbs the 501 into an empty list — kept because it is the correct
+        // handling and the absorbing is the thing that should change.
+        if (err instanceof ApiError && err.isNotImplemented) {
+          setLoadState({ kind: "unavailable" });
+          return;
+        }
         setLoadState({
           kind: "error",
           message: err instanceof Error ? err.message : "request failed",
@@ -111,15 +172,68 @@ export function DatasetsPage() {
     return () => abortRef.current?.abort();
   }, [load]);
 
-  const all = loadState.kind === "ready" ? loadState.items : [];
+  const all = useMemo(
+    () => (loadState.kind === "ready" ? loadState.items : []),
+    [loadState],
+  );
+
+  // Attention-first (§6.1): datasets that cannot be labelled yet sort above the
+  // ones that can, "Nothing needed" last, then alphabetically.
+  const sorted = useMemo(
+    () =>
+      [...all].sort((a, b) => {
+        const rank =
+          nextStepRank(datasetNextStep(a).tone) - nextStepRank(datasetNextStep(b).tone);
+        if (rank !== 0) return rank;
+        return a.name.localeCompare(b.name);
+      }),
+    [all],
+  );
+
+  const emptyDatasets = useMemo(
+    () => sorted.filter((d) => datasetNextStep(d).tone !== "none"),
+    [sorted],
+  );
+
   const q = query.trim().toLowerCase();
-  const items = q ? all.filter((d) => d.name.toLowerCase().includes(q)) : all;
+  const items = useMemo(() => {
+    const byView =
+      view === "empty"
+        ? emptyDatasets
+        : view === "populated"
+          ? sorted.filter((d) => datasetNextStep(d).tone === "none")
+          : sorted;
+    return q ? byView.filter((d) => d.name.toLowerCase().includes(q)) : byView;
+  }, [view, q, sorted, emptyDatasets]);
+
+  // The list endpoint answers with every dataset in the caller's namespace in one
+  // response (no cursor), so these are the backend's counts, not a tally of rendered rows.
+  // Built FROM the view union rather than beside it, so the chips, their order
+  // and the type cannot drift apart — a chip whose id is not a view stops
+  // compiling instead of silently filtering to nothing.
+  const dsViewLabel: Record<DSView, string> = {
+    all: "Everything",
+    empty: "Waiting for cases",
+    populated: "Ready to label",
+  };
+  const dsViewCount: Record<DSView, number> = {
+    all: all.length,
+    empty: emptyDatasets.length,
+    populated: all.length - emptyDatasets.length,
+  };
+  const chips: FilterChip[] = DS_VIEWS.map((id) => ({
+    id,
+    label: dsViewLabel[id],
+    count: dsViewCount[id],
+  }));
+  const viewLabel = chips.find((c) => c.id === view)?.label ?? "Everything";
 
   const error: DataTableError | null =
     loadState.kind === "error"
       ? {
           message: loadState.message,
           forbidden: loadState.forbidden,
+          resource: "datasets",
           onRetry: loadState.forbidden ? undefined : load,
         }
       : null;
@@ -127,56 +241,166 @@ export function DatasetsPage() {
   const columns: Column<DatasetSummary>[] = [
     {
       id: "name",
-      header: "Name",
-      cell: (d) => <span className="font-medium font-mono">{d.name}</span>,
-    },
-    {
-      id: "cases",
-      header: "Cases",
+      header: "Dataset",
+      priority: 1,
+      className: "max-w-[22rem]",
       cell: (d) => (
-        <span className="text-sm text-muted-foreground">
-          {d.caseCount.toLocaleString()}
-        </span>
+        <div data-testid={`dataset-row-${d.name}`}>
+          <CellEntity name={d.name} namespace={d.namespace} />
+        </div>
       ),
     },
     {
       id: "created",
       header: "Created",
-      hideOnMobile: true,
-      cell: (d) => (
-        <span className="text-sm text-muted-foreground">{formatDate(d.createdAt)}</span>
-      ),
+      priority: 4,
+      cell: (d) =>
+        d.createdAt ? (
+          <span
+            className="whitespace-nowrap font-mono text-xs tabular-nums text-faint"
+            title={d.createdAt}
+          >
+            {formatStamp(d.createdAt)}
+          </span>
+        ) : (
+          <UnknownValue title="No creation time was recorded for this dataset." />
+        ),
+    },
+    {
+      id: "cases",
+      header: "Cases",
+      priority: 3,
+      numeric: true,
+      // Straight through: a count the BFF did not send arrives as `undefined` and
+      // reads `—`, never `0`. Zero and unknown never share a glyph (§7.1).
+      cell: (d) => <QuantityValue value={d.caseCount} />,
+    },
+    {
+      id: "next",
+      header: "Next step",
+      priority: 1,
+      cell: (d) => {
+        const step = datasetNextStep(d);
+        return (
+          <NextStepLink
+            label={step.label}
+            tone={step.tone}
+            to={
+              step.tone === "none"
+                ? undefined
+                : `/datasets/${encodeURIComponent(d.name)}`
+            }
+            ariaLabel={step.tone === "none" ? undefined : `${step.label} in ${d.name}`}
+            testId={`dataset-next-${d.name}`}
+          />
+        );
+      },
     },
   ];
 
-  return (
-    <div className="mx-auto max-w-6xl space-y-6" data-testid="datasets-page">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Datasets</h2>
-        <p className="text-sm text-muted-foreground">
-          Human-labeled eval datasets for the improvement loop. Add a trace as a
-          case with the “Add to dataset” action on any trace.
-        </p>
-      </div>
-
-      <DataTable<DatasetSummary>
-        columns={columns}
-        rows={items}
-        rowKey={(d) => d.id}
-        loading={loadState.kind === "loading"}
-        error={error}
-        query={query}
-        onQueryChange={setQuery}
-        queryPlaceholder="Filter datasets by name…"
-        ariaLabel="Datasets"
-        onRowClick={(d) => navigate(`/datasets/${encodeURIComponent(d.name)}`)}
-        empty={{
+  const empty: EmptyStateProps =
+    view !== "all" && all.length > 0
+      ? {
+          intent: "filtered",
+          icon: Filter,
+          title: "Nothing in this view",
+          description: `No dataset is in “${viewLabel}” right now.`,
+          action: {
+            label: "Show everything",
+            variant: "outline",
+            onClick: () => setView("all"),
+          },
+          totalCount: all.length,
+          countNoun: "datasets",
+        }
+      : {
           icon: Database,
           title: "No datasets",
           description:
             "No labeling datasets yet. Use the “Add to dataset” action on a trace to create one from a run.",
-        }}
+        };
+
+  const totalCases = all.reduce(
+    (n, d) => n + (typeof d.caseCount === "number" ? d.caseCount : 0),
+    0,
+  );
+
+  return (
+    <div className="mx-auto max-w-6xl space-y-6" data-testid="datasets-page">
+      <PageHeader
+        title="Datasets"
+        loading={loadState.kind === "loading"}
+        meta={
+          all.length > 0
+            ? `${all.length} datasets · ${totalCases.toLocaleString()} cases`
+            : undefined
+        }
+        lede="Human-labeled eval datasets for the improvement loop. Add a trace as a case with the “Add to dataset” action on any trace, then label the cases here."
       />
+
+      {loadState.kind === "unavailable" ? (
+        // The backend cannot answer — and that is calm, not a failure (§7.1).
+        <div data-testid="datasets-quiet-note">
+          <QuietNote title="Datasets aren’t configured on this install.">
+            Datasets live in the control-plane store, and this platform has none — set{" "}
+            <span className="font-mono">CONTROLPLANE_DSN</span> to enable them. Nothing
+            here is estimated and nothing is lost: the list is simply absent, not empty.
+          </QuietNote>
+        </div>
+      ) : (
+        <>
+          {all.length > 0 && (
+            <FilterChipRow
+              chips={chips}
+              value={view}
+              onChange={(id) => setView(id as DSView)}
+              label="Filter datasets"
+            />
+          )}
+
+          {loadState.kind === "ready" && (
+            <div data-testid="datasets-quiet-note">
+              {all.length === 0 ? (
+                <QuietNote title="An empty list means one of two things here.">
+                  Datasets live in the control-plane store. An install without{" "}
+                  <span className="font-mono">CONTROLPLANE_DSN</span> answers “not
+                  configured”, and this list cannot tell that apart from “none created
+                  yet” — so it claims neither. Nothing here is estimated.
+                </QuietNote>
+              ) : (
+                <QuietNote title="Label progress isn’t in this list.">
+                  The counts above are each dataset’s draft-head size. How many of those
+                  cases already carry a human label is known only inside the dataset, so
+                  no row claims a labelled ratio. Open one to see and add labels.
+                </QuietNote>
+              )}
+            </div>
+          )}
+
+          <DataTable<DatasetSummary>
+            columns={columns}
+            rows={items}
+            rowKey={(d) => d.id}
+            loading={loadState.kind === "loading"}
+            error={error}
+            query={query}
+            onQueryChange={setQuery}
+            queryPlaceholder="Filter datasets by name…"
+            ariaLabel="Datasets"
+            tableClassName="min-w-[36rem]"
+            onRowClick={(d) => navigate(`/datasets/${encodeURIComponent(d.name)}`)}
+            empty={empty}
+          />
+
+          {all.length > 0 && (
+            <ClosingNote>
+              {emptyDatasets.length === 0
+                ? `All ${all.length} datasets hold cases — ${totalCases.toLocaleString()} between them — and need nothing from this list.`
+                : `${emptyDatasets.length} of ${all.length} datasets have no cases yet. The other ${all.length - emptyDatasets.length} hold ${totalCases.toLocaleString()} cases between them.`}
+            </ClosingNote>
+          )}
+        </>
+      )}
     </div>
   );
 }

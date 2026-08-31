@@ -5576,6 +5576,37 @@ export const api = {
     return (await res.json()) as StopScopeResponse;
   },
 
+  // liftStop un-kills a scope (POST /api/kill/lift, ADR 0126 §5). It takes the SAME body as the
+  // kill; the backend reads only the scope (a lift needs no reason — the un-kill is audited on its
+  // own row). It is gated by the same `kill` verb, so most callers get a 403 here.
+  //
+  // Three answers, and none of them may be swallowed:
+  //   • 403 — the caller lacks the verb. THE STOP IS STILL IN FORCE. Surfacing this is the whole
+  //     point: a dialog that closed as though it had worked would leave an operator believing the
+  //     fleet is running when it is not.
+  //   • 501 — this install has no kill store at all (killScopes == nil). Nothing can be stopped or
+  //     lifted here, and the surface says so as a calm note rather than as a failure.
+  //   • 200 with `applied: false` — the scope was not stopped, so nothing was lifted. An honest
+  //     no-op, and callers must render it as one rather than as a success.
+  liftStop: async (
+    req: StopScopeRequest,
+    signal?: AbortSignal,
+  ): Promise<StopScopeResponse> => {
+    const res = await apiFetch("/api/kill/lift", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `the stop was not lifted (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as StopScopeResponse;
+  },
+
   // getSharedRun fetches the public shared-run view (GET /api/shared/runs/{token}).
   // This is a NO-AUTH fetch — it MUST NOT send an Authorization header.
   // The public page at /shared/runs/:token uses this without a logged-in session.

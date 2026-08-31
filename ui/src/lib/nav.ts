@@ -334,14 +334,16 @@ export const NAV_SECTIONS: NavSection[] = [
       {
         // Stops (ADR 0126, spec §5.23/§6.2) — the scoped kill switch's landing
         // surface: what is stopped, why, by whom, and how to lift it. The frame's
-        // StopControl creates them; this is where they are read. The PAGE is
-        // m151.7 (spec §6.2 gap 2), so the destination is honestly a placeholder
-        // for now — but the COUNT is live from GET /api/kills, because "a scope is
-        // halted right now" is the one fact the frame must not sit on.
+        // StopControl creates them; this is where they are read. The PAGE shipped
+        // in m151.7 (spec §6.2 gap 2), so the item now walks to the real surface
+        // instead of /soon/stops — and the COUNT is live from GET /api/kills,
+        // because "a scope is halted right now" is the one fact the frame must
+        // not sit on.
         id: "stops",
         label: "Stops",
         icon: OctagonX,
         milestone: "M151",
+        route: "/stops",
         count: { source: "stops", tone: "stopped" },
       },
       {

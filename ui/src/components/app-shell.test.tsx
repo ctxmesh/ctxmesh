@@ -152,11 +152,13 @@ describe("AppShell — the approved IA", () => {
     expect(screen.getByLabelText("Workspace")).toBeInTheDocument();
   });
 
-  it("routes the not-yet-built Stops destination to its honest placeholder", async () => {
+  it("routes the Stops destination to its real surface (m151.7)", async () => {
+    // Was /soon/stops while the page was unbuilt. The page shipped, so the frame's kill-switch
+    // count now leads somewhere that can actually be acted on.
     installFetch(ALLOW_ALL);
     renderShell();
     const stops = await screen.findByRole("link", { name: /Stops/ });
-    expect(stops).toHaveAttribute("href", "/soon/stops");
+    expect(stops).toHaveAttribute("href", "/stops");
   });
 
   it("hides write-only nav for a viewer (read-only chrome by construction)", async () => {

@@ -53,6 +53,7 @@ import { TopologyPage } from "@/pages/topology-page";
 import { TracePage } from "@/pages/trace-page";
 import { MySharesPage } from "@/pages/my-shares-page";
 import { ApprovalsPage } from "@/pages/approvals-page";
+import { StopsPage } from "@/pages/stops-page";
 import { SharedRunPage } from "@/pages/shared-run-page";
 import { RequireAuth, SessionProvider } from "@/lib/session-provider";
 import { ToastProvider } from "@/components/kit";
@@ -267,6 +268,9 @@ export function App() {
             <Route path="my-shares" element={<MySharesPage />} />
             {/* V5/V15, M112-M113: Approvals — namespace-scoped unified queue of runs paused on plan_approval OR mid-run approval. */}
             <Route path="approvals" element={<ApprovalsPage />} />
+            {/* m151.7: Stops — the scoped kill switch's landing surface (ADR 0126, spec §6.2
+                gap 2). What is halted right now, what it holds, who stopped it, and the lift. */}
+            <Route path="stops" element={<StopsPage />} />
             {/* m16.7: native trace page — full one-trace view with TraceExplorer
                 + Langfuse link-out demotion + FeedbackPanel (m16.9). */}
             <Route path="traces/:id" element={<TracePage />} />

@@ -109,12 +109,24 @@ export function NextStepLink({
 
   const toneClass = TONE_CLASS[tone];
 
+  // A NextStepLink almost always sits in the last cell of a row that is ITSELF
+  // clickable — the row opens the detail, the link does the one specific thing.
+  // Without this, clicking the link fires both: the drawer opens behind the
+  // dialog the link just raised, and the operator is looking at two surfaces
+  // they only asked for one of. Stopping propagation here fixes it once for
+  // every list page rather than 20 times, and there is no case where a row
+  // wants its own click AND its next-step link's click.
+  const handle = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onClick?.();
+  };
+
   if (to) {
     return (
       <Link
         to={to}
         aria-label={ariaLabel}
-        onClick={onClick}
+        onClick={handle}
         className={cn(shared, toneClass, className)}
         data-testid={testId}
       >
@@ -127,7 +139,7 @@ export function NextStepLink({
     <button
       type="button"
       aria-label={ariaLabel}
-      onClick={onClick}
+      onClick={handle}
       className={cn(shared, toneClass, className)}
       data-testid={testId}
     >

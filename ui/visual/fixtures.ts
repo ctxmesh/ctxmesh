@@ -1821,6 +1821,7 @@ const MCP_SERVER_REFERENCES: McpServerReferencesResponse = {
 // ───────────────────────────────────────────────────────────────────────────
 
 const GET = ["GET"] as const;
+const POST = ["POST"] as const;
 
 const ROUTES: FixtureRoute[] = [
   // ── Auth + boot: 200 in every mode, or the sweep screenshots the login wall ──
@@ -1838,6 +1839,43 @@ const ROUTES: FixtureRoute[] = [
   // Raw mode (the dashboard mini-graph) omits `groups`; grouped mode (the
   // /topology page, ?group=registry) returns them — mirroring the BFF.
   { match: /^\/api\/topology$/, populated: topology },
+
+  // ── Stops (M146 kill switch, M151 Stops page) ─────────────────────────────
+  // Deliberately mixed: a namespace stop that DOES report its impact, and a
+  // fleet stop that does NOT. The second one is the interesting fixture — the
+  // page must render "not reported" rather than a zero, and a screenshot is how
+  // we find out whether it does.
+  {
+    match: /^\/api\/kills$/,
+    methods: GET,
+    populated: () => ({
+      stops: [
+        {
+          scope: "ns:team-b",
+          level: "namespace",
+          namespace: NS_B,
+          reason: "runaway delegation loop",
+          principal: "oncall@acme.example",
+          at: "2026-09-01T16:35:02Z",
+          agentsRefusing: 6,
+          runsHeld: 12,
+          runsInFlight: 1,
+        },
+        {
+          scope: "agent:team-d/ingest-coordinator",
+          level: "agent",
+          namespace: NS_D,
+          agent: "ingest-coordinator",
+          reason: "spawn budget exhausted — holding while we raise the ceiling",
+          principal: "platform-oncall@acme.example",
+          at: "2026-09-01T15:58:40Z",
+        },
+      ],
+    }),
+    empty: () => ({ stops: [] }),
+  },
+  { match: /^\/api\/kill$/, methods: POST, populated: () => ({ scope: "ns:team-b", level: "namespace", applied: true }) },
+  { match: /^\/api\/kill\/lift$/, methods: POST, populated: () => ({ scope: "ns:team-b", level: "namespace", applied: true }) },
 
   // ── Agents: suffixed paths before the bare detail path ────────────────────
   { match: /^\/api\/agents\/generate$/, populated: () => ({ agentYAML: "name: support-assistant\nmodel:\n  route: anthropic-primary\ntools:\n  - search_documents\n", expanded: "apiVersion: agents.ctxmesh.ai/v1alpha1\nkind: AgentDeployment\n", model: "claude-opus-4", warnings: ["No guardrail policy was requested — the namespace default applies."] }) },
