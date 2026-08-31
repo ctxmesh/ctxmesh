@@ -68,8 +68,12 @@ func resolveSupervisedTeam(
 
 // delegateEnv builds the launcher's delegate wiring from the supervised team: enable the listener, the
 // roster (as JSON, for the delegate_to tool's schema + description), the spawn budget, and the BFF URL.
-func delegateEnv(team *agentsv1beta1.AgentTeam) []corev1.EnvVar {
-	fanOut, depth, total := defaultMaxFanOut, defaultMaxSpawnDepth, defaultMaxTotalSpawns
+// resolveSpawnBudget applies the AgentTeam's declared budget over the CRD defaults. It is shared by the
+// launcher env injection and the control-plane mirror the BFF's authoritative gate reads (M142.6), so
+// the number the agent is told and the number the platform enforces are the SAME derivation — deriving
+// them twice is how they drift.
+func resolveSpawnBudget(team *agentsv1beta1.AgentTeam) (fanOut, depth, total int) {
+	fanOut, depth, total = defaultMaxFanOut, defaultMaxSpawnDepth, defaultMaxTotalSpawns
 	if b := team.Spec.SpawnBudget; b != nil {
 		if b.MaxFanOut > 0 {
 			fanOut = int(b.MaxFanOut)
@@ -81,6 +85,11 @@ func delegateEnv(team *agentsv1beta1.AgentTeam) []corev1.EnvVar {
 			total = int(b.MaxTotalSpawns)
 		}
 	}
+	return fanOut, depth, total
+}
+
+func delegateEnv(team *agentsv1beta1.AgentTeam) []corev1.EnvVar {
+	fanOut, depth, total := resolveSpawnBudget(team)
 
 	roster := make([]map[string]string, 0, len(team.Spec.Roster))
 	for i := range team.Spec.Roster {

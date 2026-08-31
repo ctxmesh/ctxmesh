@@ -67,6 +67,7 @@ import (
 	"github.com/ctxmesh/agentry/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agentry/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/agentry/internal/controlplane/onlinescore"
+	"github.com/ctxmesh/agentry/internal/controlplane/spawnbudget"
 	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agentry/internal/ingestion"
 	"github.com/ctxmesh/agentry/internal/kedatypes"
@@ -518,6 +519,9 @@ func main() {
 		// here so the BFF's discovery path can rank a registry's agents against a capability query — again
 		// with no K8s read on the BFF SA.
 		AgentCapabilityStore: agentcapability.NewPostgresStore(cpDB),
+		// Declared per-team spawn budget (M142.6, m52.C19b): the controller can read AgentTeam, the BFF
+		// cannot (ADR 0011), so the number the BFF's authoritative gate enforces is projected here.
+		SpawnBudgetStore: spawnbudget.NewPostgresStore(cpDB),
 		// Injected sidecar image overrides (audit OPS-1): empty ⇒ the dev.local defaults,
 		// which ImagePullBackOff off a kind cluster, so a real install sets these.
 		// The L4 egress redirect (M142.4, ADR 0123): OFF unless explicitly enabled AND given an image.
