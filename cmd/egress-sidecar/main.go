@@ -178,7 +178,12 @@ func run(log logr.Logger) error {
 		Log:              log,
 		Recorder:         recorder,
 		Policy:           policyHolder,
-		Transport:        toolTransport,
+		// G18 (M143.4): bound the gap BETWEEN bytes on a streaming tool response. F3's header timeout
+		// disarms once headers arrive, so a streamable-http server that then goes silent would hang the
+		// managed loop indefinitely. Defaulted generously — a legit stream resets the clock on every byte,
+		// so this only fires on genuine silence.
+		StreamIdleTimeout: egressStreamIdleTimeout(),
+		Transport:         toolTransport,
 	})
 
 	mux := http.NewServeMux()
@@ -328,6 +333,22 @@ func delegatingHTTPClient(log logr.Logger) (*http.Client, error) {
 	}
 	log.Info("delegating to the token service over mutual mTLS (E-2)")
 	return &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}, Timeout: delegationTimeout}, nil
+}
+
+// egressStreamIdleTimeout resolves the G18 mid-stream idle bound from EGRESS_STREAM_IDLE_TIMEOUT
+// (e.g. "120s","2m"); blank/invalid ⇒ 120s. An explicit "0" DISABLES the watchdog — that is an
+// operator's deliberate choice and is honoured rather than quietly replaced with the default.
+func egressStreamIdleTimeout() time.Duration {
+	const def = 120 * time.Second
+	v := strings.TrimSpace(os.Getenv("EGRESS_STREAM_IDLE_TIMEOUT"))
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return def
+	}
+	return d // including an explicit 0 = disabled
 }
 
 // egressResponseHeaderTimeout resolves the F3 upstream-response-header timeout from
