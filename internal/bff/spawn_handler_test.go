@@ -101,7 +101,9 @@ func TestSpawn_ValidCapabilityCreatesSubRunAsSameUser(t *testing.T) {
 	assert.Equal(t, "parent-1", sub.RootRunID, "a root parent roots the tree at itself")
 	assert.Equal(t, 1, sub.SpawnDepth)
 	assert.Equal(t, "web-researcher", sub.Agent)
-	assert.Equal(t, "http://web-researcher.team-ns.svc", sub.Endpoint)
+	// The endpoint is DERIVED from (namespace, name), not taken from the request (M142.2, ADR 0122) —
+	// validSpawnBody() sends "http://web-researcher.team-ns.svc" and it is deliberately ignored.
+	assert.Equal(t, "http://web-researcher.team-ns.svc.cluster.local", sub.Endpoint)
 	assert.Equal(t, "team-ns", sub.Namespace, "the sub-run runs in the supervisor's namespace")
 }
 
@@ -156,11 +158,13 @@ func TestSpawn_Idempotent(t *testing.T) {
 	assert.Len(t, store.List(), 2, "still exactly parent + one sub-run (no double-spawn)")
 }
 
-// TestSpawn_MissingFieldsIs400 — an incomplete body is rejected before any create.
+// TestSpawn_MissingFieldsIs400 — an incomplete body is rejected before any create. `endpoint` is NOT in
+// that set since M142.2 (ADR 0122): the BFF derives the sub-agent's address rather than accepting one, so
+// its absence is normal and its presence is ignored.
 func TestSpawn_MissingFieldsIs400(t *testing.T) {
 	s, signer, _ := newSpawnServer(t, mkParentRun("parent-1"))
 	body := validSpawnBody()
-	body.Endpoint = "" // missing
+	body.SubAgent = "" // missing
 	rec := postSpawn(t, s, mintCap(t, signer, "parent-1"), body)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }

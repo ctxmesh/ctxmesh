@@ -19,6 +19,7 @@ package bff
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"regexp"
 	"slices"
@@ -38,9 +39,11 @@ import (
 type SpawnRunRequest struct {
 	// SubAgent is the roster-member AgentDeployment name to summon as the sub-run.
 	SubAgent string `json:"subAgent"`
-	// Endpoint is the sub-agent's resolved ksvc URL (the launcher resolves it; the sub-run's worker
-	// POSTs the input there). Bounded by the inherited Boundary + the registry NetworkPolicy.
-	Endpoint string `json:"endpoint"`
+	// Endpoint is IGNORED since M142.2 (ADR 0122). The BFF derives the sub-agent's address from
+	// (namespace, name) instead: a caller-supplied URL here was stored and then POSTed to by the trusted
+	// run-worker, making the control plane an attacker-directed request issuer. Still accepted on the wire
+	// — and ignored — so an older launcher keeps working.
+	Endpoint string `json:"endpoint,omitempty"`
 	// Input is the delegated task forwarded to the sub-agent's /invoke.
 	Input json.RawMessage `json:"input"`
 	// Step + CallID identify this delegation within the supervisor's loop — the idempotency key
@@ -129,6 +132,43 @@ func (s *Server) handleReadSpawnedRun(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// enforceDelegateFence rejects a spawn whose target is outside the caller's AgentRegistry (M142.1,
+// ADR 0122). It is the same rule the launcher's A2A guard applies at layer 1 and the async dispatcher
+// applies before delivery — one boundary, enforced at every edge that can cross it.
+//
+// Fail-closed, including when either party has no membership row: "I cannot verify this" is not a reason
+// to allow it. A missing row means the AgentDeployment controller has not reconciled that agent since the
+// capability registry landed; it converges on the next reconcile, and the error says so rather than
+// leaving an operator to guess. Skipped only when there is no registry at all (no control-plane DB), where
+// there is nothing to enforce against.
+func (s *Server) enforceDelegateFence(ctx context.Context, namespace, caller, target string) error {
+	if s.agentCapabilities == nil {
+		return nil // no capability registry wired ⇒ nothing to check against
+	}
+	if target == caller {
+		return fmt.Errorf("an agent cannot delegate to itself")
+	}
+	callerRow, ok, err := s.agentCapabilities.Get(ctx, namespace, caller)
+	if err != nil {
+		return fmt.Errorf("the capability registry is unavailable — delegation cannot be authorized")
+	}
+	if !ok || callerRow.RegistryID == "" {
+		return fmt.Errorf("agent %q is not a member of any AgentRegistry, so it may not delegate "+
+			"(if it was just created, its registration converges on the next reconcile)", caller)
+	}
+	targetRow, ok, err := s.agentCapabilities.Get(ctx, namespace, target)
+	if err != nil {
+		return fmt.Errorf("the capability registry is unavailable — delegation cannot be authorized")
+	}
+	if !ok || targetRow.RegistryID != callerRow.RegistryID {
+		// Deliberately the same message whether the target is in another registry or unknown: a
+		// supervisor probing names must not learn which agents exist outside its boundary.
+		return fmt.Errorf("agent %q is not in this agent's registry — delegation is bounded by "+
+			"AgentTeam.spec.registryRef, the team's declared trust boundary", target)
+	}
+	return nil
+}
+
 // roleAssistant is the chat-message role of a model turn (the sub-run's answer lives in the last one).
 const roleAssistant = "assistant"
 
@@ -206,10 +246,32 @@ func (s *Server) handleSpawnRun(w http.ResponseWriter, r *http.Request) {
 	req.Endpoint = strings.TrimSpace(req.Endpoint)
 	req.Step = strings.TrimSpace(req.Step)
 	req.CallID = strings.TrimSpace(req.CallID)
-	if req.SubAgent == "" || req.Endpoint == "" || req.Step == "" || req.CallID == "" {
-		writeError(w, http.StatusBadRequest, "subAgent, endpoint, step, and callId are required")
+	if req.SubAgent == "" || req.Step == "" || req.CallID == "" {
+		writeError(w, http.StatusBadRequest, "subAgent, step, and callId are required")
 		return
 	}
+
+	// (3b) THE DELEGATE FENCE (M142.1, ADR 0122). Until now the spawn edge bounded HOW MUCH a supervisor
+	// could delegate — fan-out, depth, total — but never WHAT it could delegate to: `subAgent` was taken
+	// from the request and turned into a URL, so a prompt-injected model could summon any agent in the
+	// namespace. AgentTeam.spec.registryRef already DECLARES the boundary ("this team's trust boundary…
+	// the supervisor + every roster member MUST be members of it"); this enforces it.
+	//
+	// Enforced here rather than in the launcher because the launcher runs in the agent pod: its roster env
+	// is advice a compromised pod can ignore. The BFF holds the VERIFIED parent run and reads both parties'
+	// registries from the control-plane mirror, so neither is anything the caller asserts.
+	if err := s.enforceDelegateFence(r.Context(), parent.Namespace, parent.Agent, req.SubAgent); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	// (3c) DERIVE the endpoint; never accept it (M142.2, ADR 0122). The request used to carry one, and it
+	// was stored and later POSTed to by the run-worker — a TRUSTED control-plane workload issuing an
+	// attacker-directed request with platform identity, which is server-side request forgery in shape if
+	// not in exploitation. The sub-agent's address is a function of (namespace, name), and both are now
+	// authoritative: the name passed the fence above, the namespace comes from the VERIFIED parent run. So
+	// there is nothing the caller needs to tell us — and a field we do not read cannot be abused.
+	subEndpoint := s.agentEndpoint(req.SubAgent, parent.Namespace)
 
 	// (4) Lineage + the deterministic sub-run id, both AUTHORITATIVE (derived from the VERIFIED parent,
 	// never the request body). A root parent (no RootRunID) roots the tree at itself.
@@ -264,7 +326,7 @@ func (s *Server) handleSpawnRun(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	sub := run.New(subID, parent.Namespace, req.SubAgent, req.Input, parent.ConversationID, now)
-	sub.Endpoint = req.Endpoint
+	sub.Endpoint = subEndpoint
 	sub.CallerUsername = parent.CallerUsername // the SAME invoking user (OBO inherited, no re-consent)
 	sub.Boundary = parent.Boundary             // the SAME trust boundary (a sub-run can't escalate scope)
 	sub.TraceID = parent.TraceID               // one trace tree across the spawn (m64.8 nests the spans)
@@ -291,7 +353,7 @@ func (s *Server) handleSpawnRun(w http.ResponseWriter, r *http.Request) {
 			parent.CallerUsername, parent.Namespace, req.SubAgent, parent.Boundary, subID); minted {
 			execCtx = contextWithRunCapability(execCtx, capToken)
 		}
-		go s.executeRun(execCtx, subID, req.Endpoint, []byte(req.Input))
+		go s.executeRun(execCtx, subID, subEndpoint, []byte(req.Input))
 	}
 	writeJSON(w, http.StatusAccepted, SpawnRunResponse{ID: subID, Status: string(run.StatusQueued)})
 }
