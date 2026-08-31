@@ -72,11 +72,29 @@ class _FakeTools:
         return [_FakeTool(DELEGATE_TOOL_NAME)]
 
     def delegate(
-        self, sub_agent, task, step, call_id, *, suspend=False, spawn_root="", spawn_depth=-1
+        self,
+        sub_agent,
+        task,
+        step,
+        call_id,
+        *,
+        capability="",
+        suspend=False,
+        spawn_root="",
+        spawn_depth=-1,
     ):
-        self.delegate_calls.append(
-            {"sub_agent": sub_agent, "step": step, "call_id": call_id, "suspend": suspend}
-        )
+        recorded = {
+            "sub_agent": sub_agent,
+            "step": step,
+            "call_id": call_id,
+            "suspend": suspend,
+        }
+        # Recorded only when a by-capability delegation actually happened (M141.4), so the
+        # by-name expectations below stay about what they test rather than carrying an
+        # always-empty key.
+        if capability:
+            recorded["capability"] = capability
+        self.delegate_calls.append(recorded)
         return self._delegate_fn(sub_agent, task, step, call_id, suspend=suspend)
 
 

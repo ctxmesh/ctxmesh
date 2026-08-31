@@ -69,6 +69,11 @@ const (
 	wireKeyNamespace      = "namespace"
 	wireKeyEmbeddingModel = "embeddingModel"
 	wireKeySubject        = "subject"
+	// wireKeyQuery / wireKeyTopK are the search term + result bound every launcher-forwarded lookup
+	// carries — knowledge retrieval, long-term memory, and capability discovery all spell them the
+	// same way, so they are defined once rather than restated at each call site.
+	wireKeyQuery = "query"
+	wireKeyTopK  = "topK"
 )
 
 // kbRosterEntry is the per-KB wire shape in the KNOWLEDGE_BASES env — matches the JSON the controller
@@ -275,7 +280,8 @@ func (p *knowledgeProxy) handleSearch(w http.ResponseWriter, r *http.Request) {
 	)
 	payload := map[string]any{
 		wireKeyNamespace: p.namespace, "knowledgeBase": body.KnowledgeBase, wireKeySubject: subject,
-		"query": body.Query, "topK": body.TopK, "threshold": body.Threshold, wireKeyEmbeddingModel: embeddingModel,
+		wireKeyQuery: body.Query, wireKeyTopK: body.TopK, "threshold": body.Threshold,
+		wireKeyEmbeddingModel: embeddingModel,
 	}
 	var out json.RawMessage
 	if err := p.post(ctx, "/v1/knowledge/search", payload, &out); err != nil {

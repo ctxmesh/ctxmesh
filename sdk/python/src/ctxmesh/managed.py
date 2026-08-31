@@ -1133,23 +1133,37 @@ def _dispatch_knowledge_search(client: Client, args: Dict[str, Any]) -> str:
 
 
 def _dispatch_delegate_one(
-    client: Client, sub_agent: str, task: str, step: str, call_id: str
+    client: Client, sub_agent: str, task: str, step: str, call_id: str, capability: str = ""
 ) -> str:
-    """Summon ONE roster sub-agent as a durable sub-run and return its result as the tool content. A
+    """Summon ONE sub-agent as a durable sub-run and return its result as the tool content. A
     denial/failure returns as text the model can act on (try another sub-agent, or answer) — not an
     exception. Traced under the current span, so a concurrent call nests when the caller propagates
-    the context (v1b)."""
+    the context (v1b).
+
+    With *capability* and no *sub_agent*, the platform resolves WHO can do the work (M141.4, ADR
+    0120) and echoes the agent it picked. The trace and the failure text then name the RESOLVED
+    agent, so a by-capability delegation is as legible after the fact as a by-name one."""
     sub_agent = sub_agent.strip()
-    if not sub_agent:
-        return "error: delegate_to requires a 'sub_agent'"
-    with client.trace.tool(
-        DELEGATE_TOOL_NAME, input={"sub_agent": sub_agent, "task": task}
-    ) as span:
-        resp = client.tools.delegate(sub_agent=sub_agent, task=task, step=step, call_id=call_id)
+    capability = capability.strip()
+    if not sub_agent and not capability:
+        return "error: delegate_to requires a 'sub_agent' or a 'capability'"
+    span_input = {"task": task}
+    if sub_agent:
+        span_input["sub_agent"] = sub_agent
+    else:
+        span_input["capability"] = capability
+    with client.trace.tool(DELEGATE_TOOL_NAME, input=span_input) as span:
+        resp = client.tools.delegate(
+            sub_agent=sub_agent, task=task, step=step, call_id=call_id, capability=capability
+        )
         span.set_output(resp)
+    # The launcher echoes the agent it actually delegated to; for a by-capability call that is the
+    # only place the resolved name exists.
+    resolved = str(resp.get("subAgent", "")) or sub_agent
     if resp.get("ok"):
         return str(resp.get("answer", ""))
-    return f"delegation to {sub_agent!r} did not succeed: {resp.get('error', 'unknown error')}"
+    target = repr(resolved) if resolved else f"capability {capability!r}"
+    return f"delegation to {target} did not succeed: {resp.get('error', 'unknown error')}"
 
 
 def _dispatch_handoff(client: Client, call: Dict[str, Any]) -> Dict[str, str]:
@@ -1205,7 +1219,12 @@ def _dispatch_delegate(
 ) -> str:
     """Dispatch a single delegate_to call (the sequential path + the unit-test seam)."""
     content = _dispatch_delegate_one(
-        client, str(args.get("sub_agent", "")), str(args.get("task", "")), step, call_id
+        client,
+        str(args.get("sub_agent", "")),
+        str(args.get("task", "")),
+        step,
+        call_id,
+        str(args.get("capability", "")),
     )
     tools_called.append(DELEGATE_TOOL_NAME)
     return content
@@ -1217,19 +1236,29 @@ def _dispatch_delegate_batch(client: Client, calls: List[tuple], step: str) -> D
     DENIES the rest fail-closed (each gets honest tool text) — so over-fan-out is safe. Each worker
     runs in a COPIED context (contextvars), carrying BOTH the invoking user's run capability (OBO —
     the sub-run acts as the same user) AND the OTel active span (trace nesting) into the thread.
-    ``calls`` is a list of ``(call_id, sub_agent, task)``."""
+    ``calls`` is a list of ``(call_id, sub_agent, task, capability)`` — *capability* empty for a
+    by-name delegation (M141.4)."""
     if len(calls) == 1:
-        cid, sub_agent, task = calls[0]
-        return {cid: _dispatch_delegate_one(client, sub_agent, task, step, cid)}
+        cid, sub_agent, task, capability = calls[0]
+        return {cid: _dispatch_delegate_one(client, sub_agent, task, step, cid, capability)}
 
     results: Dict[str, str] = {}
     workers = min(len(calls), _MAX_DELEGATE_WORKERS)
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {}
-        for cid, sub_agent, task in calls:
+        for cid, sub_agent, task, capability in calls:
             ctx = contextvars.copy_context()  # snapshot: run capability + OTel span
             futures[
-                pool.submit(ctx.run, _dispatch_delegate_one, client, sub_agent, task, step, cid)
+                pool.submit(
+                    ctx.run,
+                    _dispatch_delegate_one,
+                    client,
+                    sub_agent,
+                    task,
+                    step,
+                    cid,
+                    capability,
+                )
             ] = cid
         for fut in concurrent.futures.as_completed(futures):
             results[futures[fut]] = fut.result()
@@ -1851,6 +1880,9 @@ def _drive_loop(
                     c.get("id", ""),
                     str(_parse_arguments(_call_arguments(c)).get("sub_agent", "")),
                     str(_parse_arguments(_call_arguments(c)).get("task", "")),
+                    # By-capability delegation (M141.4): carried alongside the name so the
+                    # fan-out and suspend paths resolve it exactly as the sequential one does.
+                    str(_parse_arguments(_call_arguments(c)).get("capability", "")),
                 )
                 for c in resp.tool_calls
                 if _call_name(c) == DELEGATE_TOOL_NAME and c.get("id", "") not in blocked
@@ -1867,21 +1899,25 @@ def _drive_loop(
             pending_delegates: List[Dict[str, Any]] = []
             delegate_results: Dict[str, str] = {}
             if delegate_calls and suspend_eligible:
-                for cid, sub_agent, task in delegate_calls:
+                for cid, sub_agent, task, capability in delegate_calls:
                     sig = client.tools.delegate(
                         sub_agent=sub_agent,
                         task=task,
                         step=str(step),
                         call_id=cid,
+                        capability=capability,
                         suspend=True,
                         spawn_root=spawn_root,
                         spawn_depth=spawn_depth,
                     )
                     if isinstance(sig, dict) and sig.get("suspend"):
+                        # Checkpoint the RESOLVED agent, never the capability query: the BFF
+                        # worker creates the child run from this record, and a by-capability
+                        # delegation has no name until the suspend signal echoes one back.
                         pending_delegates.append(
                             {
                                 "call_id": cid,
-                                "sub_agent": sub_agent,
+                                "sub_agent": str(sig.get("subAgent", "")) or sub_agent,
                                 "task": task,
                                 "endpoint": str(sig.get("endpoint", "")),
                             }
@@ -1895,8 +1931,11 @@ def _drive_loop(
                             err = "malformed response"
                             if isinstance(sig, dict):
                                 err = str(sig.get("error", "unknown error"))
+                            named = sub_agent or f"capability {capability!r}"
                             delegate_results[cid] = (
-                                f"delegation to {sub_agent!r} did not succeed: {err}"
+                                f"delegation to {named!r} did not succeed: {err}"
+                                if sub_agent
+                                else f"delegation to {named} did not succeed: {err}"
                             )
             elif delegate_calls:
                 delegate_results = _dispatch_delegate_batch(client, delegate_calls, str(step))
@@ -2046,7 +2085,13 @@ def _drive_loop(
                     )
                     blocking = _dispatch_delegate_batch(
                         client,
-                        [(p["call_id"], p["sub_agent"], p["task"]) for p in pending_delegates],
+                        # The capability is already RESOLVED into sub_agent by the suspend
+                        # signal, so the blocking fallback delegates by NAME — it must not re-run
+                        # discovery and risk a different agent than the one checkpointed.
+                        [
+                            (p["call_id"], p["sub_agent"], p["task"], "")
+                            for p in pending_delegates
+                        ],
                         str(step),
                     )
                     for p in pending_delegates:

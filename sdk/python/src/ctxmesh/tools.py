@@ -118,13 +118,17 @@ def _delegate_tool() -> Tool:
         or "(configured on the AgentTeam)"
     )
     description = (
-        "Delegate a subtask to a sub-agent on your team and wait for its result. Use it to break a "
-        "complex task into pieces handled by the right specialist, then combine their answers. "
+        "Delegate a subtask to a sub-agent and wait for its result. Use it to break a complex task "
+        "into pieces handled by the right specialist, then combine their answers. Either name a "
+        "sub_agent from your team, or — when none of them fits — describe what you need in "
+        "`capability` and the platform finds the best-matching agent in your registry. "
         f"Available sub-agents:\n{listing}"
     )
     sub_agent_schema: Dict[str, Any] = {
         "type": "string",
-        "description": "The roster member to delegate to.",
+        "description": (
+            "The roster member to delegate to. Omit it to delegate by capability instead."
+        ),
     }
     if names:
         sub_agent_schema["enum"] = names
@@ -132,12 +136,26 @@ def _delegate_tool() -> Tool:
         "type": "object",
         "properties": {
             "sub_agent": sub_agent_schema,
+            # Delegate-by-capability (M141.4, ADR 0120). The roster teaches the model who it
+            # already knows; this lets it reach an agent it was never wired to by name, described
+            # by what the work needs. `sub_agent` stays enum-constrained, so these are two separate
+            # parameters — a free-form name would drop that guardrail for every call.
+            "capability": {
+                "type": "string",
+                "description": (
+                    "What the sub-agent must be able to do, in plain language (e.g. "
+                    "'summarize a long PDF and extract action items'). Used only when sub_agent "
+                    "is omitted: the platform ranks the agents in your registry by their published "
+                    "capabilities and delegates to the best match. If nothing matches you get told "
+                    "so — nothing is guessed."
+                ),
+            },
             "task": {
                 "type": "string",
                 "description": "The subtask to hand to the sub-agent, in plain language.",
             },
         },
-        "required": ["sub_agent", "task"],
+        "required": ["task"],
     }
     return Tool(
         name=DELEGATE_TOOL_NAME,
@@ -447,11 +465,12 @@ class ToolsClient:
         step: str,
         call_id: str,
         *,
+        capability: str = "",
         suspend: bool = False,
         spawn_root: str = "",
         spawn_depth: int = -1,
     ) -> Dict[str, Any]:
-        """Delegate a subtask to a roster sub-agent via the launcher-local endpoint (M64, ADR 0057).
+        """Delegate a subtask to a sub-agent via the launcher-local endpoint (M64, ADR 0057).
 
         The launcher applies the spawn guard, starts the sub-agent as a durable SUB-RUN, waits for
         it to finish, and returns ``{"ok": bool, "answer": str, "error": str}``. The invoking user's
@@ -468,6 +487,12 @@ class ToolsClient:
         detects the missing ``suspend`` and threads that result inline (graceful mixed-version
         fallback). *spawn_root* / *spawn_depth* relay this run's spawn-tree position so the
         launcher's depth gate (suspension is depth-0 only) + spawn guard key on the true root.
+
+        *capability* delegates by WHAT is needed instead of by name (M141.4, ADR 0120): with
+        ``sub_agent`` empty, the launcher asks the platform's discovery edge to rank the caller's
+        registry by this capability and delegates to the best match, echoing the resolved agent back
+        as ``subAgent``. Nothing is guessed — if no agent advertises it, the call returns
+        ``ok=false`` with an honest reason. An explicit ``sub_agent`` wins and skips discovery.
         """
         payload: Dict[str, Any] = {
             "subAgent": sub_agent,
@@ -475,13 +500,17 @@ class ToolsClient:
             "step": step,
             "callId": call_id,
         }
+        if capability:
+            payload["capability"] = capability
         if suspend:
             payload["suspend"] = True
         body = json.dumps(payload).encode()
         headers = {"Content-Type": "application/json"}
-        capability = current_capability()
-        if capability:
-            headers[CAPABILITY_HEADER] = capability
+        # NB: the RUN capability (the OBO token) — distinct from the *capability* parameter above,
+        # which is a capability QUERY. Named apart so the two never get conflated at a call site.
+        run_capability = current_capability()
+        if run_capability:
+            headers[CAPABILITY_HEADER] = run_capability
         # Relay the spawn-tree position (m108.5): the launcher's depth gate + guard key are
         # otherwise
         # blind to SDK-driven delegations (they default to depth 0 / root ""), making the depth-0

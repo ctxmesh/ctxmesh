@@ -960,8 +960,10 @@ class _DelTools:
         self._result = result
         self.calls = []
 
-    def delegate(self, sub_agent, task, step, call_id):
-        self.calls.append({"sub_agent": sub_agent, "task": task, "step": step, "call_id": call_id})
+    def delegate(self, sub_agent, task, step, call_id, capability=""):
+        self.calls.append(
+            {"sub_agent": sub_agent, "task": task, "step": step, "call_id": call_id}
+        )
         return self._result
 
 
@@ -1026,11 +1028,12 @@ def test_delegate_batch_runs_concurrently_and_propagates_capability():
     # once. Serial execution (a reused pool thread) blocks the first wait() until the timeout
     # → BrokenBarrier → the delegate returns an error → the results assertion fails. This never
     # depends on distinct thread IDENTITY (which a fast/loaded machine reuses), so it can't flake.
-    calls = [("c1", "researcher", "t1"), ("c2", "coder", "t2"), ("c3", "writer", "t3")]
+    # The 4th slot is the by-capability query (M141.4) — empty here: these are by-name delegations.
+    calls = [("c1", "researcher", "t1", ""), ("c2", "coder", "t2", ""), ("c3", "writer", "t3", "")]
     concurrency_barrier = threading.Barrier(len(calls), timeout=10.0)
 
     class _BatchTools:
-        def delegate(self, sub_agent, task, step, call_id):
+        def delegate(self, sub_agent, task, step, call_id, capability=""):
             seen_caps.append(current_capability())
             concurrency_barrier.wait()  # all N must reach here at once — proves true concurrency
             return {"ok": True, "answer": f"{sub_agent}:done"}
@@ -1050,12 +1053,73 @@ def test_delegate_batch_runs_concurrently_and_propagates_capability():
     ), "every sub-run acts on-behalf-of the same user (OBO to threads)"
 
 
+def test_dispatch_delegate_by_capability_names_the_resolved_agent():
+    """A by-capability delegation (M141.4) carries the query through and reports the agent the
+    platform RESOLVED — the caller never named one, so the launcher's echo is the only place that
+    name exists. Without it the trace and the tool text would both say 'nothing'."""
+    from ctxmesh.managed import _dispatch_delegate_one
+
+    class _Tools:
+        def __init__(self):
+            self.calls = []
+
+        def delegate(self, sub_agent, task, step, call_id, capability=""):
+            self.calls.append({"sub_agent": sub_agent, "capability": capability})
+            return {"ok": True, "answer": "the brief", "subAgent": "summarizer"}
+
+    class _Client:
+        trace = _DelTrace()
+        tools = _Tools()
+
+    client = _Client()
+    out = _dispatch_delegate_one(client, "", "summarize it", "1", "c1", "summarize a long PDF")
+
+    assert out == "the brief"
+    assert client.tools.calls[0] == {"sub_agent": "", "capability": "summarize a long PDF"}
+
+
+def test_dispatch_delegate_by_capability_failure_names_the_capability():
+    """When a by-capability delegation fails BEFORE anything is resolved, the tool text names the
+    capability that was asked for — a bare "delegation to '' did not succeed" would tell the model
+    nothing it could act on."""
+    from ctxmesh.managed import _dispatch_delegate_one
+
+    class _Tools:
+        def delegate(self, sub_agent, task, step, call_id, capability=""):
+            return {"ok": False, "error": "no agent in your registry advertises that"}
+
+    class _Client:
+        trace = _DelTrace()
+        tools = _Tools()
+
+    out = _dispatch_delegate_one(_Client(), "", "do it", "1", "c1", "fly a spacecraft")
+
+    assert "capability 'fly a spacecraft'" in out
+    assert "no agent in your registry advertises that" in out
+
+
+def test_dispatch_delegate_requires_a_name_or_a_capability():
+    """Neither given is a usable call, and it must not reach the launcher."""
+    from ctxmesh.managed import _dispatch_delegate_one
+
+    class _Tools:
+        def delegate(self, *a, **kw):  # pragma: no cover — must never be reached
+            raise AssertionError("the launcher must not be called without a target")
+
+    class _Client:
+        trace = _DelTrace()
+        tools = _Tools()
+
+    out = _dispatch_delegate_one(_Client(), "", "do it", "1", "c1", "")
+    assert "requires a 'sub_agent' or a 'capability'" in out
+
+
 def test_delegate_batch_single_call_no_pool():
     """A single delegate call takes the direct path (no thread pool) and returns its result."""
     from ctxmesh.managed import _dispatch_delegate_batch
 
     client = _DelClient({"ok": True, "answer": "solo"})
-    out = _dispatch_delegate_batch(client, [("c1", "researcher", "t")], "1")
+    out = _dispatch_delegate_batch(client, [("c1", "researcher", "t", "")], "1")
     assert out == {"c1": "solo"}
 
 
