@@ -135,13 +135,36 @@ spec:
                 type: object
               capabilities:
                 description: |-
-                  capabilities is a SHORT natural-language statement of what this agent can do — the basis for
-                  CAPABILITY-BASED semantic discovery (M141): an agent is found by what it does, not its DNS name. The
-                  control plane embeds this descriptor (via the offline embedder, ADR 0116) so a capability QUERY retrieves
-                  semantically discoverable (it stays reachable by name). Free-text, bounded; a structured skill taxonomy is
-                  a future addition (carded). Example: "Summarizes long documents and extracts action items."
-                maxLength: 1024
-                type: string
+                  capabilities is what this agent CAN DO, in the agent's own words — the basis for CAPABILITY-BASED
+                  semantic discovery (M141, ADR 0120): an agent is found by what it does, not its DNS name. The control
+                  plane embeds the descriptor (offline embedder, ADR 0116) so a capability QUERY retrieves + reranks the
+                  right agent (ADR 0084/0117). Optional — an agent with NO descriptor is simply not semantically
+                  discoverable; it stays reachable by name, exactly as before.
+                properties:
+                  description:
+                    description: |-
+                      description is a SHORT natural-language statement of the agent's capability, written for a peer to
+                      match against ("Summarizes long documents and extracts action items."). This is the text the control
+                      plane embeds, so it carries the semantic weight — an empty description makes the agent
+                      undiscoverable even if tags are set.
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                  tags:
+                    description: |-
+                      tags are coarse, lowercase capability labels ("summarization", "pdf", "sql") used to FILTER the
+                      candidate set before semantic ranking, and appended to the embedded text as extra lexical signal.
+                      Tags narrow; they never rank. Bounded at 16 entries of at most 63 characters.
+                    items:
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: atomic
+                required:
+                - description
+                type: object
               endUserAccess:
                 description: |-
                   endUserAccess opts THIS agent into being reachable by END-USERS via the standalone /chat runtime
@@ -1253,13 +1276,36 @@ spec:
                 type: object
               capabilities:
                 description: |-
-                  capabilities is a SHORT natural-language statement of what this agent can do — the basis for
-                  CAPABILITY-BASED semantic discovery (M141): an agent is found by what it does, not its DNS name. The
-                  control plane embeds this descriptor (via the offline embedder, ADR 0116) so a capability QUERY retrieves
-                  semantically discoverable (it stays reachable by name). Free-text, bounded; a structured skill taxonomy is
-                  a future addition (carded). Example: "Summarizes long documents and extracts action items."
-                maxLength: 1024
-                type: string
+                  capabilities is what this agent CAN DO, in the agent's own words — the basis for CAPABILITY-BASED
+                  semantic discovery (M141, ADR 0120): an agent is found by what it does, not its DNS name. The control
+                  plane embeds the descriptor (offline embedder, ADR 0116) so a capability QUERY retrieves + reranks the
+                  right agent (ADR 0084/0117). Optional — an agent with NO descriptor is simply not semantically
+                  discoverable; it stays reachable by name, exactly as before.
+                properties:
+                  description:
+                    description: |-
+                      description is a SHORT natural-language statement of the agent's capability, written for a peer to
+                      match against ("Summarizes long documents and extracts action items."). This is the text the control
+                      plane embeds, so it carries the semantic weight — an empty description makes the agent
+                      undiscoverable even if tags are set.
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                  tags:
+                    description: |-
+                      tags are coarse, lowercase capability labels ("summarization", "pdf", "sql") used to FILTER the
+                      candidate set before semantic ranking, and appended to the embedded text as extra lexical signal.
+                      Tags narrow; they never rank. Bounded at 16 entries of at most 63 characters.
+                    items:
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: atomic
+                required:
+                - description
+                type: object
               endUserAccess:
                 description: |-
                   endUserAccess opts THIS agent into being reachable by END-USERS via the standalone /chat runtime
@@ -3648,13 +3694,36 @@ spec:
                     type: object
                   capabilities:
                     description: |-
-                      capabilities is a SHORT natural-language statement of what this agent can do — the basis for
-                      CAPABILITY-BASED semantic discovery (M141): an agent is found by what it does, not its DNS name. The
-                      control plane embeds this descriptor (via the offline embedder, ADR 0116) so a capability QUERY retrieves
-                      semantically discoverable (it stays reachable by name). Free-text, bounded; a structured skill taxonomy is
-                      a future addition (carded). Example: "Summarizes long documents and extracts action items."
-                    maxLength: 1024
-                    type: string
+                      capabilities is what this agent CAN DO, in the agent's own words — the basis for CAPABILITY-BASED
+                      semantic discovery (M141, ADR 0120): an agent is found by what it does, not its DNS name. The control
+                      plane embeds the descriptor (offline embedder, ADR 0116) so a capability QUERY retrieves + reranks the
+                      right agent (ADR 0084/0117). Optional — an agent with NO descriptor is simply not semantically
+                      discoverable; it stays reachable by name, exactly as before.
+                    properties:
+                      description:
+                        description: |-
+                          description is a SHORT natural-language statement of the agent's capability, written for a peer to
+                          match against ("Summarizes long documents and extracts action items."). This is the text the control
+                          plane embeds, so it carries the semantic weight — an empty description makes the agent
+                          undiscoverable even if tags are set.
+                        maxLength: 1024
+                        minLength: 1
+                        type: string
+                      tags:
+                        description: |-
+                          tags are coarse, lowercase capability labels ("summarization", "pdf", "sql") used to FILTER the
+                          candidate set before semantic ranking, and appended to the embedded text as extra lexical signal.
+                          Tags narrow; they never rank. Bounded at 16 entries of at most 63 characters.
+                        items:
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        maxItems: 16
+                        type: array
+                        x-kubernetes-list-type: atomic
+                    required:
+                    - description
+                    type: object
                   endUserAccess:
                     description: |-
                       endUserAccess opts THIS agent into being reachable by END-USERS via the standalone /chat runtime
@@ -4521,13 +4590,36 @@ spec:
                     type: object
                   capabilities:
                     description: |-
-                      capabilities is a SHORT natural-language statement of what this agent can do — the basis for
-                      CAPABILITY-BASED semantic discovery (M141): an agent is found by what it does, not its DNS name. The
-                      control plane embeds this descriptor (via the offline embedder, ADR 0116) so a capability QUERY retrieves
-                      semantically discoverable (it stays reachable by name). Free-text, bounded; a structured skill taxonomy is
-                      a future addition (carded). Example: "Summarizes long documents and extracts action items."
-                    maxLength: 1024
-                    type: string
+                      capabilities is what this agent CAN DO, in the agent's own words — the basis for CAPABILITY-BASED
+                      semantic discovery (M141, ADR 0120): an agent is found by what it does, not its DNS name. The control
+                      plane embeds the descriptor (offline embedder, ADR 0116) so a capability QUERY retrieves + reranks the
+                      right agent (ADR 0084/0117). Optional — an agent with NO descriptor is simply not semantically
+                      discoverable; it stays reachable by name, exactly as before.
+                    properties:
+                      description:
+                        description: |-
+                          description is a SHORT natural-language statement of the agent's capability, written for a peer to
+                          match against ("Summarizes long documents and extracts action items."). This is the text the control
+                          plane embeds, so it carries the semantic weight — an empty description makes the agent
+                          undiscoverable even if tags are set.
+                        maxLength: 1024
+                        minLength: 1
+                        type: string
+                      tags:
+                        description: |-
+                          tags are coarse, lowercase capability labels ("summarization", "pdf", "sql") used to FILTER the
+                          candidate set before semantic ranking, and appended to the embedded text as extra lexical signal.
+                          Tags narrow; they never rank. Bounded at 16 entries of at most 63 characters.
+                        items:
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        maxItems: 16
+                        type: array
+                        x-kubernetes-list-type: atomic
+                    required:
+                    - description
+                    type: object
                   endUserAccess:
                     description: |-
                       endUserAccess opts THIS agent into being reachable by END-USERS via the standalone /chat runtime

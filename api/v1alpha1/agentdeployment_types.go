@@ -265,15 +265,13 @@ type AgentDeploymentSpec struct {
 	// +kubebuilder:validation:MaxLength=63
 	Role string `json:"role,omitempty"`
 
-	// capabilities is a SHORT natural-language statement of what this agent can do — the basis for
-	// CAPABILITY-BASED semantic discovery (M141): an agent is found by what it does, not its DNS name. The
-	// control plane embeds this descriptor (via the offline embedder, ADR 0116) so a capability QUERY retrieves
-	// + reranks the right agent (ADR 0084/0117). Optional — an agent with no descriptor is simply not
-	// semantically discoverable (it stays reachable by name). Free-text, bounded; a structured skill taxonomy is
-	// a future addition (carded). Example: "Summarizes long documents and extracts action items."
+	// capabilities is what this agent CAN DO, in the agent's own words — the basis for CAPABILITY-BASED
+	// semantic discovery (M141, ADR 0120): an agent is found by what it does, not its DNS name. The control
+	// plane embeds the descriptor (offline embedder, ADR 0116) so a capability QUERY retrieves + reranks the
+	// right agent (ADR 0084/0117). Optional — an agent with NO descriptor is simply not semantically
+	// discoverable; it stays reachable by name, exactly as before.
 	// +optional
-	// +kubebuilder:validation:MaxLength=1024
-	Capabilities string `json:"capabilities,omitempty"`
+	Capabilities *CapabilityDescriptor `json:"capabilities,omitempty"`
 
 	// allowedCallers is the per-agent inbound allowlist (PRD §12.4 layer 3):
 	// the names of peer agents permitted to call this agent over A2A. The
@@ -822,6 +820,32 @@ type RolloutStatus struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=256
 	Reason string `json:"reason,omitempty"`
+}
+
+// CapabilityDescriptor advertises what an agent can do, so peers can DISCOVER it by capability instead of
+// by DNS name (M141, ADR 0120). The shape deliberately mirrors the A2A Agent Card's skill advertisement
+// (a natural-language description plus coarse tags) — the prevailing standard for agent capability
+// publication — rather than a bespoke taxonomy: the discovery stack is semantic (embeddings +
+// cross-encoder rerank), and prose is what those models consume natively. A structured skill
+// hierarchy remains a future, additive extension.
+type CapabilityDescriptor struct {
+	// description is a SHORT natural-language statement of the agent's capability, written for a peer to
+	// match against ("Summarizes long documents and extracts action items."). This is the text the control
+	// plane embeds, so it carries the semantic weight — an empty description makes the agent
+	// undiscoverable even if tags are set.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	Description string `json:"description"`
+
+	// tags are coarse, lowercase capability labels ("summarization", "pdf", "sql") used to FILTER the
+	// candidate set before semantic ranking, and appended to the embedded text as extra lexical signal.
+	// Tags narrow; they never rank. Bounded at 16 entries of at most 63 characters.
+	// +listType=atomic
+	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	Tags []string `json:"tags,omitempty"`
 }
 
 // AgentDeploymentStatus defines the observed state of AgentDeployment.
