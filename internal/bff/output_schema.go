@@ -18,10 +18,16 @@ package bff
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/santhosh-tekuri/jsonschema/v5"
 )
+
+// errSchemaUncompilable marks the one non-conformance the AGENT cannot possibly fix: the operator's
+// declared outputSchema is not a valid JSON Schema. The m143.6 re-ask consults this so it does not
+// burn a second invoke asking an agent to satisfy a contract that cannot be expressed.
+var errSchemaUncompilable = errors.New("configured outputSchema is not a valid JSON Schema")
 
 // validateTerminalOutput is the platform-authoritative structured-output check (m65.4, ADR 0058):
 // it decides whether a run's terminal answer honours the output schema the agent's operator
@@ -46,7 +52,7 @@ func validateTerminalOutput(schema, output string) error {
 	// (2020-12 / draft-07 / ...), defaulting to the latest when $schema is absent.
 	sch, err := jsonschema.CompileString("outputSchema.json", schema)
 	if err != nil {
-		return fmt.Errorf("configured outputSchema is not a valid JSON Schema: %w", err)
+		return fmt.Errorf("%w: %w", errSchemaUncompilable, err)
 	}
 
 	// The answer must be valid JSON before it can conform to a JSON Schema.

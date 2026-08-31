@@ -501,15 +501,28 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 	// event + succeeded transition below, so a rejected answer is never surfaced as a successful
 	// assistant message. executeRun is shared with the durable worker, so this covers that path too.
 	if verr := validateTerminalOutput(started.OutputSchema, output); verr != nil {
-		s.log.Info("run: terminal output rejected by outputSchema", "run", runID, "reason", verr.Error())
-		if uErr := s.terminalTransitionFenced(ctx, runID, func(rn *run.Run) error {
-			rn.TraceID = traceID
-			rn.Error = verr.Error()
-			return rn.Transition(run.StatusFailed, now)
-		}); uErr != nil {
-			s.log.Error(uErr, "run: could not persist schema-validation failure", "run", runID)
+		// ONE platform-side re-ask before the run dies (m143.6, m52.J4). An SDK agent repairs
+		// in-loop and rarely lands here; a non-SDK / custom-loop agent — which the platform
+		// explicitly supports — had NO recovery tier at all, so a single near-miss killed the run.
+		// The re-ask is bounded to one extra invoke, on a run that was otherwise about to fail, and
+		// refuses itself when it cannot help (uncompilable schema, cancelled/self-fenced execution)
+		// — see reaskForOutputSchema. If it does not produce a conforming answer, the original
+		// fail-closed verdict below stands unchanged.
+		repaired, ok := s.reaskForOutputSchema(
+			ctx, runID, endpoint, input, started.OutputSchema, output, verr)
+		if ok {
+			output = repaired
+		} else {
+			s.log.Info("run: terminal output rejected by outputSchema", "run", runID, "reason", verr.Error())
+			if uErr := s.terminalTransitionFenced(ctx, runID, func(rn *run.Run) error {
+				rn.TraceID = traceID
+				rn.Error = verr.Error()
+				return rn.Transition(run.StatusFailed, now)
+			}); uErr != nil {
+				s.log.Error(uErr, "run: could not persist schema-validation failure", "run", runID)
+			}
+			return
 		}
-		return
 	}
 
 	// Success: emit the assistant message as a stream event BEFORE the terminal transition (which
