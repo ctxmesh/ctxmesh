@@ -1,0 +1,18 @@
+# The egress-redirect initContainer (M142.4, ADR 0123 / m52.J8).
+#
+# It exists only because the egress sidecar's own image is distroless and therefore carries no iptables
+# binary — deliberately, since the sidecar is a long-lived network-facing process and should hold the
+# smallest possible surface. The rules have to be written by SOMETHING in the pod's network namespace, so
+# that something is this: a short-lived initContainer that installs netfilter rules and exits before the
+# agent starts.
+#
+# It runs as root with NET_ADMIN. That is bounded on purpose: the capability lives here and nowhere else,
+# so code running later in the agent container inherits the rules it is bound by and has no capability to
+# remove them.
+FROM alpine:3.22
+
+# iptables only. No shell utilities beyond BusyBox's, no package manager left behind at runtime — the
+# container's whole job is one `sh -c` of iptables calls, and it is gone seconds later.
+RUN apk add --no-cache iptables=~1.8 && rm -rf /var/cache/apk/*
+
+ENTRYPOINT ["/bin/sh"]
