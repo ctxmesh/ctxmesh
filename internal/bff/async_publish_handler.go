@@ -72,14 +72,11 @@ func (s *Server) registerAsyncPublishRoute(api *http.ServeMux) {
 // caller's namespace + registry from the CONTROL PLANE — its own capability-registry row — rather than
 // from anything the pod says. An agent that belongs to no registry has no async peers and is refused.
 func (s *Server) handleAsyncPublish(w http.ResponseWriter, r *http.Request) {
-	token := strings.TrimSpace(r.Header.Get(runcap.HeaderName))
-	if token == "" {
-		writeError(w, http.StatusUnauthorized, "missing run capability")
-		return
-	}
-	capab, err := s.capabilitySigner.Verifier().Verify(token)
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid run capability")
+	// Sender-constrained: the capability must verify AND, when it is bound to a key, carry a
+	// proof-of-possession for this request (M142.5, ADR 0124) — so a copied token is not authority.
+	capab, capErr := s.verifyRuncapWithProof(r)
+	if capErr != nil {
+		writeError(w, http.StatusUnauthorized, capErr.Error())
 		return
 	}
 	caller, err := s.runStore.Get(capab.RunID)

@@ -287,15 +287,17 @@ func TestDiscover_RouteRegistrationRequiresEveryDependency(t *testing.T) {
 	}
 	assert.True(t, registered(full), "fully wired ⇒ the discovery edge is served")
 
-	noRegistry := *full
-	noRegistry.agentCapabilities = nil
-	assert.False(t, registered(&noRegistry), "no capability registry ⇒ no route")
-
-	noSigner := *full
-	noSigner.capabilitySigner = nil
-	assert.False(t, registered(&noSigner), "no capability signer ⇒ nothing to authenticate with ⇒ no route")
-
-	noRuns := *full
-	noRuns.runStore = nil
-	assert.False(t, registered(&noRuns), "no run store ⇒ the caller cannot be resolved ⇒ no route")
+	// Each variant is built FRESH rather than copied from `full`: a Server owns a proof-replay verifier
+	// and is not safe to copy (vet enforces it), and a copied one would share the replay set anyway.
+	drop := func(mutate func(*Server)) *Server {
+		s, _ := newDiscoverServer(t, caller)
+		mutate(s)
+		return s
+	}
+	assert.False(t, registered(drop(func(s *Server) { s.agentCapabilities = nil })),
+		"no capability registry ⇒ no route")
+	assert.False(t, registered(drop(func(s *Server) { s.capabilitySigner = nil })),
+		"no capability signer ⇒ nothing to authenticate with ⇒ no route")
+	assert.False(t, registered(drop(func(s *Server) { s.runStore = nil })),
+		"no run store ⇒ the caller cannot be resolved ⇒ no route")
 }

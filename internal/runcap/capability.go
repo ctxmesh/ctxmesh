@@ -56,6 +56,11 @@ type Capability struct {
 	// RunID scopes the capability to a single run (the custom `run` claim), so a captured
 	// capability is bounded to that run's lifetime + audit trail.
 	RunID string
+	// KeyThumbprint is the RFC 7800 `cnf.jkt` — the base64url SHA-256 thumbprint of the sender's public
+	// key. Non-empty ⇒ the capability is SENDER-CONSTRAINED: a verifier must additionally require a
+	// proof-of-possession signed by that key, so a copied token alone authorizes nothing. Empty ⇒ a
+	// legacy bearer capability.
+	KeyThumbprint string
 	// IssuedAt / ExpiresAt bound the validity window (JWT `iat` / `exp`). TTL is short —
 	// approximately the run timeout — so a leaked capability expires quickly.
 	IssuedAt  time.Time
@@ -73,6 +78,21 @@ var (
 	ErrBadSignature = errors.New("runcap: bad capability signature")
 	// ErrExpired — the capability is past its `exp` (or its `iat` is in the future).
 	ErrExpired = errors.New("runcap: capability expired")
+
+	// Proof-of-possession errors (M142.5, ADR 0124). Distinct so an edge can log WHY a proof failed —
+	// "the key does not match the capability" and "this proof was already spent" are different incidents,
+	// and collapsing them would hide which one is happening.
+	//
+	// ErrNotSenderConstrained is not a failure of the proof but of the CAPABILITY: it carries no `cnf`,
+	// so there is nothing to prove possession of. The edge decides what that means (accept-and-log during
+	// a rollout, refuse after), because the answer is a posture, not a fact about the token.
+	ErrNotSenderConstrained = errors.New("runcap: capability is not sender-constrained (no cnf)")
+	ErrProofMalformed       = errors.New("runcap: malformed proof")
+	ErrProofKeyMismatch     = errors.New("runcap: proof key does not match the capability's cnf")
+	ErrProofBadSignature    = errors.New("runcap: proof signature invalid")
+	ErrProofWrongRequest    = errors.New("runcap: proof is for a different method or URI")
+	ErrProofExpired         = errors.New("runcap: proof expired")
+	ErrProofReplayed        = errors.New("runcap: proof already used")
 	// ErrWrongAudience — the capability was minted for a different audience.
 	ErrWrongAudience = errors.New("runcap: capability audience mismatch")
 	// ErrIncomplete — a required claim (sub / run) is empty.
@@ -113,8 +133,17 @@ type jwtClaims struct {
 	Aud string    `json:"aud"`           // credential-plane audience
 	Run string    `json:"run"`           // custom: the run id
 	Bnd string    `json:"bnd,omitempty"` // custom: the trust boundary (ADR 0033); "" = unscoped
+	Cnf *cnfClaim `json:"cnf,omitempty"` // RFC 7800 confirmation: the sender's key thumbprint
 	Iat int64     `json:"iat"`
 	Exp int64     `json:"exp"`
+}
+
+// cnfClaim is the RFC 7800 "confirmation" claim carrying an RFC 9449 JWK thumbprint (`jkt`). Its
+// presence is what turns a run capability from a BEARER token — where possession is authority — into a
+// SENDER-CONSTRAINED one, where the holder must also prove possession of the matching private key
+// (M142.5, ADR 0124). A capability without it is a legacy bearer token and is treated as such.
+type cnfClaim struct {
+	JKT string `json:"jkt"`
 }
 
 // actClaim is the RFC 8693 actor claim — the delegated party (the agent).

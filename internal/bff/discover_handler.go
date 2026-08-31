@@ -24,7 +24,6 @@ import (
 
 	"github.com/ctxmesh/agentry/internal/credplane"
 	"github.com/ctxmesh/agentry/internal/discovery"
-	"github.com/ctxmesh/agentry/internal/runcap"
 )
 
 // Capability discovery edge (M141, ADR 0120) — "which agent here can do X?", answered semantically
@@ -109,14 +108,11 @@ func (s *Server) handleDiscoverAgents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// (1) Authenticate on the RELAYED capability — never a caller token.
-	token := strings.TrimSpace(r.Header.Get(runcap.HeaderName))
-	if token == "" {
-		writeError(w, http.StatusUnauthorized, "missing run capability")
-		return
-	}
-	capab, err := s.capabilitySigner.Verifier().Verify(token)
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid run capability")
+	// Sender-constrained: the capability must verify AND, when it is bound to a key, carry a
+	// proof-of-possession for this request (M142.5, ADR 0124) — so a copied token is not authority.
+	capab, capErr := s.verifyRuncapWithProof(r)
+	if capErr != nil {
+		writeError(w, http.StatusUnauthorized, capErr.Error())
 		return
 	}
 
