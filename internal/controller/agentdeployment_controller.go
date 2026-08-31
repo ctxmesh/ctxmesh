@@ -255,6 +255,12 @@ type AgentDeploymentReconciler struct {
 	// ⇒ no sidecar is injected and the pod template is unchanged (no drift).
 	OBOEgress OBOEgressConfig
 
+	// EgressRedirect configures the L4 netfilter redirect that makes plain-remote tool deny structural
+	// rather than advisory (M142.4, ADR 0123). Disabled by default: it changes every agent pod's
+	// networking, which is the class of change M128/M134 established must ship as a proven mechanism and
+	// be flipped deliberately afterwards.
+	EgressRedirect EgressRedirectConfig
+
 	// EndUserAgentStore is the end-user AGENT exposure mirror (M137/EU1b, ADR 0107). The reconciler
 	// writes an agent's endpoint + spec here iff spec.endUserAccess (serving-only, CEL-enforced), and
 	// prunes it otherwise / on delete, so the BFF resolves an end-user run WITHOUT a K8s read. Nil ⇒ no
@@ -1829,6 +1835,19 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		combinedDigest = fmt.Sprintf("%x", sum[:])[:8]
 	}
 
+	// The L4 egress redirect (M142.4, ADR 0123) — only for a pod that HAS an egress sidecar, since the
+	// redirect's whole purpose is to force traffic into it. Redirecting into a sidecar that is not there
+	// would black-hole the pod's egress, so the sidecar's presence is the precondition, not an extra.
+	// Ordered AFTER the launcher initContainer so the rules are installed last and are in place before
+	// any app container starts.
+	if hasEgressSidecar(containers) && r.egressRedirectReady(func(flags []string) bool {
+		return r.knativeFlagsEnabled(ctx, flags, "M142.4 egress redirect")
+	}) {
+		initContainers = append(initContainers, egressRedirectInitContainer(r.EgressRedirect))
+		sum := sha256.Sum256([]byte(combinedDigest + "|egress-redirect:" + r.EgressRedirect.Image))
+		combinedDigest = fmt.Sprintf("%x", sum[:])[:8]
+	}
+
 	return podTemplate{
 		containers:         containers,
 		initContainers:     initContainers,
@@ -1907,23 +1926,43 @@ func (r *AgentDeploymentReconciler) launcherInjectionReady(ctx context.Context) 
 			"launcherImage", r.LauncherImage)
 		return false
 	}
+	return r.knativeFlagsEnabled(ctx, launcherRequiredKnativeFlags, "C8 launcher injection")
+}
+
+// knativeFlagsEnabled reports whether every named Knative feature flag is on in
+// knative-serving/config-features. FAIL-SAFE in both directions: an unreadable ConfigMap or a flag that
+// is off returns false and logs loudly, so the caller SKIPS injection rather than emitting a pod template
+// Knative would reject — which would take out every ksvc in the fleet, not just the misconfigured one.
+// `purpose` names the caller in the log so an operator reading it knows which feature went quiet.
+func (r *AgentDeploymentReconciler) knativeFlagsEnabled(ctx context.Context, flags []string, purpose string) bool {
 	var cm corev1.ConfigMap
 	if err := r.Get(ctx, client.ObjectKey{Namespace: knativeServingNamespace, Name: knativeFeaturesConfigMap}, &cm); err != nil {
-		logf.FromContext(ctx).Info("WARNING: C8 launcher injection SKIPPED — cannot read knative-serving/config-features to confirm the required feature flags; keeping baked-launcher behavior. Set LAUNCHER_IMAGE only after enabling the flags.",
-			"err", err.Error(), "flags", launcherRequiredKnativeFlags)
+		logf.FromContext(ctx).Info("WARNING: SKIPPED — cannot read knative-serving/config-features to confirm the required feature flags; keeping current behavior (fail-safe).",
+			"purpose", purpose, "err", err.Error(), "flags", flags)
 		return false
 	}
-	for _, flag := range launcherRequiredKnativeFlags {
+	for _, flag := range flags {
 		switch strings.ToLower(strings.TrimSpace(cm.Data[flag])) {
 		case "enabled", "allowed":
 			// on
 		default:
-			logf.FromContext(ctx).Info("WARNING: C8 launcher injection SKIPPED — a required Knative feature flag is not enabled; keeping baked-launcher behavior (fail-safe, no fleet outage).",
-				"flag", flag, "value", cm.Data[flag])
+			logf.FromContext(ctx).Info("WARNING: SKIPPED — a required Knative feature flag is not enabled; keeping current behavior (fail-safe, no fleet outage).",
+				"purpose", purpose, "flag", flag, "value", cm.Data[flag])
 			return false
 		}
 	}
 	return true
+}
+
+// hasEgressSidecar reports whether the pod template carries the egress sidecar — the precondition for the
+// L4 redirect, which exists to force traffic INTO it.
+func hasEgressSidecar(containers []corev1.Container) bool {
+	for i := range containers {
+		if containers[i].Name == egressSidecarContainerName {
+			return true
+		}
+	}
+	return false
 }
 
 // injectPlatformLauncher rewrites the pod template to run the PLATFORM-pinned launcher (C8, ADR 0079). A
@@ -1966,7 +2005,7 @@ func injectPlatformLauncher(containers []corev1.Container, volumes []corev1.Volu
 			RunAsUser:                ptr.To(int64(65532)),
 			AllowPrivilegeEscalation: ptr.To(false),
 			ReadOnlyRootFilesystem:   ptr.To(true),
-			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{capabilityAll}},
 			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 		},
 	}

@@ -264,6 +264,10 @@ docker-build-launcher: ## Build the launcher image (launcher:latest) from Docker
 docker-build-egress-sidecar: ## Build the egress-sidecar image (egress-sidecar:latest) from Dockerfile.egress-sidecar (ADR 0030 §1).
 	$(CONTAINER_TOOL) build -t egress-sidecar:latest -f Dockerfile.egress-sidecar .
 
+.PHONY: docker-build-egress-init
+docker-build-egress-init: ## Build the egress-redirect initContainer image (egress-init:latest) from Dockerfile.egress-init (M142.4, ADR 0123).
+	$(CONTAINER_TOOL) build -t egress-init:latest -f Dockerfile.egress-init .
+
 # REPLAY_TAG is the version the replay-serve image is tagged AND stamped with. It must match the
 # CLI's devVersion (cmd/agentry) so `dev --replay`'s /replay/version parity check passes; the
 # default "m78-smoke" agrees with the CLI's built-in default out of the box (ADR 0071 §3a).

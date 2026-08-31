@@ -265,6 +265,18 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
+// splitCommaList parses a comma-separated env list, trimming blanks. Used for the egress-redirect CIDR
+// exclusions, where a stray empty entry would otherwise become a malformed iptables rule.
+func splitCommaList(raw string) []string {
+	out := []string{}
+	for p := range strings.SplitSeq(raw, ",") {
+		if v := strings.TrimSpace(p); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // nolint:gocyclo
 func main() {
 	var metricsAddr string
@@ -508,6 +520,14 @@ func main() {
 		AgentCapabilityStore: agentcapability.NewPostgresStore(cpDB),
 		// Injected sidecar image overrides (audit OPS-1): empty ⇒ the dev.local defaults,
 		// which ImagePullBackOff off a kind cluster, so a real install sets these.
+		// The L4 egress redirect (M142.4, ADR 0123): OFF unless explicitly enabled AND given an image.
+		// Default-off because it rewrites every agent pod's networking — the M128/M134 class of change
+		// that ships as a proven mechanism and is flipped deliberately, never defaulted on at birth.
+		EgressRedirect: controller.EgressRedirectConfig{
+			Enabled:      strings.TrimSpace(os.Getenv("EGRESS_REDIRECT_ENABLED")) == envValueTrue,
+			Image:        strings.TrimSpace(os.Getenv("EGRESS_REDIRECT_IMAGE")),
+			ExcludeCIDRs: splitCommaList(os.Getenv("EGRESS_REDIRECT_EXCLUDE_CIDRS")),
+		},
 		CollectorImage: strings.TrimSpace(os.Getenv("COLLECTOR_IMAGE")),
 		DiscoveryImage: strings.TrimSpace(os.Getenv("DISCOVERY_IMAGE")),
 		// Dev data plane gate (OPS-2): whether to inject the DEV-ONLY object-store + Langfuse
