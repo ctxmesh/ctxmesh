@@ -35,4 +35,5 @@ resources:
 # denied, an anonymous request is rejected by the K8s API server's authn.
 - agentry_operator_role.yaml
 - agentry_developer_role.yaml
+- agentry_killswitch_role.yaml
 - agentry_viewer_role.yaml

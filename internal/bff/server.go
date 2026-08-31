@@ -919,6 +919,14 @@ func (s *Server) Handler() http.Handler {
 		// a reviewer's pending inbox, each row deep-linking to /runs/:id. Persona gate: one
 		// caller-scoped SSAR on `workflows` (plan_approval is workflow-only), never per-row.
 		authed.HandleFunc("GET /api/approvals", s.handleApprovals)
+
+		// The scoped kill switch (M146, ADR 0126). Every mutation is gated by the caller-scoped `kill`
+		// verb (see kill_handler.go) — NOT by an existing persona — and audited on every outcome
+		// including denial. The list is readable by any authenticated caller so the console can render
+		// the "this scope is stopped" banner to the people affected by it.
+		authed.HandleFunc("POST /api/kill", s.handleKill)
+		authed.HandleFunc("POST /api/kill/lift", s.handleUnkill)
+		authed.HandleFunc("GET /api/kills", s.handleListKills)
 		// Cost forecast (M70, ADR 0063 D3): linear run-rate month-end projection from
 		// the durable cost-rollup ledger. Caller-scoped SSAR on `costrollups` (persona
 		// gate â no per-row leak). nil store â 501. ?tenant= required.

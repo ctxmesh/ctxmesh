@@ -632,7 +632,7 @@ func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 
 	// ?by is required and the only supported value is "agent".
 	by := strings.TrimSpace(qs.Get("by"))
-	if by != "agent" {
+	if by != scopeTypeAgent {
 		if by == "" {
 			writeError(w, http.StatusBadRequest,
 				`missing required query param: by (supported values: "agent")`)

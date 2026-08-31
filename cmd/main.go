@@ -64,6 +64,7 @@ import (
 	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agentry/internal/controlplane/costrollup"
 	"github.com/ctxmesh/agentry/internal/controlplane/enduseragent"
+	"github.com/ctxmesh/agentry/internal/controlplane/killscope"
 	"github.com/ctxmesh/agentry/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agentry/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/agentry/internal/controlplane/onlinescore"
@@ -454,6 +455,12 @@ func main() {
 		CapabilityAudience:     os.Getenv("MCP_CAPABILITY_AUDIENCE"),
 		CredentialNamespace:    os.Getenv("MCP_CREDENTIAL_NAMESPACE"),
 		TokenServiceURL:        os.Getenv("TOKEN_SERVICE_URL"),
+		// M146.7 (m52.M143-knobs): the two tool-call timeouts finally get a config surface. Both were
+		// read by cmd/egress-sidecar and set by NOTHING, so an operator with a legitimately slow tool
+		// had no supported way to change them. Empty ⇒ the sidecar's own defaults, so an install that
+		// sets neither is byte-unchanged.
+		ResponseHeaderTimeout: os.Getenv("EGRESS_RESPONSE_HEADER_TIMEOUT"),
+		StreamIdleTimeout:     os.Getenv("EGRESS_STREAM_IDLE_TIMEOUT"),
 	}
 	if oboEgress.Enabled {
 		setupLog.Info("OBO egress-sidecar injection ENABLED (ADR 0030)",
@@ -522,6 +529,14 @@ func main() {
 		// Declared per-team spawn budget (M142.6, m52.C19b): the controller can read AgentTeam, the BFF
 		// cannot (ADR 0011), so the number the BFF's authoritative gate enforces is projected here.
 		SpawnBudgetStore: spawnbudget.NewPostgresStore(cpDB),
+		// spec.suspend projection (M146.6, ADR 0126 §4): the BFF cannot read AgentDeployment, so the
+		// declarative halt reaches the worker + the run-create edge through this mirror.
+		KillScopeStore: killscope.NewPostgresStore(cpDB),
+		// M146.7 (m52.M143-knobs): how long to wait for a referenced KnowledgeBase to appear before
+		// deploying without it. Zero ⇒ the 30s default; NEGATIVE disables the settle gate entirely
+		// (pre-M143 behaviour, accepting the revision churn) — an escape hatch, not a setting to reach
+		// for. Controller-side only, so unlike the egress timeouts it has no digest interaction.
+		KnowledgeSettleWindow: envDuration("KNOWLEDGE_SETTLE_WINDOW"),
 		// Injected sidecar image overrides (audit OPS-1): empty ⇒ the dev.local defaults,
 		// which ImagePullBackOff off a kind cluster, so a real install sets these.
 		// The L4 egress redirect (M142.4, ADR 0123): OFF unless explicitly enabled AND given an image.
@@ -935,4 +950,19 @@ func auditRetention(log logr.Logger) time.Duration {
 		return audit.DefaultRetention
 	}
 	return time.Duration(days) * 24 * time.Hour
+}
+
+// envDuration parses an optional duration env var (e.g. "45s", "2m"). Blank or unparseable ⇒ 0, which
+// every consumer reads as "use my default" — a typo must not silently disable a safety window.
+func envDuration(name string) time.Duration {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		setupLog.Info("WARNING: ignoring unparseable duration env var; using the default", "var", name, "value", v)
+		return 0
+	}
+	return d
 }

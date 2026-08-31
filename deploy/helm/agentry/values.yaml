@@ -90,14 +90,31 @@ controllerManager:
     sidecarImage: ""
     capabilityAudience: ""
     tokenServiceURL: ""
+    # The two tool-call timeouts (M146.7 / m52.M143-knobs). They bound DIFFERENT hangs and are not
+    # interchangeable: responseHeaderTimeout covers "connects but never responds" and is disarmed the
+    # moment headers arrive, while streamIdleTimeout bounds the gap BETWEEN bytes, which a healthy
+    # stream resets on every read — so a long-but-alive stream is never cut. Blank ⇒ the sidecar's own
+    # defaults (120s each). Changing either ROLLS a new agent revision by design: the values are pod
+    # env, and an env change that did not move the revision name would be silently dropped.
+    responseHeaderTimeout: ""
+    streamIdleTimeout: ""
+
+# How long the controller waits for a referenced KnowledgeBase to become visible before deploying the
+# agent WITHOUT it (M146.7 / m52.M143-knobs; the gate itself is M143.5). Blank ⇒ 30s, which covers the
+# ordinary case of an AgentDeployment and its KnowledgeBase being applied together. A NEGATIVE value
+# disables the gate (pre-M143 behaviour: deploy immediately and accept the revision churn) — an escape
+# hatch, not a setting to reach for.
+knowledgeSettleWindow: ""
 
 # Optional PodDisruptionBudgets for the stateless request-serving components
 # (bff / gateway / token-service), M48 / ADR 0047. OFF by default (no-drift).
 # Enable ALONGSIDE their replicas>1 so a node drain/upgrade can't evict a whole
 # component at once. These components are stateless request-servers (the token-
 # service reads the shared credential store; the gateway is a config-rendered
-# proxy; the bff is caller-scoped) — but note bff replicas>1 requires the durable
-# run-worker path (runWorkerDispatch, ADR 0034), else runs execute in-process.
+# proxy; the bff is caller-scoped). Note: bff replicas>1 uses the durable
+# run-worker path. Since M143 (ADR 0125) that is the ONLY path — the pool starts
+# unconditionally and the retired runWorkerDispatch toggle does nothing — so bff
+# replicas>1 is safe without any additional setting.
 componentPodDisruptionBudgets:
   enabled: false
   minAvailable: 1
