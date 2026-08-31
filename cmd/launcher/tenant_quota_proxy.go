@@ -30,7 +30,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ctxmesh/agentry/internal/gateway/budget"
+	"github.com/ctxmesh/ctxmesh/internal/gateway/budget"
 )
 
 // ErrQuotaProxyRejected is returned when the proxy DEFINITIVELY rejects the

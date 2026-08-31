@@ -16,10 +16,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/agentcapability"
-	"github.com/ctxmesh/agentry/internal/credplane"
-	"github.com/ctxmesh/agentry/internal/run"
-	"github.com/ctxmesh/agentry/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
+	"github.com/ctxmesh/ctxmesh/internal/credplane"
+	"github.com/ctxmesh/ctxmesh/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // wordEmbedder is a deterministic stand-in for the offline embedder (the ranking maths is proven in

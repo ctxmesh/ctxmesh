@@ -21,7 +21,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/ctxmesh/agentry/internal/kedatypes"
+	"github.com/ctxmesh/ctxmesh/internal/kedatypes"
 )
 
 // The durable run-worker (ADR 0034, m32.2) is a platform singleton — NOT a per-agent workload — so

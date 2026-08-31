@@ -17,7 +17,7 @@ export interface HealthResponse {
 }
 
 // DevModeResponse mirrors the BFF's DevModeResponse (internal/bff/dto.go). true =
-// the local `agentry dev --ui` substrate (ADR 0021): no cluster, no login wall.
+// the local `ctxmesh dev --ui` substrate (ADR 0021): no cluster, no login wall.
 // The endpoint is unauthenticated so the SPA can read it before any session exists.
 export interface DevModeResponse {
   devMode: boolean;
@@ -2985,7 +2985,7 @@ function listQuery(params: AgentListParams = {}): string {
 export const api = {
   health: (signal?: AbortSignal) =>
     getJSON<HealthResponse>("/api/health", signal),
-  // devMode probes whether the console runs under `agentry dev --ui` (ADR 0021).
+  // devMode probes whether the console runs under `ctxmesh dev --ui` (ADR 0021).
   // Unauthenticated, so it resolves before any login. Callers treat any failure as
   // false (login wall stays on) — never accidentally drop auth on a real cluster.
   devMode: (signal?: AbortSignal) =>

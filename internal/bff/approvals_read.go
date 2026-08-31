@@ -25,8 +25,8 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/authz"
-	"github.com/ctxmesh/agentry/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
+	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 // ApprovalQueueItem is one row of the V5 "Plan approvals" queue (GET /api/approvals, M112). Token-free:

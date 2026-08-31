@@ -150,7 +150,7 @@ jobs:
         # OpenInference indexed message keys (value-wide replace_all_patterns) AND
         # the LiteLLM gateway's own trace (turn_off_message_logging; cost span
         # survives) — raw PII absent from the persisted Langfuse trace, tree intact;
-        # (2) authz — unbound/anonymous rejected, agentry-developer can create,
+        # (2) authz — unbound/anonymous rejected, ctxmesh-developer can create,
         # viewer read-only; (3) audit — a CRD create+delete in the manager audit
         # log; (4) egress lockdown — non-allowlisted host denied (Calico) while the
         # collector→Langfuse export stays alive. Dedupe fail-closed is unit-proven,
@@ -278,11 +278,11 @@ jobs:
         # ADR 0006: full headless slice on a FRESH CI cluster; locally provable —
         # tier0 + tsc --noEmit + playwright test --list + shellcheck.
         run: make -C agent-brain/harness tier2 SLICE=m18-ui
-      - name: M19 dev-ui smoke (agentry dev --ui — NO cluster, Docker Compose)
+      - name: M19 dev-ui smoke (ctxmesh dev --ui — NO cluster, Docker Compose)
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # The dev-ui 🧪 (ADR 0021, spec dev-ui-and-sso): the ONLY slice with NO
-        # cluster. It brings up `agentry dev --ui` (the local Compose inner loop
+        # cluster. It brings up `ctxmesh dev --ui` (the local Compose inner loop
         # + the dev-mode console BFF) and drives the console headless — spec
         # 110-dev-ui: GET /api/devmode=true, the console renders with NO login wall +
         # the dev banner, config-preview (/api/expand) is live, a Playground run

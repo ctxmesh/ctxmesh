@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // TestScheduledRefreshDecision covers the pure scheduling predicate (M140.4) — the load-bearing logic, tested

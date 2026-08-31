@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 )
 
 // mcpToolBindingKind is the CRD kind name for an MCPToolBinding (used in error
@@ -451,7 +451,7 @@ func (s *Server) handleCreateMCPToolBinding(w http.ResponseWriter, r *http.Reque
 // --- PUT /api/mcptoolbindings/{ns}/{name} -----------------------------------
 
 // handleUpdateMCPToolBinding serves PUT /api/mcptoolbindings/{ns}/{name} — edits
-// an MCPToolBinding via SSA under the "agentry-console" field-manager
+// an MCPToolBinding via SSA under the "ctxmesh-console" field-manager
 // (ForceOwnership). The controller's status (including the Ready condition, which
 // is the propagation status signal) is NEVER clobbered.
 //

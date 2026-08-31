@@ -31,31 +31,31 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/ctxmesh/agentry/internal/asyncbus"
-	"github.com/ctxmesh/agentry/internal/controlplane/agentcapability"
-	"github.com/ctxmesh/agentry/internal/controlplane/agentmemory"
-	"github.com/ctxmesh/agentry/internal/controlplane/alertstore"
-	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
-	"github.com/ctxmesh/agentry/internal/controlplane/authz"
-	"github.com/ctxmesh/agentry/internal/controlplane/costrollup"
-	"github.com/ctxmesh/agentry/internal/controlplane/dataset"
-	"github.com/ctxmesh/agentry/internal/controlplane/enduseragent"
-	"github.com/ctxmesh/agentry/internal/controlplane/killscope"
-	"github.com/ctxmesh/agentry/internal/controlplane/knowledge"
-	"github.com/ctxmesh/agentry/internal/controlplane/namespacetenant"
-	"github.com/ctxmesh/agentry/internal/controlplane/onlinescore"
-	"github.com/ctxmesh/agentry/internal/controlplane/promptversion"
-	"github.com/ctxmesh/agentry/internal/controlplane/publishedartifact"
-	"github.com/ctxmesh/agentry/internal/controlplane/sharedrun"
-	"github.com/ctxmesh/agentry/internal/controlplane/spawnbudget"
-	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
-	"github.com/ctxmesh/agentry/internal/credplane"
-	"github.com/ctxmesh/agentry/internal/credresolve"
-	"github.com/ctxmesh/agentry/internal/objectstore"
-	"github.com/ctxmesh/agentry/internal/ocr"
-	"github.com/ctxmesh/agentry/internal/prompt"
-	"github.com/ctxmesh/agentry/internal/run"
-	"github.com/ctxmesh/agentry/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/alertstore"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/costrollup"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/dataset"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/enduseragent"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/killscope"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/publishedartifact"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/sharedrun"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/spawnbudget"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/ctxmesh/internal/credplane"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/objectstore"
+	"github.com/ctxmesh/ctxmesh/internal/ocr"
+	"github.com/ctxmesh/ctxmesh/internal/prompt"
+	"github.com/ctxmesh/ctxmesh/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // defaultVersion is reported by /api/health when no version is injected at
@@ -275,7 +275,7 @@ type Server struct {
 	// authz.SSARAuthorizer{}); tests inject a fake to drive allow/deny deterministically.
 	authorizer authz.Authorizer
 
-	// devMode is true when the BFF runs under `agentry dev --ui` (ADR 0021):
+	// devMode is true when the BFF runs under `ctxmesh dev --ui` (ADR 0021):
 	// a local, single-developer substrate with NO cluster (callerClients nil →
 	// cluster-only endpoints serve honest 501) and NO login wall. GET /api/devmode
 	// exposes it so the SPA renders dev-mode chrome instead of the login gate.
@@ -431,7 +431,7 @@ type Options struct {
 	// StaticDir is the directory of the built SPA (dist/). Empty disables static
 	// serving; the SPA is then served elsewhere (e.g. an nginx sidecar).
 	StaticDir string
-	// DevMode marks the local `agentry dev --ui` substrate (ADR 0021): no
+	// DevMode marks the local `ctxmesh dev --ui` substrate (ADR 0021): no
 	// cluster (CallerClients nil), no login wall. Surfaced at GET /api/devmode so
 	// the SPA renders dev chrome instead of the login gate.
 	DevMode bool

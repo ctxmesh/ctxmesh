@@ -19,7 +19,7 @@ package ingest
 import (
 	"strings"
 
-	v1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	v1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // ─── token-counting heuristic ────────────────────────────────────────────────

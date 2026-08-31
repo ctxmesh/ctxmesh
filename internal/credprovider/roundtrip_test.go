@@ -22,8 +22,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/ctxmesh/agentry/internal/credprovider"
-	"github.com/ctxmesh/agentry/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/credprovider"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 // fakeBackend is an in-memory Backend double — the shape a third-party vault (or the m27.6

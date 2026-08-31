@@ -43,7 +43,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/ctxmesh/agentry/internal/toolmanifest"
+	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
 
 const (

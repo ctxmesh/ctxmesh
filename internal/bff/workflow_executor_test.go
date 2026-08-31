@@ -28,8 +28,8 @@ import (
 	"github.com/stretchr/testify/require"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
-	"github.com/ctxmesh/agentry/internal/run"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 // ── test harness ──────────────────────────────────────────────────────────────────────────────────────────

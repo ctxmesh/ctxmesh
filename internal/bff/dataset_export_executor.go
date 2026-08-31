@@ -23,9 +23,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/dataset"
-	"github.com/ctxmesh/agentry/internal/run"
-	"github.com/ctxmesh/agentry/internal/telemetry"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/dataset"
+	"github.com/ctxmesh/ctxmesh/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 )
 
 // ── The dataset-export executor (m69.2, ADR 0062 Fork 1) ────────────────────────────────────────────────────

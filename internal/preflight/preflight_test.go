@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ctxmesh/agentry/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // realPair returns a matching (privSeedB64, pubB64) Ed25519 pair via the same helpers the platform uses.
@@ -26,7 +26,7 @@ func TestCheck_CoherentConfig_NoErrors(t *testing.T) {
 			"TOKEN_SERVICE_URL":         "http://ts.svc:8443",
 			"EGRESS_SIDECAR_IMAGE":      "dev.local/egress-sidecar:x",
 			"MCP_CAPABILITY_PUBLIC_KEY": pub,
-			"MCP_CREDENTIAL_NAMESPACE":  "agentry",
+			"MCP_CREDENTIAL_NAMESPACE":  "ctxmesh",
 			"COST_ROLLUP_ENABLED":       "1",
 		},
 		CapabilityPrivateSeed: priv,

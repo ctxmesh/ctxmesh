@@ -2,7 +2,8 @@
   "name": "ctxmesh",
   "private": true,
   "version": "0.1.0",
-  "description": "The ctxmesh TypeScript SDK — typed sugar over the agentry launcher localhost plane, at parity with the Python SDK (sdk/python). Vendored into the base-node agent image, not published to npm (ADR 0070).",
+  "license": "Apache-2.0",
+  "description": "The ctxmesh TypeScript SDK \u2014 typed sugar over the ctxmesh launcher localhost plane, at parity with the Python SDK (sdk/python). Vendored into the base-node agent image, not published to npm (ADR 0070).",
   "type": "module",
   "packageManager": "pnpm@9.15.0",
   "engines": {

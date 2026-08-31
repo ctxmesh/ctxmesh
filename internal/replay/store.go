@@ -28,7 +28,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ctxmesh/agentry/internal/objectstore"
+	"github.com/ctxmesh/ctxmesh/internal/objectstore"
 )
 
 // ErrNoFixture is returned (wrapped) by GetRun when a run has NO recorded fixture blobs — nothing was

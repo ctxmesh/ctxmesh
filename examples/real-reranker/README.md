@@ -26,12 +26,12 @@ the deliberate deviation from the embedder's one-service pattern, recorded in AD
 
 ```sh
 make docker-build-real-reranker                          # → dev.local/real-reranker:m140
-kind load docker-image dev.local/real-reranker:m140 --name agentry-dev
-kubectl apply -f examples/real-reranker/deploy.yaml      # ns: agentry
+kind load docker-image dev.local/real-reranker:m140 --name ctxmesh-dev
+kubectl apply -f examples/real-reranker/deploy.yaml      # ns: ctxmesh
 ```
 
 Then activate the opt-in rerank stage on the token-service:
-`KNOWLEDGE_RERANK_URL=http://real-reranker.agentry.svc:8080` + `KNOWLEDGE_RERANK=true`.
+`KNOWLEDGE_RERANK_URL=http://real-reranker.ctxmesh.svc:8080` + `KNOWLEDGE_RERANK=true`.
 
 > Rerank is **fail-open**: a dead/slow reranker (2s client timeout) never breaks retrieval — the
 > handler falls back to the store's fusion order.

@@ -1,12 +1,12 @@
 # Simplified agent.yaml for the echo-agent example — the same schema the
-# `agentry expand` and `agentry dev` commands consume.
+# `ctxmesh expand` and `ctxmesh dev` commands consume.
 #
 # Local inner loop (spec §22): build the image once, then run it locally with
 # the full runtime contract + a mock gateway (MOCK_OK):
 #
 #   make docker-build-example        # builds echo-agent:latest
 #   make docker-build-discovery      # builds the tool-discovery sidecar
-#   agentry dev -f examples/echo-agent/agent.yaml
+#   ctxmesh dev -f examples/echo-agent/agent.yaml
 #
 # Then POST to the printed /invoke URL; the mock gateway answers MOCK_OK.
 name: echo-agent

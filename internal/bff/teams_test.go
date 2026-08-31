@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 func mkTeam(name, registry, supervisor string, ready bool, budget *agentsv1beta1.SpawnBudget) *agentsv1beta1.AgentTeam {

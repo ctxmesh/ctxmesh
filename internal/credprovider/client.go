@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ctxmesh/agentry/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 // defaultTimeout bounds a provider round-trip (a self-refreshing backend may itself hit an

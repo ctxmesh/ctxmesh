@@ -37,10 +37,10 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
-	"github.com/ctxmesh/agentry/internal/egress"
-	"github.com/ctxmesh/agentry/internal/toolmanifest"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/ctxmesh/internal/egress"
+	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
 
 // m82EgressConfig is an OBO egress config with a public key + sidecar image (the always-on sidecar

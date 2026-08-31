@@ -104,4 +104,4 @@ jobs:
           path: dist/
       # SHA-pin this at enablement (repo convention); release/v1 is the maintainer-pinned major.
       - name: Publish to PyPI (Trusted Publishing)
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc # v1.12.4

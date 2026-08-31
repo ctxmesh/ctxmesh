@@ -39,9 +39,9 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
-	"github.com/ctxmesh/agentry/internal/kedatypes"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/kedatypes"
 )
 
 var (
@@ -111,12 +111,12 @@ func TestMain(m *testing.M) {
 		panic("failed to create envtest client: " + err.Error())
 	}
 
-	// Ensure the agentry namespace exists. It is used by the
+	// Ensure the ctxmesh namespace exists. It is used by the
 	// ModelRoute controller tests for the gateway ConfigMap and Deployment.
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "agentry"}}
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ctxmesh"}}
 	if nsErr := k8sClient.Create(testCtx, ns); nsErr != nil {
 		if !apierrors.IsAlreadyExists(nsErr) {
-			panic("failed to create agentry namespace: " + nsErr.Error())
+			panic("failed to create ctxmesh namespace: " + nsErr.Error())
 		}
 	}
 

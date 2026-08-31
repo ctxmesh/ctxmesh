@@ -28,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	sigsyaml "sigs.k8s.io/yaml"
 
-	"github.com/ctxmesh/agentry/internal/expand"
+	"github.com/ctxmesh/ctxmesh/internal/expand"
 )
 
 // TestListRecipes_Basic verifies that GET /api/recipes returns at least 4

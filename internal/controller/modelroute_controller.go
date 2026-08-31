@@ -32,15 +32,15 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	"github.com/ctxmesh/agentry/internal/gateway"
-	"github.com/ctxmesh/agentry/internal/telemetry"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	"github.com/ctxmesh/ctxmesh/internal/gateway"
+	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 )
 
 const (
 	// configHashAnnotation is the pod-template annotation the controller uses to
 	// force a Deployment rollout when the rendered gateway config changes.
-	configHashAnnotation = "agentry.ctxmesh.ai/config-hash"
+	configHashAnnotation = "ctxmesh.ai/config-hash"
 
 	// sbEnvPrefix is the env-var prefix for SecretBinding credentials on the
 	// gateway Deployment. Must match gateway.EnvVarName's prefix.
@@ -73,10 +73,10 @@ type ModelRouteReconciler struct {
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=secretbindings,verbs=get;list;watch
 // SEC-3: cluster-wide READ (provider-key Secrets live in arbitrary tenant namespaces —
 // unavoidable, same posture as cert-manager/ESO) but the WRITES (the gateway-Secret mirror,
-// syncGatewaySecrets) only ever land in agentry, so scope create/update/delete
+// syncGatewaySecrets) only ever land in ctxmesh, so scope create/update/delete
 // to a namespaced Role there — a compromised manager can't write Secrets cluster-wide.
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core,resources=secrets,namespace=agentry,verbs=create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=secrets,namespace=ctxmesh,verbs=create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 

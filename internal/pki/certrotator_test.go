@@ -27,12 +27,12 @@ import (
 
 func baseCfg() WebhookCertConfig {
 	return WebhookCertConfig{
-		Namespace:          "agentry",
+		Namespace:          "ctxmesh",
 		ServiceName:        "webhook-service",
 		CertDir:            "/tmp/k8s-webhook-server/serving-certs",
-		SecretName:         "agentry-webhook-server-cert",
-		CAName:             "agentry-ca",
-		CAOrganization:     "agentry",
+		SecretName:         "ctxmesh-webhook-server-cert",
+		CAName:             "ctxmesh-ca",
+		CAOrganization:     "ctxmesh",
 		CADuration:         5 * 365 * 24 * time.Hour,
 		ServerCertDuration: 90 * 24 * time.Hour,
 	}
@@ -42,7 +42,7 @@ func TestDNSName_ShortServiceForm_NoClusterLocal(t *testing.T) {
 	// ADR 0102 one-way door: the SAN is the SHORT `<svc>.<ns>.svc` form and must NEVER
 	// hardcode the operator-configurable cluster domain.
 	got := baseCfg().dnsName()
-	assert.Equal(t, "webhook-service.agentry.svc", got)
+	assert.Equal(t, "webhook-service.ctxmesh.svc", got)
 	assert.NotContains(t, got, "cluster.local", "must not hardcode the cluster domain")
 }
 
@@ -50,11 +50,11 @@ func TestRotatorFor_MapsConfig(t *testing.T) {
 	ready := make(chan struct{})
 	cr := baseCfg().rotatorFor(ready)
 
-	assert.Equal(t, "agentry", cr.SecretKey.Namespace)
-	assert.Equal(t, "agentry-webhook-server-cert", cr.SecretKey.Name)
+	assert.Equal(t, "ctxmesh", cr.SecretKey.Namespace)
+	assert.Equal(t, "ctxmesh-webhook-server-cert", cr.SecretKey.Name)
 	assert.Equal(t, "/tmp/k8s-webhook-server/serving-certs", cr.CertDir)
-	assert.Equal(t, "webhook-service.agentry.svc", cr.DNSName)
-	assert.Equal(t, "agentry-ca", cr.CAName)
+	assert.Equal(t, "webhook-service.ctxmesh.svc", cr.DNSName)
+	assert.Equal(t, "ctxmesh-ca", cr.CAName)
 	assert.False(t, cr.RestartOnSecretRefresh, "certwatcher hot-reloads — no pod restart on rotation")
 	assert.Equal(t, 5*365*24*time.Hour, cr.CaCertDuration)
 	assert.Equal(t, 90*24*time.Hour, cr.ServerCertDuration)

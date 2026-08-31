@@ -12,21 +12,21 @@ metadata:
   namespace: system
   labels:
     control-plane: statelayer-proxy
-    app.kubernetes.io/name: agentry
+    app.kubernetes.io/name: ctxmesh
     app.kubernetes.io/managed-by: kustomize
 spec:
   replicas: 1
   selector:
     matchLabels:
       control-plane: statelayer-proxy
-      app.kubernetes.io/name: agentry
+      app.kubernetes.io/name: ctxmesh
   template:
     metadata:
       annotations:
         kubectl.kubernetes.io/default-container: statelayer-proxy
       labels:
         control-plane: statelayer-proxy
-        app.kubernetes.io/name: agentry
+        app.kubernetes.io/name: ctxmesh
     spec:
       securityContext:
         runAsNonRoot: true
@@ -45,7 +45,7 @@ spec:
             # m49). BYO-external installs override it (ADR 0049 posture). The Helm chart
             # templates it (no drift).
             - name: STATELAYER_ADDR
-              value: agentry-statelayer.agentry.svc:6379
+              value: ctxmesh-statelayer.ctxmesh.svc:6379
             # STATELAYER_USERNAME/PASSWORD for a Valkey ACL user (ADR 0050 §6) — empty by
             # default (the in-cluster Valkey is unauthenticated, ADR 0049). Set for a
             # password-protected/BYO-external Valkey.

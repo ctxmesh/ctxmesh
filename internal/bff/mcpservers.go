@@ -35,9 +35,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	"github.com/ctxmesh/agentry/internal/controlplane/authz"
-	"github.com/ctxmesh/agentry/internal/controlplane/toolregistry"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
 
 // The BYO-MCP register + tool-catalog handlers (ADR 0016). All are CALLER-SCOPED
@@ -61,7 +61,7 @@ import (
 const (
 	// managedByMCP marks an object as created by the BYO-MCP register flow. It is
 	// the value of labelManagedBy (shared with the connect flow's constant).
-	managedByMCP = "agentry-mcp"
+	managedByMCP = "ctxmesh-mcp"
 
 	// labelMCPScope / labelMCPOwner stamp the server's SCOPE + OWNER as LABELS at
 	// register (ADR 0029 §1/§3). scope ∈ {public, personal, org} is a visibility +
@@ -765,7 +765,7 @@ func toolCatalogEntriesFromDiscovered(registry, namespace string, tools []discov
 
 // handleListMCPServers serves GET /api/mcpservers — the registered servers, read
 // through the CALLER-SCOPED client. It lists register-managed ToolRegistries
-// (labelled managed-by=agentry-mcp) and projects each onto the flat
+// (labelled managed-by=ctxmesh-mcp) and projects each onto the flat
 // MCPServerSummary — NO secret material, only the Secret NAME as a reference.
 // Servers is [] (not null) for the empty case; a Forbidden on the list surfaces
 // as 403, never a swallowed empty list.

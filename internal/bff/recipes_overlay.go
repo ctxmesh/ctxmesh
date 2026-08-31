@@ -41,7 +41,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"gopkg.in/yaml.v3"
 
-	"github.com/ctxmesh/agentry/internal/expand"
+	"github.com/ctxmesh/ctxmesh/internal/expand"
 )
 
 // recipeOverlayHolder guards the current operator overlay behind an RWMutex so the fsnotify watcher can

@@ -825,7 +825,7 @@ spec:
                             description: |-
                               addr is the host:port of the Valkey backend.
                               If omitted the controller defaults to
-                              agentry-statelayer.agentry.svc:6379.
+                              ctxmesh-statelayer.ctxmesh.svc:6379.
                             maxLength: 256
                             type: string
                         type: object
@@ -1735,7 +1735,7 @@ spec:
                             description: |-
                               addr is the host:port of the Valkey backend.
                               If omitted the controller defaults to
-                              agentry-statelayer.agentry.svc:6379.
+                              ctxmesh-statelayer.ctxmesh.svc:6379.
                             maxLength: 256
                             type: string
                         type: object

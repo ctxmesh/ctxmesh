@@ -28,8 +28,8 @@ import (
 
 	"go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/ctxmesh/agentry/internal/gateway/budget"
-	"github.com/ctxmesh/agentry/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/gateway/budget"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

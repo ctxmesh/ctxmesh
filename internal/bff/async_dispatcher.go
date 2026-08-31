@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ctxmesh/agentry/internal/asyncbus"
+	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
 )
 
 // The async A2A DISPATCHER (M141.4, ADR 0121) — the half that turns a durable message back into a call.
@@ -50,13 +50,13 @@ const (
 	// asyncDurableName is the JetStream durable consumer this dispatcher rejoins across restarts. It is a
 	// fixed name on purpose: a generated one would create a NEW consumer on every boot, so the messages
 	// waiting for the old one would never be delivered — the exact failure durability is meant to prevent.
-	asyncDurableName = "agentry-async-dispatcher"
+	asyncDurableName = "ctxmesh-async-dispatcher"
 
 	// asyncAllRegistries is the subject filter covering every registry's traffic. One dispatcher serves
 	// them all; isolation is not weakened by that, because the callee still hard-denies a cross-registry
 	// envelope at A2A layer 1, and this dispatcher independently refuses to cross a registry boundary
 	// (see deliver).
-	asyncAllRegistries = "agentry.a2a.>"
+	asyncAllRegistries = "ctxmesh.a2a.>"
 )
 
 // AsyncDispatcherConfig configures the dispatcher.

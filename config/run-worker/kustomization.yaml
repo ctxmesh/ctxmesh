@@ -11,7 +11,7 @@ kind: Kustomization
 # the run-worker Deployment name (`run-worker`) is referenced verbatim by the ScaledObject's
 # scaleTargetRef, which kustomize's name-reference transformer does NOT rewrite for a CRD — a prefix
 # would silently break the KEDA target. The bff SA is name-aligned explicitly on the Deployment below.
-namespace: agentry
+namespace: ctxmesh
 resources:
   - deployment.yaml
   - scaledobject.yaml

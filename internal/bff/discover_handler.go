@@ -22,8 +22,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/ctxmesh/agentry/internal/credplane"
-	"github.com/ctxmesh/agentry/internal/discovery"
+	"github.com/ctxmesh/ctxmesh/internal/credplane"
+	"github.com/ctxmesh/ctxmesh/internal/discovery"
 )
 
 // Capability discovery edge (M141, ADR 0120) — "which agent here can do X?", answered semantically

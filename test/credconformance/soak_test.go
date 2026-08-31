@@ -25,9 +25,9 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/ctxmesh/agentry/internal/credplane"
-	"github.com/ctxmesh/agentry/internal/credpostgres"
-	"github.com/ctxmesh/agentry/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/credplane"
+	"github.com/ctxmesh/ctxmesh/internal/credpostgres"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 // auditSink records every credential-plane ActionUse, thread-safe, so the soak can prove

@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/killscope"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/killscope"
 )
 
 // The cross-PACKAGE key contract (M146, ADR 0126).

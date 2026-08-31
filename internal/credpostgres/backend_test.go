@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ctxmesh/agentry/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 // --- fakes ---
