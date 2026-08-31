@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ctxmesh/agentry/internal/controlplane/agentcapability"
 	"github.com/ctxmesh/agentry/internal/controlplane/agentmemory"
 	"github.com/ctxmesh/agentry/internal/controlplane/alertstore"
 	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
@@ -163,6 +164,18 @@ type Server struct {
 	// ingestion executor calls it as a FALLBACK when a PDF's born-digital text is insufficient. nil (INGEST_OCR_URL
 	// unset) ⇒ a scanned PDF stays honestly PartiallyIngested (today's behaviour) — strictly additive.
 	ocr ocr.OCR
+
+	// agentCapabilities is the control-plane CAPABILITY REGISTRY (M141, ADR 0120) the discovery edge reads:
+	// the caller's own row supplies its registry scope, and that registry's described agents are the
+	// candidate set. Read-only here — the CONTROLLER owns the writes, so the BFF needs no agent-CRD RBAC
+	// (ADR 0011; the SA stays `rules: []`). nil (no cpDB) ⇒ the discovery edge is not wired at all.
+	agentCapabilities agentcapability.Store
+	// discoveryReranker optionally re-scores discovery candidates with the cross-encoder (ADR 0117). nil ⇒
+	// cosine-only ranking. Fail-open by construction — a dead reranker never breaks discovery.
+	discoveryReranker credplane.Reranker
+	// discoveryEmbeddingRoute names the ModelRoute the capability query + descriptors embed through (the
+	// offline embedder, ADR 0116). Empty ⇒ discovery cannot embed and the edge serves an honest 501.
+	discoveryEmbeddingRoute string
 
 	// datasetStore is the control-plane Postgres store for eval datasets (M69, ADR 0062 Fork 1), built from
 	// cpDB. The dataset-export executor (m69.2) WRITES it DIRECTLY — EnsureDataset/AppendCase — copying
@@ -569,6 +582,17 @@ type Options struct {
 	// ocr.NewHTTPOCR.
 	OCR ocr.OCR
 
+	// AgentCapabilities is the capability registry the discovery edge ranks over (M141, ADR 0120).
+	// Optional — nil ⇒ POST /api/internal/discover is not registered. Constructed in cmd/bff/main.go from
+	// cpDB; the CONTROLLER writes it, the BFF only reads (ADR 0011 — no new RBAC).
+	AgentCapabilities agentcapability.Store
+	// DiscoveryReranker optionally re-scores discovery candidates with the cross-encoder (ADR 0117).
+	// Optional — nil ⇒ cosine-only. Constructed in cmd/bff/main.go via credplane.NewHTTPReranker.
+	DiscoveryReranker credplane.Reranker
+	// DiscoveryEmbeddingRoute names the ModelRoute discovery embeds through (DISCOVERY_EMBEDDING_ROUTE).
+	// Empty ⇒ the discovery edge answers 501 rather than guessing a model.
+	DiscoveryEmbeddingRoute string
+
 	Log logr.Logger
 }
 
@@ -627,6 +651,9 @@ func NewServer(opts Options) *Server {
 		onlineResolver:           opts.OnlineResolver,
 		rollupStore:              opts.RollupStore,
 		embedder:                 opts.Embedder,
+		agentCapabilities:        opts.AgentCapabilities,
+		discoveryReranker:        opts.DiscoveryReranker,
+		discoveryEmbeddingRoute:  strings.TrimSpace(opts.DiscoveryEmbeddingRoute),
 		ocr:                      opts.OCR,
 		judgeCounters:            &judgeCounter{},
 		enrichCache:              newTraceEnrichCache(),
@@ -790,6 +817,9 @@ func (s *Server) Handler() http.Handler {
 
 	s.registerSpawnRoute(api)
 	s.registerHandoffRoute(api)
+	// Capability discovery (M141, ADR 0120): the same internal, capability-authenticated class as spawn —
+	// the caller is a launcher relaying its run capability, not a browser bearer token.
+	s.registerDiscoverRoute(api)
 	// Guardrail block ingest (m66.9, ADR 0059 §9): capability-authorized durable compliance record.
 	// Wired alongside the spawn edge — both are internal launcher-to-BFF endpoints authenticated on
 	// the run capability, not a browser bearer token.

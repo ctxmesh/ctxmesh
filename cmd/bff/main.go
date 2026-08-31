@@ -50,6 +50,7 @@ import (
 	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
 	"github.com/ctxmesh/agentry/internal/bff"
 	"github.com/ctxmesh/agentry/internal/controlplane"
+	"github.com/ctxmesh/agentry/internal/controlplane/agentcapability"
 	"github.com/ctxmesh/agentry/internal/controlplane/agentmemory"
 	"github.com/ctxmesh/agentry/internal/controlplane/alertstore"
 	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
@@ -475,8 +476,14 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		RollupStore:            rollupStore,
 		Embedder:               ingestEmbedder,
 		OCR:                    ingestOCR,
-		ConvStore:              convStore,
-		PromptStore:            promptStore,
+		// Capability discovery (M141, ADR 0120): the registry the discovery edge ranks over (the
+		// CONTROLLER writes it — the BFF only reads, so no new RBAC), plus the offline models it ranks
+		// with. It reuses `ingestEmbedder`: discovery embeds through the SAME gateway seam as ingestion.
+		AgentCapabilities:       agentcapability.NewPostgresStore(cpDB),
+		DiscoveryReranker:       discoveryReranker(log),
+		DiscoveryEmbeddingRoute: strings.TrimSpace(os.Getenv("DISCOVERY_EMBEDDING_ROUTE")),
+		ConvStore:               convStore,
+		PromptStore:             promptStore,
 		// Production git-pointer prompt resolver (m121.3, ADR 0008) — the drop-in for the
 		// fixture Resolver, so GET /api/promptversions/{ns}/{name}/diff resolves REAL content
 		// from git (github.com raw). PROMPT_GIT_TOKEN (a PAT via a Secret, never committed)
@@ -729,6 +736,24 @@ func newDocStore() (objectstore.ObjectStore, error) {
 		return nil, nil
 	}
 	return ms, nil
+}
+
+// discoveryReranker wires the OPTIONAL cross-encoder that re-scores capability-discovery candidates
+// (M141, ADR 0120; the reranker itself is ADR 0117). It reads DISCOVERY_RERANK_URL and falls back to
+// KNOWLEDGE_RERANK_URL, so an operator running ONE offline rerank service gets discovery reranking for
+// free rather than having to point a second variable at the same pod. Unset ⇒ nil ⇒ cosine-only ranking,
+// which is a complete answer, just a coarser one — rerank is fail-open by construction.
+func discoveryReranker(log logr.Logger) credplane.Reranker {
+	rerankURL := strings.TrimSpace(os.Getenv("DISCOVERY_RERANK_URL"))
+	if rerankURL == "" {
+		rerankURL = strings.TrimSpace(os.Getenv("KNOWLEDGE_RERANK_URL"))
+	}
+	if rerankURL == "" {
+		log.Info("capability discovery: no rerank service wired — ranking is cosine-only (M141)")
+		return nil
+	}
+	log.Info("capability discovery: cross-encoder rerank wired (ADR 0117)", "reranker", rerankURL)
+	return credplane.NewHTTPReranker(rerankURL, nil)
 }
 
 // newIngestEmbedder builds the gateway embedder the KB ingestion executor uses to embed chunk texts directly
