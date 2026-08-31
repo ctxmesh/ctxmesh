@@ -489,7 +489,14 @@ export function DataTable<T>({
           // overflow-hidden: wide tables scroll HERE, inside their own
           // container, and are never clipped away or pushed onto the body
           // (§4.6). min-w-0/max-w-full make that promise unconditional.
-          "min-w-0 max-w-full overflow-x-auto rounded-lg border bg-card shadow-card",
+          // `relative` is load-bearing, not decoration. An absolutely-positioned
+          // descendant resolves against its nearest POSITIONED ancestor — so a
+          // `sr-only` column head (position:absolute) inside an unpositioned
+          // scroll box escapes the box entirely and lands against the initial
+          // containing block, extending the DOCUMENT by exactly its overshoot.
+          // That is how a table that scrolls correctly still made the page
+          // scroll sideways (M151, found at 1440 on /tools/mcp-servers).
+          "relative min-w-0 max-w-full overflow-x-auto rounded-lg border bg-card shadow-card",
           virtualize && "max-h-[32rem] overflow-y-auto",
         )}
       >
