@@ -23,19 +23,24 @@ import (
 )
 
 // ControlStore reads a run's CONTROL marker from the credentialed Valkey (m70.8, the real-kill cancel
-// channel). The trusted BFF WRITES `run:{runID}:control=<verb>` on cancel (internal/bff/run_control.go);
+// channel). The trusted BFF WRITES `run:{namespace}:{runID}:control=<verb>` on cancel
+// (internal/bff/run_control.go);
 // this store READS it back for the pod-authed /control endpoint so the launcher gateway can abort the
 // agent's in-flight model call. Read-only here — the proxy never writes control markers (the BFF is the
 // sole writer). An interface so the handler tests use a fake without a live Valkey.
 type ControlStore interface {
 	// Control returns the run's control verb, or "" when no marker is set (the common, no-cancel case).
-	Control(ctx context.Context, runID string) (string, error)
+	// The namespace is supplied by the CALLER from the authenticated pod identity, never from the
+	// request — it is what scopes the read (M142.3, C15).
+	Control(ctx context.Context, namespace, runID string) (string, error)
 }
 
 // controlKey is the EXACT marker key the BFF writes (internal/bff/run_control.go runControlKey):
-// `run:{runID}:control`. Duplicated here (a tiny, stable format) so the read side of the cross-repo…
+// `run:{namespace}:{runID}:control`. Duplicated here (a tiny, stable format) so the read side of the
 // cross-PACKAGE contract is explicit and greppable; the two must never drift.
-func controlKey(runID string) string { return "run:" + runID + ":control" }
+func controlKey(namespace, runID string) string {
+	return "run:" + namespace + ":" + runID + ":control"
+}
 
 // redisControlStore is the production ControlStore over the proxy's credentialed Valkey.
 type redisControlStore struct{ rdb *redis.Client }
@@ -54,8 +59,8 @@ func NewRedisControlStore(addr, username, password string) ControlStore {
 	})}
 }
 
-func (s *redisControlStore) Control(ctx context.Context, runID string) (string, error) {
-	v, err := s.rdb.Get(ctx, controlKey(runID)).Result()
+func (s *redisControlStore) Control(ctx context.Context, namespace, runID string) (string, error) {
+	v, err := s.rdb.Get(ctx, controlKey(namespace, runID)).Result()
 	if err == redis.Nil {
 		return "", nil // no marker ⇒ no control verb (the run is not cancelled)
 	}

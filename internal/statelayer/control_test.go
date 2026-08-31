@@ -26,9 +26,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newControlProxy builds a proxy with a control store + pod authenticator (no tenant resolver — the
-// /control endpoint is pod-authed but NOT tenant-scoped). Returns the server + the backing miniredis so a
-// test can seed the `run:{id}:control` marker the BFF would write.
+// newControlProxy builds a proxy with a control store + pod authenticator. Returns the server + the
+// backing miniredis so a test can seed the `run:{ns}:{id}:control` marker the BFF would write. Since
+// M142.3 the read is scoped to the AUTHENTICATED pod's namespace, so the seeded key must carry it.
 func newControlProxy(t *testing.T, byToken map[string]string, auth PodAuthenticator) (*Server, *miniredis.Miniredis) {
 	t.Helper()
 	mr := miniredis.RunT(t)
@@ -53,8 +53,8 @@ func newControlProxy(t *testing.T, byToken map[string]string, auth PodAuthentica
 // A pod-authed GET /control/{runID} returns the verb the BFF wrote to `run:{id}:control`.
 func TestControlGet_PodAuthedReturnsVerb(t *testing.T) {
 	s, mr := newControlProxy(t, map[string]string{"pod-tok": "team-alpha-ns"}, nil)
-	// The BFF writes this exact key (internal/bff/run_control.go runControlKey).
-	require.NoError(t, mr.Set("run:run-123:control", "cancel"))
+	// The BFF writes this exact key (internal/bff/run_control.go runControlKey) — namespace included.
+	require.NoError(t, mr.Set("run:team-alpha-ns:run-123:control", "cancel"))
 
 	rec := do(t, s, "GET", "/control/run-123", "pod-tok", "", nil)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -127,4 +127,30 @@ func TestControlGet_BackendError(t *testing.T) {
 	s, mr := newControlProxy(t, map[string]string{"pod-tok": "team-alpha-ns"}, nil)
 	mr.Close() // Valkey now unreachable
 	assert.Equal(t, http.StatusBadGateway, do(t, s, "GET", "/control/r", "pod-tok", "", nil).Code)
+}
+
+// THE C15 FIX (M142.3): the read is scoped to the CALLER's own namespace. Before it, /control was
+// agent-authenticated but not run-scoped — any verified agent could name any run id and learn whether it
+// was being cancelled, a cross-tenant read in a shared state layer. The namespace comes from the pod's
+// verified identity and is what the key is built from, so this is structural, not a check that could be
+// forgotten: an agent in another namespace simply looks somewhere else.
+func TestControlGet_CannotReadAnotherNamespacesRun(t *testing.T) {
+	s, mr := newControlProxy(t, map[string]string{
+		"alpha-tok": "team-alpha-ns",
+		"beta-tok":  "team-beta-ns",
+	}, nil)
+	// A run being cancelled in team-alpha-ns.
+	require.NoError(t, mr.Set("run:team-alpha-ns:run-123:control", "cancel"))
+
+	// Its owner sees the verb.
+	owner := do(t, s, "GET", "/control/run-123", "alpha-tok", "", nil)
+	require.Equal(t, http.StatusOK, owner.Code)
+	assert.JSONEq(t, `{"control":"cancel"}`, owner.Body.String())
+
+	// An agent in ANOTHER namespace, naming the same run id, learns nothing. It is answered 200 with an
+	// empty verb — the same response as "no such run" — so the endpoint is not an existence oracle either.
+	stranger := do(t, s, "GET", "/control/run-123", "beta-tok", "", nil)
+	require.Equal(t, http.StatusOK, stranger.Code)
+	assert.JSONEq(t, `{"control":""}`, stranger.Body.String(),
+		"a cross-namespace read must return nothing — and be indistinguishable from an absent marker")
 }

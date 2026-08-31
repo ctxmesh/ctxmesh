@@ -32,7 +32,7 @@ import (
 type RunControlPublisher interface {
 	// Publish SETs the control verb for a run with a bounded TTL. A failure is returned for the caller
 	// to LOG (never fatal to the cancel response — the status flip already happened).
-	Publish(ctx context.Context, runID, verb string) error
+	Publish(ctx context.Context, namespace, runID, verb string) error
 }
 
 // controlVerbCancel is the ONLY control verb v1 handles (real-kill). Future verbs (nudge / take-over)
@@ -52,8 +52,18 @@ const controlMarkerTTL = runCapabilityTTL
 const controlPublishTimeout = usageOpTimeout
 
 // runControlKey is the EXACT marker key the launcher's control-store reads back through the proxy:
-// `run:{runID}:control`. Kept in ONE place so the write site and the proxy read site cannot drift.
-func runControlKey(runID string) string { return "run:" + runID + ":control" }
+// `run:{namespace}:{runID}:control`.
+//
+// The NAMESPACE is in the key for authorization, not tidiness (M142.3, C15). The proxy's /control read is
+// agent-authenticated but was not run-SCOPED: any verified agent could ask about any run id and learn
+// whether it was being cancelled — a cross-tenant read in a shared state layer. The proxy cannot check
+// ownership directly (it holds no run→agent mapping, and its runcap verifier was deliberately RETIRED in
+// ADR 0052 §C6 so a compromised proxy holds no user credential). Putting the namespace in the key lets it
+// derive the key from the AUTHENTICATED pod's namespace instead, which makes a cross-namespace read
+// structurally impossible rather than merely checked.
+func runControlKey(namespace, runID string) string {
+	return "run:" + namespace + ":" + runID + ":control"
+}
 
 type redisRunControlPublisher struct{ rdb *redis.Client }
 
@@ -69,22 +79,22 @@ func NewRedisRunControlPublisher(addr string) RunControlPublisher {
 	})}
 }
 
-func (p *redisRunControlPublisher) Publish(ctx context.Context, runID, verb string) error {
+func (p *redisRunControlPublisher) Publish(ctx context.Context, namespace, runID, verb string) error {
 	ctx, cancel := context.WithTimeout(ctx, controlPublishTimeout)
 	defer cancel()
-	return p.rdb.Set(ctx, runControlKey(runID), verb, controlMarkerTTL).Err()
+	return p.rdb.Set(ctx, runControlKey(namespace, runID), verb, controlMarkerTTL).Err()
 }
 
 // publishCancelMarker writes the cancel verb for a run AFTER a successful status flip, best-effort. A nil
 // publisher (STATELAYER_ADDR unset — a memory-only / dev deployment) or a Valkey failure degrades to
 // today's soft cancel (the durable status flip already happened): the marker is only the accelerator, so
 // its absence never breaks the cancel — it just means the agent pod notices via the status, not the abort.
-func (s *Server) publishCancelMarker(ctx context.Context, runID string) {
+func (s *Server) publishCancelMarker(ctx context.Context, namespace, runID string) {
 	if s.runControl == nil {
 		s.log.V(1).Info("run cancel: no control publisher (STATELAYER_ADDR unset) — soft cancel only", "run", runID)
 		return
 	}
-	if err := s.runControl.Publish(ctx, runID, controlVerbCancel); err != nil {
+	if err := s.runControl.Publish(ctx, namespace, runID, controlVerbCancel); err != nil {
 		// Best-effort: the status flip is the authoritative cancel. Log and move on — never fail the
 		// cancel response on a marker-publish blip.
 		s.log.Error(err, "run cancel: publishing the control marker failed (soft cancel still applied)", "run", runID)
