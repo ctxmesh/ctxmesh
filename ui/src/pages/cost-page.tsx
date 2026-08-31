@@ -315,6 +315,15 @@ export function CostPage() {
     setPageStack([""]);
   }, [tenant]);
 
+  // zeroTenants is the ONLY thing the breakdown fetch needs from the tenant list: the M99 B1
+  // "genuinely no tenants → fetch the cluster-wide breakdown" fallback. Depending on the whole
+  // tenantsState instead re-created `load` when the list merely finished loading, which re-ran the
+  // effect and fired a SECOND identical breakdown fetch — blanking the table back to `loading` and
+  // flashing already-rendered rows away (and making the page tests racy, m52.G8). As a boolean it
+  // only changes when the answer actually changes.
+  const zeroTenants =
+    tenantsState.kind === "ready" && tenantsState.tenants.length === 0;
+
   const load = useCallback(() => {
     abortRef.current?.abort();
     const controller = new AbortController();
@@ -326,8 +335,6 @@ export function CostPage() {
     // tenant list is still loading, forbidden, or non-empty (the picker's default-to-first will select
     // one), keep the calm no-tenant state.
     if (!tenant) {
-      const zeroTenants =
-        tenantsState.kind === "ready" && tenantsState.tenants.length === 0;
       if (!zeroTenants) {
         setLoadState({ kind: "no-tenant" });
         return;
@@ -373,7 +380,7 @@ export function CostPage() {
           forbidden: err instanceof ApiError && err.isForbidden,
         });
       });
-  }, [cursor, tenant, tenantsState]);
+  }, [cursor, tenant, zeroTenants]);
 
   useEffect(() => {
     load();

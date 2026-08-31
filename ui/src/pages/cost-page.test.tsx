@@ -153,7 +153,7 @@ describe("CostPage — basic rendering (m16.10)", () => {
 
     renderPage();
 
-    expect(await screen.findByTestId("cost-page")).toBeInTheDocument();
+    await screen.findByTestId("cost-page");
     expect(screen.getByTestId("cost-breakdown-table")).toBeInTheDocument();
     expect(screen.getByRole("table", { name: "Cost breakdown" })).toBeInTheDocument();
   });
@@ -173,8 +173,9 @@ describe("CostPage — basic rendering (m16.10)", () => {
 
     renderPage();
 
-    const degraded = await screen.findByTestId("cost-degraded");
-    expect(degraded).toHaveTextContent(/temporarily unavailable/i);
+    await waitFor(() =>
+      expect(screen.getByTestId("cost-degraded")).toHaveTextContent(/temporarily unavailable/i),
+    );
     expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
     // NOT the true-empty "no cost data" table.
     expect(screen.queryByTestId("cost-breakdown-table")).toBeNull();
@@ -192,15 +193,18 @@ describe("CostPage — basic rendering (m16.10)", () => {
 
     renderPage();
 
-    const card = await screen.findByTestId("cost-summary-card");
-    expect(card).toBeInTheDocument();
-    // Total cost is displayed (formatUSD: $3.250)
-    expect(card.textContent).toContain("$3.250");
-    // Total tokens are shown in compact form — exact format is locale-dependent;
-    // assert the card contains a non-zero token display rather than hardcoding "120K".
-    expect(card.textContent).toMatch(/\d/); // has numeric content
-    // The "Total tokens" label must appear
-    expect(card.textContent).toContain("Total tokens");
+    // Re-query inside waitFor: the page settles several fetches (tenants/breakdown/forecast), and a
+    // handle captured before the last one lands is a DETACHED node by assertion time (m52.G8).
+    await waitFor(() => {
+      const card = screen.getByTestId("cost-summary-card");
+      // Total cost is displayed (formatUSD: $3.250)
+      expect(card.textContent).toContain("$3.250");
+      // Total tokens are shown in compact form — exact format is locale-dependent;
+      // assert the card contains a non-zero token display rather than hardcoding "120K".
+      expect(card.textContent).toMatch(/\d/); // has numeric content
+      // The "Total tokens" label must appear
+      expect(card.textContent).toContain("Total tokens");
+    });
   });
 
   it("breakdown table renders per-agent rows with cost, tokens, runCount", async () => {
@@ -219,7 +223,7 @@ describe("CostPage — basic rendering (m16.10)", () => {
     renderPage();
 
     // Both agent rows appear
-    expect(await screen.findByText("prod/billing-agent")).toBeInTheDocument();
+    await screen.findByText("prod/billing-agent");
     expect(screen.getByText("staging/support-agent")).toBeInTheDocument();
 
     // cost / tokens / runCount values
@@ -242,9 +246,7 @@ describe("CostPage — basic rendering (m16.10)", () => {
 
     renderPage();
 
-    expect(
-      await screen.findByTestId("cost-row-prod-billing-agent"),
-    ).toBeInTheDocument();
+    await screen.findByTestId("cost-row-prod-billing-agent");
   });
 });
 
@@ -266,7 +268,7 @@ describe("CostPage — (untagged) bucket (m16.10)", () => {
     renderPage();
 
     // The (untagged) cell text
-    expect(await screen.findByText("(untagged)")).toBeInTheDocument();
+    await screen.findByText("(untagged)");
   });
 
   it("(untagged) row does NOT navigate (click is a no-op)", async () => {
@@ -283,9 +285,8 @@ describe("CostPage — (untagged) bucket (m16.10)", () => {
 
     renderPage();
 
-    const cell = await screen.findByText("(untagged)");
-    const row = cell.closest("tr")!;
-    fireEvent.click(row);
+    await screen.findByText("(untagged)");
+    fireEvent.click(screen.getByText("(untagged)").closest("tr")!);
 
     // The agent-detail stub should NOT appear — (untagged) has no agent page.
     expect(screen.queryByTestId("agent-detail-stub")).toBeNull();
@@ -305,9 +306,8 @@ describe("CostPage — (untagged) bucket (m16.10)", () => {
 
     renderPage();
 
-    const cell = await screen.findByText("prod/billing-agent");
-    const row = cell.closest("tr")!;
-    fireEvent.click(row);
+    await screen.findByText("prod/billing-agent");
+    fireEvent.click(screen.getByText("prod/billing-agent").closest("tr")!);
 
     await waitFor(() =>
       expect(screen.getByTestId("agent-detail-stub")).toBeInTheDocument(),
@@ -362,7 +362,7 @@ describe("CostPage — cursor pagination (m16.10)", () => {
 
     renderPage();
 
-    expect(await screen.findByText("prod/page-zero-agent")).toBeInTheDocument();
+    await screen.findByText("prod/page-zero-agent");
 
     const next = screen.getByRole("button", { name: /Next page/ });
     const prev = screen.getByRole("button", { name: /Previous page/ });
@@ -370,7 +370,7 @@ describe("CostPage — cursor pagination (m16.10)", () => {
     expect(prev).toBeDisabled();
 
     fireEvent.click(next);
-    expect(await screen.findByText("prod/page-one-agent")).toBeInTheDocument();
+    await screen.findByText("prod/page-one-agent");
 
     // The second fetch should include cursor=cursor1
     expect(captured.some((u) => u.includes("cursor=cursor1"))).toBe(true);
@@ -381,7 +381,7 @@ describe("CostPage — cursor pagination (m16.10)", () => {
 
     // Prev walks back to page 0
     fireEvent.click(screen.getByRole("button", { name: /Previous page/ }));
-    expect(await screen.findByText("prod/page-zero-agent")).toBeInTheDocument();
+    await screen.findByText("prod/page-zero-agent");
   });
 
   it("hasNext is determined by nextCursor (not row count)", async () => {
@@ -500,10 +500,12 @@ describe("CostPage — tenant picker (m86, ADR 0077)", () => {
 
     renderPage(""); // no ?tenant= → default-to-first
 
-    const picker = (await screen.findByTestId("cost-tenant-picker")) as HTMLSelectElement;
+    await screen.findByTestId("cost-tenant-picker");
     // Both tenants appear as options.
-    const optionValues = Array.from(picker.options).map((o) => o.value);
-    expect(optionValues).toEqual(["acme", "globex"]);
+    await waitFor(() => {
+      const picker = screen.getByTestId("cost-tenant-picker") as HTMLSelectElement;
+      expect(Array.from(picker.options).map((o) => o.value)).toEqual(["acme", "globex"]);
+    });
   });
 
   it("defaults to the FIRST tenant when ?tenant= is absent and tenants exist", async () => {
@@ -521,8 +523,9 @@ describe("CostPage — tenant picker (m86, ADR 0077)", () => {
       ).toBe(true),
     );
     // The picker reflects the chosen tenant, not a dead-end empty state.
-    const picker = (await screen.findByTestId("cost-tenant-picker")) as HTMLSelectElement;
-    expect(picker.value).toBe("acme");
+    await waitFor(() =>
+      expect((screen.getByTestId("cost-tenant-picker") as HTMLSelectElement).value).toBe("acme"),
+    );
     expect(screen.queryByTestId("cost-no-tenant")).toBeNull();
   });
 
@@ -534,18 +537,22 @@ describe("CostPage — tenant picker (m86, ADR 0077)", () => {
 
     renderPage("acme"); // start on acme
 
-    const picker = (await screen.findByTestId("cost-tenant-picker")) as HTMLSelectElement;
-    await waitFor(() => expect(picker.value).toBe("acme"));
+    await waitFor(() =>
+      expect((screen.getByTestId("cost-tenant-picker") as HTMLSelectElement).value).toBe("acme"),
+    );
 
-    // Switch to globex → the breakdown re-fetches scoped to globex.
-    fireEvent.change(picker, { target: { value: "globex" } });
+    // Switch to globex → the breakdown re-fetches scoped to globex. Re-query the picker at click
+    // time: a handle captured earlier may have been replaced by a re-render (m52.G8).
+    fireEvent.change(screen.getByTestId("cost-tenant-picker"), { target: { value: "globex" } });
 
     await waitFor(() =>
       expect(
         captured.some((u) => u.includes("/api/cost/breakdown") && u.includes("tenant=globex")),
       ).toBe(true),
     );
-    expect(picker.value).toBe("globex");
+    await waitFor(() =>
+      expect((screen.getByTestId("cost-tenant-picker") as HTMLSelectElement).value).toBe("globex"),
+    );
   });
 });
 
@@ -617,14 +624,15 @@ describe("CostPage — forecast card (M70 ADR 0063 D3)", () => {
 
     renderPageWithTenant("acme");
 
-    const card = await screen.findByTestId("cost-forecast-card");
-    expect(card).toBeInTheDocument();
-    // Month-to-date amount is displayed.
-    expect(card.textContent).toContain("$42.500");
-    // Projected month-end amount is displayed.
-    expect(card.textContent).toContain("$155.000");
-    // Card header says "Month forecast"
-    expect(card.textContent).toContain("Month forecast");
+    await waitFor(() => {
+      const card = screen.getByTestId("cost-forecast-card");
+      // Month-to-date amount is displayed.
+      expect(card.textContent).toContain("$42.500");
+      // Projected month-end amount is displayed.
+      expect(card.textContent).toContain("$155.000");
+      // Card header says "Month forecast"
+      expect(card.textContent).toContain("Month forecast");
+    });
   });
 
   it("renders the breakdown but NOT the forecast card when there are zero tenants (M99 B1)", async () => {
@@ -659,10 +667,11 @@ describe("CostPage — forecast card (M70 ADR 0063 D3)", () => {
 
     renderPageWithTenant("acme");
 
-    const link = await screen.findByTestId("cost-chargeback-download");
-    expect(link).toBeInTheDocument();
-    expect(link.getAttribute("href")).toContain("/api/cost/chargeback");
-    expect(link.getAttribute("href")).toContain("tenant=acme");
-    expect(link.getAttribute("href")).toContain("format=csv");
+    await waitFor(() => {
+      const href = screen.getByTestId("cost-chargeback-download").getAttribute("href");
+      expect(href).toContain("/api/cost/chargeback");
+      expect(href).toContain("tenant=acme");
+      expect(href).toContain("format=csv");
+    });
   });
 });
