@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/onlinescore"
-	"github.com/ctxmesh/agentry/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
+	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 func makeRun(id string, status run.Status, durationMs int64) *run.Run {

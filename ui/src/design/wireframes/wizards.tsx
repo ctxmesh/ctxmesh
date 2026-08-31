@@ -367,7 +367,7 @@ export function CreateAgentDescribeWireframe() {
                 Advanced — view the generated agent.yaml / CRDs
               </button>
               {advanced && (
-                <pre className="overflow-x-auto rounded-md bg-surface-3 p-4 text-xs">{`apiVersion: agentry.dev/v1
+                <pre className="overflow-x-auto rounded-md bg-surface-3 p-4 text-xs">{`apiVersion: ctxmesh.dev/v1
 kind: AgentDeployment
 metadata:
   name: support-agent

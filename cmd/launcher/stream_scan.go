@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"unicode/utf8"
 
-	"github.com/ctxmesh/agentry/internal/telemetry"
+	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 )
 
 // ── K2 (ADR 0086): streaming hold-release guardrail scanner ─────────────────────

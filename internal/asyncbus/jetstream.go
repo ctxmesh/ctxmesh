@@ -40,10 +40,10 @@ const (
 	// per-registry SUBJECTS (rather than a stream per registry) keeps provisioning static: adding a
 	// registry adds a subject, not a broker object, so nothing has to reconcile stream lifecycle against
 	// AgentRegistry lifecycle. Consumers still bind per-registry via a subject filter.
-	streamName = "AGENTRY_A2A"
+	streamName = "CTXMESH_A2A"
 	// subjectPrefix namespaces our subjects inside a NATS server an operator may share with other
-	// workloads. The wildcard AGENTRY_A2A.> is what the stream captures.
-	subjectPrefix = "agentry.a2a"
+	// workloads. The wildcard CTXMESH_A2A.> is what the stream captures.
+	subjectPrefix = "ctxmesh.a2a"
 
 	// publishTimeout bounds a publish. It must be a real bound: a publish that hangs would stall the A2A
 	// hop that triggered it, and the caller has its own deadline to honour.
@@ -138,7 +138,7 @@ func NewJetStream(ctx context.Context, opts JetStreamOptions) (*JetStreamBus, er
 		return nil, fmt.Errorf("asyncbus: a NATS URL is required")
 	}
 	connOpts := []nats.Option{
-		nats.Name("agentry-asyncbus"),
+		nats.Name("ctxmesh-asyncbus"),
 		// Reconnect indefinitely: a broker restart must not permanently detach a control-plane consumer.
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2 * time.Second),

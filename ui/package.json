@@ -1,9 +1,9 @@
 {
-  "name": "agentry-ui",
+  "name": "ctxmesh-ui",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "agentry operator UI — Vite React SPA (static assets, no Node runtime). Served by the Go BFF.",
+  "description": "ctxmesh operator UI — Vite React SPA (static assets, no Node runtime). Served by the Go BFF.",
   "packageManager": "pnpm@9.15.0",
   "engines": {
     "node": ">=22 <23"

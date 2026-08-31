@@ -21,7 +21,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/ctxmesh/agentry/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // Sender-constrained run capabilities at the internal edges (M142.5, ADR 0124).

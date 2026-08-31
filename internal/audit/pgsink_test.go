@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
 )
 
 // mutation builds a controller AuditEntry with a fixed object identity ("a"/"ns1"); only the verb

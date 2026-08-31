@@ -26,8 +26,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/controlplane"
-	"github.com/ctxmesh/agentry/internal/controlplane/namespacetenant"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
 )
 
 // eachStore runs one behavioural contract against the in-memory twin AND the Postgres store (the
@@ -226,7 +226,7 @@ func TestStore_EndUserIdentity_SetAndResolve(t *testing.T) {
 
 		// Configure team-a → both of its namespaces resolve it; team-b (no config) stays fail-closed.
 		want := namespacetenant.EndUserIdentity{
-			Enabled: true, Issuer: "https://dex-eu.example.com", ClientID: "agentry-enduser",
+			Enabled: true, Issuer: "https://dex-eu.example.com", ClientID: "ctxmesh-enduser",
 			Scopes: []string{"email", "offline_access"}, AllowedHosts: []string{"a.ns-a1.example.com"},
 		}
 		require.NoError(t, s.SetEndUserIdentity(ctx, "team-a", want))

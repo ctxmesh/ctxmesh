@@ -194,7 +194,7 @@ export class ModelClient {
   private headers(): Record<string, string> {
     // The gateway is OpenAI-compatible and expects a bearer token; the launcher
     // injects the master key in-pod. When absent (offline/mock) we send a placeholder.
-    const key = this.config.modelGatewayKey || "sk-agentry";
+    const key = this.config.modelGatewayKey || "sk-ctxmesh";
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       Authorization: `Bearer ${key}`,

@@ -29,7 +29,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver
 
-	"github.com/ctxmesh/agentry/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 // fenceStores returns the mem twin plus (when RUN_POSTGRES_TEST_DSN is set) the durable Postgres

@@ -1,0 +1,100 @@
+# Platform-persona ClusterRole: ctxmesh-operator (M11.4, PRD §20).
+#
+# Full management of every agent.ctxmesh.ai CRD — all verbs on all agent
+# resources plus their status subresources. Intended for platform operators who
+# own the agent control plane. Bind to users/groups/ServiceAccounts via a
+# (Cluster)RoleBinding created by the cluster admin.
+#
+# This role is NOT used by the ctxmesh controller itself (that is
+# manager-role in role.yaml); it is a built-in persona for humans/automation
+# acting on the CRDs through the Kubernetes API.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/managed-by: kustomize
+    rbac.ctxmesh.ai/persona: operator
+  name: operator
+rules:
+- apiGroups:
+  - agents.ctxmesh.ai
+  resources:
+  - agentdeployments
+  - agentversions
+  - modelroutes
+  - secretbindings
+  - mcptoolbindings
+  # toolregistries is retired as a CRD (ADR 0044) but stays in this persona RBAC:
+  # the BFF gates every store read/write with a SelfSubjectAccessReview on this
+  # resource, so the persona's RBAC on toolregistries IS the authorization policy.
+  # Do NOT remove — dropping it would fail-closed every ToolRegistry API call.
+  - toolregistries
+  # promptversions is likewise store-backed (Postgres-authoritative, ADR 0044):
+  # the BFF authorizes every PromptVersion store read/write with a caller-scoped
+  # SelfSubjectAccessReview on this resource, so the persona's RBAC on
+  # promptversions IS the authz policy. Omitting it fail-closes every PromptVersion
+  # API call — the same contract as toolregistries above.
+  - promptversions
+  - agentregistries
+  - agentteams
+  - workflows
+  - agentscalingpolicies
+  - evalsuites
+  - knowledgebases # M116: console Knowledge Bases surface + caller-scoped list (was 403 for all roles)
+  - guardrailpolicies
+  # alertpolicies is an agent-scoped policy CRD (M70, ADR 0063 D2) — the structural analog of
+  # guardrailpolicies, so it mirrors it across the personas. It ALSO backs the fired-alert feed:
+  # GET /api/alerts gates on a caller-scoped SSAR on `alertpolicies` (resourceAlerts). Omitting it
+  # fail-closes /api/alerts for the persona — the operator was locked out of the Alerts surface (Q10).
+  - alertpolicies
+  - tenants
+  # auditlogs is a store-backed VIRTUAL resource (ADR 0056, M63): GET /api/audit gates on a
+  # caller-scoped SelfSubjectAccessReview on this name, so this grant IS the audit-read policy.
+  # Operator ONLY — the audit trail spans users/namespaces (who connected/consented/invoked what),
+  # so developer/viewer personas deliberately do NOT get it. Omitting it fail-closes /api/audit.
+  - auditlogs
+  # costrollups is a store-backed VIRTUAL resource (M70, ADR 0063 D1): GET /api/cost/forecast +
+  # /api/cost/chargeback gate on a caller-scoped SSAR on this name — this grant IS the cost-read
+  # policy for the durable per-tenant spend ledger. Operator ONLY (per-tenant spend/billing spans
+  # tenants) — like auditlogs above, developer/viewer deliberately do NOT get it (confirmed the
+  # intended posture by live-verify 2026-08-16: dev/viewer 403 on Cost is by design, m52.Q4). The
+  # older Langfuse-backed /api/cost + /api/cost/breakdown are now ALSO gated on this same resource
+  # (handleCost/handleCostBreakdown), so the whole cost-view family shares one costrollups posture.
+  - costrollups
+  verbs:
+  - '*'
+- apiGroups:
+  - agents.ctxmesh.ai
+  resources:
+  - agentdeployments/status
+  - agentversions/status
+  - modelroutes/status
+  - secretbindings/status
+  - mcptoolbindings/status
+  - agentregistries/status
+  - agentteams/status
+  - workflows/status
+  - agentscalingpolicies/status
+  - evalsuites/status
+  - knowledgebases/status
+  - guardrailpolicies/status
+  - alertpolicies/status
+  verbs:
+  - get
+  - list
+  - watch
+# MCP-server registration (POST /api/mcpservers) creates the tool's egress NetworkPolicy
+# with the CALLER's client (ADR 0011), so a builder self-serves it in their namespace.
+# (Caller-created NetworkPolicy is a design smell — m52.G9 tracks moving it controller-
+# side; until then the builder needs this. An auth-less MCP needs no Secret, so `secrets`
+# create is deliberately NOT granted here — least privilege.)
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - create
+  - get
+  - list
+  - delete

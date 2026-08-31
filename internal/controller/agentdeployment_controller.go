@@ -46,17 +46,17 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
-	"github.com/ctxmesh/agentry/internal/controlplane/agentcapability"
-	"github.com/ctxmesh/agentry/internal/controlplane/enduseragent"
-	"github.com/ctxmesh/agentry/internal/controlplane/killscope"
-	"github.com/ctxmesh/agentry/internal/controlplane/spawnbudget"
-	"github.com/ctxmesh/agentry/internal/eval"
-	"github.com/ctxmesh/agentry/internal/gateway"
-	"github.com/ctxmesh/agentry/internal/prompt"
-	"github.com/ctxmesh/agentry/internal/telemetry"
-	"github.com/ctxmesh/agentry/internal/toolmanifest"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/enduseragent"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/killscope"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/spawnbudget"
+	"github.com/ctxmesh/ctxmesh/internal/eval"
+	"github.com/ctxmesh/ctxmesh/internal/gateway"
+	"github.com/ctxmesh/ctxmesh/internal/prompt"
+	"github.com/ctxmesh/ctxmesh/internal/telemetry"
+	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
 
 // conditionReady is the condition type name mirrored from the Knative Service
@@ -103,7 +103,7 @@ const (
 	// (config/objectstore/, wired into config/default). It mirrors the S3 API
 	// port; the launcher connects to it plain-HTTP in-cluster (dev posture, like
 	// the dev Valkey). One store serves every registry member.
-	objectStoreAddr = "agentry-objectstore.agentry.svc:9000"
+	objectStoreAddr = "ctxmesh-objectstore.ctxmesh.svc:9000"
 
 	// objectStoreDevAccessKey / objectStoreDevSecretKey are the DETERMINISTIC
 	// DEV-ONLY credentials for the dev MinIO — fixed values committed as such
@@ -111,8 +111,8 @@ const (
 	// never rotated, only ever meaningful against the in-cluster dev MinIO). They
 	// MUST match the values the config/objectstore/ MinIO Deployment is seeded
 	// with. Injected as static env so the launcher authenticates to the dev store.
-	objectStoreDevAccessKey = "agentry-dev"
-	objectStoreDevSecretKey = "agentry-dev-secret" //nolint:gosec // dev-only fixed value, not a real credential (see comment).
+	objectStoreDevAccessKey = "ctxmesh-dev"
+	objectStoreDevSecretKey = "ctxmesh-dev-secret" //nolint:gosec // dev-only fixed value, not a real credential (see comment).
 
 	// Env-var NAMES for the durable object-store wiring — the launcher (blob offload, M78 record
 	// fixtures) and the record-capable egress sidecar (M78 tool fixtures) read them. Named
@@ -150,7 +150,7 @@ const (
 	// controller repoints MODEL_GATEWAY_URL at the launcher's local budget proxy
 	// (budgetProxyURL) and passes this address through as GATEWAY_UPSTREAM_URL so
 	// the proxy still forwards to LiteLLM after enforcing the cost cap.
-	litellmGatewayURL = "http://agentry-gateway.agentry.svc:4000"
+	litellmGatewayURL = "http://ctxmesh-gateway.ctxmesh.svc:4000"
 
 	// budgetProxyURL is where MODEL_GATEWAY_URL points when a budget is set: the
 	// launcher's OWN outbound gateway proxy (:2996, cmd/launcher/gateway.go). The
@@ -2394,7 +2394,7 @@ func (r *AgentDeploymentReconciler) reconcileCollector(
 	// Secret lookup: the agent's own namespace acts as a per-namespace
 	// override; the platform namespace (where dev-up seeds the dev keys) is
 	// the fallback default. Without the fallback, agents outside
-	// agentry silently ran debug-only and nothing ever reached
+	// ctxmesh silently ran debug-only and nothing ever reached
 	// Langfuse (caught 2026-07-08 by querying the Langfuse API at M3 close).
 	var sec corev1.Secret
 	// UNCACHED read (see APIReader): a cached read is racy around informer resync and can

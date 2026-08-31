@@ -24,11 +24,11 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	"github.com/ctxmesh/agentry/internal/controlplane/authz"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
-	"github.com/ctxmesh/agentry/internal/controlplane/killscope"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/killscope"
 )
 
 // The kill-switch control surface (M146.5, ADR 0126 §5).
@@ -39,14 +39,14 @@ import (
 // is the same caller-scoped SelfSubjectAccessReview every other control-plane write uses (ADR 0011: the
 // BFF's own service account still holds `rules: []`).
 //
-// The shipped ClusterRole `agentry-killswitch` carries this verb and is bound to NOBODY by default. An
+// The shipped ClusterRole `ctxmesh-killswitch` carries this verb and is bound to NOBODY by default. An
 // operator binds it deliberately. That is the point: a control that can halt the fleet should require an
 // explicit, auditable grant, not arrive implied by "operator".
 
 // verbKill / subresourceKill gate every kill-switch mutation.
 //
 // The permission is a custom verb on the `agentdeployments/kill` SUBRESOURCE, not on agentdeployments
-// itself. That distinction is load-bearing and was found by the acceptance bar: agentry-operator holds
+// itself. That distinction is load-bearing and was found by the acceptance bar: ctxmesh-operator holds
 // `verbs: ["*"]` on agentdeployments, so a bare custom verb there would have been implied by operator —
 // silently defeating the whole point of a separately-granted control. An RBAC rule naming a resource does
 // NOT cover its subresources, so `agentdeployments/kill` stays outside that wildcard and existing roles

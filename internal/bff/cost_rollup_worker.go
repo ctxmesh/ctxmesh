@@ -22,7 +22,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/costrollup"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/costrollup"
 )
 
 // Cost-rollup worker (ADR 0063 D1, M70). A PERIODIC off-request reconciler goroutine — modelled on

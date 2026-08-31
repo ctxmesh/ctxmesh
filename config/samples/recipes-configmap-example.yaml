@@ -1,7 +1,7 @@
 # Example: operator recipe overlay (S1).
 #
 # A cluster operator adds custom starter recipes to the console gallery by creating a ConfigMap named
-# `agentry-recipes` in the BFF's namespace. The BFF mounts it read-only at /etc/agentry/recipes
+# `ctxmesh-recipes` in the BFF's namespace. The BFF mounts it read-only at /etc/ctxmesh/recipes
 # (optional:true — absent ⇒ the embedded gallery serves, fail-closed) and hot-reloads it, merging the
 # operator recipes OVER the Go-embedded defaults in GET /api/recipes — no console-image redeploy.
 #
@@ -10,15 +10,15 @@
 #   - Each recipe's `spec` is validated (expand.Expand) at load; a bad recipe is skipped with a log,
 #     never breaking the gallery. `name` + `title` are required.
 #   - This ConfigMap is NOT kustomize-managed — create it out-of-band (kubectl apply / GitOps). The
-#     literal name `agentry-recipes` is what the BFF volume references.
+#     literal name `ctxmesh-recipes` is what the BFF volume references.
 #
 # Apply into the BFF namespace, e.g.:
-#   kubectl -n agentry apply -f recipes-configmap-example.yaml
+#   kubectl -n ctxmesh apply -f recipes-configmap-example.yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: agentry-recipes
-  namespace: agentry
+  name: ctxmesh-recipes
+  namespace: ctxmesh
 data:
   acme-support.yaml: |
     name: acme-support

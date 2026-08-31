@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"strings"
 
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
-	"github.com/ctxmesh/agentry/internal/telemetry"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 )
 
 // The effective streaming mode a guarded agent runs under (M139/K10, ADR 0086). These strings are the

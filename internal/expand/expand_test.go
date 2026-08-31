@@ -29,8 +29,8 @@ import (
 // cliGoldenDir is the CLI expand command's golden-file directory. The reusable
 // package is the mapping BEHIND that command, so it MUST reproduce those exact
 // bytes — this is the equivalence-with-the-CLI proof: form → agent.yaml → this
-// package produces the identical manifest the CLI `agentry expand` prints.
-const cliGoldenDir = "../../cmd/agentry/testdata"
+// package produces the identical manifest the CLI `ctxmesh expand` prints.
+const cliGoldenDir = "../../cmd/ctxmesh/testdata"
 
 // TestExpandEquivalentToCLIGolden drives every CLI expand fixture through the
 // public Expand() and asserts byte-equality with the CLI golden output. If the

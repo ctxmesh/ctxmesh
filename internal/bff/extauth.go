@@ -20,7 +20,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/ctxmesh/agentry/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // registerExtAuthRoutes wires the Envoy ext-auth endpoint (ADR 0039) — only when the caller-client

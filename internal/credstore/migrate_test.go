@@ -27,8 +27,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/ctxmesh/agentry/internal/credpostgres"
-	"github.com/ctxmesh/agentry/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/credpostgres"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 func legacyGrantSecret(credNS, ns, server, userHash, token string) client.Object {

@@ -27,7 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 )
 
 // evalSuiteKind is the CRD kind name for an EvalSuite (used in error messages
@@ -521,7 +521,7 @@ func (s *Server) handleCreateEvalSuite(w http.ResponseWriter, r *http.Request) {
 // --- PUT /api/evalsuites/{ns}/{name} ----------------------------------------
 
 // handleUpdateEvalSuite serves PUT /api/evalsuites/{ns}/{name} — edits an
-// EvalSuite via SSA under the "agentry-console" field-manager (ForceOwnership).
+// EvalSuite via SSA under the "ctxmesh-console" field-manager (ForceOwnership).
 // The controller's status conditions are NEVER clobbered (SSA spec-only apply).
 //
 // Rename guard: spec name in the body ≠ URL {name} → 400.

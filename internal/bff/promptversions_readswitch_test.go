@@ -10,10 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	"github.com/ctxmesh/agentry/internal/controlplane/authz"
-	"github.com/ctxmesh/agentry/internal/controlplane/promptversion"
-	"github.com/ctxmesh/agentry/internal/prompt"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
+	"github.com/ctxmesh/ctxmesh/internal/prompt"
 )
 
 func pvReadSwitchServer(t *testing.T, auth authz.Authorizer, resolver prompt.Resolver) (*Server, promptversion.Store) {

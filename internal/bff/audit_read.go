@@ -21,8 +21,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/auditlog"
-	"github.com/ctxmesh/agentry/internal/controlplane/authz"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 )
 
 // AuditEventSummary is one audit row on the wire (GET /api/audit). It NEVER carries secret

@@ -38,7 +38,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 
-	"github.com/ctxmesh/agentry/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // newTestMemoryServer spins up a miniredis and returns an httptest server

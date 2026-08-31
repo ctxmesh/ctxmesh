@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ctxmesh/agentry/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 // The platform-side structured-output re-ask (m143.6, m52.J4, ADR 0058's deferred recovery tier).

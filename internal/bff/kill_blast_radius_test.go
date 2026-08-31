@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/killscope"
-	"github.com/ctxmesh/agentry/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/killscope"
+	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 // THE M146 BLAST-RADIUS PROOF (the milestone's 🧪 bar).

@@ -1,6 +1,6 @@
 # Token-service Service — the central credential plane the injecting egress sidecars
 # delegate to over mTLS (ADR 0030 §1). Sidecars reach it via TOKEN_SERVICE_URL
-# (https://agentry-token-service.<ns>.svc:8443), injected by the controller.
+# (https://ctxmesh-token-service.<ns>.svc:8443), injected by the controller.
 apiVersion: v1
 kind: Service
 metadata:
@@ -8,12 +8,12 @@ metadata:
   namespace: system
   labels:
     control-plane: token-service
-    app.kubernetes.io/name: agentry
+    app.kubernetes.io/name: ctxmesh
     app.kubernetes.io/managed-by: kustomize
 spec:
   selector:
     control-plane: token-service
-    app.kubernetes.io/name: agentry
+    app.kubernetes.io/name: ctxmesh
   ports:
     - name: mtls
       port: 8443

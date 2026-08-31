@@ -1,4 +1,4 @@
-# ctxmesh — agentry Python SDK
+# ctxmesh — ctxmesh Python SDK
 
 Optional, typed sugar over the launcher's language-agnostic localhost platform
 plane (ADR 0002). Bundled into `base-python`, importable as `ctxmesh`. Never a

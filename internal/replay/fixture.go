@@ -243,7 +243,7 @@ func UnmarshalFixture(data []byte) (*Fixture, error) {
 		return nil, fmt.Errorf("replay: fixture has no schemaVersion (malformed or pre-versioning)")
 	}
 	if f.SchemaVersion > SchemaVersion {
-		return nil, fmt.Errorf("replay: fixture schemaVersion %d is newer than supported version %d — upgrade agentry to replay it", f.SchemaVersion, SchemaVersion)
+		return nil, fmt.Errorf("replay: fixture schemaVersion %d is newer than supported version %d — upgrade ctxmesh to replay it", f.SchemaVersion, SchemaVersion)
 	}
 	return &f, nil
 }

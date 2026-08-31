@@ -1,5 +1,5 @@
 # ClusterIP Service for the MinIO Object Store. A registry member's launcher
-# reaches it at agentry-objectstore.agentry.svc:9000 (the S3 API
+# reaches it at ctxmesh-objectstore.ctxmesh.svc:9000 (the S3 API
 # port) — the OBJECT_STORE_ADDR the AgentDeployment controller injects. The 9001
 # console port is exposed for dev convenience only; the launcher never uses it.
 apiVersion: v1
@@ -9,13 +9,13 @@ metadata:
   namespace: system
   labels:
     control-plane: objectstore
-    app.kubernetes.io/name: agentry
+    app.kubernetes.io/name: ctxmesh
     app.kubernetes.io/managed-by: kustomize
 spec:
   type: ClusterIP
   selector:
     control-plane: objectstore
-    app.kubernetes.io/name: agentry
+    app.kubernetes.io/name: ctxmesh
   ports:
     - name: s3
       port: 9000

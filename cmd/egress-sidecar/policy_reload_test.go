@@ -32,7 +32,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/egress"
+	"github.com/ctxmesh/ctxmesh/internal/egress"
 )
 
 // denyPolicy is a small tool-policy JSON (default=deny, one allow override) — the SAME shape the

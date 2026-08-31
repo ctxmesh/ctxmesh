@@ -19,11 +19,11 @@ offline** (no paid API, no provisioning) so the whole M140 bar runs deterministi
 
 ```sh
 make docker-build-ocr-service                          # → dev.local/ocr-service:m140
-kind load docker-image dev.local/ocr-service:m140 --name agentry-dev
-kubectl apply -f examples/ocr-service/deploy.yaml      # ns: agentry
+kind load docker-image dev.local/ocr-service:m140 --name ctxmesh-dev
+kubectl apply -f examples/ocr-service/deploy.yaml      # ns: ctxmesh
 ```
 
-Then activate the opt-in OCR fallback on the run-worker: `INGEST_OCR_URL=http://ocr-service.agentry.svc:8080`.
+Then activate the opt-in OCR fallback on the run-worker: `INGEST_OCR_URL=http://ocr-service.ctxmesh.svc:8080`.
 
 > OCR runs **only** when a PDF's text layer is insufficient (the existing `MinSufficientChars` guard) — it's
 > expensive, so it never runs on a born-digital PDF. If OCR also yields insufficient text (a truly blank

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package main implements the agentry launcher — PID 1 for agent containers.
+// Package main implements the ctxmesh launcher — PID 1 for agent containers.
 //
 // M3 evolution: the launcher no longer exec-replaces the user process. It
 // spawns the user process as a child (os/exec), stays alive, and operates as a

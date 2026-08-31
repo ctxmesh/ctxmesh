@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 )
 
 // secretBindingKind is the CRD kind name for a SecretBinding (used in error
@@ -427,7 +427,7 @@ func (s *Server) handleCreateSecretBinding(w http.ResponseWriter, r *http.Reques
 // --- PUT /api/secretbindings/{ns}/{name} -------------------------------------
 
 // handleUpdateSecretBinding serves PUT /api/secretbindings/{ns}/{name} — edits
-// a SecretBinding via SSA under the "agentry-console" field-manager
+// a SecretBinding via SSA under the "ctxmesh-console" field-manager
 // (ForceOwnership), so the controller's status and derived fields are never
 // clobbered.
 //

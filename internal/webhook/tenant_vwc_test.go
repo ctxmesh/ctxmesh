@@ -27,7 +27,7 @@ import (
 )
 
 func TestBuildTenantLabelVWC_Guards(t *testing.T) {
-	vwc := buildTenantLabelVWC("agentry", "webhook-service", []byte("CA"))
+	vwc := buildTenantLabelVWC("ctxmesh", "webhook-service", []byte("CA"))
 	require.Len(t, vwc.Webhooks, 1)
 	w := vwc.Webhooks[0]
 
@@ -38,7 +38,7 @@ func TestBuildTenantLabelVWC_Guards(t *testing.T) {
 	// clientConfig → the webhook Service in the install namespace, caBundle set.
 	require.NotNil(t, w.ClientConfig.Service)
 	assert.Equal(t, "webhook-service", w.ClientConfig.Service.Name)
-	assert.Equal(t, "agentry", w.ClientConfig.Service.Namespace)
+	assert.Equal(t, "ctxmesh", w.ClientConfig.Service.Namespace)
 	assert.Equal(t, []byte("CA"), w.ClientConfig.CABundle)
 
 	// Blast-radius guard #1 — immutable-name exemption INCLUDING the install namespace.
@@ -49,7 +49,7 @@ func TestBuildTenantLabelVWC_Guards(t *testing.T) {
 		"exemption must key on the API-server-managed IMMUTABLE name label, never a spoofable custom label")
 	assert.Equal(t, metav1.LabelSelectorOpNotIn, exempt.Operator)
 	assert.Contains(t, exempt.Values, "kube-system")
-	assert.Contains(t, exempt.Values, "agentry", "the install namespace must be exempt (no self-wedge)")
+	assert.Contains(t, exempt.Values, "ctxmesh", "the install namespace must be exempt (no self-wedge)")
 
 	// Blast-radius guard #2 — matchConditions evaluating BOTH object + oldObject.
 	require.Len(t, w.MatchConditions, 1)
@@ -72,5 +72,5 @@ func TestBuildTenantLabelVWC_ExemptionTracksInstallNamespace(t *testing.T) {
 	vwc := buildTenantLabelVWC("acme-ctrl", "webhook-service", nil)
 	exempt := vwc.Webhooks[0].NamespaceSelector.MatchExpressions[0]
 	assert.Contains(t, exempt.Values, "acme-ctrl")
-	assert.NotContains(t, exempt.Values, "agentry")
+	assert.NotContains(t, exempt.Values, "ctxmesh")
 }

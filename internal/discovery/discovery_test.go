@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/agentry/internal/discovery"
+	"github.com/ctxmesh/ctxmesh/internal/discovery"
 )
 
 // bagOfWordsEmbedder is a deterministic stand-in for the offline embedder: each text becomes a vector over

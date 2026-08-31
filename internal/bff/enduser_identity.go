@@ -23,9 +23,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/ctxmesh/agentry/internal/controlplane/namespacetenant"
-	"github.com/ctxmesh/agentry/internal/credresolve"
-	"github.com/ctxmesh/agentry/internal/enduseroidc"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/enduseroidc"
 )
 
 // errEndUserBearerRejected signals that a bearer WAS presented at an end-user-enabled agent origin and

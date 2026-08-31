@@ -22,7 +22,7 @@ import (
 	"net/http"
 	"slices"
 
-	"github.com/ctxmesh/agentry/internal/promql"
+	"github.com/ctxmesh/ctxmesh/internal/promql"
 )
 
 // PrometheusConfig configures the concrete Prometheus adapter. The endpoint

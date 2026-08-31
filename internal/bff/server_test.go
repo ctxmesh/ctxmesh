@@ -33,8 +33,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
-	agentsv1beta1 "github.com/ctxmesh/agentry/api/v1beta1"
+	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -111,14 +111,14 @@ func TestAuthConfigEndpoint(t *testing.T) {
 		Auth:         AllowAll{},
 		OIDCEnabled:  true,
 		OIDCIssuer:   "https://dex.example.com",
-		OIDCClientID: "agentry-console",
+		OIDCClientID: "ctxmesh-console",
 		Log:          logr.Discard(),
 	})
 	rec = httptest.NewRecorder()
 	oidc.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/authconfig", nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.JSONEq(t,
-		`{"oidcEnabled":true,"issuer":"https://dex.example.com","clientId":"agentry-console"}`,
+		`{"oidcEnabled":true,"issuer":"https://dex.example.com","clientId":"ctxmesh-console"}`,
 		rec.Body.String())
 
 	// Half-config (enabled but no issuer): must NOT advertise SSO — never send the SPA

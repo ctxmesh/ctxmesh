@@ -42,7 +42,7 @@ import { BatchSpanProcessor, type SpanProcessor } from "@opentelemetry/sdk-trace
 
 /**
  * The tracer/instrumentation-scope name. Distinct from the launcher's
- * `agentry/launcher` scope so a trace shows which producer emitted a span, while both
+ * `ctxmesh/launcher` scope so a trace shows which producer emitted a span, while both
  * still share the trace id via propagation.
  */
 export const TRACER_NAME = "ctxmesh";

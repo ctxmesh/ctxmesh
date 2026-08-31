@@ -25,11 +25,11 @@ wants a query prefix and would underperform here).
 
 ```sh
 make docker-build-real-embedder                         # → dev.local/real-embedder:m117
-kind load docker-image dev.local/real-embedder:m117 --name agentry-dev
-kubectl apply -f examples/real-embedder/deploy.yaml     # ns: agentry
+kind load docker-image dev.local/real-embedder:m117 --name ctxmesh-dev
+kubectl apply -f examples/real-embedder/deploy.yaml     # ns: ctxmesh
 ```
 
-The model gateway routes its embedding hop at `svc real-embedder.agentry:8080`; the
+The model gateway routes its embedding hop at `svc real-embedder.ctxmesh:8080`; the
 KB's `embeddingRoute` selects that route so ingestion + retrieval use real vectors.
 
 > Scope: this is a **dev/CI** semantic backend (M140 — makes the live semantic-RAG

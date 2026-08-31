@@ -25,7 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 
-	v1alpha1 "github.com/ctxmesh/agentry/api/v1alpha1"
+	v1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 )
 
 // rawJSON is a small helper that marshals v to a *k8sruntime.RawExtension for use in test fixtures.

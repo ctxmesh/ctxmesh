@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ctxmesh/agentry/internal/telemetry"
+	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

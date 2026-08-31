@@ -77,7 +77,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/ctxmesh/agentry/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // refuseRedirect is the CheckRedirect policy for the launcher's identity-relaying outbound clients (audit

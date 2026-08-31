@@ -177,7 +177,7 @@ export function DevModeWireframe() {
   return (
     <div className="space-y-4">
       <Note>
-        `agentry dev --ui` (§31, M18): the same console served locally against
+        `ctxmesh dev --ui` (§31, M18): the same console served locally against
         the Compose loop — a "dev" badge, reduced nav (Agents / Traces / Runs only),
         no cluster. This is how a developer gets define→run→trace on a laptop.
       </Note>

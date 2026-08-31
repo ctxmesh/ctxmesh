@@ -27,10 +27,10 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/ctxmesh/agentry/internal/credpostgres"
-	"github.com/ctxmesh/agentry/internal/credprovider"
-	"github.com/ctxmesh/agentry/internal/credresolve"
-	"github.com/ctxmesh/agentry/test/credconformance"
+	"github.com/ctxmesh/ctxmesh/internal/credpostgres"
+	"github.com/ctxmesh/ctxmesh/internal/credprovider"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/test/credconformance"
 )
 
 var farFuture = time.Now().Add(48 * time.Hour)

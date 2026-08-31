@@ -1,18 +1,18 @@
 # real-reranker — the dev-cluster cross-encoder rerank service (M140.2, ADR 0117). Re-scores
 # retrieval candidates with ms-marco-MiniLM-L-6-v2 behind a Cohere-shape /v1/rerank so the KB
 # retrieval path can promote the semantically-best chunks above the fusion rank. Offline +
-# self-hosted: no external key, no paid API. Apply into the `agentry` namespace.
+# self-hosted: no external key, no paid API. Apply into the `ctxmesh` namespace.
 #
 # Build first: `make docker-build-real-reranker` (tag dev.local/real-reranker:m140), then
-# `kind load docker-image dev.local/real-reranker:m140 --name agentry-dev`.
+# `kind load docker-image dev.local/real-reranker:m140 --name ctxmesh-dev`.
 #
-# Activation: set the token-service's KNOWLEDGE_RERANK_URL=http://real-reranker.agentry.svc:8080
+# Activation: set the token-service's KNOWLEDGE_RERANK_URL=http://real-reranker.ctxmesh.svc:8080
 # and KNOWLEDGE_RERANK=true (the rerank stage is opt-in; off by default).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: real-reranker
-  namespace: agentry
+  namespace: ctxmesh
   labels:
     app: real-reranker
 spec:
@@ -51,7 +51,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: real-reranker
-  namespace: agentry
+  namespace: ctxmesh
 spec:
   selector:
     app: real-reranker
