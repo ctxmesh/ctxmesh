@@ -319,6 +319,17 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	if killNS == "" {
 		killNS = defaultCreateNamespace
 	}
+	// spec.suspend is read STRAIGHT off the resolved deployment here (M146.6). The create edge already
+	// holds the object — it resolved it through the CALLER's client — so this needs no mirror and, more
+	// importantly, cannot lag one: an agent suspended a moment ago refuses immediately rather than
+	// after the controller's next reconcile.
+	if deploy.Spec.Suspend {
+		s.log.Info("kill gate: refusing a run — the agent is suspended (spec.suspend)",
+			"namespace", killNS, "agent", req.Agent)
+		writeError(w, killRefusalStatus,
+			"this agent is suspended (spec.suspend is set on its AgentDeployment) — new runs are refused")
+		return
+	}
 	if s.refuseIfKilled(w, r.Context(), killNS, req.Agent) {
 		return
 	}

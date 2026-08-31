@@ -338,6 +338,21 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/name: agentry
+  name: agentry-killswitch
+rules:
+- apiGroups:
+  - agents.ctxmesh.ai
+  resources:
+  - agentdeployments
+  verbs:
+  - kill
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
   name: agentry-manager-role
 rules:
 - apiGroups:

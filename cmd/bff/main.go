@@ -58,6 +58,7 @@ import (
 	"github.com/ctxmesh/agentry/internal/controlplane/costrollup"
 	"github.com/ctxmesh/agentry/internal/controlplane/dataset"
 	"github.com/ctxmesh/agentry/internal/controlplane/enduseragent"
+	"github.com/ctxmesh/agentry/internal/controlplane/killscope"
 	"github.com/ctxmesh/agentry/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agentry/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/agentry/internal/controlplane/onlinescore"
@@ -499,8 +500,12 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		// Sender-constrained run capabilities (M142.5, ADR 0124). The bind store rides the shared
 		// state-layer Valkey so "already bound" is the same answer on every replica; without an addr
 		// there is no exchange edge, and capabilities stay bearer.
-		RuncapBind:               runcapBindStore(log),
-		SpawnBudgets:             spawnbudget.NewPostgresStore(cpDB),
+		RuncapBind:   runcapBindStore(log),
+		SpawnBudgets: spawnbudget.NewPostgresStore(cpDB),
+		// The scoped kill switch (M146, ADR 0126). This is the FAIL-CLOSED half: the worker reads it
+		// before claiming and the run-create edge reads it before accepting, and neither consults the
+		// state layer — so an unreachable Valkey cannot resurrect a killed scope.
+		KillScopes:               killscope.NewPostgresStore(cpDB),
 		RequireProofOfPossession: strings.TrimSpace(os.Getenv("RUNCAP_REQUIRE_POP")) == "true",
 		ConvStore:                convStore,
 		PromptStore:              promptStore,

@@ -58,7 +58,24 @@ type Scope struct {
 	Namespace string // agent, namespace
 	Agent     string // agent
 	Tenant    string // tenant
+	// Source distinguishes an OPERATOR's imperative stop from the controller's projection of a
+	// declarative `spec.suspend` (M146.6). They can name the same agent and must not clobber each
+	// other: an operator lifting their incident stop must not un-suspend an agent someone deliberately
+	// turned off in the spec, and a controller reconcile must not lift an operator's stop. So Source is
+	// part of the row identity (Key) but NOT of the marker key — the accelerator is the same halt
+	// either way. Empty means SourceOperator.
+	Source Source
 }
+
+// Source is who recorded a stop.
+type Source string
+
+const (
+	// SourceOperator is an imperative stop pulled through the kill API. The zero value.
+	SourceOperator Source = ""
+	// SourceSpec is the controller's projection of `spec.suspend: true`.
+	SourceSpec Source = "spec"
+)
 
 // Validate rejects a scope whose identifiers do not match its level.
 func (s Scope) Validate() error {
@@ -91,6 +108,14 @@ func (s Scope) Validate() error {
 // Key is the stable identity of a scope — one active kill per scope, so re-killing an already-killed
 // scope is idempotent rather than creating a second row someone must remember to lift twice.
 func (s Scope) Key() string {
+	prefix := ""
+	if s.Source == SourceSpec {
+		prefix = "spec|"
+	}
+	return prefix + s.bareKey()
+}
+
+func (s Scope) bareKey() string {
 	switch s.Level {
 	case LevelAgent:
 		return "agent:" + s.Namespace + ":" + s.Agent
