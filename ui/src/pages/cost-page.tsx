@@ -5,6 +5,7 @@ import { Coins, Download, Filter } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import {
+  formatMoney,
   CellEntity,
   ClosingNote,
   DataTable,
@@ -132,10 +133,7 @@ const NEAR_CAP_RATIO = 0.8;
  * is the older 3/6-decimal register shared with surfaces outside this page's
  * scope; converging them is a separate change, not a silent side effect.
  */
-export function formatMoney(usd: number): string {
-  if (usd === 0) return "$0.00";
-  return Math.abs(usd) < 1 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
-}
+
 
 /**
  * A share of the window's spend. One decimal is all the precision it earns —

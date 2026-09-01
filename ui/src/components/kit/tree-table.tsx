@@ -76,6 +76,17 @@ export const TREE_INDENT_PX = 20;
  * The gutter stops growing here (8 × 20px = 160px). Deeper rows keep their real
  * `aria-level` and gain a `d{n} ·` chip — unlimited depth, bounded indent.
  */
+// Parity with DataTable: if the table has to scroll, the one column the design
+// calls never-dropped is the one that must stay visible. TreeTable lacked this,
+// so a wide roster pushed "Next step" out of sight at rest — the same defect the
+// fit gate was taught to see on the flat table.
+const PINNED_CELL = "sticky right-0 z-10 bg-inherit border-l border-border-soft";
+const PINNED_HEAD = "sticky right-0 z-20 bg-card border-l border-border-soft";
+
+function isPinnedCol<T>(col: TreeColumn<T>, index: number, total: number): boolean {
+  return index === total - 1 && columnPriority(col) === 1 && !col.mobileOnly;
+}
+
 export const TREE_GUTTER_MAX_LEVELS = 8;
 
 /**
@@ -622,11 +633,15 @@ export function TreeTable<T>({
     node: React.ReactNode,
     extra?: string,
     numeric?: boolean,
+    // Read by the fit gate: a never-dropped column that is scrolled out of
+    // sight has been dropped in every sense that matters to a person.
+    priority?: number,
   ) => (
     <th
       key={key}
       role="columnheader"
       scope="col"
+      data-col-priority={priority}
       className={cn(
         // The uppercase-mono column-head register (§3.2), identical to DataTable
         // so a tree and a list read as one kit.
@@ -803,12 +818,14 @@ export function TreeTable<T>({
       >
         {treeCell}
         {row.kind !== "summary" &&
-          columns.map((col) => (
+          columns.map((col, ci) => (
             <td
               key={col.id}
               role="gridcell"
+              data-col-priority={columnPriority(col)}
               className={cn(
                 "px-4 align-middle text-sm",
+                isPinnedCol(col, ci, columns.length) && PINNED_CELL,
                 col.mobileOnly
                   ? "md:hidden"
                   : PRIORITY_CLASS[columnPriority(col)],
@@ -871,17 +888,19 @@ export function TreeTable<T>({
             <thead role="rowgroup">
               <tr role="row" aria-rowindex={1} className="border-b border-border bg-card">
                 {headCell("tree", treeHeader, treeColumnClassName)}
-                {columns.map((col) =>
+                {columns.map((col, ci) =>
                   headCell(
                     col.id,
                     col.header,
                     cn(
+                      isPinnedCol(col, ci, columns.length) && PINNED_HEAD,
                       col.mobileOnly
                         ? "md:hidden"
                         : PRIORITY_CLASS[columnPriority(col)],
                       col.className,
                     ),
                     col.numeric,
+                    columnPriority(col),
                   ),
                 )}
               </tr>
