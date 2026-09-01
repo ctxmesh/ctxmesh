@@ -229,8 +229,8 @@ describe("EvalsPage", () => {
     expect(screen.getByTestId("eval-suite-other-eval")).toBeInTheDocument();
     expect(screen.getByText("my-eval")).toBeInTheDocument();
     expect(screen.getByText("other-eval")).toBeInTheDocument();
-    // gate badge visible
-    expect(screen.getByText(/gate: exact-match/)).toBeInTheDocument();
+    // The gate and its threshold render as one string in the Gate column.
+    expect(screen.getByText("exact-match ≥ 0.8")).toBeInTheDocument();
   });
 
   it("shows empty state when no suites", async () => {
@@ -243,8 +243,8 @@ describe("EvalsPage", () => {
     // Wait for suites to load
     await screen.findByTestId("eval-suite-my-eval");
 
-    // Expand results
-    fireEvent.click(screen.getByTestId("eval-results-my-eval"));
+    // Open the row — the results live in its drawer (§4.4 dropped ≠ lost).
+    fireEvent.click(screen.getByTestId("eval-suite-my-eval"));
 
     // Wait for results panel
     await waitFor(() => {
@@ -261,9 +261,12 @@ describe("EvalsPage", () => {
     expect(screen.getByText(/score 0\.9182/)).toBeInTheDocument();
     expect(screen.getByText("promoted")).toBeInTheDocument();
 
-    // Real scores shown (scoresAvailable=true)
-    expect(screen.getByText("exact-match")).toBeInTheDocument();
-    expect(screen.getByText("0.9")).toBeInTheDocument();
+    // Real scores shown (scoresAvailable=true) — asserted on the score row so
+    // the scorer name matching elsewhere on the page can't satisfy it.
+    expect(screen.getByTestId("eval-score-exact-match")).toHaveTextContent(
+      "exact-match",
+    );
+    expect(screen.getByTestId("eval-score-exact-match")).toHaveTextContent("0.9");
 
     // The "unavailable" message must NOT appear when scores are available
     expect(screen.queryByTestId("eval-scores-unavailable-my-eval")).not.toBeInTheDocument();
@@ -273,7 +276,7 @@ describe("EvalsPage", () => {
     renderPage(EDITOR_CAPS, { resultsBody: RESULTS_NO_SCORES });
     await screen.findByTestId("eval-suite-my-eval");
 
-    fireEvent.click(screen.getByTestId("eval-results-my-eval"));
+    fireEvent.click(screen.getByTestId("eval-suite-my-eval"));
 
     await waitFor(() => {
       expect(screen.getByTestId("eval-results-panel-my-eval")).toBeInTheDocument();
@@ -287,7 +290,9 @@ describe("EvalsPage", () => {
     expect(screen.getByTestId("eval-scores-unavailable-my-eval")).toBeInTheDocument();
     expect(screen.getByText("Langfuse not configured")).toBeInTheDocument();
 
-    // No fabricated numeric scores in the document
+    // No fabricated numeric scores in the document — no score row at all, and
+    // no bare figure anywhere that could be read as one.
+    expect(screen.queryByTestId("eval-score-exact-match")).not.toBeInTheDocument();
     expect(screen.queryByText("0.9")).not.toBeInTheDocument();
     expect(screen.queryByText("0.8")).not.toBeInTheDocument();
   });
@@ -418,5 +423,84 @@ describe("EvalsPage", () => {
     await screen.findByTestId("eval-suite-my-eval");
     // Stat card absent — no fabricated 0/0.
     expect(screen.queryByTestId("eval-gated-stat")).not.toBeInTheDocument();
+    // ...and the absence is STATED (§7.1), not silent: a capability the reader
+    // cannot see is indistinguishable from a page that failed to render.
+    expect(screen.getByTestId("eval-gated-unavailable")).toBeInTheDocument();
+  });
+
+  // ---- attention-first order + the Next step column (§6.1 A1) --------------
+
+  it("sorts by what is blocking, and says what to do about it", async () => {
+    renderPage(EDITOR_CAPS, {
+      suites: [
+        // Ready, scored — needs nothing from this list.
+        {
+          name: "quiet-suite",
+          namespace: "default",
+          datasetRef: "ds",
+          scorers: ["exact-match"],
+          ready: true,
+        },
+        // Not ready — worth a look, but well formed.
+        {
+          name: "pending-suite",
+          namespace: "default",
+          datasetRef: "ds",
+          scorers: ["bleu"],
+          ready: false,
+        },
+        // No scorers at all — it can never produce a result to gate on, so it
+        // is the most urgent row on the page.
+        { name: "inert-suite", namespace: "default", datasetRef: "ds", ready: true },
+      ],
+    });
+    await screen.findByTestId("eval-suite-inert-suite");
+
+    expect(screen.getByTestId("next-step-inert-suite")).toHaveTextContent(
+      "Add a scorer",
+    );
+    expect(screen.getByTestId("next-step-pending-suite")).toHaveTextContent(
+      "Review the suite",
+    );
+    // A row that needs nothing says so, and never invents an errand.
+    expect(screen.getByTestId("next-step-quiet-suite")).toHaveTextContent(
+      "Nothing needed",
+    );
+
+    // An empty scorer list is a REAL answer (the API omits it), so it renders
+    // the "declared but never exercised" Tag — never a dash, never a zero.
+    expect(screen.getByText("no scorers")).toBeInTheDocument();
+
+    // Attention-first: the two rows that need a person sort above the one that
+    // does not, and "Nothing needed" is last.
+    const order = screen
+      .getAllByTestId(/^next-step-/)
+      .map((el) => el.textContent ?? "");
+    expect(order[0]).toContain("Add a scorer");
+    expect(order[order.length - 1]).toContain("Nothing needed");
+  });
+
+  it("a chip view that matches nothing is the filtered state, not the first-run one", async () => {
+    renderPage(EDITOR_CAPS, {
+      suites: [
+        {
+          name: "quiet-suite",
+          namespace: "default",
+          datasetRef: "ds",
+          scorers: ["exact-match"],
+          ready: true,
+        },
+      ],
+    });
+    await screen.findByTestId("eval-suite-quiet-suite");
+
+    fireEvent.click(screen.getByRole("radio", { name: /Needs you/ }));
+
+    expect(await screen.findByText("Nothing needs a person")).toBeInTheDocument();
+    // The way back out is offered; the first-run teaching copy is NOT shown.
+    expect(
+      screen.getByRole("button", { name: /Show everything/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/No eval suites yet/i)).not.toBeInTheDocument();
   });
 });

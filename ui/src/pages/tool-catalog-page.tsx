@@ -7,7 +7,6 @@ import {
   Code2,
   Loader2,
   RefreshCw,
-  Server,
   Shield,
   User,
 } from "lucide-react";
@@ -17,16 +16,20 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  ClosingNote,
   EmptyState,
   ErrorState,
+  FilterChipRow,
   ForbiddenInline,
-  SkeletonTable,
+  PageHeader,
+  SkeletonCard,
+  StatusBadge,
   Wizard,
   useToast,
+  type FilterChip,
   type WizardStep,
 } from "@/components/kit";
 import { useCapabilities } from "@/lib/capabilities";
-import { groupToolsByServer } from "@/lib/tool-groups";
 import { useNamespace } from "@/lib/namespace";
 import {
   api,
@@ -36,12 +39,45 @@ import {
   type MCPToolBindingDetail,
 } from "@/lib/api";
 
-// ToolCatalogPage — the merged tool catalog surface (m17.10). Lists ALL tools
-// from GET /api/tools in three distinct states:
-//   • curated   — from the built-in ToolRegistry (source unset or source=
-//                 "curated"); always bindable
-//   • user-added — submitted via the BYO-MCP flow + approved; bindable
+// ToolCatalogPage — archetype A9, the gallery (M151 spec §6.1/§6.2: "curated /
+// user-added / pending as Tag-differentiated cards; pending cards' CTA disabled
+// with the reason line"). Lists ALL tools from GET /api/tools in three distinct
+// states:
+//   • curated    — from the built-in ToolRegistry; always bindable
+//   • user-added — brought in through the BYO-MCP flow + approved; bindable
 //   • pending-approval — queued in the approval gate (m17.4); NOT bindable
+//
+// ── THE THREE STATES ARE THREE DIFFERENT CLAIMS ─────────────────────────────
+// They are not three severities of the same thing: they say who vouched for the
+// tool. Curated means this install shipped it. User-added means a person here
+// brought it in and an operator let it through. Pending means NOBODY has
+// decided yet — which is the hold state (§2.2/§2.4: work paused because a
+// person must decide), not a warning and not a failure. So the three never
+// render alike: `muted` chip + shield, dashed `open` chip + person, hold chip +
+// clock — and the pending card's CTA is dead with the reason written next to
+// it. A card you cannot use must say why; a disabled button that explains
+// nothing just looks broken.
+//
+// The reason line used to be there and could not be READ: it was
+// `text-warning-foreground`, which is the ink for text ON a filled warning
+// surface — pure white in light theme (`--warning-foreground: 0 0% 100%`), on a
+// white card. It now renders in the hold hue, which is both the correct
+// semantic and legible in both themes.
+//
+// ── WHY A GRID OF CARDS AND NOT THE COLLAPSIBLE SERVER TREE ─────────────────
+// The catalog was a tree of MCP-server groups (m25 S11). §6.2 assigns this page
+// A9, and the tree fought the archetype: the server was a header row, so the
+// only way to learn where a tool came from was to remember which group you had
+// scrolled into. Each card now carries its own provenance line, and the cards
+// sort by what you can DO with them (bindable first, pending last) rather than
+// alphabetically by server.
+//
+// ── SORT: USABLE FIRST, DELIBERATELY NOT ATTENTION-FIRST ────────────────────
+// A1's doctrine puts whatever is blocking at the top. This page inverts it on
+// purpose: the reader is shopping, and a pending tool's next step belongs to an
+// OPERATOR, not to them — there is no action the browsing user can take on it.
+// Leading a discovery surface with things nobody browsing can use would be
+// attention-first applied where it does the reader no good.
 //
 // Bind wizard: opens from any curated/user-added tool. It binds the tool to a
 // selected agent via POST /api/mcptoolbindings, then polls the binding detail
@@ -57,18 +93,47 @@ import {
 
 type ToolState = "curated" | "user-added" | "pending-approval";
 
+/**
+ * The origin class of one tool.
+ *
+ * `source` is the ORIGIN CLASS ("user-added" | "curated"), not the server name —
+ * see the `CatalogTool` contract in lib/api.ts. The old heuristic read any
+ * non-empty `source` as user-added, which quietly labelled every curated tool
+ * the BFF marks `source: "curated"` as "user-added": the catalog rendered two
+ * provenance states where the backend sent three. Older BFFs send the MCP
+ * server's name in this field, so anything that is neither empty nor the
+ * literal "curated" is still read as user-added.
+ */
 function toolState(t: CatalogTool): ToolState {
   if (t.approvalStatus === "pending") return "pending-approval";
-  // Heuristic: if a source is present and doesn't look like a registry name
-  // (no "/" prefix), treat it as user-added. The BFF marks user-added tools
-  // with approvalStatus="approved" + a source referencing the MCP server.
-  // Curated tools either have no source or approvalStatus absent/approved with
-  // source absent. We use the presence of a source as the user-added signal.
-  if (t.source) return "user-added";
+  if (t.source && t.source.trim() && t.source.trim() !== "curated") return "user-added";
   return "curated";
 }
 
+/** Usable first (§ the sort note above); within a state, by server then name. */
+const STATE_ORDER: Record<ToolState, number> = {
+  curated: 0,
+  "user-added": 1,
+  "pending-approval": 2,
+};
+
+/** Where the tool came from — the MCP server, or this install's own registry. */
+function originOf(t: CatalogTool): string {
+  const registry = t.registry?.trim();
+  return registry ? `from ${registry}` : "from the built-in registry";
+}
+
+/** Frozen empty, so a not-yet-loaded catalog doesn't churn the memos. */
+const NO_TOOLS: CatalogTool[] = [];
+
 type FilterState = "all" | ToolState;
+
+const VIEWS: { id: FilterState; label: string }[] = [
+  { id: "all", label: "Everything" },
+  { id: "curated", label: "Curated" },
+  { id: "user-added", label: "User-added" },
+  { id: "pending-approval", label: "Awaiting approval" },
+];
 
 type PageState =
   | { kind: "loading" }
@@ -97,6 +162,27 @@ type BindState =
   | { kind: "done"; detail: MCPToolBindingDetail }
   | { kind: "error"; message: string; forbidden?: boolean };
 
+/**
+ * The §5.18 closing line: the catalog's split across its three provenance
+ * claims, counted from the tools in hand. `/api/tools` returns the whole
+ * catalog in one response — there is no cursor — so these are facts about the
+ * catalog, not about a page of it (which is also why the chips carry numbers).
+ */
+export function catalogClosingLine(tools: CatalogTool[]): string | null {
+  const total = tools.length;
+  if (total === 0) return null;
+  const pending = tools.filter((t) => toolState(t) === "pending-approval").length;
+  const bindable = total - pending;
+  const noun = `${total} tool${total === 1 ? "" : "s"}`;
+  if (pending === 0) {
+    return `Every one of the ${noun} here has been approved — there is nothing waiting on an operator.`;
+  }
+  if (bindable === 0) {
+    return `All ${noun} here are waiting on an operator's decision. None of them can be bound yet.`;
+  }
+  return `${noun} here: ${bindable} you can bind now, ${pending} still waiting on an operator's decision.`;
+}
+
 // ---- main page --------------------------------------------------------------
 
 export function ToolCatalogPage() {
@@ -104,19 +190,6 @@ export function ToolCatalogPage() {
   const [filter, setFilter] = React.useState<FilterState>("all");
   const [q, setQ] = React.useState("");
   const [wizard, setWizard] = React.useState<WizardState>({ kind: "closed" });
-  // MCP-server grouping (m25 S11) is collapsible; browse defaults to EXPANDED (the
-  // grouping is visible up front) so we track which servers the user COLLAPSED.
-  const [collapsedServers, setCollapsedServers] = React.useState<Set<string>>(
-    () => new Set(),
-  );
-  const toggleServer = React.useCallback((server: string) => {
-    setCollapsedServers((s) => {
-      const next = new Set(s);
-      if (next.has(server)) next.delete(server);
-      else next.add(server);
-      return next;
-    });
-  }, []);
 
   const { can } = useCapabilities();
   // Binding is a write op — gated on mcptoolbindings/create. Display-only;
@@ -158,46 +231,64 @@ export function ToolCatalogPage() {
     return () => controller.abort();
   }, [load]);
 
+  // Stable across renders while `page` is unchanged — the sort/filter memos
+  // below key off it.
+  const tools = React.useMemo(
+    () => (page.kind === "ready" ? page.tools : NO_TOOLS),
+    [page],
+  );
+
+  // Sorted once: usable before pending, then by the server that supplies it.
+  const sorted = React.useMemo(
+    () =>
+      [...tools].sort(
+        (a, b) =>
+          STATE_ORDER[toolState(a)] - STATE_ORDER[toolState(b)] ||
+          (a.registry ?? "").localeCompare(b.registry ?? "") ||
+          a.name.localeCompare(b.name),
+      ),
+    [tools],
+  );
+
   // Derived: filter the tool list by state + name query
   const displayedTools = React.useMemo<CatalogTool[]>(() => {
-    if (page.kind !== "ready") return [];
-    let tools = page.tools;
+    let list = sorted;
     if (filter !== "all") {
-      tools = tools.filter((t) => toolState(t) === filter);
+      list = list.filter((t) => toolState(t) === filter);
     }
     if (q.trim()) {
       const lower = q.trim().toLowerCase();
-      tools = tools.filter(
+      list = list.filter(
         (t) =>
           t.name.toLowerCase().includes(lower) ||
           (t.description ?? "").toLowerCase().includes(lower),
       );
     }
-    return tools;
-  }, [page, filter, q]);
+    return list;
+  }, [sorted, filter, q]);
+
+  // Counts are facts here: the catalog arrives whole, so a count of the tools
+  // in hand IS the catalog's count (the FilterChipRow contract's one condition).
+  const chips: FilterChip[] = VIEWS.map((v) => ({
+    id: v.id,
+    label: v.label,
+    count: v.id === "all" ? tools.length : tools.filter((t) => toolState(t) === v.id).length,
+  }));
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6" data-testid="tool-catalog">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight">Tool Catalog</h2>
-          <p className="text-sm text-muted-foreground">
-            Browse curated, user-added, and pending-approval tools. Bind an
-            approved tool to an agent to enable it in that agent's managed loop.
-          </p>
-        </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => load()}
-          aria-label="Refresh catalog"
-          data-testid="catalog-refresh"
-        >
-          <RefreshCw className="h-4 w-4" />
-        </Button>
-      </div>
+    <div className="min-w-0 space-y-6" data-testid="tool-catalog">
+      <PageHeader
+        title="Tool catalog"
+        lede="Every tool this namespace can reach, and who vouched for it. Bind an approved one to an agent to put it in that agent's managed loop."
+      />
 
-      {page.kind === "loading" && <SkeletonTable rows={5} />}
+      {page.kind === "loading" && (
+        <div className="grid auto-rows-fr gap-5 sm:grid-cols-2 xl:grid-cols-3">
+          {[0, 1, 2, 3, 4, 5].map((i) => (
+            <SkeletonCard key={i} />
+          ))}
+        </div>
+      )}
 
       {page.kind === "forbidden" && (
         <ForbiddenInline
@@ -225,103 +316,75 @@ export function ToolCatalogPage() {
 
       {page.kind === "ready" && (
         <>
-          {/* Filters */}
-          <div className="flex items-center gap-3">
-            <div className="relative flex-1 max-w-xs">
-              <Input
-                placeholder="Filter tools…"
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                className="pl-3"
-                data-testid="catalog-filter-input"
-              />
-            </div>
-            <div className="flex items-center gap-2">
-              <Button
-                variant={filter === "all" ? "secondary" : "ghost"}
-                size="sm"
-                onClick={() => setFilter("all")}
-                data-testid="catalog-filter-all"
-              >
-                All ({page.tools.length})
-              </Button>
-              <Button
-                variant={filter === "curated" ? "secondary" : "ghost"}
-                size="sm"
-                onClick={() => setFilter("curated")}
-                data-testid="catalog-filter-curated"
-              >
-                Curated
-              </Button>
-              <Button
-                variant={filter === "user-added" ? "secondary" : "ghost"}
-                size="sm"
-                onClick={() => setFilter("user-added")}
-                data-testid="catalog-filter-user-added"
-              >
-                User-added
-              </Button>
-              <Button
-                variant={filter === "pending-approval" ? "secondary" : "ghost"}
-                size="sm"
-                onClick={() => setFilter("pending-approval")}
-                data-testid="catalog-filter-pending"
-              >
-                Pending
-              </Button>
-            </div>
+          {/* Views, not filters (§5.28) — one question, one answer at a time. */}
+          <div className="flex flex-wrap items-center gap-3">
+            <FilterChipRow
+              chips={chips}
+              value={filter}
+              onChange={(id) => setFilter(id as FilterState)}
+              label="Filter tools"
+              className="min-w-0 flex-1"
+            />
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => load()}
+              aria-label="Refresh catalog"
+              data-testid="catalog-refresh"
+            >
+              <RefreshCw className="h-4 w-4" />
+            </Button>
+          </div>
+
+          <div className="relative max-w-sm">
+            <Input
+              placeholder="Filter tools…"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              data-testid="catalog-filter-input"
+            />
           </div>
 
           {displayedTools.length === 0 ? (
             <EmptyState
-              title="No tools match"
-              description="Try a different filter or clear the search."
+              icon={BookOpen}
               intent="filtered"
+              title="Nothing matches"
+              description={
+                q.trim()
+                  ? `No tool in the catalog matches “${q.trim()}”. Clear the search to see the rest.`
+                  : filter === "pending-approval"
+                    ? "Nothing is waiting on an operator. Show everything to see the tools you can bind."
+                    : "No tool in the catalog came from there. Show everything to see the rest."
+              }
+              totalCount={tools.length}
+              countNoun="tools"
+              action={{
+                label: q.trim() ? "Clear the search" : "Show everything",
+                variant: "outline",
+                onClick: () => {
+                  setQ("");
+                  setFilter("all");
+                },
+              }}
             />
           ) : (
-            // Group the catalog by MCP server (m25 S11) as a COLLAPSIBLE tree: the
-            // catalog shows the servers; click one to reveal its tools. Curated tools
-            // (no registry) group last under "Curated tools".
-            <div className="space-y-3" data-testid="catalog-tool-list">
-              {groupToolsByServer(displayedTools).map(([server, tools]) => {
-                const isOpen = !collapsedServers.has(server);
-                return (
-                  <div
-                    key={server}
-                    className="overflow-hidden rounded-lg border bg-card shadow-card"
-                    data-testid={`catalog-group-${server}`}
-                  >
-                    <button
-                      type="button"
-                      className="flex w-full items-center gap-2 bg-muted/40 px-4 py-2.5 text-left hover:bg-muted/60"
-                      onClick={() => toggleServer(server)}
-                      aria-expanded={isOpen}
-                      data-testid={`catalog-group-toggle-${server}`}
-                    >
-                      <ChevronRight
-                        className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${isOpen ? "rotate-90" : ""}`}
-                      />
-                      <Server className="h-4 w-4 shrink-0 text-muted-foreground" />
-                      <span className="min-w-0 truncate text-sm font-medium">{server}</span>
-                      <Badge variant="secondary">{tools.length}</Badge>
-                    </button>
-                    {isOpen && (
-                      <div className="divide-y border-t">
-                        {tools.map((tool) => (
-                          <ToolRow
-                            key={`${server}/${tool.name}`}
-                            tool={tool}
-                            canBind={canBind}
-                            onBind={() => setWizard({ kind: "open", tool })}
-                          />
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+            <ul
+              className="grid auto-rows-fr gap-5 sm:grid-cols-2 xl:grid-cols-3"
+              data-testid="catalog-tool-list"
+            >
+              {displayedTools.map((tool) => (
+                <ToolCard
+                  key={`${tool.registry ?? ""}/${tool.name}`}
+                  tool={tool}
+                  canBind={canBind}
+                  onBind={() => setWizard({ kind: "open", tool })}
+                />
+              ))}
+            </ul>
           )}
+
+          <ClosingNote>{catalogClosingLine(tools)}</ClosingNote>
         </>
       )}
 
@@ -336,68 +399,106 @@ export function ToolCatalogPage() {
   );
 }
 
-// ---- ToolRow ----------------------------------------------------------------
+// ---- ToolCard ---------------------------------------------------------------
+// The A9 card anatomy: identity → provenance → 2-line description → Tag row →
+// (the reason, when there is one) → right-aligned CTA footer. Equal height by
+// `auto-rows-fr` on the grid + `mt-auto` on the footer, so a card never grows
+// to fit its longest field and every CTA sits on the same baseline.
+//
+// A card has no column to bound it, so every line that can carry a machine name
+// truncates on one line with the full value in `title` (§4.5) — never
+// `break-all`, and never a name allowed to set the card's width.
 
-interface ToolRowProps {
+interface ToolCardProps {
   tool: CatalogTool;
   canBind: boolean;
   onBind: () => void;
 }
 
-function ToolRow({ tool, canBind, onBind }: ToolRowProps) {
+function ToolCard({ tool, canBind, onBind }: ToolCardProps) {
   const state = toolState(tool);
   const isPending = state === "pending-approval";
   const hasSchema = tool.inputSchema !== undefined && tool.inputSchema !== null;
   const [showSchema, setShowSchema] = React.useState(false);
+  const origin = originOf(tool);
 
   return (
-    <div
-      className="flex items-start gap-4 px-4 py-3"
+    <li
+      className="flex min-w-0 flex-col rounded-lg border border-border bg-card p-5"
       data-testid={`catalog-tool-${tool.name}`}
     >
-      <ToolStateIcon state={state} />
-      <div className="min-w-0 flex-1 space-y-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="font-mono text-sm font-medium">{tool.name}</span>
-          <ToolStateBadge state={state} toolName={tool.name} />
-          {hasSchema && (
-            <button
-              type="button"
-              onClick={() => setShowSchema((s) => !s)}
-              data-testid={`catalog-schema-toggle-${tool.name}`}
-              aria-expanded={showSchema}
-            >
-              <Badge
-                variant="outline"
-                className="cursor-pointer text-[10px] hover:bg-muted"
-              >
-                <Code2 className="mr-1 h-2.5 w-2.5" />
-                {showSchema ? "hide schema" : "schema"}
-              </Badge>
-            </button>
-          )}
-        </div>
-        {tool.description && (
-          <p className="text-sm text-muted-foreground">{tool.description}</p>
-        )}
-        {isPending && (
-          <p className="text-xs text-warning-foreground">
-            Awaiting operator approval — cannot bind until approved.
+      <div className="flex min-w-0 items-start gap-2.5">
+        <ToolStateIcon state={state} />
+        <div className="min-w-0 flex-1">
+          {/* A tool name is a machine identifier — the literal string the model
+              emits — so it stays mono where a gallery title would be serif. */}
+          <h3 className="truncate font-mono text-md font-medium" title={tool.name}>
+            {tool.name}
+          </h3>
+          <p className="mt-1 truncate font-mono text-xs text-faint" title={origin}>
+            {origin}
           </p>
-        )}
-        {showSchema && hasSchema && (
-          <pre
-            className="mt-2 max-h-72 overflow-auto rounded-md border bg-muted/40 p-3 text-xs"
-            data-testid={`catalog-schema-${tool.name}`}
-          >
-            {JSON.stringify(tool.inputSchema, null, 2)}
-          </pre>
-        )}
+        </div>
       </div>
-      <div className="shrink-0">
+
+      {tool.description && (
+        <p
+          className="mt-3 line-clamp-2 text-sm text-secondary-foreground"
+          title={tool.description}
+        >
+          {tool.description}
+        </p>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-1.5">
+        <ToolStateBadge state={state} toolName={tool.name} />
+      </div>
+
+      {isPending && (
+        // §6.2: a pending card's CTA is disabled WITH the reason line. The hue
+        // is hold, not warn — nothing is degraded, a person simply has not
+        // decided yet (§2.2), and the person is not the reader.
+        <p
+          className="mt-3 text-xs text-hold"
+          data-testid={`catalog-pending-reason-${tool.name}`}
+        >
+          An operator has to approve this tool before anyone can bind it. Nothing
+          you do here changes that — the decision is theirs.
+        </p>
+      )}
+
+      {showSchema && hasSchema && (
+        // A code well, own-container scrolling (§4.6/§4.5): structured JSON
+        // keeps its indentation and scrolls sideways inside its own frame.
+        <pre
+          className="mt-3 max-h-64 overflow-auto rounded-md border border-border bg-surface-3 p-3 font-mono text-xs text-secondary-foreground"
+          data-testid={`catalog-schema-${tool.name}`}
+        >
+          {JSON.stringify(tool.inputSchema, null, 2)}
+        </pre>
+      )}
+
+      <div className="mt-auto flex flex-wrap items-center justify-end gap-2 pt-4">
+        {hasSchema && (
+          // A disclosure, not a destination: a quiet ghost control, so the pine
+          // CTA stays the only pine affordance on the card (§6.1 A9).
+          <Button
+            variant="ghost"
+            size="sm"
+            className="mr-auto text-faint"
+            onClick={() => setShowSchema((s) => !s)}
+            data-testid={`catalog-schema-toggle-${tool.name}`}
+            aria-expanded={showSchema}
+          >
+            <Code2 className="mr-1.5 h-3.5 w-3.5" />
+            {showSchema ? "hide schema" : "schema"}
+          </Button>
+        )}
         <Button
           size="sm"
-          variant="outline"
+          // Disabled renders as the outline shape, never a greyed pine slab:
+          // a dead primary button reads as available at a glance (§2.3).
+          variant={isPending || !canBind ? "outline" : "default"}
           disabled={isPending || !canBind}
           onClick={onBind}
           title={
@@ -413,20 +514,26 @@ function ToolRow({ tool, canBind, onBind }: ToolRowProps) {
           <ChevronRight className="ml-1 h-3.5 w-3.5" />
         </Button>
       </div>
-    </div>
+    </li>
   );
 }
 
 // ---- state icon + badge helpers ---------------------------------------------
+// Three claims, three treatments — they may never look alike (§6.2). The two
+// vouched-for states carry NO hue: provenance is a declared fact, not a health
+// reading, so they use the two non-hue Tag variants (§5.6) and are separated by
+// form — a solid sunk chip for "this install ships it", the dashed `open` chip
+// for "somebody here brought it in". Only the third state is a real state: work
+// paused because a person must decide, which is hold (§2.2/§2.4).
 
 function ToolStateIcon({ state }: { state: ToolState }) {
   if (state === "curated") {
-    return <Shield className="mt-0.5 h-4 w-4 shrink-0 text-success" />;
+    return <Shield className="mt-0.5 h-4 w-4 shrink-0 text-faint" />;
   }
   if (state === "user-added") {
-    return <User className="mt-0.5 h-4 w-4 shrink-0 text-accent-foreground" />;
+    return <User className="mt-0.5 h-4 w-4 shrink-0 text-faint" />;
   }
-  return <Clock className="mt-0.5 h-4 w-4 shrink-0 text-warning" />;
+  return <Clock className="mt-0.5 h-4 w-4 shrink-0 text-hold" />;
 }
 
 function ToolStateBadge({
@@ -438,32 +545,20 @@ function ToolStateBadge({
 }) {
   if (state === "curated") {
     return (
-      <Badge
-        variant="secondary"
-        className="text-[10px]"
-        data-testid={`catalog-tool-state-${toolName}`}
-      >
+      <Badge variant="muted" data-testid={`catalog-tool-state-${toolName}`}>
         curated
       </Badge>
     );
   }
   if (state === "user-added") {
     return (
-      <Badge
-        variant="outline"
-        className="text-[10px]"
-        data-testid={`catalog-tool-state-${toolName}`}
-      >
+      <Badge variant="open" data-testid={`catalog-tool-state-${toolName}`}>
         user-added
       </Badge>
     );
   }
   return (
-    <Badge
-      variant="warning"
-      className="text-[10px]"
-      data-testid={`catalog-tool-state-${toolName}`}
-    >
+    <Badge variant="hold" data-testid={`catalog-tool-state-${toolName}`}>
       pending-approval
     </Badge>
   );
@@ -714,15 +809,20 @@ function BindWizard({ tool, onClose }: BindWizardProps) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
       data-testid="bind-tool-wizard"
     >
-      <div className="w-full max-w-2xl rounded-xl bg-background shadow-xl">
+      <div
+        className="absolute inset-0 bg-foreground/40 backdrop-blur-[2px]"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <div className="relative w-full max-w-2xl rounded-xl border border-border bg-card shadow-overlay">
         <div className="p-6">
-          <h3 className="text-lg font-semibold">
-            Bind <span className="font-mono">{tool.name}</span> to an agent
+          <h3 className="font-serif text-xl font-medium">
+            Bind <span className="font-mono text-lg">{tool.name}</span> to an agent
           </h3>
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="mt-1 text-sm text-secondary-foreground">
             A new MCPToolBinding will be created and the controller will
             hot-update the agent's tool list live.
           </p>
@@ -764,7 +864,7 @@ function SelectAgentStep({
 }: SelectAgentStepProps) {
   if (loadState.kind === "loading-agents") {
     return (
-      <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+      <div className="flex items-center gap-2 py-4 text-sm text-faint">
         <Loader2 className="h-4 w-4 animate-spin" />
         Loading agents…
       </div>
@@ -774,7 +874,7 @@ function SelectAgentStep({
   if (loadState.kind === "agents-error") {
     return (
       <p
-        className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+        className="rounded-md border border-destructive-surface bg-destructive-surface px-3 py-2 text-sm text-destructive"
         role="alert"
       >
         {loadState.message}
@@ -793,40 +893,43 @@ function SelectAgentStep({
 
   return (
     <div className="space-y-3">
-      <p className="text-sm text-muted-foreground">
+      <p className="text-sm text-secondary-foreground">
         Select the agent you want to bind this tool to.
       </p>
-      <div className="max-h-64 overflow-y-auto rounded-lg border divide-y">
+      <div className="max-h-64 divide-y divide-border-soft overflow-y-auto rounded-lg border border-border">
         {agents.map((a) => {
           const selected = selectedNs === a.namespace && selectedName === a.name;
           return (
             <button
               key={`${a.namespace}/${a.name}`}
               type="button"
-              className={`flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-accent/50 ${
-                selected ? "bg-accent/30" : ""
+              // Selection is always pine-family, never a status hue (§2.3).
+              className={`flex w-full items-center gap-3 px-4 py-3 text-left transition-colors ${
+                selected ? "bg-accent" : "hover:bg-surface-2"
               }`}
               onClick={() => onSelect(a.namespace, a.name)}
               data-testid={`bind-agent-${a.namespace}-${a.name}`}
             >
               {selected ? (
-                <CheckCircle className="h-4 w-4 shrink-0 text-success" />
+                <CheckCircle className="h-4 w-4 shrink-0 text-primary" />
               ) : (
-                <div className="h-4 w-4 shrink-0 rounded-full border border-border" />
+                <div className="h-4 w-4 shrink-0 rounded-full border border-border-strong" />
               )}
               <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-sm font-medium">{a.name}</span>
-                  <Badge variant="secondary" className="text-[10px]">
-                    {a.namespace}
-                  </Badge>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="truncate font-mono text-sm font-medium" title={a.name}>
+                    {a.name}
+                  </span>
+                  <Badge variant="muted">{a.namespace}</Badge>
+                  {/* The kit owns the status vocabulary — a hand-rolled "not
+                      ready" chip is how two surfaces start disagreeing. */}
                   {!a.ready && (
-                    <Badge variant="warning" className="text-[10px]">
-                      not ready
-                    </Badge>
+                    <StatusBadge ready={a.ready} phase={a.phase} reason={a.reason} />
                   )}
                 </div>
-                <p className="text-xs text-muted-foreground">{a.image}</p>
+                <p className="truncate font-mono text-xs text-faint" title={a.image}>
+                  {a.image}
+                </p>
               </div>
             </button>
           );
@@ -859,29 +962,27 @@ function ConfirmStep({
 }: ConfirmStepProps) {
   return (
     <div className="space-y-4" data-testid="bind-tool-confirm">
-      <div className="rounded-lg border bg-card/50 p-4 space-y-2">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-muted-foreground">Tool</span>
-          <span className="font-mono text-sm font-semibold">{tool.name}</span>
-          {tool.source && (
-            <Badge variant="outline" className="text-[10px]">
-              {tool.source}
-            </Badge>
-          )}
+      <div className="space-y-2 rounded-lg border border-border bg-surface-2 p-4">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="text-sm font-medium text-faint">Tool</span>
+          <span className="min-w-0 truncate font-mono text-sm font-semibold" title={tool.name}>
+            {tool.name}
+          </span>
+          {tool.registry && <Badge variant="muted">{tool.registry}</Badge>}
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-muted-foreground">Agent</span>
-          <span className="font-mono text-sm font-semibold">{agentName}</span>
-          <Badge variant="secondary" className="text-[10px]">
-            {agentNs}
-          </Badge>
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="text-sm font-medium text-faint">Agent</span>
+          <span className="min-w-0 truncate font-mono text-sm font-semibold" title={agentName}>
+            {agentName}
+          </span>
+          <Badge variant="muted">{agentNs}</Badge>
         </div>
       </div>
       <div className="space-y-3">
         <div className="space-y-1.5">
           <Label htmlFor="bind-ns" className="text-sm">
             Binding namespace{" "}
-            <span className="text-muted-foreground">(defaults to agent namespace)</span>
+            <span className="text-faint">(defaults to agent namespace)</span>
           </Label>
           <Input
             id="bind-ns"
@@ -893,8 +994,7 @@ function ConfirmStep({
         </div>
         <div className="space-y-1.5">
           <Label htmlFor="bind-name" className="text-sm">
-            Binding name{" "}
-            <span className="text-muted-foreground">(auto-generated)</span>
+            Binding name <span className="text-faint">(auto-generated)</span>
           </Label>
           <Input
             id="bind-name"
@@ -905,7 +1005,7 @@ function ConfirmStep({
           />
         </div>
       </div>
-      <p className="text-xs text-muted-foreground">
+      <p className="text-xs text-faint">
         The controller will create an MCPToolBinding and hot-update the agent's
         tool list. You'll see the propagation status on the next step.
       </p>
@@ -917,6 +1017,11 @@ function ConfirmStep({
 // Surfaces the propagation status HONESTLY from the controller's Ready condition.
 // "propagated" is shown ONLY when the binding detail says ready=true (Ready=True).
 // Any non-ready state shows the reason from the controller — never faked.
+//
+// The not-yet-propagated block reads `progressing`, not `warn`: the controller
+// converging on its own is the machine doing its own work (§2.5), and amber is
+// reserved for a bound near or crossed. The hue rides on a Tag, not on a filled
+// panel — semantic hues are annotation, not alarm (§2.2).
 
 interface ResultStepProps {
   tool: CatalogTool;
@@ -929,7 +1034,7 @@ function ResultStep({ tool, agentName, bindState, canBind }: ResultStepProps) {
   if (bindState.kind === "binding") {
     return (
       <div
-        className="flex items-center gap-2 py-4 text-sm text-muted-foreground"
+        className="flex items-center gap-2 py-4 text-sm text-faint"
         data-testid="binding-propagation-status"
         data-status="creating"
       >
@@ -942,7 +1047,7 @@ function ResultStep({ tool, agentName, bindState, canBind }: ResultStepProps) {
   if (bindState.kind === "polling") {
     return (
       <div
-        className="flex items-center gap-2 py-4 text-sm text-muted-foreground"
+        className="flex items-center gap-2 py-4 text-sm text-faint"
         data-testid="binding-propagation-status"
         data-status="propagating"
       >
@@ -955,15 +1060,15 @@ function ResultStep({ tool, agentName, bindState, canBind }: ResultStepProps) {
   if (bindState.kind === "error") {
     return (
       <div
-        className="rounded-md border border-destructive/40 bg-destructive/5 px-4 py-3 space-y-1"
+        className="space-y-1 rounded-md border border-destructive bg-destructive-surface px-4 py-3"
         data-testid="binding-propagation-status"
         data-status="error"
         role="alert"
       >
         <p className="text-sm font-medium text-destructive">Binding failed</p>
-        <p className="text-sm text-destructive/90">{bindState.message}</p>
+        <p className="text-sm text-destructive">{bindState.message}</p>
         {bindState.forbidden && !canBind && (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-xs text-secondary-foreground">
             Your account lacks permission to create tool bindings on this cluster.
           </p>
         )}
@@ -980,49 +1085,56 @@ function ResultStep({ tool, agentName, bindState, canBind }: ResultStepProps) {
     const isActuallyPropagated = isReady && status === "propagated";
 
     return (
-      <div className="space-y-4" data-testid="binding-propagation-status" data-status={isActuallyPropagated ? "propagated" : "pending"}>
-        <div className="rounded-lg border bg-card/50 p-4 space-y-2">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-muted-foreground">Binding</span>
-            <span className="font-mono text-sm">{detail.name}</span>
-            <Badge variant="secondary" className="text-[10px]">{detail.namespace}</Badge>
+      <div
+        className="space-y-4"
+        data-testid="binding-propagation-status"
+        data-status={isActuallyPropagated ? "propagated" : "pending"}
+      >
+        <div className="space-y-2 rounded-lg border border-border bg-surface-2 p-4">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="text-sm font-medium text-faint">Binding</span>
+            <span className="min-w-0 truncate font-mono text-sm" title={detail.name}>
+              {detail.name}
+            </span>
+            <Badge variant="muted">{detail.namespace}</Badge>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-muted-foreground">Tool</span>
-            <span className="font-mono text-sm">{tool.name}</span>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="text-sm font-medium text-faint">Tool</span>
+            <span className="min-w-0 truncate font-mono text-sm" title={tool.name}>
+              {tool.name}
+            </span>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-muted-foreground">Agent</span>
-            <span className="font-mono text-sm">{agentName}</span>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="text-sm font-medium text-faint">Agent</span>
+            <span className="min-w-0 truncate font-mono text-sm" title={agentName}>
+              {agentName}
+            </span>
           </div>
         </div>
 
         {isActuallyPropagated ? (
-          <div className="flex items-center gap-2 rounded-md border border-success/30 bg-success/5 px-4 py-3">
-            <CheckCircle className="h-4 w-4 text-success" />
+          <div className="flex items-start gap-3 rounded-md border border-border bg-surface-2 px-4 py-3">
+            <CheckCircle className="mt-0.5 h-4 w-4 shrink-0 text-success" />
             <div>
-              <p className="text-sm font-medium text-success-foreground">
+              <p className="text-sm font-medium text-foreground">
                 Propagated — hot-updated live
               </p>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-xs text-secondary-foreground">
                 The tool is active in the agent's managed loop.
               </p>
             </div>
           </div>
         ) : (
-          <div className="rounded-md border border-warning/30 bg-warning/5 px-4 py-3 space-y-1">
-            <div className="flex items-center gap-2">
-              <Clock className="h-4 w-4 text-warning" />
-              <p className="text-sm font-medium text-warning-foreground">
-                Not yet propagated
-              </p>
+          <div className="space-y-1 rounded-md border border-border bg-surface-2 px-4 py-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="progressing">not yet propagated</Badge>
+              <span className="font-mono text-xs text-faint">
+                {status || "pending"}
+              </span>
             </div>
-            <p className="text-sm text-muted-foreground">
-              Controller status: <span className="font-mono text-xs">{status || "pending"}</span>
-            </p>
-            <p className="text-xs text-muted-foreground">
-              The binding was created. The controller will reconcile it — check the
-              agent's binding list for the latest status.
+            <p className="text-sm text-secondary-foreground">
+              The binding was created and the controller has not reported it
+              Ready yet. Check the agent's binding list for the latest status.
             </p>
           </div>
         )}

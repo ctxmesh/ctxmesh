@@ -22,10 +22,17 @@ import { cn } from "@/lib/utils";
 // keyboard-first behaviour (arrow-key nav, Enter, fuzzy filter, focus-return)
 // come from the kit. This adapter only supplies `commands` + wires open/close.
 
-// PaletteTrigger is the discoverable cmd-K affordance in the header: a chip that
+// PaletteTrigger is the discoverable cmd-K affordance in the top bar: a chip that
 // shows the shortcut AND opens the palette on click (keyboard users get the
 // global binding; pointer users get the chip). Purely a second opener - the
 // source of truth for open-state is the parent's useCommandK.
+//
+// It is the SECOND thing to give way as the bar narrows (M151 section 4.2's
+// collapse order: identity, then this, then the workspace switcher). It gives way
+// in two steps rather than one: below `lg` the word and the keycap go and the
+// chip becomes a 32px icon button; below `md` it leaves the bar entirely, since a
+// touch keyboard has no cmd-K to advertise and the drawer carries navigation
+// there. The BINDING never collapses - it is on window, at every width.
 function PaletteTrigger({ onOpen }: { onOpen: () => void }) {
   return (
     <button
@@ -33,15 +40,18 @@ function PaletteTrigger({ onOpen }: { onOpen: () => void }) {
       onClick={onOpen}
       aria-label="Open command palette"
       aria-keyshortcuts="Meta+K Control+K"
+      title="Search or jump to - Cmd K"
       className={cn(
-        "flex items-center gap-2 rounded-md border bg-surface-2/60 px-2.5 py-1.5",
-        "text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground",
+        "hidden h-8 shrink-0 items-center justify-center gap-2 rounded-md border border-border-strong bg-card",
+        "text-xs text-faint transition-colors hover:bg-surface-2 hover:text-foreground",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+        "w-8 px-0 md:inline-flex lg:w-auto lg:px-2.5",
       )}
     >
-      <Command className="h-3.5 w-3.5" />
-      <span className="hidden sm:inline">Search</span>
-      <kbd className="flex items-center gap-0.5 rounded border bg-card px-1 py-0.5 text-[9px] font-medium">
-        <Command className="h-2.5 w-2.5" />K
+      <Command className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+      <span className="hidden lg:inline">Search</span>
+      <kbd className="hidden items-center gap-0.5 rounded-sm border bg-surface-2 px-1 font-mono text-2xs lg:flex">
+        <Command className="h-2.5 w-2.5" aria-hidden="true" />K
       </kbd>
     </button>
   );

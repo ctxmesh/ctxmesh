@@ -105,8 +105,9 @@ describe("MySharesPage — lists shares with status badges (V13)", () => {
 
     renderPage();
 
-    await screen.findByTestId("my-shares-page");
-    // "Live" is in the Status column — badge text
+    // The page root renders during loading, so await the row data itself.
+    await screen.findAllByText("Live");
+    // "Live" is in the State column — badge text
     const liveBadges = screen.getAllByText("Live");
     expect(liveBadges.length).toBeGreaterThan(0);
     // At least one badge lives inside a <td>
@@ -121,7 +122,7 @@ describe("MySharesPage — lists shares with status badges (V13)", () => {
 
     renderPage();
 
-    await screen.findByTestId("my-shares-page");
+    await screen.findAllByText("Revoked");
     const els = screen.getAllByText("Revoked");
     expect(els.some((el) => el.closest("td") !== null)).toBe(true);
   });
@@ -134,7 +135,7 @@ describe("MySharesPage — lists shares with status badges (V13)", () => {
 
     renderPage();
 
-    await screen.findByTestId("my-shares-page");
+    await screen.findAllByText("Expired");
     const els = screen.getAllByText("Expired");
     expect(els.some((el) => el.closest("td") !== null)).toBe(true);
   });
@@ -150,7 +151,10 @@ describe("MySharesPage — lists shares with status badges (V13)", () => {
 
     renderPage();
 
-    await screen.findByTestId("my-shares-page");
+    // Both rows are dead, so wait for one of their state tags before asserting
+    // the ABSENCE of a control — an assertion made before the rows land would
+    // pass for the wrong reason.
+    await screen.findAllByText("Revoked");
     // Revoke buttons only appear for live shares
     expect(screen.queryByRole("button", { name: /Revoke/i })).toBeNull();
   });
@@ -167,8 +171,7 @@ describe("MySharesPage — lists shares with status badges (V13)", () => {
 
     renderPage();
 
-    await screen.findByTestId("my-shares-page");
-    const agentCell = screen.getByText("research-bot");
+    const agentCell = await screen.findByText("research-bot");
     expect(agentCell.closest("td")).not.toBeNull();
   });
 });
@@ -360,5 +363,81 @@ describe("MySharesPage — error states (V13)", () => {
     ).toBeNull();
     // Forbidden is terminal — no Retry
     expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
+  });
+});
+
+// ── M151: the editorial ACTIVITY-FEED conversion ──────────────────────────────
+
+describe("MySharesPage — activity feed (M151, §4.4 / §7.1 / §7.2)", () => {
+  it("a live full-transcript link carries a next step; a metadata-only one says Nothing needed", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: [
+        share({ id: "s-open", runId: "run-1", status: "live", includeContent: true }),
+        share({ id: "s-meta", runId: "run-2", status: "live", includeContent: false }),
+      ],
+    }));
+
+    renderPage();
+
+    const step = await screen.findByTestId("next-step-s-open");
+    expect(step).toHaveTextContent("Review the transcript");
+    expect(step).toHaveAttribute("href", "/runs/run-1");
+
+    const quiet = screen.getByTestId("next-step-s-meta");
+    expect(quiet).toHaveTextContent("Nothing needed");
+    expect(quiet.tagName).not.toBe("A");
+    expect(quiet.tagName).not.toBe("BUTTON");
+  });
+
+  it("Opened reads — with a QuietNote, never a fabricated 0 (§7.1)", async () => {
+    installFetch(() => ({ ok: true, body: [share({ id: "s1", status: "live" })] }));
+
+    renderPage();
+    await screen.findByTestId("next-step-s1");
+
+    expect(screen.getByRole("note")).toHaveTextContent(
+      "How often a link has been opened isn’t in this list.",
+    );
+    expect(
+      screen.getByTitle(/does not report how many times the link was opened/i),
+    ).toBeInTheDocument();
+  });
+
+  it("the Ended chip narrows the list to links that no longer work", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: [
+        share({ id: "s-live", agent: "still-live-agent", status: "live" }),
+        share({ id: "s-dead", agent: "revoked-agent", status: "revoked" }),
+      ],
+    }));
+
+    renderPage();
+    await screen.findByText("still-live-agent");
+
+    fireEvent.click(screen.getByRole("radio", { name: /Ended/ }));
+    expect(screen.getByText("revoked-agent")).toBeInTheDocument();
+    expect(screen.queryByText("still-live-agent")).toBeNull();
+  });
+
+  it("the closing line counts the standing disclosures from the data", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: [
+        share({ id: "s1", status: "live", includeContent: true }),
+        share({ id: "s2", status: "live", includeContent: false }),
+        share({ id: "s3", status: "revoked", includeContent: true }),
+      ],
+    }));
+
+    renderPage();
+    await screen.findByTestId("next-step-s1");
+
+    expect(
+      screen.getByText(
+        /2 of the 3 links are still live\. One of them shows the whole transcript/,
+      ),
+    ).toBeInTheDocument();
   });
 });

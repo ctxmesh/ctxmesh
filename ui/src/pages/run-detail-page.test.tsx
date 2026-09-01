@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { RunDetailPage } from "@/pages/run-detail-page";
@@ -484,9 +484,12 @@ describe("RunDetailPage (V5, M112)", () => {
       renderPage("secret-id");
 
       // ForbiddenInline delegates to ErrorState which renders role="alert".
-      // It also shows the "Not allowed to read this run" title we pass in.
+      // The copy is §7 A5's forbidden sentence, resource-named (M100 UI99-403):
+      // a permission boundary, never the raw RBAC string.
       await screen.findByRole("alert");
-      expect(screen.getByText(/not allowed to read this run/i)).toBeInTheDocument();
+      expect(
+        screen.getByText(/permission to view this run/i),
+      ).toBeInTheDocument();
     });
   });
 
@@ -497,14 +500,16 @@ describe("RunDetailPage (V5, M112)", () => {
       stubFetch({ run: APPROVAL_RUN_WITH_CONTEXT });
       renderPage(APPROVAL_RUN_WITH_CONTEXT.id);
 
-      await screen.findByTestId("run-original-request");
-      // The first user message content is shown
+      const panel = await screen.findByTestId("run-original-request");
+      // The first user message content is shown IN THE PANEL. Scoped, because
+      // the page now also renders the run's story as a Timeline: the assertion
+      // was always about what this panel carries, not about the whole document.
       expect(
-        screen.getByText("Please draft a summary of Q3 sales."),
+        within(panel).getByText("Please draft a summary of Q3 sales."),
       ).toBeInTheDocument();
-      // The assistant message is NOT the one shown (only the user message)
+      // The assistant message is NOT the one the panel shows (only the ask).
       expect(
-        screen.queryByText("I will now draft the Q3 sales summary…"),
+        within(panel).queryByText("I will now draft the Q3 sales summary…"),
       ).toBeNull();
     });
 

@@ -79,6 +79,8 @@ const (
 	// resPods / verbGet name the core-group pods/log SSAR the logs capability probes (M100).
 	resPods = "pods"
 	verbGet = "get"
+	// verbList is the read verb the caller-scoped stop list probes with (ADR 0129).
+	verbList = "list"
 )
 
 // agentsAPIGroup is the API group all the golden CRD kinds live in.
@@ -103,7 +105,7 @@ var (
 		resAuditLogs,
 		resKnowledgeBases,
 	}
-	goldenVerbs = []string{verbGet, "list", "create", "update", "delete"}
+	goldenVerbs = []string{verbGet, verbList, "create", "update", "delete"}
 )
 
 // handleWhoAmI serves GET /api/whoami — the caller's identity (username +

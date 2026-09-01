@@ -128,14 +128,21 @@ function recordingFetch(run: RunMock = {}) {
   return calls;
 }
 
-function renderChat(devMode = false) {
+function renderChat(devMode = false, audience: "operator" | "end-user" = "operator") {
   const onTraced = vi.fn();
   const utils = render(
     <MemoryRouter>
       <NamespaceProvider>
         <CapabilitiesProvider>
           <DevModeContext.Provider value={devMode}>
-            <ChatPanel ns="default" name="scalekit-agent" ready memoryBound onTraced={onTraced} />
+            <ChatPanel
+              ns="default"
+              name="scalekit-agent"
+              ready
+              memoryBound
+              onTraced={onTraced}
+              audience={audience}
+            />
           </DevModeContext.Provider>
         </CapabilitiesProvider>
       </NamespaceProvider>
@@ -284,5 +291,105 @@ describe("ChatPanel (durable runs, ADR 0093)", () => {
     expect(await screen.findByText("Not allowed to run this agent")).toBeInTheDocument();
     expect(screen.queryByText(/forbidden: not allowed/)).toBeNull();
     expect(screen.queryByTestId("chat-turn-error")).toBeNull();
+  });
+});
+
+// ── M151 §6.1 A10 / §7 A10 — what the surface says, and to whom ─────────────
+//
+// The chatbox is served at an agent's OWN hostname as well as inside the
+// console, and the person at that door is not an operator. These pin the two
+// halves of that: governance is rendered as governance (the hold hue, the
+// §5.26 spine) rather than as a bubble or an amber warning, and operator
+// vocabulary — run ids, trace ids, raw server strings — never crosses over.
+
+describe("ChatPanel — governance and audience (M151 A10)", () => {
+  it("renders an approval pause as a HELD gate, not a failure — with a way into the run for an operator", async () => {
+    recordingFetch({
+      details: [
+        {
+          id: "run-1",
+          status: "requires_action",
+          traceId: "trace-hold",
+          messages: [{ role: "assistant", content: '{"output":"That needs sign-off."}' }],
+          requiresAction: { kind: "approval", message: "Issue a $42.00 refund" },
+        },
+      ],
+    });
+    renderChat(false);
+    await sendMessage("refund order 4021");
+
+    const hold = await screen.findByTestId("chat-hold");
+    // It is HELD: nothing is lost, and it is not drawn as an error.
+    expect(hold).toHaveTextContent(/A person has to approve this before it goes on/i);
+    expect(hold).toHaveTextContent(/held, not failed/i);
+    expect(screen.queryByTestId("chat-turn-error")).toBeNull();
+    // The turn wears the hold tag, and an operator is given the run to open.
+    // The Badge recipe uppercases in CSS, so the DOM carries the sentence case.
+    expect(screen.getByTestId("chat-turn-agent")).toHaveTextContent("Held");
+    expect(screen.getByRole("link", { name: /Review the hold/i })).toHaveAttribute(
+      "href",
+      "/runs/run-1",
+    );
+  });
+
+  it("at an agent's own door the same hold offers NO console link (that route does not exist there)", async () => {
+    recordingFetch({
+      details: [
+        {
+          id: "run-1",
+          status: "requires_action",
+          traceId: "trace-hold",
+          messages: [{ role: "assistant", content: '{"output":"That needs sign-off."}' }],
+          requiresAction: { kind: "approval", message: "Issue a $42.00 refund" },
+        },
+      ],
+    });
+    renderChat(false, "end-user");
+    await sendMessage("refund order 4021");
+
+    const hold = await screen.findByTestId("chat-hold");
+    expect(hold).toHaveTextContent(/held, not failed/i);
+    expect(screen.queryByRole("link", { name: /Review the hold/i })).toBeNull();
+    // Nor the trace link, nor a run id anywhere on the surface.
+    expect(screen.queryByTestId("open-trace")).toBeNull();
+    expect(document.body.textContent).not.toContain("trace-hold");
+  });
+
+  it("a failed turn stays IN the transcript with a way to try again (§7 A10)", async () => {
+    const calls = recordingFetch({
+      createOk: false,
+      createStatus: 500,
+      createJson: { error: "the run store refused the create" },
+    });
+    renderChat(false);
+    await sendMessage("how long does a refund take?");
+
+    await screen.findByTestId("chat-turn-error");
+    // The earlier turn is still on screen — the transcript is never blanked.
+    expect(screen.getByTestId("chat-turn-user")).toHaveTextContent(
+      "how long does a refund take?",
+    );
+    const createsBefore = calls.filter((c) => c.url === "/api/runs" && c.method === "POST").length;
+    fireEvent.click(screen.getByText("Try again"));
+    await waitFor(() =>
+      expect(
+        calls.filter((c) => c.url === "/api/runs" && c.method === "POST").length,
+      ).toBe(createsBefore + 1),
+    );
+  });
+
+  it("the server's raw words reach an operator and not the person at the assistant's door", async () => {
+    recordingFetch({
+      createOk: false,
+      createStatus: 500,
+      createJson: { error: "boom: the run store refused the create" },
+    });
+    renderChat(false, "end-user");
+    await sendMessage("hi");
+
+    const turn = await screen.findByTestId("chat-turn-error");
+    expect(turn).toHaveTextContent(/didn't get an answer/i);
+    expect(turn).toHaveTextContent(/Nothing above has changed/i);
+    expect(document.body.textContent).not.toContain("the run store refused the create");
   });
 });

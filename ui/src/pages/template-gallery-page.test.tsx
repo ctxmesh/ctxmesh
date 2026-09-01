@@ -14,6 +14,15 @@ function LocationSpy({ onLocation }: { onLocation: (loc: string, state: unknown)
   return null;
 }
 
+// ── Tab selectors (M151 A9) ───────────────────────────────────────────────────
+// The tab strip is now the kit PageHeader's (spec §5.17): APG tabs with a
+// roving tabindex, rendered by the kit rather than by this page, so they no
+// longer carry the page-local `gallery-tab-*` testids. The assertions below are
+// unchanged in intent — same tabs, same labels, same aria-selected contract —
+// addressed through the role and accessible name the kit guarantees.
+const templatesTab = () => screen.getByRole("tab", { name: "Templates" });
+const mcpTab = () => screen.getByRole("tab", { name: "Shared servers" });
+
 // Fake fetch for the template gallery page. Covers:
 //   - GET /api/templates  — the template list (recipes + published agents)
 //   - GET /api/catalog    — the MCP catalog tab
@@ -183,9 +192,8 @@ describe("TemplateGalleryPage — taxonomy (m76.1)", () => {
   it("Gallery MCP tab is labeled 'Shared servers', not 'MCP Servers'", () => {
     makeFetch();
     renderPage();
-    const mcpTab = screen.getByTestId("gallery-tab-mcp");
-    expect(mcpTab).toHaveTextContent("Shared servers");
-    expect(mcpTab).not.toHaveTextContent("MCP Servers");
+    expect(mcpTab()).toHaveTextContent("Shared servers");
+    expect(mcpTab()).not.toHaveTextContent("MCP Servers");
   });
 });
 
@@ -195,8 +203,8 @@ describe("TemplateGalleryPage — templates tab", () => {
     makeFetch();
     renderPage();
     expect(screen.getByText("Gallery")).toBeInTheDocument();
-    expect(screen.getByTestId("gallery-tab-templates")).toBeInTheDocument();
-    expect(screen.getByTestId("gallery-tab-mcp")).toBeInTheDocument();
+    expect(templatesTab()).toBeInTheDocument();
+    expect(mcpTab()).toBeInTheDocument();
   });
 
   it("renders recipe and published agent template cards", async () => {
@@ -416,7 +424,7 @@ describe("TemplateGalleryPage — MCP catalog tab", () => {
     makeFetch();
     renderPage();
 
-    fireEvent.click(screen.getByTestId("gallery-tab-mcp"));
+    fireEvent.click(mcpTab());
 
     expect(
       await screen.findByTestId(`mcp-catalog-entry-${defaultCatalogEntry.name}`),
@@ -450,7 +458,7 @@ describe("TemplateGalleryPage — MCP catalog tab", () => {
     );
 
     renderPage();
-    fireEvent.click(screen.getByTestId("gallery-tab-mcp"));
+    fireEvent.click(mcpTab());
 
     const connectBtn = await screen.findByTestId(`connect-mcp-tab-${defaultCatalogEntry.name}`);
     fireEvent.click(connectBtn);
@@ -466,7 +474,7 @@ describe("TemplateGalleryPage — MCP catalog tab", () => {
   it("shows empty state when MCP catalog has no entries", async () => {
     makeFetch({ catalogEntries: [] });
     renderPage();
-    fireEvent.click(screen.getByTestId("gallery-tab-mcp"));
+    fireEvent.click(mcpTab());
     expect(await screen.findByText("No discoverable servers yet")).toBeInTheDocument();
   });
 });
@@ -478,7 +486,7 @@ describe("TemplateGalleryPage MCP catalog — CredentialSourceBadge (m76.2 T8)",
       catalogEntries: [{ ...defaultCatalogEntry, credentialSource: "byo-oauth" }],
     });
     renderPage();
-    fireEvent.click(screen.getByTestId("gallery-tab-mcp"));
+    fireEvent.click(mcpTab());
 
     const badge = await screen.findByTestId(`cred-source-${defaultCatalogEntry.name}`);
     expect(badge).toHaveTextContent("You connect your account");
@@ -489,7 +497,7 @@ describe("TemplateGalleryPage MCP catalog — CredentialSourceBadge (m76.2 T8)",
       catalogEntries: [{ ...defaultCatalogEntry, credentialSource: "shared" }],
     });
     renderPage();
-    fireEvent.click(screen.getByTestId("gallery-tab-mcp"));
+    fireEvent.click(mcpTab());
 
     const badge = await screen.findByTestId(`cred-source-${defaultCatalogEntry.name}`);
     expect(badge).toHaveTextContent("Uses a shared credential");
@@ -500,7 +508,7 @@ describe("TemplateGalleryPage MCP catalog — CredentialSourceBadge (m76.2 T8)",
       catalogEntries: [{ ...defaultCatalogEntry, credentialSource: undefined }],
     });
     renderPage();
-    fireEvent.click(screen.getByTestId("gallery-tab-mcp"));
+    fireEvent.click(mcpTab());
 
     await screen.findByTestId(`mcp-catalog-entry-${defaultCatalogEntry.name}`);
     expect(screen.queryByTestId(`cred-source-${defaultCatalogEntry.name}`)).toBeNull();
@@ -524,7 +532,7 @@ describe("TemplateGalleryPage MCP catalog — already-connected (m76.2 T10)", ()
       ],
     });
     renderPage();
-    fireEvent.click(screen.getByTestId("gallery-tab-mcp"));
+    fireEvent.click(mcpTab());
 
     await screen.findByTestId(`mcp-catalog-entry-${defaultCatalogEntry.name}`);
 
@@ -552,7 +560,7 @@ describe("TemplateGalleryPage MCP catalog — already-connected (m76.2 T10)", ()
       ],
     });
     renderPage();
-    fireEvent.click(screen.getByTestId("gallery-tab-mcp"));
+    fireEvent.click(mcpTab());
 
     await screen.findByTestId(`mcp-catalog-entry-${defaultCatalogEntry.name}`);
     const connectBtn = screen.getByTestId(`connect-mcp-tab-${defaultCatalogEntry.name}`);
@@ -574,7 +582,7 @@ describe("TemplateGalleryPage MCP catalog — post-connect highlight (m76.2 T11)
       lastPath = loc;
       lastState = state;
     });
-    fireEvent.click(screen.getByTestId("gallery-tab-mcp"));
+    fireEvent.click(mcpTab());
 
     const connectBtn = await screen.findByTestId(`connect-mcp-tab-${defaultCatalogEntry.name}`);
     fireEvent.click(connectBtn);
@@ -596,7 +604,7 @@ describe("TemplateGalleryPage MCP catalog — search filter (m76.2 T12)", () => 
       ],
     });
     renderPage();
-    fireEvent.click(screen.getByTestId("gallery-tab-mcp"));
+    fireEvent.click(mcpTab());
 
     await screen.findByTestId(`mcp-catalog-entry-${defaultCatalogEntry.name}`);
     await screen.findByTestId("mcp-catalog-entry-other-mcp");
@@ -613,7 +621,7 @@ describe("TemplateGalleryPage MCP catalog — search filter (m76.2 T12)", () => 
   it("shows a no-results message when search matches nothing", async () => {
     makeFetch({ catalogEntries: [defaultCatalogEntry] });
     renderPage();
-    fireEvent.click(screen.getByTestId("gallery-tab-mcp"));
+    fireEvent.click(mcpTab());
 
     await screen.findByTestId(`mcp-catalog-entry-${defaultCatalogEntry.name}`);
     const searchInput = screen.getByTestId("mcp-catalog-search");
@@ -643,7 +651,7 @@ describe("TemplateGalleryPage MCP catalog — search filter (m76.2 T12)", () => 
     );
 
     renderPage();
-    fireEvent.click(screen.getByTestId("gallery-tab-mcp"));
+    fireEvent.click(mcpTab());
 
     const connectBtn = await screen.findByTestId(`connect-mcp-tab-${defaultCatalogEntry.name}`);
     fireEvent.click(connectBtn);
@@ -949,23 +957,76 @@ describe("TemplateGalleryPage — P1-3 ?tab= deep-link (m76 close)", () => {
     renderPageAt("/gallery?tab=mcp");
 
     // The MCP tab should be active (aria-selected=true).
-    expect(screen.getByTestId("gallery-tab-mcp")).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByTestId("gallery-tab-templates")).toHaveAttribute("aria-selected", "false");
+    expect(mcpTab()).toHaveAttribute("aria-selected", "true");
+    expect(templatesTab()).toHaveAttribute("aria-selected", "false");
   });
 
   it("no ?tab= param defaults to the Agent Templates tab", () => {
     makeFetch();
     renderPageAt("/gallery");
 
-    expect(screen.getByTestId("gallery-tab-templates")).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByTestId("gallery-tab-mcp")).toHaveAttribute("aria-selected", "false");
+    expect(templatesTab()).toHaveAttribute("aria-selected", "true");
+    expect(mcpTab()).toHaveAttribute("aria-selected", "false");
   });
 
   it("?tab=templates opens the Agent Templates tab explicitly", () => {
     makeFetch();
     renderPageAt("/gallery?tab=templates");
 
-    expect(screen.getByTestId("gallery-tab-templates")).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByTestId("gallery-tab-mcp")).toHaveAttribute("aria-selected", "false");
+    expect(templatesTab()).toHaveAttribute("aria-selected", "true");
+    expect(mcpTab()).toHaveAttribute("aria-selected", "false");
+  });
+});
+
+// ── A9 card contract: a card has no column, so the CARD does the bounding ─────
+// The gallery was the last route failing the fit sweep: the 63-character
+// single-token published name below overflowed its card by +272px at 1440 and
+// +288px at 1280, in both themes, on every render. The mechanism the fix relies
+// on is §4.5 — one truncating line, the whole value in `title`, never
+// `break-all` — and that mechanism is what these assert. (jsdom measures
+// nothing; the pixel proof is ui/visual's sweep.)
+describe("TemplateGalleryPage — long-value containment (M151 §4.5)", () => {
+  const UNBREAKABLE = "unbreakablesingletokenagentnamewithnohyphensorwhitespaceatallxy";
+  const unbreakableTemplate: TemplateRow = {
+    kind: "AgentDeployment",
+    source: "published",
+    name: UNBREAKABLE,
+    description: "An experimental agent published with a name nothing can wrap.",
+    provenance: { originNamespace: "default", originName: UNBREAKABLE, version: "7" },
+    visibility: "public",
+  };
+
+  it("truncates the origin line and keeps the full value in title — never break-all", async () => {
+    makeFetch({ templates: [unbreakableTemplate] });
+    renderPage();
+
+    const originEl = await screen.findByTestId(`template-origin-${UNBREAKABLE}`);
+    expect(originEl.className).toContain("truncate");
+    // A name is never broken across lines (§4.5) — that turns an identifier
+    // into a five-line paragraph and makes the card taller than its subject.
+    expect(originEl.className).not.toContain("break-all");
+    expect(originEl.className).not.toContain("break-words");
+    // Truncated on screen, whole on hover.
+    expect(originEl).toHaveAttribute("title", `origin: default/${UNBREAKABLE} @ 7`);
+  });
+
+  it("truncates the card title and keeps the full name in title", async () => {
+    makeFetch({ templates: [unbreakableTemplate] });
+    renderPage();
+
+    const nameEl = await screen.findByTestId(`template-name-${UNBREAKABLE}`);
+    expect(nameEl.className).toContain("truncate");
+    expect(nameEl).toHaveAttribute("title", UNBREAKABLE);
+  });
+
+  it("clamps a long description to two lines with the whole text in title", async () => {
+    const long = "x".repeat(400);
+    makeFetch({ templates: [{ ...unbreakableTemplate, description: long }] });
+    renderPage();
+
+    const card = await screen.findByTestId(`template-card-${UNBREAKABLE}`);
+    const desc = card.querySelector("p[title]:not([data-testid])");
+    expect(desc?.className).toContain("line-clamp-2");
+    expect(desc).toHaveAttribute("title", long);
   });
 });

@@ -2,18 +2,38 @@ import * as React from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { UsedBySection } from "@/components/used-by-section";
-import { GitBranch, Pencil, Plus, Trash2, X } from "lucide-react";
+import { Pencil, Plus, Trash2, X } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, PanelHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+// One import for the whole module. The create wizard below briefly carried its
+// own second `@/components/kit` statement so the two surfaces could be edited
+// independently; TypeScript scopes imports per MODULE, so the moment both
+// surfaces needed `PageHeader` that became a duplicate-identifier error. The
+// components are still independently editable — the import list is not the
+// seam that keeps them so.
 import {
   ComboSelect,
   ConfirmDialog,
   DetailDrawer,
-  EmptyState,
+  ErrorState,
   ForbiddenInline,
+  KeyValueList,
+  Meter,
+  NextStepLink,
+  PageHeader,
+  QuantityValue,
+  QuietNote,
+  ResourceLink,
+  SectionHeader,
+  Skeleton,
+  SkeletonCard,
+  StatusBadge,
+  UNKNOWN,
   Wizard,
+  formatCount,
+  type KeyValueItem,
   type WizardStep,
   useToast,
 } from "@/components/kit";
@@ -28,11 +48,55 @@ import {
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_ROUTES } from "@/lib/nav";
 
-// ModelRouteDetailPage — detail + edit wizard + typed-name delete for one
-// ModelRoute. The edit wizard lets the caller manage the providers list (including
-// apiBase for non-mock providers) and the optional rate limit. A 422 from the BFF
-// (CRD validation: secretBindingRef/apiBase rule) surfaces in the form, never
-// swallowed. RBAC-aware: viewers see no edit/delete affordances.
+// ModelRouteDetailPage — the route reader + its edit form (M151 §6.1 archetype
+// A2, form-edit variant). Route: /routes/:ns/:name
+//
+// ── THE PAGE'S ONE IDEA: A ROUTE IS AN ORDER, NOT A SET ─────────────────────
+// A ModelRoute's providers are not a bag of options; they are a ranked list,
+// and the only question a reader brings here is "what actually serves my
+// traffic, and what happens when it can't?". So the main column renders them as
+// an ORDERED spine — first choice, then what it falls back to — while the rail
+// states the bound facts that order is made of. The old page rendered the same
+// array as unordered chips with "Priority 2" buried mid-row: the same data,
+// saying nothing.
+//
+// ── AN UNSAVED CHANGE IS VISIBLY UNSAVED (this variant's contract) ──────────
+// The rail states what the route IS; the drawer edits it. Between the two there
+// is a window where the form and the record disagree, and the form says so:
+// every step carries the unsaved line, each diverged field carries its own
+// "Changed — not saved yet" hint, the review renders was → now rather than a
+// flat restatement, and Cancel/Esc route through the discard guard. Dirtiness is
+// COMPUTED against the record rather than tracked as a flag, so a field edited
+// and then edited back is correctly not a change.
+//
+// ── WHAT THIS PAGE MAY NOT CLAIM (§7.1) ────────────────────────────────────
+// `GET /api/modelroutes/{ns}/{name}` returns identity, the provider list, the
+// optional rate limit and the phase. It returns NO request counts, NO per-
+// provider health and NO spend. So the rate-cap Meter draws the bound it was
+// given and states that usage against it is not recorded here — it does not
+// draw a fill at zero, because zero would be a claim the platform never made.
+// A 422 from the BFF (the CRD's secretBindingRef/apiBase rule) surfaces in the
+// form, never swallowed. RBAC-aware: viewers see no edit/delete affordances.
+//
+// data-testid contract:
+//   route-detail-page      — root container (ready state)
+//   route-detail-loading   — the loading state
+//   route-detail-error     — the generic error state
+//   route-not-found        — the 404 state
+//   provider-row-{i}       — one provider in the failover order
+//   route-edit-review      — the edit wizard's review step
+//   route-edit-error       — a non-403 save failure (422 included)
+//   route-edit-unsaved     — the unsaved-changes line in the edit form
+
+/** The A2 breadcrumb — the same trail in every state, so a failed load still
+ *  offers the way back the ready page offers. */
+const CRUMBS = (name: string) => [
+  { label: "Model routes", to: "/routes" },
+  { label: name },
+];
+
+/** How the failover order reads. Past the third entry the eyebrow is the rank. */
+const RANK = ["First choice", "Falls back to", "Then to"];
 
 type Load =
   | { kind: "loading" }
@@ -101,26 +165,49 @@ export function ModelRouteDetailPage() {
 
   React.useEffect(() => load(), [load]);
 
+  // The §7 A2 loading shape: the header band instantly, a SkeletonCard where the
+  // panel will be, and kv-line bars in the rail — so nothing re-lays-out under
+  // the reader when the answer arrives.
   if (state.kind === "loading") {
     return (
-      <div className="mx-auto max-w-5xl">
-        <p
-          className="text-sm text-muted-foreground"
-          data-testid="route-detail-loading"
-        >
-          Loading {name}…
-        </p>
+      <div className="min-w-0 space-y-6" data-testid="route-detail-loading">
+        <PageHeader
+          breadcrumb={CRUMBS(name)}
+          title={name || "Model route"}
+          titleMono
+          loading
+        />
+        <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
+          <SkeletonCard className="min-w-0" />
+          <Card className="min-w-0">
+            <PanelHeader title="The record" />
+            <CardContent>
+              <div
+                role="status"
+                aria-busy="true"
+                aria-label="Loading the route's record"
+              >
+                {[0, 1, 2, 3, 4, 5].map((i) => (
+                  <Skeleton decorative key={i} className="mb-3 h-3.5 w-full" />
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       </div>
     );
   }
 
   if (state.kind === "error") {
+    // §7 A2: a permission boundary replaces the page under the header — calm,
+    // resource-named, and never the raw RBAC string (M100 UI99-403).
     if (state.forbidden) {
       return (
-        <div className="mx-auto max-w-5xl">
+        <div className="min-w-0 space-y-6">
+          <PageHeader breadcrumb={CRUMBS(name)} title={name} titleMono />
           <ForbiddenInline
-            title={`Not allowed to view ${name}`}
-            description="Your account can't read this model route in this namespace."
+            title={`You don't have permission to view ${name}.`}
+            resource="model routes"
             detail={state.message}
           />
         </div>
@@ -128,28 +215,35 @@ export function ModelRouteDetailPage() {
     }
     if (state.status === 404) {
       return (
-        <div className="mx-auto max-w-5xl" data-testid="route-not-found">
-          <EmptyState
-            icon={GitBranch}
+        <div className="min-w-0 space-y-6" data-testid="route-not-found">
+          <PageHeader
+            breadcrumb={[{ label: "Model routes", to: "/routes" }]}
             title="Model route not found"
-            description={`No ModelRoute "${name}" in ${ns || "this namespace"}.`}
-            action={{
-              label: "Back to routes",
-              onClick: () => navigate("/routes"),
-            }}
+            lede="Nothing in this workspace answers to that name."
           />
+          <QuietNote title="No model route with this name was found.">
+            There is no ModelRoute{" "}
+            <span className="font-mono text-xs">{name}</span> in{" "}
+            <span className="font-mono text-xs">{ns || "this namespace"}</span>.
+            It may have been deleted, or the link may name a route from another
+            cluster. Nothing is missing from this page — there is simply no route
+            to show.
+            <span className="mt-3 block">
+              <NextStepLink label="Back to routes" to="/routes" />
+            </span>
+          </QuietNote>
         </div>
       );
     }
     return (
-      <div className="mx-auto max-w-5xl">
-        <div
-          className="rounded-lg border bg-card p-6 text-sm text-destructive shadow-card"
-          role="alert"
-          data-testid="route-detail-error"
-        >
-          Couldn't load the model route: {state.message}
-        </div>
+      <div className="min-w-0 space-y-6" data-testid="route-detail-error">
+        <PageHeader breadcrumb={CRUMBS(name)} title={name} titleMono />
+        <ErrorState
+          title="The model route didn't load."
+          description="Nothing has changed about the route itself — only this page failed to read it."
+          detail={state.message}
+          onRetry={() => load()}
+        />
       </div>
     );
   }
@@ -202,106 +296,239 @@ function RouteDetailContent({
   const canEdit = can(RES_ROUTES, "update");
   const canDelete = can(RES_ROUTES, "delete");
 
+  // The order IS the fact, so it is established once, here, rather than trusted
+  // to whatever order the array happened to arrive in. Ties keep their relative
+  // position (a stable sort), so two providers at the same priority read in the
+  // order the CR declares them.
+  const ordered = [...detail.providers].sort((a, b) => a.priority - b.priority);
+  const count = ordered.length;
+  const first = ordered[0];
+
+  // The rail: the bound facts, in the kv register. No table here — §4.7.
+  const facts: KeyValueItem[] = [
+    { key: "Route", value: detail.name, title: detail.name },
+    { key: "Workspace", value: detail.namespace, absent: "not recorded" },
+    {
+      key: "Providers",
+      value: <QuantityValue value={count} />,
+      mono: false,
+    },
+    {
+      key: "First choice",
+      value: first ? (
+        <span
+          className="block truncate"
+          title={`${first.provider} / ${first.model}`}
+        >
+          {first.provider} / {first.model}
+        </span>
+      ) : undefined,
+      absent: "none declared",
+      title: "This route declares no providers, so nothing serves its traffic.",
+    },
+  ];
+
   return (
-    <div
-      className="mx-auto max-w-5xl space-y-6"
-      data-testid="route-detail-page"
-    >
-      {/* Header */}
-      <div className="space-y-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <h2 className="text-2xl font-semibold tracking-tight">
-            {detail.name}
-          </h2>
-          <Badge variant={detail.ready ? "success" : "warning"}>
-            {detail.phase || (detail.ready ? "Ready" : "Pending")}
-          </Badge>
-          <span className="text-sm text-muted-foreground">
-            {detail.namespace}
-          </span>
-          <div className="ml-auto flex items-center gap-2">
-            {canEdit && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={onOpenEdit}
-                data-testid="edit-route-button"
-              >
-                <Pencil className="h-4 w-4" />
-                Edit
-              </Button>
-            )}
-            {canDelete && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={onOpenDelete}
-                className="text-destructive hover:text-destructive"
-                data-testid="delete-route-button"
-              >
-                <Trash2 className="h-4 w-4" />
-                Delete
-              </Button>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Detail panel */}
-      <div className="rounded-lg border bg-card p-5 shadow-card">
-        <p className="mb-3 text-sm font-medium">Providers</p>
-        <div className="space-y-3">
-          {detail.providers.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No providers configured.
-            </p>
-          ) : (
-            detail.providers.map((p, i) => (
-              <div
-                key={i}
-                className="flex flex-wrap items-start gap-x-8 gap-y-1 rounded-md border bg-surface-2/40 p-3 text-sm"
-                data-testid={`provider-row-${i}`}
-              >
-                <KV k="Provider" v={p.provider} />
-                <KV
-                  k="Model"
-                  v={<span className="font-mono text-xs">{p.model}</span>}
-                />
-                <KV k="Priority" v={String(p.priority)} />
-                {p.secretBindingRef && (
-                  <KV k="SecretBinding" v={p.secretBindingRef} />
-                )}
-                {p.apiBase && (
-                  <KV
-                    k="API base"
-                    v={<span className="font-mono text-xs">{p.apiBase}</span>}
-                  />
-                )}
-              </div>
-            ))
-          )}
-        </div>
-        {detail.rateLimit && (
-          <div className="mt-4 flex items-center gap-2 text-sm">
-            <span className="text-muted-foreground">Rate limit:</span>
-            <span>{detail.rateLimit.tenantRPM} RPM per tenant</span>
-          </div>
-        )}
-      </div>
-
-      {/* Reverse-lookup: the agents that route through this ModelRoute (m18.9). */}
-      <UsedBySection
-        kind="modelroute"
-        name={detail.name}
-        namespace={detail.namespace}
-        title="Used by agents"
+    <div className="min-w-0 space-y-6" data-testid="route-detail-page">
+      <PageHeader
+        breadcrumb={CRUMBS(detail.name)}
+        title={detail.name}
+        titleMono
+        status={<StatusBadge ready={detail.ready} phase={detail.phase} />}
+        meta={`${detail.namespace} · ${count} provider${count === 1 ? "" : "s"}`}
+        actionsSlot={
+          canEdit || canDelete ? (
+            <>
+              {canEdit && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-sm"
+                  onClick={onOpenEdit}
+                  data-testid="edit-route-button"
+                >
+                  <Pencil className="h-4 w-4" />
+                  Edit
+                </Button>
+              )}
+              {canDelete && (
+                // Crit as an ACTION colour is §2.3's one sanctioned exception:
+                // a destructive control, told apart from a crit STATUS by form
+                // (a filled button, never an uppercase mono tag).
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  className="text-sm"
+                  onClick={onOpenDelete}
+                  data-testid="delete-route-button"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Delete
+                </Button>
+              )}
+            </>
+          ) : undefined
+        }
       />
+
+      {/* §4.7 hub grid: the order on the left, the bound facts in the 300px
+          rail, which stacks UNDER the main column below `lg`. */}
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
+        <div className="min-w-0 space-y-5">
+          <Card className="min-w-0">
+            <PanelHeader
+              title="The failover order"
+              meta={count > 0 ? `${count} provider${count === 1 ? "" : "s"}` : undefined}
+            />
+            <CardContent>
+              {count === 0 ? (
+                // §7 A2: a missing SECTION teaches rather than sitting blank.
+                // A route with no providers is not an empty list, it is a route
+                // that cannot serve anything, and the copy says which.
+                <QuietNote title="This route has no providers yet.">
+                  Nothing serves its traffic: an agent pointed at this route has
+                  nowhere to send a model call. Add at least one provider — the
+                  first one you add becomes its first choice.
+                  {canEdit && (
+                    <span className="mt-3 block">
+                      <NextStepLink
+                        label="Add a provider"
+                        to={`/routes/${encodeURIComponent(detail.namespace)}/${encodeURIComponent(detail.name)}?edit=1`}
+                      />
+                    </span>
+                  )}
+                </QuietNote>
+              ) : (
+                <>
+                  <p className="mb-2 max-w-[64ch] text-sm text-secondary-foreground">
+                    The route tries these in priority order. The first one that
+                    answers serves the request; the rest are what it falls back
+                    to when it can&rsquo;t.
+                  </p>
+                  <ol>
+                    {ordered.map((p, i) => (
+                      <li
+                        key={`${p.provider}/${p.model}/${i}`}
+                        className="border-b border-border-soft py-4 last:border-0"
+                        data-testid={`provider-row-${i}`}
+                      >
+                        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                          {/* The rank is the eyebrow, not a Tag: it names a
+                              POSITION, and a position is not a status — no
+                              semantic hue may claim it (§2.2). */}
+                          <span className="font-mono text-2xs uppercase tracking-wide text-faint">
+                            {RANK[i] ?? `Then to (${i + 1})`}
+                          </span>
+                          <span
+                            className="min-w-0 truncate font-mono text-sm font-medium"
+                            title={`${p.provider} / ${p.model}`}
+                          >
+                            <span>{p.provider}</span>
+                            <span aria-hidden="true" className="text-ghost">
+                              {" / "}
+                            </span>
+                            <span>{p.model}</span>
+                          </span>
+                          <span className="ml-auto whitespace-nowrap font-mono text-xs tabular-nums text-faint">
+                            priority {p.priority}
+                          </span>
+                        </div>
+                        <KeyValueList
+                          className="mt-1"
+                          items={[
+                            {
+                              key: "Credential",
+                              value: p.secretBindingRef ? (
+                                // If it names a resource, it is a link (M22).
+                                <ResourceLink
+                                  kind="secretbinding"
+                                  namespace={detail.namespace}
+                                  name={p.secretBindingRef}
+                                  className="text-sm"
+                                />
+                              ) : undefined,
+                              absent: "not attached",
+                              title:
+                                "No SecretBinding is attached to this provider. The CRD requires one, or an API base, for every non-mock provider.",
+                              mono: false,
+                            },
+                            {
+                              key: "API base",
+                              value: p.apiBase ? (
+                                <span className="block truncate" title={p.apiBase}>
+                                  {p.apiBase}
+                                </span>
+                              ) : undefined,
+                              absent: "the provider default",
+                              title:
+                                "No override is set, so calls go to the provider's own endpoint.",
+                            },
+                          ]}
+                        />
+                      </li>
+                    ))}
+                  </ol>
+                </>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Reverse-lookup: the agents that route through this ModelRoute
+              (m18.9). A list of links, so it stays in the main column — §4.7
+              rails carry kv-lists and meters only. */}
+          <UsedBySection
+            kind="modelroute"
+            name={detail.name}
+            namespace={detail.namespace}
+            title="Used by agents"
+          />
+        </div>
+
+        <div className="min-w-0 space-y-5">
+          <Card className="min-w-0">
+            <PanelHeader title="The record" />
+            <CardContent>
+              <KeyValueList items={facts} />
+            </CardContent>
+          </Card>
+
+          <Card className="min-w-0">
+            <PanelHeader title="The tenant rate cap" />
+            <CardContent>
+              {detail.rateLimit ? (
+                // A known cap with no known usage: the Meter draws the bound
+                // (it is real) and omits the fill (it is not). A zero-width bar
+                // labelled 0 would claim this route has served nothing.
+                <Meter
+                  label="Requests per minute"
+                  used={UNKNOWN}
+                  cap={detail.rateLimit.tenantRPM}
+                  format={(n) => `${formatCount(n)}/min`}
+                  thing="route"
+                />
+              ) : (
+                <KeyValueList
+                  items={[
+                    {
+                      key: "Requests per minute",
+                      absent: "not capped",
+                      title:
+                        "This route sets no per-tenant rate cap, so requests are bounded only by the provider's own limits.",
+                    },
+                  ]}
+                />
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
 
       {/* Edit wizard */}
       <DetailDrawer
         open={editOpen}
         onClose={onCloseEdit}
         title={`Edit ${detail.name}`}
+        subtitle="Repoints the route — which providers it tries, and in what order"
         size="lg"
       >
         {editOpen && (
@@ -325,14 +552,8 @@ function RouteDetailContent({
   );
 }
 
-function KV({ k, v }: { k: string; v: React.ReactNode }) {
-  return (
-    <div className="flex min-w-0 items-baseline gap-2">
-      <dt className="shrink-0 text-muted-foreground">{k}</dt>
-      <dd className="min-w-0 truncate">{v}</dd>
-    </div>
-  );
-}
+// The page's bespoke kv row is gone: `KeyValueList` (§5.25) is the console's
+// one fact-row vocabulary, and a second one here is how a design system decays.
 
 // ── Edit Wizard ───────────────────────────────────────────────────────────────
 
@@ -456,6 +677,74 @@ function RouteEditWizard({
     setProviders((prev) => prev.filter((_, idx) => idx !== i));
   }
 
+  // ── What is unsaved, and how the form says so ─────────────────────────────
+  //
+  // Dirtiness is COMPUTED against the record rather than tracked as a flag: a
+  // field edited and then edited back is not a change, and a flag that says it
+  // is makes the discard guard cry wolf until people click through it.
+  const bound: ProviderForm[] =
+    detail.providers.length > 0
+      ? detail.providers.map(providerToForm)
+      : [emptyProvider()];
+  /** Normalised so whitespace and "1" vs 1 are not mistaken for edits. */
+  const shape = (list: ProviderForm[]) =>
+    JSON.stringify(
+      list.map((p) => ({
+        provider: p.provider.trim(),
+        model: p.model.trim(),
+        priority: parseInt(p.priority, 10) || 1,
+        secretBindingRef: p.secretBindingRef.trim(),
+        apiBase: p.apiBase.trim(),
+      })),
+    );
+  const boundRpm = detail.rateLimit ? String(detail.rateLimit.tenantRPM) : "";
+  const providersChanged = shape(providers) !== shape(bound);
+  const rpmChanged = rateLimitRpm.trim() !== boundRpm;
+  const dirty = providersChanged || rpmChanged;
+
+  /** True when THIS provider row differs from the one at the same position in
+   *  the record — including "there was no row here", which is also a change. */
+  const rowChanged = (i: number) =>
+    shape([providers[i]]) !== (bound[i] ? shape([bound[i]]) : "[]");
+
+  /** The unsaved line. It rides at the top of EVERY step, not only the review,
+   *  because the moment the form diverges from the record is the moment the
+   *  reader needs to know nothing has been written yet. */
+  const unsavedNote = dirty ? (
+    <p className="text-sm text-secondary-foreground" data-testid="route-edit-unsaved">
+      <span className="font-mono text-2xs uppercase tracking-wide text-faint">
+        Unsaved
+      </span>{" "}
+      This form differs from the route as it stands. Nothing changes until you
+      press Save changes.
+    </p>
+  ) : null;
+
+  /** One review row: what it is now, and what it becomes. An unchanged row says
+   *  so rather than looking identical to a changed one. */
+  function change(was: string, next: string, isChanged: boolean): React.ReactNode {
+    if (!isChanged) {
+      return (
+        <span className="block truncate text-faint" title={was}>
+          {was || "—"} <span className="text-ghost">(unchanged)</span>
+        </span>
+      );
+    }
+    return (
+      <span className="block truncate" title={`${was || "—"} → ${next || "—"}`}>
+        <span className="text-faint line-through">{was || "—"}</span>{" "}
+        <span aria-hidden="true" className="text-ghost">
+          →
+        </span>{" "}
+        {next || "—"}
+      </span>
+    );
+  }
+
+  /** "anthropic / claude-opus-4 @1" — one provider as one comparable line. */
+  const line = (p?: ProviderForm) =>
+    p ? `${p.provider.trim() || "—"} / ${p.model.trim() || "—"} @${parseInt(p.priority, 10) || 1}` : "";
+
   async function doSave() {
     setSaveState({ kind: "saving" });
     try {
@@ -498,15 +787,26 @@ function RouteEditWizard({
     description: "Ordered list of provider/model entries",
     content: (
       <div className="space-y-4">
+        <SectionHeader
+          title="Providers, in order"
+          lede="The lowest priority serves the traffic; the ones after it are what the route falls back to."
+          as="h3"
+        />
+        {unsavedNote}
         {providers.map((p, i) => (
           <div
             key={i}
-            className="space-y-3 rounded-md border p-3"
+            className="space-y-3 rounded-lg border border-border p-3"
             data-testid={`provider-entry-${i}`}
           >
             <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-muted-foreground">
+              <span className="font-mono text-2xs uppercase tracking-wide text-faint">
                 Provider {i + 1}
+                {rowChanged(i) && (
+                  <span className="ml-2 normal-case text-secondary-foreground">
+                    changed — not saved yet
+                  </span>
+                )}
               </span>
               {providers.length > 1 && (
                 <Button
@@ -598,9 +898,16 @@ function RouteEditWizard({
     description: "Optional per-tenant rate cap",
     content: (
       <div className="space-y-4">
+        <SectionHeader
+          title="Rate limit"
+          lede="A ceiling on requests per minute, per tenant. Clear it and the route carries no cap of its own."
+          as="h3"
+        />
+        {unsavedNote}
         <FormField
           id="rate-limit-rpm"
           label="Tenant RPM (leave blank to clear)"
+          hint={rpmChanged ? "Changed — not saved yet" : undefined}
         >
           <Input
             id="rate-limit-rpm"
@@ -621,51 +928,74 @@ function RouteEditWizard({
     review: true,
     content: (
       <div className="space-y-4" data-testid="route-edit-review">
-        <p className="text-sm font-medium">Review changes</p>
+        <SectionHeader
+          title={dirty ? "What changes when you save" : "Nothing has changed"}
+          lede={
+            dirty
+              ? "The route still serves what it served. Saving repoints it."
+              : "This form matches the route as it stands, so saving would write the same thing back."
+          }
+          as="h3"
+        />
         {saveState.kind === "error" && saveState.forbidden && (
           <ForbiddenInline
-            title="Not allowed to edit this route"
-            description="Your account can't update ModelRoutes in this cluster."
+            title="You don't have permission to edit this route."
+            resource="model routes"
+            permission="update"
             detail={saveState.message}
           />
         )}
         {saveState.kind === "error" && !saveState.forbidden && (
-          <p
-            className="text-sm text-destructive"
-            role="alert"
-            data-testid="route-edit-error"
-          >
-            {saveState.message}
-          </p>
+          // The API's own words, verbatim: a CRD validation message names the
+          // field that has to change, and paraphrasing loses it. It sits in a
+          // code well (§4.5) so a long rule keeps its shape and scrolls in its
+          // own frame rather than widening the step.
+          <div role="alert">
+            <p className="font-serif text-md font-medium text-destructive">
+              The route wasn&rsquo;t saved.
+            </p>
+            <pre
+              className="mt-2 min-w-0 whitespace-pre-wrap break-words rounded-md bg-surface-3 px-3 py-2 font-mono text-xs text-secondary-foreground"
+              data-testid="route-edit-error"
+            >
+              {saveState.message}
+            </pre>
+            <p className="mt-2 max-w-[64ch] text-sm text-secondary-foreground">
+              Nothing was written to the cluster. Go back, fix what it named, and
+              save again.
+            </p>
+          </div>
         )}
-        <dl className="divide-y rounded-md border text-sm">
-          {providers.map((p, i) => (
-            <div key={i} className="px-3 py-2 text-xs">
-              <span className="font-medium">
-                {p.provider}/{p.model}
-              </span>{" "}
-              <span className="text-muted-foreground">
-                priority {p.priority}
-              </span>
-              {p.secretBindingRef && (
-                <span className="ml-2 text-muted-foreground">
-                  → {p.secretBindingRef}
-                </span>
-              )}
-              {p.apiBase && (
-                <span className="ml-2 font-mono text-muted-foreground">
-                  {p.apiBase}
-                </span>
-              )}
-            </div>
-          ))}
-          {rateLimitRpm && (
-            <div className="flex items-start justify-between gap-4 px-3 py-2">
-              <dt className="text-muted-foreground">Rate limit</dt>
-              <dd>{rateLimitRpm} RPM</dd>
-            </div>
-          )}
-        </dl>
+
+        {/* The providers, position by position, so a reordering reads as a
+            reordering rather than as five unrelated edits. */}
+        <div className="space-y-1">
+          <p className="font-mono text-2xs uppercase tracking-wide text-faint">
+            Providers, in priority order
+          </p>
+          <KeyValueList
+            items={Array.from(
+              { length: Math.max(providers.length, bound.length) },
+              (_, i): KeyValueItem => ({
+                key: RANK[i] ?? `Then to (${i + 1})`,
+                value: change(line(bound[i]), line(providers[i]), rowChanged(i)),
+              }),
+            )}
+          />
+        </div>
+
+        <KeyValueList
+          items={[
+            {
+              key: "Tenant rate cap",
+              value: change(
+                boundRpm ? `${boundRpm}/min` : "not capped",
+                rateLimitRpm.trim() ? `${rateLimitRpm.trim()}/min` : "not capped",
+                rpmChanged,
+              ),
+            },
+          ]}
+        />
       </div>
     ),
   };
@@ -681,6 +1011,9 @@ function RouteEditWizard({
       }}
       finishLabel="Save changes"
       onCancel={onClose}
+      // An edit that has diverged from the record routes Cancel/Esc through the
+      // discard guard, so an unsaved change cannot vanish on a stray keystroke.
+      dirty={dirty}
     />
   );
 }
@@ -737,6 +1070,10 @@ function RouteDeleteDialog({
 }
 
 // ── New route page (create) ───────────────────────────────────────────────────
+//
+// The create surface is M151 §6.1 archetype A4 and adopts the editorial kit.
+// Its kit imports live in the single module-level statement at the top of this
+// file (see the note there).
 
 export function NewModelRoutePage() {
   const navigate = useNavigate();
@@ -811,25 +1148,31 @@ export function NewModelRoutePage() {
     title: "Identity",
     description: "Name and namespace for the new route",
     content: (
-      <div className="space-y-4">
-        <FormField id="route-name" label="Name">
-          <Input
-            id="route-name"
-            value={routeName}
-            onChange={(e) => setRouteName(e.target.value)}
-            placeholder="my-model-route"
-            data-testid="new-route-name"
-          />
-        </FormField>
-        <FormField id="route-ns" label="Namespace (blank = default)">
-          <Input
-            id="route-ns"
-            value={routeNs}
-            onChange={(e) => setRouteNs(e.target.value)}
-            placeholder="default"
-            data-testid="new-route-namespace"
-          />
-        </FormField>
+      <div className="space-y-5">
+        <SectionHeader
+          title="Identity"
+          lede="What the route is called, and which namespace it lives in. Agents reference it by this name."
+        />
+        <div className="space-y-4">
+          <FormField id="route-name" label="Name">
+            <Input
+              id="route-name"
+              value={routeName}
+              onChange={(e) => setRouteName(e.target.value)}
+              placeholder="my-model-route"
+              data-testid="new-route-name"
+            />
+          </FormField>
+          <FormField id="route-ns" label="Namespace (blank = default)">
+            <Input
+              id="route-ns"
+              value={routeNs}
+              onChange={(e) => setRouteNs(e.target.value)}
+              placeholder="default"
+              data-testid="new-route-namespace"
+            />
+          </FormField>
+        </div>
       </div>
     ),
   };
@@ -839,15 +1182,19 @@ export function NewModelRoutePage() {
     title: "Providers",
     description: "Ordered list of provider/model entries",
     content: (
-      <div className="space-y-4">
+      <div className="space-y-5">
+        <SectionHeader
+          title="Providers, in order"
+          lede="The first entry serves the traffic; the ones below it are the fallbacks, tried in priority order when it can’t."
+        />
         {providers.map((p, i) => (
           <div
             key={i}
-            className="space-y-3 rounded-md border p-3"
+            className="space-y-3 rounded-lg border border-border p-3"
             data-testid={`new-provider-entry-${i}`}
           >
             <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-muted-foreground">
+              <span className="font-mono text-2xs uppercase tracking-wide text-faint">
                 Provider {i + 1}
               </span>
               {providers.length > 1 && (
@@ -936,102 +1283,133 @@ export function NewModelRoutePage() {
     title: "Rate limit",
     description: "Optional per-tenant rate cap",
     content: (
-      <FormField id="new-rate-limit-rpm" label="Tenant RPM (optional)">
-        <Input
-          id="new-rate-limit-rpm"
-          inputMode="numeric"
-          value={rateLimitRpm}
-          onChange={(e) => setRateLimitRpm(e.target.value)}
-          placeholder="60"
-          data-testid="new-rate-limit-rpm"
+      <div className="space-y-5">
+        <SectionHeader
+          title="Rate limit"
+          lede="An optional ceiling on requests per minute, per tenant. Leave it blank and the route carries no cap of its own."
         />
-      </FormField>
+        <FormField id="new-rate-limit-rpm" label="Tenant RPM (optional)">
+          <Input
+            id="new-rate-limit-rpm"
+            inputMode="numeric"
+            value={rateLimitRpm}
+            onChange={(e) => setRateLimitRpm(e.target.value)}
+            placeholder="60"
+            data-testid="new-rate-limit-rpm"
+          />
+        </FormField>
+      </div>
     ),
   };
+
+  // The choices, as facts. A blank field is not a blank row (kit KeyValueList):
+  // it states what leaving it blank MEANS, in the ghost register, so the review
+  // never shows an empty cell the reader has to interpret.
+  const routeFacts: KeyValueItem[] = [
+    { key: "Name", value: routeName.trim() || undefined, absent: "not named yet" },
+    {
+      key: "Namespace",
+      value: routeNs.trim() || undefined,
+      absent: "default",
+      title: "Left blank — the route is created in the default namespace.",
+    },
+    { key: "Providers", value: providers.length },
+    {
+      key: "Rate limit",
+      value: rateLimitRpm.trim() ? `${rateLimitRpm.trim()} RPM` : undefined,
+      absent: "no cap",
+      title: "Left blank — this route carries no per-tenant rate limit of its own.",
+    },
+  ];
 
   const reviewStep: WizardStep = {
     id: "review",
     title: "Review",
     review: true,
     content: (
-      <div className="space-y-4" data-testid="new-route-review">
-        <p className="text-sm font-medium">Review new ModelRoute</p>
+      <div className="space-y-5" data-testid="new-route-review">
+        <SectionHeader
+          title="Review the route"
+          lede="Nothing exists in the cluster yet. Creating it writes one ModelRoute — and only that."
+        />
         {saveState.kind === "error" && saveState.forbidden && (
           <ForbiddenInline
             title="Not allowed to create routes"
             description="Your account can't create ModelRoutes in this cluster."
-            detail={saveState.message}
+            resource="model routes"
+            permission="create"
           />
         )}
         {saveState.kind === "error" && !saveState.forbidden && (
-          <p
-            className="text-sm text-destructive"
+          <div
+            className="rounded-lg border border-destructive/40 bg-destructive-surface/40 px-4 py-3"
             role="alert"
             data-testid="new-route-error"
           >
-            {saveState.message}
-          </p>
-        )}
-        <dl className="divide-y rounded-md border text-sm">
-          <div className="flex items-start justify-between gap-4 px-3 py-2">
-            <dt className="text-muted-foreground">Name</dt>
-            <dd>{routeName || "—"}</dd>
+            <p className="font-serif text-md font-medium text-destructive">
+              The route wasn’t created.
+            </p>
+            {/* The API's own words, verbatim — a CRD validation message names
+                the field that has to change, and paraphrasing loses it. */}
+            <pre className="mt-2 min-w-0 whitespace-pre-wrap break-words rounded-md bg-surface-3 px-3 py-2 font-mono text-xs text-secondary-foreground">
+              {saveState.message}
+            </pre>
+            <p className="mt-2 max-w-[64ch] text-sm text-secondary-foreground">
+              Nothing was written to the cluster. Go back, fix what it named, and
+              create it again.
+            </p>
           </div>
-          {routeNs && (
-            <div className="flex items-start justify-between gap-4 px-3 py-2">
-              <dt className="text-muted-foreground">Namespace</dt>
-              <dd>{routeNs}</dd>
-            </div>
-          )}
+        )}
+        <KeyValueList items={routeFacts} />
+        <div className="space-y-2">
+          <p className="font-mono text-2xs uppercase tracking-wide text-faint">
+            Providers, in priority order
+          </p>
           {providers.map((p, i) => (
-            <div key={i} className="px-3 py-2 text-xs">
-              <span className="font-medium">
-                {p.provider}/{p.model}
+            <div
+              key={i}
+              className="flex flex-wrap items-baseline gap-x-3 gap-y-1 rounded-md border border-border bg-surface-2/40 px-3 py-2"
+            >
+              <span className="font-mono text-sm">
+                {p.provider || "—"}/{p.model || "—"}
               </span>
-              <span className="ml-2 text-muted-foreground">
+              <span className="font-mono text-xs text-faint">
                 priority {p.priority}
               </span>
               {p.apiBase && (
-                <span className="ml-2 font-mono text-muted-foreground">
+                <span className="min-w-0 break-all font-mono text-xs text-faint">
                   {p.apiBase}
                 </span>
               )}
             </div>
           ))}
-          {rateLimitRpm && (
-            <div className="flex items-start justify-between gap-4 px-3 py-2">
-              <dt className="text-muted-foreground">Rate limit</dt>
-              <dd>{rateLimitRpm} RPM</dd>
-            </div>
-          )}
-        </dl>
+        </div>
       </div>
     ),
   };
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">
-          New Model Route
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          A ModelRoute routes AI calls to one or more providers in priority
-          order.
-        </p>
-      </div>
-      <Wizard
-        steps={[identityStep, providersStep, rateLimitStep, reviewStep]}
-        current={current}
-        onStepChange={setCurrent}
-        busy={saveState.kind === "saving"}
-        onFinish={() => {
-          void doCreate();
-        }}
-        finishLabel="Create route"
-        onCancel={() => navigate("/routes")}
-        dirty={routeName.trim() !== ""}
+    <div className="min-w-0 space-y-6">
+      <PageHeader
+        title="New model route"
+        lede="A route decides which provider serves a model call, and which one takes over when the first can’t. Agents point at the route, never at a vendor."
       />
+      {/* §6.1 A4: the Wizard's 15rem rail + its 2rem gap + the archetype's
+          46rem content column. Capping the outer column sizes the inner one. */}
+      <div className="max-w-[63rem]">
+        <Wizard
+          steps={[identityStep, providersStep, rateLimitStep, reviewStep]}
+          current={current}
+          onStepChange={setCurrent}
+          busy={saveState.kind === "saving"}
+          onFinish={() => {
+            void doCreate();
+          }}
+          finishLabel="Create route"
+          onCancel={() => navigate("/routes")}
+          dirty={routeName.trim() !== ""}
+        />
+      </div>
     </div>
   );
 }

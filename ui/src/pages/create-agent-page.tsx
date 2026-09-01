@@ -1,19 +1,6 @@
 import * as React from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import {
-  Boxes,
-  CheckCircle2,
-  ChevronRight,
-  PlugZap,
-  Plus,
-  Rocket,
-  Search,
-  Send,
-  Server,
-  Sparkles,
-  Terminal,
-  Wrench,
-} from "lucide-react";
+import { ChevronRight, PlugZap, Plus, Search, Send, Server } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -22,10 +9,20 @@ import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  ClosingNote,
   EmptyState,
+  ErrorState,
   ForbiddenInline,
+  KeyValueList,
+  NextStepLink,
+  PageHeader,
+  QuantityValue,
+  QuietNote,
+  SectionHeader,
+  SkeletonText,
   Wizard,
   useToast,
+  type KeyValueItem,
   type WizardStep,
 } from "@/components/kit";
 import { FormField } from "@/components/config/form-field";
@@ -53,43 +50,65 @@ import {
 } from "@/lib/config-form";
 import { groupToolsByServer } from "@/lib/tool-groups";
 
-// CreateAgentPage — the create-agent wizard, the HEART of the aha (spec §5, ADR
-// 0013/0014). TWO entrances converge on ONE review:
+// CreateAgentPage — the create-agent wizard, the HEART of the aha (ADR 0013 /
+// 0014; redesigned onto the editorial system in M151, spec §6.1 archetype A4 and
+// the `create-agent-page` row of §6.2). TWO entrances converge on ONE review:
 //
-//   • "Describe it" — a prompt hero → POST /api/agents/generate → a friendly
-//     review of the generated config (raw CRD behind Advanced) + the tool picker
-//     (the generated tools pre-selected). A 422 (keyed off the `regenerate` FLAG,
-//     NOT the status) → the reason + a Regenerate button; the raw agentYAML is
-//     preserved so nothing is lost. Generation NEVER auto-applies.
-//   • "Configure it" — the M12 config-builder form SPLIT into Wizard steps
-//     (basics → behavior → resources → optional), reusing lib/config-form's
-//     validate + toAgentYAML (NOT rewritten), converging on the SAME review.
+//   • "Describe it" — a sentence → POST /api/agents/generate → the proposed
+//     config, which the user can refine by chat, create as a draft and test,
+//     or take straight to the shared review. A 422 (keyed off the `regenerate`
+//     FLAG, NOT the status) renders INLINE in the step with the description
+//     still on screen and the raw attempt preserved — nothing is lost, and the
+//     user edits rather than retypes. Generation NEVER auto-applies.
+//   • "Configure it" — the M12 config-builder form split into kit Wizard steps
+//     (basics → behaviour → resources → optional → review), reusing
+//     lib/config-form's validate + toAgentYAML (NOT rewritten), converging on
+//     the SAME review.
 //
-// The shared review renders the agent.yaml as a friendly summary (raw behind
-// Advanced — no hand-editing as the primary path), the tool picker (GET
-// /api/tools — curated + user-added, with schema/pending badges), a Preview
-// (POST /api/expand → the CRD) and Create (POST /api/agents, the m12.6 path).
-// On create → navigate to the agent landing page (m14.11) if built, else the
-// agents list with a success toast.
+// ── A GENERATED CONFIG IS A PROPOSAL, NOT A FACT ────────────────────────────
 //
-// RBAC-aware (display-only, ADR 0011): Create gates on agentdeployments.create;
-// a forced 403 renders ForbiddenInline. A caller with NO connected provider is
-// steered to connect one first — the Describe-it path needs a provider to
-// generate (and running any agent needs a model).
+// Everything a model wrote and a person has not confirmed is marked as such,
+// consistently, by `ProposalMark`: the `open` tag (declared, never exercised),
+// the composing model named in mono, and one sentence saying the agent does not
+// exist yet. A config the USER typed carries no proposal tag — they wrote it —
+// but the same "nothing exists yet" sentence, because that is a fact about the
+// cluster either way. Recipes sit in between and say so.
+//
+// ── A REQUIREMENT THAT WASN'T CHECKED IS NOT A SATISFIED ONE ────────────────
+//
+// `check-requirements` is advisory (m72.3, ADR 0066 D3) and it can be absent
+// entirely — an older server 501s it, a probe can fail. The checklist therefore
+// has FIVE states, not two: ready / needs approval / needs consent / not
+// registered / **not checked**. The last one is what the surface falls back to
+// when the pre-flight didn't answer: the requirements are still listed (we know
+// them from the config), each honestly marked unchecked, with one QuietNote
+// saying why. A green tick the platform never earned is the one thing this
+// surface must not draw (§7.1).
+//
+// The checklist never blocks Create — the cluster is the real gate.
+//
+// ── RBAC-aware (display-only, ADR 0011) ─────────────────────────────────────
+// Create gates on agentdeployments.create; a forced 403 renders the calm
+// permission boundary. A caller with NO connected provider is steered to
+// connect one first — generation needs a provider, and running any agent needs
+// a model.
 
 // The mode is the top-level flow selection: the entrance fork, then one of the
-// two entrances. `configure` and `describe` both end at the shared review.
+// entrances. `configure`, `describe` and `recipe` all end at the shared review.
 type Mode = "entrance" | "describe" | "configure" | "recipe";
 
-// The Describe-it sub-state. `prompt` is the hero; `review` is the generation
-// review (valid generation); `regenerate` is the 422 outcome (reason + raw YAML
-// preserved). The shared review is reached by advancing `review` → `shared`.
+// The Describe-it sub-state. `prompt` is the form; `review` hands off to the
+// refine/draft surface. `issue` is the 422 outcome, rendered INLINE in the
+// prompt step with the raw attempt preserved.
 type DescribeStage =
   | { kind: "prompt" }
   | { kind: "generating" }
-  | { kind: "review"; gen: GenerateAgentResponse }
-  | { kind: "refining" }
-  | { kind: "regenerate"; reason: string; rawYAML: string };
+  | { kind: "review"; gen: GenerateAgentResponse };
+
+interface GenIssue {
+  reason: string;
+  rawYAML: string;
+}
 
 // CreateState covers the shared review's Preview/Create lifecycle. It carries
 // the final agentYAML (tools injected) so Preview and Create act on the SAME
@@ -111,6 +130,9 @@ type DraftState =
   | { kind: "published" }
   | { kind: "conflict" }
   | { kind: "error"; message: string };
+
+/** Where a config on the review came from — it decides how strongly it is claimed. */
+type Origin = "generated" | "recipe" | "form";
 
 export function CreateAgentPage() {
   const [params] = useSearchParams();
@@ -153,35 +175,38 @@ export function CreateAgentPage() {
   }, [initialRecipe]);
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">New agent</h2>
-        <p className="text-sm text-muted-foreground">
-          Describe it in a sentence and we generate a validated config — or
-          configure every knob yourself. Both converge on one review + tool
-          picker before anything is created.
-        </p>
+    <div className="min-w-0 space-y-6">
+      <PageHeader
+        title="New agent"
+        lede="Describe it in a sentence and we compose a validated config — or set every knob yourself. Both paths end at the same review, where you see the whole thing and pick its tools before anything is created."
+      />
+      {/* The A4 content measure, on the header's own left margin (the band's
+          px-6) so the h1 and every step heading share one edge. Cancel lives in
+          the wizard footer, so the header carries no side actions. */}
+      <div className="min-w-0 px-6">
+        <div className="min-w-0 max-w-[46rem]">
+        <ProviderGate>
+          {mode === "entrance" && (
+            <Entrance onPick={setMode} onPickRecipe={onPickRecipe} />
+          )}
+          {mode === "describe" && (
+            <DescribeFlow onBack={() => setMode("entrance")} />
+          )}
+          {mode === "configure" && (
+            <ConfigureFlow
+              onBack={() => setMode("entrance")}
+              initialProvider={initialProvider}
+            />
+          )}
+          {mode === "recipe" && recipeSpec && (
+            <RecipeReview
+              spec={recipeSpec}
+              onBack={() => setMode("entrance")}
+            />
+          )}
+        </ProviderGate>
+        </div>
       </div>
-      <ProviderGate>
-        {mode === "entrance" && (
-          <Entrance onPick={setMode} onPickRecipe={onPickRecipe} />
-        )}
-        {mode === "describe" && (
-          <DescribeFlow onBack={() => setMode("entrance")} />
-        )}
-        {mode === "configure" && (
-          <ConfigureFlow
-            onBack={() => setMode("entrance")}
-            initialProvider={initialProvider}
-          />
-        )}
-        {mode === "recipe" && recipeSpec && (
-          <RecipeReview
-            spec={recipeSpec}
-            onBack={() => setMode("entrance")}
-          />
-        )}
-      </ProviderGate>
     </div>
   );
 }
@@ -215,13 +240,12 @@ function ProviderGate({ children }: { children: React.ReactNode }) {
   }, []);
 
   if (state.kind === "loading") {
+    // §7 A4: the panel shows shaped skeleton text, never a spinner or a
+    // "Loading…" string that the layout then jumps away from.
     return (
-      <p
-        className="text-sm text-muted-foreground"
-        data-testid="provider-gate-loading"
-      >
-        Checking connected providers…
-      </p>
+      <div data-testid="provider-gate-loading">
+        <SkeletonText lines={3} />
+      </div>
     );
   }
   if (state.kind === "gate") {
@@ -243,9 +267,12 @@ function ProviderGate({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-// Entrance — the fork. "Describe it" is visually the primary (recommended) path;
-// "Configure it" is the full-control form; "Start from a recipe" shows a card grid
-// of pre-built recipes (m72.5). Matches the approved wireframe.
+// ── The entrance fork ───────────────────────────────────────────────────────
+//
+// Two ways in, said in the user's terms, plus the recipe shelf. The recommended
+// card is the only pine-bordered element on the surface, because pine means
+// "you can act here" and both cards are actions — the border and the tint carry
+// the recommendation, not a second colour.
 function Entrance({
   onPick,
   onPickRecipe,
@@ -273,60 +300,67 @@ function Entrance({
     }
   }
 
+  const cardBase =
+    "rounded-lg border p-5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
+
   return (
-    <div className="space-y-4" data-testid="create-entrance">
+    <div className="min-w-0 space-y-6" data-testid="create-entrance">
+      <SectionHeader
+        title="How do you want to start?"
+        lede="Both paths end at the same review — the whole config, in plain words, with its tools — before anything is created."
+      />
       <div className="grid gap-4 md:grid-cols-2">
         <button
           type="button"
           onClick={() => onPick("describe")}
-          className="rounded-xl border-2 border-primary bg-accent/40 p-6 text-left shadow-card transition-shadow hover:shadow-elevated"
+          className={`${cardBase} border-primary bg-accent hover:bg-brand-2/10`}
           data-testid="entrance-describe"
         >
-          <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-brand-2 text-primary-foreground">
-            <Boxes className="h-6 w-6" />
-          </div>
-          <p className="text-base font-semibold">Describe it</p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Say what it should do in a sentence. We generate a validated config
-            you review before creating.{" "}
-            <span className="font-medium text-primary">Recommended</span>.
+          <p className="font-serif text-lg font-medium">Describe it</p>
+          <p className="mt-1.5 text-sm text-secondary-foreground">
+            Say what it should do in a sentence. We compose a validated config
+            you read before creating.
           </p>
+          <p className="mt-2 text-xs font-semibold text-primary">Recommended</p>
         </button>
         <button
           type="button"
           onClick={() => onPick("configure")}
-          className="rounded-xl border p-6 text-left shadow-card transition-shadow hover:shadow-elevated"
+          className={`${cardBase} border-border bg-card hover:bg-surface-2`}
           data-testid="entrance-configure"
         >
-          <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-surface-2">
-            <Terminal className="h-6 w-6 text-muted-foreground" />
-          </div>
-          <p className="text-base font-semibold">Configure it</p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            A guided multi-step form — full control over runtime, model, prompt,
-            and tools.
+          <p className="font-serif text-lg font-medium">Configure it</p>
+          <p className="mt-1.5 text-sm text-secondary-foreground">
+            A guided form — full control over runtime, model, prompt and tools.
           </p>
+          <p className="mt-2 text-xs text-faint">Five steps</p>
         </button>
       </div>
 
-      {/* Recipe gallery (m72.5) — "Start from a recipe" expands below the main cards. */}
+      {/* The recipe shelf (m72.5) — a third way in, deliberately quieter. */}
       {!showRecipes ? (
         <button
           type="button"
           onClick={handleShowRecipes}
-          className="flex w-full items-center gap-2 rounded-xl border border-dashed p-4 text-sm text-muted-foreground transition-colors hover:border-primary/60 hover:text-foreground"
+          className="flex w-full items-center gap-2 rounded-lg border border-dashed border-border-strong p-4 text-sm text-muted-foreground transition-colors hover:border-faint hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           data-testid="entrance-recipes-toggle"
         >
-          <Sparkles className="h-4 w-4 shrink-0" />
           Start from a recipe
         </button>
       ) : (
-        <div data-testid="recipe-gallery">
-          <p className="mb-3 text-sm font-medium">Recipes</p>
+        <section aria-labelledby="recipes-head" data-testid="recipe-gallery">
+          <SectionHeader
+            as="h3"
+            id="recipes-head"
+            title="Recipes"
+            lede="Pre-written configs. Picking one opens the same review, pre-filled — it is a starting point, not a decision."
+          />
           {recipesLoading ? (
-            <p className="text-sm text-muted-foreground">Loading recipes…</p>
+            <SkeletonText lines={2} />
           ) : recipes.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No recipes available.</p>
+            <p className="text-sm text-faint">
+              No recipes are published on this install.
+            </p>
           ) : (
             <div className="grid gap-3 sm:grid-cols-2">
               {recipes.map((r) => (
@@ -334,29 +368,29 @@ function Entrance({
                   key={r.name}
                   type="button"
                   onClick={() => onPickRecipe(r.spec)}
-                  className="rounded-xl border bg-card p-4 text-left shadow-card transition-shadow hover:shadow-elevated"
+                  className="rounded-lg border border-border bg-card p-4 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                   data-testid={`recipe-card-${r.name}`}
                 >
                   {r.icon && (
-                    <span className="mb-2 block text-2xl" role="img" aria-label={r.title}>
+                    <span className="mb-2 block text-lg" role="img" aria-label={r.title}>
                       {r.icon}
                     </span>
                   )}
-                  <p className="text-sm font-semibold">{r.title}</p>
-                  <p className="mt-0.5 text-xs text-muted-foreground line-clamp-2">
+                  <p className="font-serif text-md font-medium">{r.title}</p>
+                  <p className="mt-0.5 line-clamp-2 text-xs text-faint">
                     {r.description}
                   </p>
                 </button>
               ))}
             </div>
           )}
-        </div>
+        </section>
       )}
     </div>
   );
 }
 
-// ─── Describe it ────────────────────────────────────────────────────────────
+// ── Describe it ─────────────────────────────────────────────────────────────
 
 const EXAMPLE_PROMPTS = [
   "A support agent that looks up orders, answers from our docs, and can open a ticket when it can't resolve the issue.",
@@ -368,6 +402,9 @@ function DescribeFlow({ onBack }: { onBack: () => void }) {
   const [description, setDescription] = React.useState("");
   const [model, setModel] = React.useState("");
   const [stage, setStage] = React.useState<DescribeStage>({ kind: "prompt" });
+  // The 422 outcome lives BESIDE the form, not instead of it: the description
+  // that produced it stays on screen and editable, and the raw attempt is kept.
+  const [issue, setIssue] = React.useState<GenIssue | null>(null);
 
   // The connected providers drive the model dropdown: default the connected
   // provider's model; if the operator pinned platform models or multiple
@@ -403,6 +440,7 @@ function DescribeFlow({ onBack }: { onBack: () => void }) {
 
   async function generate() {
     setStage({ kind: "generating" });
+    setIssue(null);
     try {
       const picked = modelChoices.find((c) => c.id === model);
       const res = await api.generateAgent({
@@ -413,8 +451,8 @@ function DescribeFlow({ onBack }: { onBack: () => void }) {
       // Branch on the FLAG, never the status code (ADR 0014 landmine): a
       // regenerate outcome keeps the raw agentYAML so nothing is lost.
       if (res.regenerate) {
-        setStage({
-          kind: "regenerate",
+        setStage({ kind: "prompt" });
+        setIssue({
           reason:
             res.reason ?? res.error ?? "The generated config didn't validate.",
           rawYAML: res.agentYAML ?? "",
@@ -423,8 +461,8 @@ function DescribeFlow({ onBack }: { onBack: () => void }) {
       }
       setStage({ kind: "review", gen: res });
     } catch (err) {
-      setStage({
-        kind: "regenerate",
+      setStage({ kind: "prompt" });
+      setIssue({
         reason:
           err instanceof ApiError
             ? `${err.message}${err.status ? ` (${err.status})` : ""}`
@@ -453,90 +491,165 @@ function DescribeFlow({ onBack }: { onBack: () => void }) {
   }
 
   return (
-    <div className="space-y-4" data-testid="describe-flow">
-      {stage.kind === "regenerate" ? (
-        <RegenerateState
-          reason={stage.reason}
-          rawYAML={stage.rawYAML}
-          busy={generating}
-          onRegenerate={generate}
-          onEdit={() => setStage({ kind: "prompt" })}
+    <div className="min-w-0 space-y-6" data-testid="describe-flow">
+      <SectionHeader
+        title="Describe your agent"
+        lede="One sentence about what it should do. We compose a validated config from it — nothing is created until you have read the whole thing."
+      />
+
+      <div className="space-y-1.5">
+        <Label htmlFor="agent-description">Agent description</Label>
+        <Textarea
+          id="agent-description"
+          rows={4}
+          value={description}
+          onChange={(e) => {
+            setDescription(e.target.value);
+            setIssue(null);
+          }}
+          placeholder="A support agent that looks up orders, answers from our docs, and can open a ticket…"
         />
-      ) : (
-        <div className="rounded-lg border bg-card p-6 shadow-card">
-          <div className="mx-auto max-w-2xl py-4 text-center">
-            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-primary to-brand-2 text-primary-foreground shadow-elevated">
-              <Sparkles className="h-7 w-7" />
-            </div>
-            <h1 className="text-2xl font-semibold tracking-tight">
-              Describe your agent
-            </h1>
-            <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
-              Say what it should do in a sentence. We generate a validated
-              config you review before anything is created.
-            </p>
-            <div className="mx-auto mt-6 max-w-xl text-left">
-              <Label htmlFor="agent-description" className="sr-only">
-                Agent description
-              </Label>
-              <Textarea
-                id="agent-description"
-                rows={4}
-                className="text-sm"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="A support agent that looks up orders, answers from our docs, and can open a ticket…"
-              />
-              {modelChoices.length > 1 && (
-                <div className="mt-3 space-y-1.5">
-                  <Label htmlFor="gen-model">Generation model</Label>
-                  <Select
-                    id="gen-model"
-                    value={model}
-                    onChange={(e) => setModel(e.target.value)}
-                  >
-                    <option value="">Default (connected provider)</option>
-                    {modelChoices.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.id} ({c.provider})
-                      </option>
-                    ))}
-                  </Select>
-                </div>
-              )}
-              <div className="mt-3 flex flex-wrap gap-2">
-                {EXAMPLE_PROMPTS.map((t) => (
-                  <button
-                    key={t}
-                    type="button"
-                    onClick={() => setDescription(t)}
-                    className="rounded-full border bg-surface-2/60 px-3 py-1 text-xs text-muted-foreground hover:bg-surface-2"
-                  >
-                    {t.split(" ").slice(0, 3).join(" ")}…
-                  </button>
-                ))}
-              </div>
-              <div className="mt-4 flex items-center justify-between">
-                <Button variant="ghost" onClick={onBack} disabled={generating}>
-                  Back
-                </Button>
-                <Button onClick={generate} disabled={!ready || generating}>
-                  <Sparkles className="h-4 w-4" />
-                  {generating ? "Generating…" : "Generate"}
-                </Button>
-              </div>
-            </div>
-          </div>
+        <div className="flex flex-wrap gap-2 pt-1">
+          {EXAMPLE_PROMPTS.map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => {
+                setDescription(t);
+                setIssue(null);
+              }}
+              className="rounded-md border border-border-strong bg-card px-2.5 py-1 text-xs text-secondary-foreground transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            >
+              {t.split(" ").slice(0, 3).join(" ")}…
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {modelChoices.length > 1 && (
+        <div className="space-y-1.5">
+          <Label htmlFor="gen-model">Generation model</Label>
+          <Select
+            id="gen-model"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+          >
+            <option value="">Default (connected provider)</option>
+            {modelChoices.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.id} ({c.provider})
+              </option>
+            ))}
+          </Select>
+          <p className="text-xs text-faint">
+            The model that WRITES the config. It is not the model the agent runs
+            on — you pick that at the review.
+          </p>
+        </div>
+      )}
+
+      {issue && <GenerationIssue issue={issue} />}
+
+      <div className="flex items-center justify-between border-t border-border pt-5">
+        <Button variant="ghost" onClick={onBack} disabled={generating}>
+          Back
+        </Button>
+        <Button
+          onClick={generate}
+          disabled={!ready || generating}
+          data-testid={issue ? "regenerate-button" : undefined}
+        >
+          {generating
+            ? "Working…"
+            : issue
+              ? "Regenerate"
+              : "Generate"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// GenerationIssue — the 422 outcome, inline in the step that caused it (§7, A4).
+// Nothing is discarded: the reason is stated in words, the raw attempt is kept
+// in a read-only code well, and the description that produced them is still in
+// the field above. Keyed off the `regenerate` flag, never a status sniff.
+function GenerationIssue({ issue }: { issue: GenIssue }) {
+  return (
+    <div
+      className="border border-border border-l-2 border-l-destructive bg-card px-4 py-3"
+      data-testid="regenerate-state"
+    >
+      <p className="font-serif text-md font-medium">
+        That generation needs another pass.
+      </p>
+      <p
+        className="mt-1 text-sm text-secondary-foreground"
+        role="alert"
+        data-testid="regenerate-reason"
+      >
+        {issue.reason}
+      </p>
+      <p className="mt-2 text-xs text-faint">
+        Nothing was created. Sharpen the description above — naming the tools or
+        the tone usually fixes it — then generate again.
+      </p>
+      {issue.rawYAML && (
+        <div className="mt-3 min-w-0">
+          <p className="mb-1.5 font-mono text-2xs uppercase tracking-wide text-faint">
+            What was produced, kept so nothing is lost
+          </p>
+          <pre
+            data-testid="regenerate-raw-yaml"
+            className="max-h-64 min-w-0 overflow-auto rounded-md bg-surface-3 p-3 font-mono text-xs leading-relaxed text-secondary-foreground"
+          >
+            {issue.rawYAML}
+          </pre>
         </div>
       )}
     </div>
   );
 }
 
+// ProposalMark — the one place the console says "a model wrote this and nobody
+// has confirmed it". Every surface that shows generated config renders it, so
+// the claim cannot drift between them (§7.1: never present a proposal as a fact).
+function ProposalMark({
+  origin,
+  model,
+  modelTestId,
+}: {
+  origin: Origin;
+  model?: string;
+  /** testid for the model attribution — the "which model wrote this" contract. */
+  modelTestId?: string;
+}) {
+  const tag =
+    origin === "generated" ? "proposed" : origin === "recipe" ? "from a recipe" : null;
+  return (
+    <div className="mb-4 flex flex-wrap items-center gap-2">
+      {tag && <Badge variant="open">{tag}</Badge>}
+      <span className="text-xs text-faint">
+        {origin === "generated" && (
+          <>
+            composed by{" "}
+            <span className="font-mono" data-testid={modelTestId}>
+              {model || "an unnamed model"}
+            </span>{" "}
+            ·{" "}
+          </>
+        )}
+        {origin === "recipe" && <>a published starting point · </>}
+        nothing exists in the cluster until you create it
+      </span>
+    </div>
+  );
+}
+
 // RefineAndDraftSurface — the builder surface (m71.4 + m71.5): after generation,
 // the user can refine by chat (each message calls /api/agents/refine), create a
-// draft (labeled stage:draft), test it inline, and publish.
-// The one-shot path (generate → create without refining) is also preserved.
+// draft (labelled stage:draft), test it inline, and publish. The one-shot path
+// (generate → review → create without refining) is preserved beside it.
 function RefineAndDraftSurface({
   gen,
   model,
@@ -757,8 +870,8 @@ function RefineAndDraftSurface({
   const draftPublishing = draftState.kind === "publishing";
   const hasRefinements = refineTranscript.length > 0;
 
-  // The one-shot path: if no refine turns and no draft, show the SharedReview directly.
-  // This preserves the existing flow where users can just generate + create without refining.
+  // The one-shot path: skip refining and go straight to the shared review, which
+  // is where tools are attached and the agent is actually created.
   const [useOneShot, setUseOneShot] = React.useState(false);
   if (useOneShot) {
     const hit = modelChoices.find((c) => c.id === model);
@@ -768,415 +881,332 @@ function RefineAndDraftSurface({
         initialTools={parseToolsFromYAML(candidateYAML)}
         summary={summarizeYAML(candidateYAML)}
         advancedYAML={advancedYAML}
+        origin="generated"
+        originModel={gen.model}
+        onRegenerate={onRegenerate}
         modelPick={hit ? { connection: hit.connection, provider: hit.provider, model: hit.id } : undefined}
         onBack={onBack}
-        header={<GenerationReviewHeader gen={gen} onRegenerate={onRegenerate} />}
       />
     );
   }
 
   return (
-    <div className="space-y-4" data-testid="refine-and-draft-surface">
-      {/* Generation summary header */}
-      <div className="rounded-lg border bg-card p-5 shadow-card">
-        <GenerationReviewHeader gen={gen} onRegenerate={onRegenerate} />
-        <div className="mt-4">
-          <FriendlySummary summary={{ ...summary, tools: parseToolsFromYAML(candidateYAML) }} />
-        </div>
-        <button
-          type="button"
-          onClick={() => setShowYAML((v) => !v)}
-          className="mt-3 flex w-full items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground"
-          aria-expanded={showYAML}
-          data-testid="advanced-toggle"
-        >
-          <ChevronRight
-            className={`h-4 w-4 transition-transform ${showYAML ? "rotate-90" : ""}`}
+    <div className="min-w-0 space-y-8" data-testid="refine-and-draft-surface">
+      {/* What was proposed. */}
+      <section aria-labelledby="proposal-head" className="min-w-0">
+        <div data-testid="generation-review">
+          <SectionHeader
+            id="proposal-head"
+            title="Here’s what we propose"
+            lede="A model wrote this from your sentence. Read it, change it in words below, or take it to the review and create it."
+            actions={
+              <Button variant="outline" size="sm" onClick={onRegenerate}>
+                Regenerate
+              </Button>
+            }
           />
-          Advanced — view agent.yaml
-        </button>
-        {showYAML && (
-          <Textarea
-            aria-label="Advanced — generated manifest"
-            data-testid="advanced-yaml"
-            readOnly
-            className="mt-3 min-h-[10rem] font-mono text-xs"
-            value={advancedYAML}
+          <ProposalMark
+            origin="generated"
+            model={gen.model}
+            modelTestId="gen-model-tag"
           />
-        )}
-      </div>
-
-      {/* Refine chat panel (m71.4) */}
-      <div className="rounded-lg border bg-card p-5 shadow-card" data-testid="refine-chat-panel">
-        <p className="mb-1 text-sm font-semibold">Refine by chat</p>
-        <p className="mb-3 text-xs text-muted-foreground">
-          Say what to change — "add web search", "be stricter" — and we update
-          the spec. Or skip straight to create.
-        </p>
-        {/* Transcript */}
-        {refineTranscript.length > 0 && (
-          <div className="mb-3 space-y-2" data-testid="refine-transcript">
-            {refineTranscript.map((turn, i) => (
-              <div
-                key={i}
-                className={`flex ${turn.role === "user" ? "justify-end" : "justify-start"}`}
-              >
-                <div
-                  className={`max-w-[85%] rounded-xl px-3 py-2 text-xs ${
-                    turn.role === "user"
-                      ? "bg-primary text-primary-foreground rounded-br-sm"
-                      : "border bg-surface-2/40 text-foreground rounded-bl-sm"
-                  }`}
-                  data-testid={turn.role === "user" ? "refine-turn-user" : "refine-turn-assistant"}
-                >
-                  {turn.text}
-                </div>
+          {gen.warnings && gen.warnings.length > 0 && (
+            <div className="mb-4 border border-border border-l-2 border-l-warning bg-card px-4 py-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="warn">heads up</Badge>
+                <p className="font-serif text-md font-medium">
+                  Worth knowing before you create it
+                </p>
               </div>
-            ))}
-          </div>
-        )}
-        {/* Diff chip */}
-        {refineDiff && refineDiff.length > 0 && (
-          <div
-            className="mb-2 inline-flex items-center gap-1.5 rounded-full border border-success/40 bg-success/10 px-3 py-1 text-xs text-success-foreground"
-            data-testid="refine-diff-chip"
-          >
-            <CheckCircle2 className="h-3.5 w-3.5" />
-            Changed: {refineDiff.join(", ")}
-          </div>
-        )}
-        {/* Refine error */}
-        {refineError && (
-          <p
-            className="mb-2 rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-warning-foreground"
-            role="alert"
-            data-testid="refine-error"
-          >
-            {refineError}
-          </p>
-        )}
-        {/* Refine input */}
-        <div className="flex items-end gap-2">
-          <Textarea
-            aria-label="Refine instruction"
-            rows={2}
-            value={refineInput}
-            onChange={(e) => setRefineInput(e.target.value)}
-            onKeyDown={onRefineKeyDown}
-            placeholder="Add web search, be stricter about formatting…"
-            className="resize-none text-xs"
-            data-testid="refine-input"
-            disabled={refineLoading}
-          />
-          <Button
-            size="icon"
-            onClick={() => void onRefine()}
-            disabled={refineLoading || !refineInput.trim()}
-            data-testid="refine-send"
-            aria-label="Send refinement"
-            className="h-9 w-9 shrink-0"
-          >
-            <Send className="h-4 w-4" />
-          </Button>
+              <ul className="mt-2 space-y-1 text-sm text-secondary-foreground">
+                {gen.warnings.map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
-        {refineLoading && (
-          <p className="mt-1.5 text-xs text-muted-foreground" data-testid="refine-loading">
-            Refining…
-          </p>
-        )}
-        <p className="mt-1.5 text-[10px] text-muted-foreground">
-          Enter to send · Shift+Enter for newline · transcript capped to 8 turns
-        </p>
-      </div>
 
-      {/* Draft lifecycle + inline test (m71.5) */}
-      <div className="rounded-lg border bg-surface-2/40 p-4" data-testid="draft-lifecycle">
-        {/* Conflict error */}
+        <div className="border border-border bg-card p-5">
+          <ConfigFacts
+            summary={{ ...summary, tools: parseToolsFromYAML(candidateYAML) }}
+          />
+        </div>
+
+        <Disclosure
+          open={showYAML}
+          onToggle={() => setShowYAML((v) => !v)}
+          testId="advanced-toggle"
+          label="the generated agent.yaml"
+        >
+          <CodeWell testId="advanced-yaml">{advancedYAML}</CodeWell>
+        </Disclosure>
+      </section>
+
+      {/* Refine by chat (m71.4). */}
+      <section aria-labelledby="refine-head" className="min-w-0" data-testid="refine-chat-panel">
+        <SectionHeader
+          as="h3"
+          id="refine-head"
+          title="Change it in words"
+          lede="“Add web search”, “be stricter about formatting”. Each message rewrites the proposal above — it still creates nothing."
+        />
+        <div className="border border-border bg-card p-5">
+          {refineTranscript.length > 0 && (
+            <div className="mb-3 space-y-2" data-testid="refine-transcript">
+              {refineTranscript.map((turn, i) => (
+                <div
+                  key={i}
+                  className={`flex ${turn.role === "user" ? "justify-end" : "justify-start"}`}
+                >
+                  <div
+                    className={`max-w-[85%] rounded-lg px-3 py-2 text-xs ${
+                      turn.role === "user"
+                        ? "bg-accent text-accent-foreground"
+                        : "border border-border bg-surface-2 text-foreground"
+                    }`}
+                    data-testid={turn.role === "user" ? "refine-turn-user" : "refine-turn-assistant"}
+                  >
+                    {turn.text}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {refineDiff && refineDiff.length > 0 && (
+            <div
+              className="mb-2 flex flex-wrap items-center gap-2 text-xs text-secondary-foreground"
+              data-testid="refine-diff-chip"
+            >
+              <Badge variant="ok">changed</Badge>
+              <span className="min-w-0 break-words font-mono">
+                {refineDiff.join(", ")}
+              </span>
+            </div>
+          )}
+          {refineError && (
+            <p
+              className="mb-2 border border-border border-l-2 border-l-destructive bg-card px-3 py-2 text-xs text-secondary-foreground"
+              role="alert"
+              data-testid="refine-error"
+            >
+              {refineError}
+            </p>
+          )}
+          <div className="flex items-end gap-2">
+            <Textarea
+              aria-label="Refine instruction"
+              rows={2}
+              value={refineInput}
+              onChange={(e) => setRefineInput(e.target.value)}
+              onKeyDown={onRefineKeyDown}
+              placeholder="Add web search, be stricter about formatting…"
+              className="resize-none text-xs"
+              data-testid="refine-input"
+              disabled={refineLoading}
+            />
+            <Button
+              size="icon"
+              onClick={() => void onRefine()}
+              disabled={refineLoading || !refineInput.trim()}
+              data-testid="refine-send"
+              aria-label="Send refinement"
+              className="h-9 w-9 shrink-0"
+            >
+              <Send className="h-4 w-4" />
+            </Button>
+          </div>
+          {refineLoading && (
+            <p className="mt-1.5 text-xs text-faint" data-testid="refine-loading">
+              Refining…
+            </p>
+          )}
+          <p className="mt-1.5 text-2xs text-faint">
+            Enter to send · Shift+Enter for a newline · the last 8 turns are kept
+          </p>
+        </div>
+      </section>
+
+      {/* Draft lifecycle + inline test (m71.5). */}
+      <section aria-labelledby="draft-head" className="min-w-0" data-testid="draft-lifecycle">
+        <SectionHeader
+          as="h3"
+          id="draft-head"
+          title="Try it before anyone else can"
+          lede="A draft is a real agent that is not published: it runs for you, and nothing routes to it until you publish."
+        />
+
         {draftState.kind === "conflict" && (
           <p
-            className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+            className="mb-3 border border-border border-l-2 border-l-destructive bg-card px-3 py-2 text-xs text-secondary-foreground"
             role="alert"
             data-testid="draft-conflict"
           >
             The agent changed since you loaded it — reload to get the latest version.
           </p>
         )}
-        {/* General error */}
         {draftState.kind === "error" && (
           <p
-            className="mb-3 text-xs text-destructive"
+            className="mb-3 border border-border border-l-2 border-l-destructive bg-card px-3 py-2 text-xs text-secondary-foreground"
             role="alert"
             data-testid="draft-error"
           >
             {draftState.message}
           </p>
         )}
-        {/* Published success */}
         {draftState.kind === "published" && (
-          <div className="mb-3 flex items-center gap-2 text-success" data-testid="draft-published">
-            <CheckCircle2 className="h-4 w-4" />
-            <p className="text-sm font-medium">Published — opening the agent page…</p>
+          <div
+            className="mb-3 flex flex-wrap items-center gap-2 text-sm"
+            data-testid="draft-published"
+          >
+            <Badge variant="ok">published</Badge>
+            <span className="text-secondary-foreground">
+              It is live — opening its page…
+            </span>
           </div>
         )}
-        {/* Namespace selector */}
-        {canCreate && nsOptions.length > 0 && draftState.kind === "none" && (
-          <div className="mb-3">
-            <FormField id="draft-namespace" label="Namespace">
-              <Select
-                id="draft-namespace"
-                value={nsOptions.includes(targetNs) ? targetNs : ""}
-                onChange={(e) => setTargetNs(e.target.value)}
-                data-testid="draft-namespace-select"
-              >
-                {nsOptions.map((n) => (
-                  <option key={n} value={n}>{n}</option>
-                ))}
-              </Select>
-            </FormField>
-          </div>
-        )}
-        {/* Action buttons row */}
-        <div className="flex flex-wrap items-center gap-3">
-          <Button variant="ghost" onClick={onBack} disabled={draftState.kind === "creating" || draftState.kind === "publishing"}>
-            Back
-          </Button>
-          {/* One-shot path (skip refine → classic create flow) */}
-          {draftState.kind === "none" && (
-            <Button
-              variant="outline"
-              onClick={() => setUseOneShot(true)}
-              data-testid="create-agent-direct"
-            >
-              <Rocket className="h-4 w-4" />
-              Create agent (classic)
-            </Button>
-          )}
-          {/* Create draft & test */}
-          {canCreate && draftState.kind === "none" && (
-            <Button
-              onClick={() => void onCreateDraft()}
-              data-testid="create-draft-button"
-            >
-              <Sparkles className="h-4 w-4" />
-              Create draft & test
-            </Button>
-          )}
-          {/* Apply refinement to live draft */}
-          {draftCreated && hasRefinements && (
-            <Button
-              variant="outline"
-              onClick={() => void onApplyRefinement()}
-              disabled={draftApplying}
-              data-testid="apply-refinement-button"
-            >
-              {draftApplying ? "Applying…" : "Apply refinement"}
-            </Button>
-          )}
-          {/* Publish */}
-          {draftCreated && (
-            <Button
-              onClick={() => void onPublish()}
-              disabled={draftPublishing}
-              data-testid="publish-button"
-            >
-              <Rocket className="h-4 w-4" />
-              {draftPublishing ? "Publishing…" : "Publish"}
-            </Button>
-          )}
-          {/* Creating/applying spinner states */}
-          {(draftState.kind === "creating") && (
-            <p className="text-xs text-muted-foreground" data-testid="draft-creating">
-              Creating draft…
-            </p>
-          )}
-        </div>
-        {/* Inline test panel (shown after draft is created) */}
-        {draftCreated && (
-          <div className="mt-4 rounded-lg border bg-card" data-testid="draft-test-panel">
-            <div className="border-b px-4 py-3">
-              <p className="text-sm font-medium">Test draft: {draftState.name}</p>
-              <p className="text-xs text-muted-foreground">
-                Try it out — the first invoke may wait while the draft deploys.
-              </p>
-            </div>
-            {/* Test chat thread */}
-            <div className="flex flex-col gap-3 px-4 py-4" style={{ minHeight: "10rem" }} data-testid="draft-test-thread">
-              {testTurns.length === 0 ? (
-                <p className="text-xs text-muted-foreground" data-testid="draft-test-empty">
-                  Send a message to test the draft agent.
-                </p>
-              ) : (
-                testTurns.map((t) => (
-                  <div key={t.id} className={`flex ${t.role === "user" ? "justify-end" : "justify-start"}`}>
-                    <div
-                      className={`max-w-[85%] rounded-xl px-3 py-2 text-xs ${
-                        t.role === "user"
-                          ? "bg-primary text-primary-foreground rounded-br-sm"
-                          : "border bg-surface-2/30 rounded-bl-sm"
-                      }`}
-                      data-testid={t.role === "user" ? "test-turn-user" : "test-turn-agent"}
-                    >
-                      {t.pending ? (
-                        <span className="inline-flex items-center gap-1" data-testid="test-pending">
-                          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-foreground/40 [animation-delay:-0.25s]" />
-                          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-foreground/40 [animation-delay:-0.12s]" />
-                          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-foreground/40" />
-                        </span>
-                      ) : t.error ? (
-                        <span className="text-destructive" role="alert">{t.error}</span>
-                      ) : (
-                        t.text
-                      )}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-            {/* Test input */}
-            <div className="border-t p-3">
-              <div className="flex items-end gap-2">
-                <Textarea
-                  aria-label="Test message"
-                  rows={2}
-                  value={testInput}
-                  onChange={(e) => setTestInput(e.target.value)}
-                  onKeyDown={onTestKeyDown}
-                  placeholder="Test your draft agent…"
-                  className="resize-none text-xs"
-                  data-testid="draft-test-input"
-                  disabled={testBusy}
-                />
-                <Button
-                  size="icon"
-                  onClick={() => void onTestSend()}
-                  disabled={testBusy || !testInput.trim()}
-                  data-testid="draft-test-send"
-                  aria-label="Send test message"
-                  className="h-9 w-9 shrink-0"
+
+        <div className="border border-border bg-card p-5">
+          {canCreate && nsOptions.length > 0 && draftState.kind === "none" && (
+            <div className="mb-4">
+              <FormField id="draft-namespace" label="Workspace">
+                <Select
+                  id="draft-namespace"
+                  value={nsOptions.includes(targetNs) ? targetNs : ""}
+                  onChange={(e) => setTargetNs(e.target.value)}
+                  data-testid="draft-namespace-select"
                 >
-                  <Send className="h-4 w-4" />
-                </Button>
+                  {nsOptions.map((n) => (
+                    <option key={n} value={n}>{n}</option>
+                  ))}
+                </Select>
+              </FormField>
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-3">
+            <Button variant="ghost" onClick={onBack} disabled={draftState.kind === "creating" || draftState.kind === "publishing"}>
+              Back
+            </Button>
+            {draftState.kind === "none" && (
+              <Button
+                variant="outline"
+                onClick={() => setUseOneShot(true)}
+                data-testid="create-agent-direct"
+              >
+                Go to the review
+              </Button>
+            )}
+            {canCreate && draftState.kind === "none" && (
+              <Button
+                onClick={() => void onCreateDraft()}
+                data-testid="create-draft-button"
+              >
+                Create a draft and test it
+              </Button>
+            )}
+            {draftCreated && hasRefinements && (
+              <Button
+                variant="outline"
+                onClick={() => void onApplyRefinement()}
+                disabled={draftApplying}
+                data-testid="apply-refinement-button"
+              >
+                {draftApplying ? "Working…" : "Apply refinement"}
+              </Button>
+            )}
+            {draftCreated && (
+              <Button
+                onClick={() => void onPublish()}
+                disabled={draftPublishing}
+                data-testid="publish-button"
+              >
+                {draftPublishing ? "Working…" : "Publish"}
+              </Button>
+            )}
+            {draftState.kind === "creating" && (
+              <p className="text-xs text-faint" data-testid="draft-creating">
+                Creating draft…
+              </p>
+            )}
+          </div>
+
+          {draftCreated && (
+            <div className="mt-5 rounded-lg border border-border" data-testid="draft-test-panel">
+              <div className="border-b border-border px-4 py-3">
+                <p className="font-serif text-md font-medium">
+                  Testing draft{" "}
+                  <span className="font-mono text-sm">{draftState.name}</span>
+                </p>
+                <p className="text-xs text-faint">
+                  The first message may wait while the draft scales up from zero.
+                </p>
+              </div>
+              <div className="flex min-h-40 flex-col gap-3 px-4 py-4" data-testid="draft-test-thread">
+                {testTurns.length === 0 ? (
+                  <p className="text-xs text-faint" data-testid="draft-test-empty">
+                    Send it something to see how it answers.
+                  </p>
+                ) : (
+                  testTurns.map((t) => (
+                    <div key={t.id} className={`flex ${t.role === "user" ? "justify-end" : "justify-start"}`}>
+                      <div
+                        className={`max-w-[85%] rounded-lg px-3 py-2 text-xs ${
+                          t.role === "user"
+                            ? "bg-accent text-accent-foreground"
+                            : "border border-border bg-surface-2"
+                        }`}
+                        data-testid={t.role === "user" ? "test-turn-user" : "test-turn-agent"}
+                      >
+                        {t.pending ? (
+                          <span className="inline-flex items-center gap-1" data-testid="test-pending">
+                            <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-ghost [animation-delay:-0.25s]" />
+                            <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-ghost [animation-delay:-0.12s]" />
+                            <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-ghost" />
+                          </span>
+                        ) : t.error ? (
+                          <span className="text-destructive" role="alert">{t.error}</span>
+                        ) : (
+                          t.text
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+              <div className="border-t border-border p-3">
+                <div className="flex items-end gap-2">
+                  <Textarea
+                    aria-label="Test message"
+                    rows={2}
+                    value={testInput}
+                    onChange={(e) => setTestInput(e.target.value)}
+                    onKeyDown={onTestKeyDown}
+                    placeholder="Ask the draft something…"
+                    className="resize-none text-xs"
+                    data-testid="draft-test-input"
+                    disabled={testBusy}
+                  />
+                  <Button
+                    size="icon"
+                    onClick={() => void onTestSend()}
+                    disabled={testBusy || !testInput.trim()}
+                    data-testid="draft-test-send"
+                    aria-label="Send test message"
+                    className="h-9 w-9 shrink-0"
+                  >
+                    <Send className="h-4 w-4" />
+                  </Button>
+                </div>
               </div>
             </div>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      </section>
     </div>
   );
 }
 
-// GenerationReviewHeader shows the friendly "here's what we'll build" summary +
-// the cost tag (generation burns the caller's key, shown not hidden — ADR 0014)
-// + a Regenerate affordance that returns to the prompt.
-function GenerationReviewHeader({
-  gen,
-  onRegenerate,
-}: {
-  gen: GenerateAgentResponse;
-  onRegenerate: () => void;
-}) {
-  return (
-    <div className="space-y-3" data-testid="generation-review">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2 text-success">
-          <Sparkles className="h-5 w-5" />
-          <p className="text-sm font-medium text-foreground">
-            Here&apos;s what we&apos;ll build
-          </p>
-        </div>
-        <Button variant="outline" size="sm" onClick={onRegenerate}>
-          <Sparkles className="h-4 w-4" /> Regenerate
-        </Button>
-      </div>
-      {gen.model && (
-        <Badge
-          variant="secondary"
-          className="text-[10px]"
-          data-testid="gen-model-tag"
-        >
-          generated with {gen.model}
-        </Badge>
-      )}
-      {gen.warnings && gen.warnings.length > 0 && (
-        <div className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-muted-foreground">
-          <p className="font-medium text-warning-foreground">Heads up</p>
-          <ul className="mt-1 list-inside list-disc">
-            {gen.warnings.map((w, i) => (
-              <li key={i}>{w}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// RegenerateState renders the 422 outcome: an honest reason + a Regenerate
-// button, WITH the raw agentYAML preserved (nothing is lost). Keyed off the
-// `regenerate` flag, never a status sniff.
-function RegenerateState({
-  reason,
-  rawYAML,
-  busy,
-  onRegenerate,
-  onEdit,
-}: {
-  reason: string;
-  rawYAML: string;
-  busy: boolean;
-  onRegenerate: () => void;
-  onEdit: () => void;
-}) {
-  return (
-    <div
-      className="rounded-lg border bg-card p-6 shadow-card"
-      data-testid="regenerate-state"
-    >
-      <div className="mb-3 flex items-center gap-2 text-warning">
-        <Sparkles className="h-5 w-5" />
-        <p className="text-sm font-medium text-foreground">
-          That generation needs another pass
-        </p>
-      </div>
-      <p
-        className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-sm text-warning-foreground"
-        role="alert"
-        data-testid="regenerate-reason"
-      >
-        {reason}
-      </p>
-      {rawYAML && (
-        <div className="mt-4 space-y-1.5">
-          <p className="text-xs font-medium text-muted-foreground">
-            What was generated (kept so nothing is lost):
-          </p>
-          <Textarea
-            aria-label="Raw generated agent.yaml"
-            data-testid="regenerate-raw-yaml"
-            readOnly
-            className="min-h-[10rem] font-mono text-xs"
-            value={rawYAML}
-          />
-        </div>
-      )}
-      <div className="mt-4 flex items-center justify-between">
-        <Button variant="ghost" onClick={onEdit} disabled={busy}>
-          Edit the description
-        </Button>
-        <Button
-          onClick={onRegenerate}
-          disabled={busy}
-          data-testid="regenerate-button"
-        >
-          <Sparkles className="h-4 w-4" />
-          {busy ? "Regenerating…" : "Regenerate"}
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-// ─── Configure it ───────────────────────────────────────────────────────────
+// ── Configure it ────────────────────────────────────────────────────────────
 
 const STEP_BASICS = 0;
 const STEP_OPTIONAL = 3;
@@ -1191,10 +1221,11 @@ function ConfigureFlow({
   // Seed a MANAGED agent (the aha default — no Docker build); the user can flip
   // to a custom image in step 1. Reuses the shared ConfigForm model + validate +
   // toAgentYAML (NOT rewritten) — the tools are picked at the shared review.
-  const [form, setForm] = React.useState<ConfigForm>(() => ({
+  const [seed] = React.useState<ConfigForm>(() => ({
     ...emptyForm(),
     runtime: "managed",
   }));
+  const [form, setForm] = React.useState<ConfigForm>(seed);
   const [errors, setErrors] = React.useState<FieldErrors>({});
   const [current, setCurrent] = React.useState(STEP_BASICS);
   const [done, setDone] = React.useState(false);
@@ -1295,6 +1326,15 @@ function ConfigureFlow({
   // The Configure-it review IS the shared review — once the user reaches the
   // last Wizard step and finishes, we hand the serialized agent.yaml to the same
   // SharedReview the Describe-it path uses (one convergence point).
+  const modelPick = React.useMemo(() => {
+    const hit = connectedModels.find(
+      (c) => `${c.connection}|${c.model}` === pickedModel,
+    );
+    return hit
+      ? { connection: hit.connection, provider: hit.provider, model: hit.model }
+      : undefined;
+  }, [connectedModels, pickedModel]);
+
   if (done) {
     return (
       <SharedReview
@@ -1302,26 +1342,22 @@ function ConfigureFlow({
         initialTools={form.tools}
         summary={summarizeYAML(toAgentYAML(form))}
         advancedYAML={toAgentYAML(form)}
+        origin="form"
         // m21: the picked model → the BFF ensures its route. If the user instead used
         // the Advanced "existing route" field, modelPick is empty and that route wins.
-        modelPick={(() => {
-          const hit = connectedModels.find(
-            (c) => `${c.connection}|${c.model}` === pickedModel,
-          );
-          return hit
-            ? {
-                connection: hit.connection,
-                provider: hit.provider,
-                model: hit.model,
-              }
-            : undefined;
-        })()}
+        modelPick={modelPick}
         onBack={() => setDone(false)}
       />
     );
   }
 
   const managed = form.runtime === "managed";
+  // Anything the user has typed is work an Escape must not silently drop. The
+  // kit Wizard owns the confirm dialog; this is the flag that arms it.
+  const dirty = JSON.stringify(form) !== JSON.stringify(seed);
+
+  const runtimeCard =
+    "rounded-lg border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
 
   const steps: WizardStep[] = [
     {
@@ -1329,7 +1365,11 @@ function ConfigureFlow({
       title: "Basics",
       description: "Name + runtime",
       content: (
-        <div className="space-y-4">
+        <div className="min-w-0 space-y-5">
+          <SectionHeader
+            title="Basics"
+            lede="What the agent is called, and whether the platform runs it for you or you bring a container."
+          />
           <FormField
             id="cfg-name"
             label="Name"
@@ -1338,6 +1378,7 @@ function ConfigureFlow({
           >
             <Input
               id="cfg-name"
+              className="font-mono"
               value={form.name}
               onChange={(e) => set("name", e.target.value)}
               placeholder="support-agent"
@@ -1345,31 +1386,35 @@ function ConfigureFlow({
           </FormField>
           <div className="space-y-1.5">
             <Label>Runtime</Label>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid gap-3 sm:grid-cols-2">
               <button
                 type="button"
                 aria-pressed={managed}
                 onClick={() => set("runtime", "managed")}
-                className={`rounded-lg border p-3 text-left transition-colors hover:bg-surface-2 ${
-                  managed ? "border-primary ring-1 ring-primary" : ""
+                className={`${runtimeCard} ${
+                  managed
+                    ? "border-primary bg-accent"
+                    : "border-border bg-card hover:bg-surface-2"
                 }`}
               >
                 <p className="text-sm font-medium">Managed</p>
-                <p className="text-xs text-muted-foreground">
-                  Stock tool-calling loop — no Docker build
+                <p className="mt-0.5 text-xs text-faint">
+                  The stock tool-calling loop — no Docker build.
                 </p>
               </button>
               <button
                 type="button"
                 aria-pressed={!managed}
                 onClick={() => set("runtime", "custom")}
-                className={`rounded-lg border p-3 text-left transition-colors hover:bg-surface-2 ${
-                  !managed ? "border-primary ring-1 ring-primary" : ""
+                className={`${runtimeCard} ${
+                  !managed
+                    ? "border-primary bg-accent"
+                    : "border-border bg-card hover:bg-surface-2"
                 }`}
               >
                 <p className="text-sm font-medium">Custom image</p>
-                <p className="text-xs text-muted-foreground">
-                  Bring your own container
+                <p className="mt-0.5 text-xs text-faint">
+                  Bring your own container.
                 </p>
               </button>
             </div>
@@ -1378,6 +1423,7 @@ function ConfigureFlow({
             <FormField id="cfg-image" label="Image" error={errors.image}>
               <Input
                 id="cfg-image"
+                className="font-mono"
                 value={form.image}
                 onChange={(e) => set("image", e.target.value)}
                 placeholder="ghcr.io/acme/agent:v1"
@@ -1385,8 +1431,8 @@ function ConfigureFlow({
             </FormField>
           )}
           {managed && form.image.trim() === "" && (
-            <p className="text-xs text-muted-foreground">
-              A managed agent runs the platform&apos;s stock image — no image to
+            <p className="text-xs text-faint">
+              A managed agent runs the platform&apos;s stock image — nothing to
               build or push.
             </p>
           )}
@@ -1395,18 +1441,23 @@ function ConfigureFlow({
     },
     {
       id: "behavior",
-      title: "Behavior",
-      description: "Prompt + model route",
+      title: "Behaviour",
+      description: "Prompt + model",
       content: (
-        <div className="space-y-4">
+        <div className="min-w-0 space-y-5">
+          <SectionHeader
+            title="Behaviour"
+            lede="What it is told to do, which model it runs on, and who is allowed to call it."
+          />
           {managed && (
             <FormField
               id="cfg-system-prompt"
               label="System prompt"
-              hint="What the managed agent should do (its persona + instructions)."
+              hint="What the managed agent should do — its persona and instructions."
             >
               <Textarea
                 id="cfg-system-prompt"
+                data-testid="cfg-system-prompt"
                 rows={4}
                 value={form.systemPrompt}
                 onChange={(e) => set("systemPrompt", e.target.value)}
@@ -1464,8 +1515,8 @@ function ConfigureFlow({
               disclosure. It competes with the Model picker above and is silently
               overridden by it, so it should not sit inline as a co-equal field —
               it is an advanced escape hatch for pre-built routes. */}
-          <details className="rounded-md border border-border/60 bg-muted/30 px-3 py-2">
-            <summary className="cursor-pointer select-none text-sm text-muted-foreground">
+          <details className="rounded-md border border-border bg-surface-2 px-3 py-2">
+            <summary className="cursor-pointer select-none text-sm text-secondary-foreground">
               Advanced: use an existing model route
             </summary>
             <div className="mt-3">
@@ -1490,6 +1541,7 @@ function ConfigureFlow({
                 ) : (
                   <Input
                     id="cfg-model-route"
+                    className="font-mono"
                     value={form.modelRoute}
                     onChange={(e) => set("modelRoute", e.target.value)}
                     placeholder="connect a provider to create a route"
@@ -1546,11 +1598,16 @@ function ConfigureFlow({
       title: "Resources",
       description: "CPU/memory + scaling",
       content: (
-        <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+        <div className="min-w-0 space-y-5">
+          <SectionHeader
+            title="Resources"
+            lede="What each replica asks for, and whether one stays warm so requests never cold-start."
+          />
+          <div className="grid gap-4 sm:grid-cols-2">
             <FormField id="cfg-cpu" label="CPU request">
               <Input
                 id="cfg-cpu"
+                className="font-mono"
                 value={form.resourcesCpu}
                 onChange={(e) => set("resourcesCpu", e.target.value)}
                 placeholder="500m"
@@ -1559,26 +1616,27 @@ function ConfigureFlow({
             <FormField id="cfg-memory" label="Memory request">
               <Input
                 id="cfg-memory"
+                className="font-mono"
                 value={form.resourcesMemory}
                 onChange={(e) => set("resourcesMemory", e.target.value)}
                 placeholder="256Mi"
               />
             </FormField>
           </div>
-          <div className="flex items-start gap-3 rounded-lg border border-border/60 bg-muted/30 p-4">
+          <div className="flex items-start gap-3 rounded-lg border border-border bg-surface-2 p-4">
             <input
               id="cfg-keep-warm"
               type="checkbox"
-              className="mt-0.5 h-4 w-4 cursor-pointer rounded border-border"
+              className="mt-0.5 h-4 w-4 cursor-pointer rounded-sm border-input accent-primary"
               checked={form.keepWarm}
               onChange={(e) => set("keepWarm", e.target.checked)}
               data-testid="cfg-keep-warm"
             />
             <label htmlFor="cfg-keep-warm" className="cursor-pointer space-y-0.5">
               <span className="text-sm font-medium">Keep warm</span>
-              <p className="text-xs text-muted-foreground">
-                Always keeps at least one replica running so requests never cold-start.
-                Advanced min/max scaling is available in the raw-YAML editor.
+              <p className="text-xs text-faint">
+                Always keeps at least one replica running so requests never
+                cold-start. Advanced min/max scaling lives in the raw-YAML editor.
               </p>
             </label>
           </div>
@@ -1588,7 +1646,7 @@ function ConfigureFlow({
     {
       id: "optional",
       title: "Optional",
-      description: "Budget · eval · prompt",
+      description: "Budget · prompt · eval",
       content: <OptionalStep form={form} set={set} errors={errors} />,
     },
     {
@@ -1596,14 +1654,17 @@ function ConfigureFlow({
       title: "Review",
       review: true,
       content: (
-        <div className="space-y-4">
-          <p className="text-sm font-medium">Ready to review + attach tools</p>
-          <p className="text-sm text-muted-foreground">
-            Finish to open the shared review — the same review + tool picker the
-            &ldquo;Describe it&rdquo; path lands on. You&apos;ll pick tools,
-            preview the CRD, and create there.
-          </p>
-          <FriendlySummary summary={summarizeYAML(toAgentYAML(form))} />
+        <div className="min-w-0 space-y-5" data-testid="configure-review-step">
+          <SectionHeader
+            title="Review what you set"
+            lede="Nothing exists in the cluster yet. Finish to attach tools and create it — the same review the “Describe it” path lands on."
+          />
+          <div className="border border-border bg-card p-5">
+            <ConfigFacts
+              summary={summarizeYAML(toAgentYAML(form))}
+              modelPick={modelPick}
+            />
+          </div>
         </div>
       ),
     },
@@ -1615,15 +1676,13 @@ function ConfigureFlow({
     current === STEP_BASICS ? Object.keys(basicsErrors).length === 0 : true;
 
   return (
-    <div
-      className="rounded-lg border bg-card p-6 shadow-card"
-      data-testid="configure-flow"
-    >
+    <div className="min-w-0" data-testid="configure-flow">
       <Wizard
         steps={steps}
         current={current}
         onStepChange={onStepChange}
         canProceed={canProceed}
+        dirty={dirty}
         onCancel={onBack}
         onFinish={() => {
           const found = validate(form);
@@ -1654,14 +1713,18 @@ function OptionalStep({
   errors: FieldErrors;
 }) {
   return (
-    <div className="space-y-4">
+    <div className="min-w-0 space-y-5">
+      <SectionHeader
+        title="Optional"
+        lede="Bounds and gates. Everything here is off unless you turn it on — an untouched block claims nothing."
+      />
       <ToggleSection
         id="cfg-budget"
         label="Cost budget"
         enabled={form.budgetEnabled}
         onToggle={(v) => set("budgetEnabled", v)}
       >
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid gap-4 sm:grid-cols-2">
           <FormField
             id="cfg-budget-conv"
             label="Per conversation (USD)"
@@ -1669,6 +1732,7 @@ function OptionalStep({
           >
             <Input
               id="cfg-budget-conv"
+              className="font-mono"
               value={form.budgetPerConversationUSD}
               onChange={(e) => set("budgetPerConversationUSD", e.target.value)}
               placeholder="0.50"
@@ -1681,6 +1745,7 @@ function OptionalStep({
           >
             <Input
               id="cfg-budget-agent"
+              className="font-mono"
               value={form.budgetPerAgentUSD}
               onChange={(e) => set("budgetPerAgentUSD", e.target.value)}
               placeholder="10.00"
@@ -1701,6 +1766,7 @@ function OptionalStep({
         >
           <Input
             id="cfg-prompt-name"
+            className="font-mono"
             value={form.promptName}
             onChange={(e) => set("promptName", e.target.value)}
             placeholder="system-prompt"
@@ -1713,15 +1779,17 @@ function OptionalStep({
         >
           <Input
             id="cfg-prompt-repo"
+            className="font-mono"
             value={form.promptRepo}
             onChange={(e) => set("promptRepo", e.target.value)}
             placeholder="https://github.com/acme/prompts"
           />
         </FormField>
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid gap-4 sm:grid-cols-2">
           <FormField id="cfg-prompt-ref" label="Ref" error={errors.promptRef}>
             <Input
               id="cfg-prompt-ref"
+              className="font-mono"
               value={form.promptRef}
               onChange={(e) => set("promptRef", e.target.value)}
               placeholder="main"
@@ -1734,6 +1802,7 @@ function OptionalStep({
           >
             <Input
               id="cfg-prompt-path"
+              className="font-mono"
               value={form.promptPath}
               onChange={(e) => set("promptPath", e.target.value)}
               placeholder="prompts/system.txt"
@@ -1747,7 +1816,7 @@ function OptionalStep({
         enabled={form.evalEnabled}
         onToggle={(v) => set("evalEnabled", v)}
       >
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid gap-4 sm:grid-cols-2">
           <FormField
             id="cfg-eval-suite"
             label="Suite name"
@@ -1755,6 +1824,7 @@ function OptionalStep({
           >
             <Input
               id="cfg-eval-suite"
+              className="font-mono"
               value={form.evalSuite}
               onChange={(e) => set("evalSuite", e.target.value)}
               placeholder="quality"
@@ -1767,6 +1837,7 @@ function OptionalStep({
           >
             <Input
               id="cfg-eval-dataset"
+              className="font-mono"
               value={form.evalDataset}
               onChange={(e) => set("evalDataset", e.target.value)}
               placeholder="golden-set"
@@ -1780,6 +1851,7 @@ function OptionalStep({
         >
           <Input
             id="cfg-eval-threshold"
+            className="font-mono"
             value={form.evalThreshold}
             onChange={(e) => set("evalThreshold", e.target.value)}
             placeholder="0.8"
@@ -1804,7 +1876,7 @@ function ToggleSection({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-md border p-4">
+    <div className="rounded-lg border border-border bg-card p-4">
       <label
         htmlFor={id}
         className="flex items-center gap-2 text-sm font-medium"
@@ -1814,7 +1886,7 @@ function ToggleSection({
           type="checkbox"
           checked={enabled}
           onChange={(e) => onToggle(e.target.checked)}
-          className="h-4 w-4 rounded border-input accent-primary"
+          className="h-4 w-4 rounded-sm border-input accent-primary"
         />
         {label}
       </label>
@@ -1823,39 +1895,35 @@ function ToggleSection({
   );
 }
 
-// ─── Recipe review (m72.5) ──────────────────────────────────────────────────
+// ── Recipe review (m72.5) ───────────────────────────────────────────────────
 
 // RecipeReview pre-fills the SharedReview surface with a recipe's simplified
 // agent.yaml spec. The recipe spec is the same format as the generate/refine
 // output — SharedReview handles tool injection, Preview, and Create identically.
 function RecipeReview({ spec, onBack }: { spec: string; onBack: () => void }) {
   const summary = summarizeYAML(spec);
-  const toolNames = summary.tools ?? [];
   return (
     <SharedReview
       baseYAML={spec}
-      initialTools={toolNames}
+      initialTools={summary.tools ?? []}
       summary={summary}
       advancedYAML={spec}
+      origin="recipe"
       onBack={onBack}
-      header={
-        <div className="flex items-center gap-2">
-          <Sparkles className="h-4 w-4 text-primary" />
-          <p className="text-sm font-medium">Recipe — review before creating</p>
-        </div>
-      }
     />
   );
 }
 
-// ─── The shared review + tool picker + Create ───────────────────────────────
+// ── The shared review + tool picker + Create ────────────────────────────────
 
 function SharedReview({
   baseYAML,
   initialTools,
   summary,
   advancedYAML,
-  header,
+  origin,
+  originModel,
+  onRegenerate,
   onBack,
   modelPick,
 }: {
@@ -1863,7 +1931,10 @@ function SharedReview({
   initialTools: string[];
   summary: YAMLSummary;
   advancedYAML: string;
-  header?: React.ReactNode;
+  origin: Origin;
+  /** The model that COMPOSED the config, when one did. */
+  originModel?: string;
+  onRegenerate?: () => void;
   onBack: () => void;
   // modelPick (m21): the (provider, model) the user picked. When set, the create
   // sends it so the BFF ensures a ModelRoute serving it and points the agent at it —
@@ -1889,7 +1960,7 @@ function SharedReview({
   }, [list, targetNs]);
   // RBAC-aware chrome (§3, display-only): Create gates on agentdeployments.create.
   // A viewer sees no Create affordance; a forced 403 (stale "yes") → reprobe +
-  // ForbiddenInline (the API is the real gate, ADR 0011).
+  // the calm permission boundary (the API is the real gate, ADR 0011).
   const { can, reprobe } = useCapabilities();
   const canCreate = can(RES_AGENTS, "create");
 
@@ -1936,18 +2007,19 @@ function SharedReview({
   );
 
   // Check-requirements checklist (m72.3, ADR 0066 D3): advisory pre-flight against
-  // the finalYAML. Runs once after finalYAML+namespace are stable. A failure (e.g.
-  // 501 from older server) degrades silently — no checklist shown.
+  // the finalYAML. `null` means it has not answered — which the checklist renders
+  // as "not checked", NEVER as satisfied.
   const [reqCheck, setReqCheck] = React.useState<CheckRequirementsResponse | null>(null);
   React.useEffect(() => {
     const c = new AbortController();
+    setReqCheck(null);
     api
       .checkRequirements(finalYAML, targetNs, c.signal)
       .then((r) => {
         if (!c.signal.aborted) setReqCheck(r);
       })
       .catch(() => {
-        /* soft miss — advisory only, don't surface errors */
+        /* soft miss — advisory only; the checklist says "not checked" instead */
       });
     return () => c.abort();
   }, [finalYAML, targetNs]);
@@ -1957,6 +2029,9 @@ function SharedReview({
     try {
       const manifest = await api.expand(finalYAML);
       setState({ kind: "preview", manifest });
+      // Open the disclosure — a preview the reader has to go hunting for is a
+      // button that appears to do nothing.
+      setAdvanced(true);
     } catch (err) {
       setState(errorState(err));
     }
@@ -2017,240 +2092,572 @@ function SharedReview({
       state.created.find((o) => o.kind === "AgentDeployment") ??
       state.created[0];
     return (
-      <div
-        className="rounded-lg border bg-card p-6 shadow-card"
+      <section
+        aria-labelledby="created-head"
+        className="min-w-0"
         data-testid="create-success"
       >
-        <div className="flex items-center gap-2 text-success">
-          <CheckCircle2 className="h-5 w-5" />
-          <p className="text-sm font-medium text-foreground">
-            {agent ? `${agent.name} created` : "Agent created"} — opening its
-            page…
-          </p>
-        </div>
-        <div className="mt-3 grid gap-2">
-          {state.created.map((obj) => (
-            <div
-              key={`${obj.kind}/${obj.namespace}/${obj.name}`}
-              className="flex items-center justify-between rounded-md border p-3"
-            >
-              <div>
-                <p className="text-sm font-medium">{obj.name}</p>
-                <p className="text-xs text-muted-foreground">{obj.namespace}</p>
+        <SectionHeader
+          id="created-head"
+          title={agent ? `${agent.name} exists now` : "The agent exists now"}
+          lede="Opening its page, where you can watch it come up and send it something."
+        />
+        {/* The kv register, hand-laid rather than KeyValueList: a create can
+            return several objects of the SAME kind (one MCPToolBinding per
+            tool), and the kit keys its rows by the key string. */}
+        <div className="border border-border bg-card px-5 py-2">
+          <dl className="min-w-0">
+            {state.created.map((obj) => (
+              <div
+                key={`${obj.kind}/${obj.namespace}/${obj.name}`}
+                className="flex items-baseline justify-between gap-3 border-b border-border-soft py-2 last:border-0"
+              >
+                <dt className="shrink-0 font-mono text-2xs uppercase tracking-wide text-faint">
+                  {obj.kind}
+                </dt>
+                <dd className="min-w-0 break-words text-right">
+                  <span className="font-mono text-sm">{obj.name}</span>
+                  <span className="mt-0.5 block text-xs text-faint">
+                    in {obj.namespace}
+                  </span>
+                </dd>
               </div>
-              <Badge variant="success">{obj.kind}</Badge>
-            </div>
-          ))}
+            ))}
+          </dl>
         </div>
-      </div>
+      </section>
     );
   }
 
   const busy = state.kind === "previewing" || state.kind === "creating";
   const isManaged = /(^|\n)runtime:\s*managed(\s|$)/.test(baseYAML);
+  // `api.checkRequirements` answers a 501 with a synthetic all-clear rather
+  // than throwing, so "it answered" has to be established, not assumed.
+  const answered =
+    reqCheck !== null && preflightAnswered(reqCheck, selected, summary.model);
+  const requirements = readRequirements(
+    answered ? reqCheck : null,
+    selected,
+    summary.model,
+  );
 
   return (
-    <div className="space-y-4" data-testid="shared-review">
-      {header && (
-        <div className="rounded-lg border bg-card p-5 shadow-card">
-          {header}
+    <div className="min-w-0 space-y-8" data-testid="shared-review">
+      {/* The whole config, plainly. Nothing that decides what gets created is
+          hidden behind a chevron — only the raw manifest is. */}
+      <section aria-labelledby="review-head" className="min-w-0">
+        <SectionHeader
+          id="review-head"
+          title="Review before creating"
+          lede="This is everything that will be created, in the words it will be created with."
+          actions={
+            origin === "generated" && onRegenerate ? (
+              <Button variant="outline" size="sm" onClick={onRegenerate}>
+                Regenerate
+              </Button>
+            ) : undefined
+          }
+        />
+        <ProposalMark origin={origin} model={originModel} />
+        <div className="border border-border bg-card p-5">
+          <ConfigFacts
+            summary={{ ...summary, tools: selected }}
+            namespace={targetNs}
+            modelPick={modelPick}
+          />
         </div>
-      )}
-
-      {/* Friendly summary — the primary review surface (raw behind Advanced). */}
-      <div className="rounded-lg border bg-card p-5 shadow-card">
-        <p className="mb-3 text-sm font-medium">Review before creating</p>
-        <FriendlySummary summary={{ ...summary, tools: selected }} />
-        <button
-          type="button"
-          onClick={() => setAdvanced((v) => !v)}
-          className="mt-4 flex w-full items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground"
-          aria-expanded={advanced}
-          data-testid="advanced-toggle"
+        <Disclosure
+          open={advanced}
+          onToggle={() => setAdvanced((v) => !v)}
+          testId="advanced-toggle"
+          label={
+            state.kind === "preview"
+              ? "the expanded CRDs"
+              : "the generated agent.yaml"
+          }
         >
-          <ChevronRight
-            className={`h-4 w-4 transition-transform ${advanced ? "rotate-90" : ""}`}
-          />
-          Advanced — view the generated agent.yaml / CRDs
-        </button>
-        {advanced && (
-          <Textarea
-            aria-label="Advanced — generated manifest"
-            data-testid="advanced-yaml"
-            readOnly
-            className="mt-3 min-h-[14rem] font-mono text-xs"
-            value={state.kind === "preview" ? state.manifest : advancedYAML}
-          />
+          <CodeWell testId="advanced-yaml">
+            {state.kind === "preview" ? state.manifest : advancedYAML}
+          </CodeWell>
+        </Disclosure>
+      </section>
+
+      {/* What it needs to actually run. Advisory — it never blocks Create. */}
+      <section aria-labelledby="requirements-head" className="min-w-0">
+        <SectionHeader
+          as="h3"
+          id="requirements-head"
+          title="What it needs before it can run"
+          lede="Checked against this workspace. None of it blocks creating the agent — it tells you what to connect next."
+        />
+        {!answered && requirements.length > 0 && (
+          <QuietNote
+            className="mb-3"
+            title="The pre-flight check hasn’t answered."
+          >
+            This install either doesn&apos;t offer{" "}
+            <span className="font-mono text-xs">check-requirements</span> or it
+            didn&apos;t reply, so nothing below has been verified against the
+            cluster. Everything is listed as <em>not checked</em> rather than
+            ready — an unchecked requirement is not a satisfied one, and nothing
+            here is guessed.
+          </QuietNote>
         )}
-      </div>
-
-      {/* Check-requirements checklist (m72.3) — advisory only, never blocks create. */}
-      {reqCheck && (reqCheck.model.required || reqCheck.tools.length > 0) && (
-        <div
-          className="rounded-lg border bg-card p-5 shadow-card"
-          data-testid="requirements-checklist"
-        >
-          <p className="mb-3 text-sm font-medium">Connect what this needs</p>
-          <ul className="space-y-2">
-            {reqCheck.model.required && (
-              <li className="flex items-start gap-2 text-sm">
-                {reqCheck.model.connected ? (
-                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" />
-                ) : (
-                  <PlugZap className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
-                )}
-                <span>
-                  Model route{reqCheck.model.route ? ` (${reqCheck.model.route})` : ""}
-                  {!reqCheck.model.connected && (
-                    <>
-                      {" — "}
-                      <a
-                        href="/providers/connect"
-                        className="text-primary underline underline-offset-2"
-                      >
-                        connect a provider
-                      </a>
-                    </>
-                  )}
-                </span>
-              </li>
-            )}
-            {reqCheck.tools.map((t) => (
-              <li key={t.name} className="flex items-start gap-2 text-sm">
-                {t.status === "ready" ? (
-                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" />
-                ) : (
-                  <Wrench className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
-                )}
-                <span>
-                  Tool: {t.name}
-                  {t.status === "needs-approval" && (
-                    <span className="ml-1 text-xs text-muted-foreground">
-                      — pending operator approval
-                    </span>
-                  )}
-                  {t.status === "needs-consent" && (
-                    <span className="ml-1 text-xs text-muted-foreground">
-                      — OAuth consent required at runtime
-                    </span>
-                  )}
-                  {t.status === "not-found" && (
-                    <>
-                      {" — "}
-                      <a
-                        href="/tools/connect"
-                        className="text-primary underline underline-offset-2"
-                      >
-                        register MCP server
-                      </a>
-                    </>
-                  )}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+        {requirements.length > 0 ? (
+          <div
+            className="border border-border bg-card px-5 py-2"
+            data-testid="requirements-checklist"
+          >
+            <ul className="min-w-0">
+              {requirements.map((r) => (
+                <RequirementRow key={`${r.kind}:${r.name}`} req={r} />
+              ))}
+            </ul>
+          </div>
+        ) : (
+          <p className="text-sm text-faint">
+            This config names no model route and no tools, so there is nothing to
+            connect.
+          </p>
+        )}
+      </section>
 
       {/* Tool picker — managed agents only (a custom image brings its own). */}
       {isManaged && (
-        <div className="rounded-lg border bg-card p-5 shadow-card">
-          <div className="mb-3">
-            <p className="text-sm font-semibold">Attach tools</p>
-            <p className="text-xs text-muted-foreground">
-              Choose the MCP tools this agent can call. Expand a server to pick
-              individual tools.
-            </p>
-          </div>
-          <ToolPicker
-            catalog={catalog}
-            selected={selected}
-            onToggle={(name) =>
-              setSelected((s) =>
-                s.includes(name) ? s.filter((t) => t !== name) : [...s, name],
-              )
-            }
-            onSelectMany={(names, on) =>
-              setSelected((s) => {
-                if (on) return [...new Set([...s, ...names])];
-                const drop = new Set(names);
-                return s.filter((t) => !drop.has(t));
-              })
-            }
+        <section aria-labelledby="tools-head" className="min-w-0">
+          <SectionHeader
+            as="h3"
+            id="tools-head"
+            title="Attach tools"
+            lede="The MCP tools this agent may call. Expand a server to pick individual tools."
           />
-        </div>
+          <div className="border border-border bg-card p-5">
+            <ToolPicker
+              catalog={catalog}
+              selected={selected}
+              onToggle={(name) =>
+                setSelected((s) =>
+                  s.includes(name) ? s.filter((t) => t !== name) : [...s, name],
+                )
+              }
+              onSelectMany={(names, on) =>
+                setSelected((s) => {
+                  if (on) return [...new Set([...s, ...names])];
+                  const drop = new Set(names);
+                  return s.filter((t) => !drop.has(t));
+                })
+              }
+            />
+          </div>
+        </section>
       )}
 
-      {/* Preview / Create. */}
-      <div className="rounded-lg border bg-surface-2/40 p-4">
-        {state.kind === "error" && state.forbidden ? (
-          <ForbiddenInline
-            title="Not allowed to create this agent"
-            description="Your account can preview the manifest but can't create AgentDeployments in this cluster."
-            detail={state.message}
-          />
-        ) : (
-          state.kind === "error" && (
-            <p
-              className="mb-3 text-sm text-destructive"
-              role="alert"
-              data-testid="create-error"
-            >
-              {state.message}
-              {state.status ? ` (${state.status})` : ""}
-            </p>
-          )
-        )}
-        {canCreate && nsOptions.length > 0 && (
-          <FormField id="create-namespace" label="Namespace">
-            <Select
-              id="create-namespace"
-              value={nsOptions.includes(targetNs) ? targetNs : ""}
-              onChange={(e) => setTargetNs(e.target.value)}
-              data-testid="create-namespace-select"
-            >
-              {nsOptions.map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </Select>
-          </FormField>
-        )}
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" onClick={onBack} disabled={busy}>
-              Back
-            </Button>
-            <Button variant="outline" onClick={onPreview} disabled={busy}>
-              {state.kind === "previewing" ? "Expanding…" : "Preview CRD"}
-            </Button>
-          </div>
-          {canCreate ? (
-            <Button
-              onClick={onCreate}
-              disabled={busy}
-              data-testid="create-button"
-            >
-              {state.kind === "creating" ? (
-                <>Creating…</>
-              ) : (
-                <>
-                  <Rocket className="h-4 w-4" /> Create agent
-                </>
-              )}
-            </Button>
+      {/* Where it lands, and the two acts. */}
+      <section aria-labelledby="create-head" className="min-w-0">
+        <SectionHeader
+          as="h3"
+          id="create-head"
+          title="Create it"
+          lede="Preview expands the config into the CRDs the cluster will hold — it changes nothing."
+        />
+        <div className="border border-border bg-card p-5">
+          {state.kind === "error" && state.forbidden ? (
+            <div className="mb-4">
+              <ForbiddenInline
+                title="Not allowed to create this agent"
+                description="Your account can preview the manifest but can't create AgentDeployments in this cluster."
+                detail={state.message}
+              />
+            </div>
           ) : (
-            <p
-              className="rounded-md border border-dashed bg-card/40 px-3 py-2 text-center text-xs text-muted-foreground"
-              data-testid="create-readonly-note"
-            >
-              You have read-only access — creating an agent requires create
-              permission on AgentDeployments.
-            </p>
+            state.kind === "error" && (
+              <div className="mb-4" data-testid="create-error">
+                <ErrorState
+                  title="The agent wasn’t created."
+                  description="Nothing was applied to the cluster. Everything above is still exactly as you left it."
+                  detail={`${state.message}${state.status ? ` (${state.status})` : ""}`}
+                  onRetry={() => setState({ kind: "idle" })}
+                  retryLabel="Dismiss"
+                />
+              </div>
+            )
           )}
+          {canCreate && nsOptions.length > 0 && (
+            <div className="mb-4">
+              <FormField id="create-namespace" label="Workspace">
+                <Select
+                  id="create-namespace"
+                  value={nsOptions.includes(targetNs) ? targetNs : ""}
+                  onChange={(e) => setTargetNs(e.target.value)}
+                  data-testid="create-namespace-select"
+                >
+                  {nsOptions.map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+                </Select>
+              </FormField>
+            </div>
+          )}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" onClick={onBack} disabled={busy}>
+                Back
+              </Button>
+              <Button variant="outline" onClick={onPreview} disabled={busy}>
+                {state.kind === "previewing" ? "Working…" : "Preview CRD"}
+              </Button>
+            </div>
+            {canCreate ? (
+              <Button
+                onClick={onCreate}
+                disabled={busy}
+                data-testid="create-button"
+              >
+                {state.kind === "creating" ? "Working…" : "Create agent"}
+              </Button>
+            ) : (
+              <p
+                className="rounded-md border border-dashed border-border-strong px-3 py-2 text-center text-xs text-faint"
+                data-testid="create-readonly-note"
+              >
+                You have read-only access — creating an agent needs create
+                permission on AgentDeployments.
+              </p>
+            )}
+          </div>
         </div>
+        <ClosingNote>
+          Creating this agent writes its CRDs. Nothing has been written yet.
+        </ClosingNote>
+      </section>
+    </div>
+  );
+}
+
+// ── The requirements checklist (m72.3) ──────────────────────────────────────
+//
+// FIVE states, not two. `not-checked` is the state that keeps the surface
+// honest: when the pre-flight didn't answer, the requirements are still listed
+// — read off the config we already hold — and every one of them says it was
+// not checked. A tick the platform never earned would be the worst thing on
+// this page (§7.1).
+
+type ReqState =
+  | "ready"
+  | "needs-approval"
+  | "needs-consent"
+  | "not-found"
+  | "not-connected"
+  | "not-checked";
+
+interface Requirement {
+  kind: "model" | "tool";
+  name: string;
+  state: ReqState;
+}
+
+/** The tag word for each state. Uppercased by the Badge recipe; ≤16 chars (§4.5). */
+const REQ_WORD: Record<ReqState, string> = {
+  ready: "ready",
+  "needs-approval": "needs approval",
+  "needs-consent": "needs consent",
+  "not-found": "not registered",
+  "not-connected": "not connected",
+  "not-checked": "not checked",
+};
+
+/**
+ * The hue per state, and the reasoning behind the two that are not obvious:
+ *   • needs-approval / needs-consent are HOLD, not warn — work is paused
+ *     because a PERSON must decide (an operator approving a tool, an end user
+ *     consenting at run time). That is the exact definition of hold (§2.4).
+ *   • not-checked is `open` — declared but never exercised. Never `ok`.
+ */
+const REQ_VARIANT: Record<ReqState, "ok" | "hold" | "crit" | "open"> = {
+  ready: "ok",
+  "needs-approval": "hold",
+  "needs-consent": "hold",
+  "not-found": "crit",
+  "not-connected": "crit",
+  "not-checked": "open",
+};
+
+/** One line of plain language per state, so the tag is never the only telling. */
+const REQ_SAYS: Record<ReqState, string> = {
+  ready: "connected and bindable",
+  "needs-approval": "an operator has to approve it before it binds",
+  "needs-consent": "the person using the agent consents at run time",
+  "not-found": "no MCP server here provides it",
+  "not-connected": "no provider is connected for it",
+  "not-checked": "unknown — the pre-flight didn’t answer",
+};
+
+/** The user's next act, when there is one. Verb-first, ≤22 chars (§7.2). */
+function reqNextStep(r: Requirement): { label: string; to: string } | null {
+  if (r.state === "not-connected") {
+    return { label: "Connect a provider", to: "/providers/connect" };
+  }
+  if (r.state === "not-found") {
+    return { label: "Register the server", to: "/tools/add-mcp" };
+  }
+  if (r.state === "needs-approval") {
+    return { label: "Open the approvals", to: "/tools/approvals" };
+  }
+  return null;
+}
+
+/**
+ * Did the pre-flight actually run?
+ *
+ * `api.checkRequirements` maps a 501 (the endpoint is absent on an older
+ * server) to a synthetic `{ model: { required: false, connected: true },
+ * tools: [] }` so callers "degrade silently". That object has the exact shape
+ * of a SATISFIED answer, and this surface may not repeat it as one.
+ *
+ * The tell is arithmetic, not a guess: an answer that requires no model and
+ * names no tools cannot be describing a config that names either. So when the
+ * config carries a route or selected tools and the response mentions neither,
+ * nothing was checked — and the checklist says so instead of showing ticks the
+ * platform never earned (§7.1).
+ */
+function preflightAnswered(
+  check: CheckRequirementsResponse,
+  selectedTools: string[],
+  configuredRoute: string | undefined,
+): boolean {
+  if (check.model.required || check.tools.length > 0) return true;
+  return selectedTools.length === 0 && !configuredRoute;
+}
+
+/**
+ * Read the checklist from the pre-flight when it answered, and from the CONFIG
+ * when it did not. The second branch is the point: a requirement we cannot
+ * verify still gets listed, marked `not-checked` — silence would read as "all
+ * clear", which is the claim we are not entitled to make.
+ */
+function readRequirements(
+  check: CheckRequirementsResponse | null,
+  selectedTools: string[],
+  configuredRoute: string | undefined,
+): Requirement[] {
+  if (check === null) {
+    const rows: Requirement[] = [];
+    if (configuredRoute) {
+      rows.push({ kind: "model", name: configuredRoute, state: "not-checked" });
+    }
+    for (const name of selectedTools) {
+      rows.push({ kind: "tool", name, state: "not-checked" });
+    }
+    return rows;
+  }
+
+  const rows: Requirement[] = [];
+  if (check.model.required) {
+    rows.push({
+      kind: "model",
+      name: check.model.route || configuredRoute || "the model route",
+      state: check.model.connected ? "ready" : "not-connected",
+    });
+  }
+  for (const t of check.tools) {
+    rows.push({ kind: "tool", name: t.name, state: toReqState(t.status) });
+  }
+  return rows;
+}
+
+/** An unrecognised status is NOT a pass — it is a value we cannot interpret. */
+function toReqState(status: string): ReqState {
+  switch (status) {
+    case "ready":
+    case "needs-approval":
+    case "needs-consent":
+    case "not-found":
+      return status;
+    default:
+      return "not-checked";
+  }
+}
+
+function RequirementRow({ req }: { req: Requirement }) {
+  const next = reqNextStep(req);
+  return (
+    <li className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-b border-border-soft py-3 last:border-0">
+      <div className="min-w-0">
+        <span className="block font-mono text-2xs uppercase tracking-wide text-faint">
+          {req.kind === "model" ? "model route" : "tool"}
+        </span>
+        <span className="block break-words font-mono text-sm">{req.name}</span>
       </div>
+      <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+        <span className="text-xs text-faint">{REQ_SAYS[req.state]}</span>
+        <Badge variant={REQ_VARIANT[req.state]}>{REQ_WORD[req.state]}</Badge>
+        {next && <NextStepLink label={next.label} to={next.to} />}
+      </div>
+    </li>
+  );
+}
+
+// ── Shared bits of furniture ────────────────────────────────────────────────
+
+// Disclosure — the one chevron on these pages, and it only ever hides the RAW
+// manifest. Everything a person needs in order to decide is above it (§6.1 A4).
+function Disclosure({
+  open,
+  onToggle,
+  testId,
+  label,
+  children,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  testId: string;
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="mt-4 min-w-0">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        data-testid={testId}
+        className="flex items-center gap-1.5 text-sm font-medium text-secondary-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+      >
+        <ChevronRight
+          aria-hidden="true"
+          className={`h-4 w-4 transition-transform ${open ? "rotate-90" : ""}`}
+        />
+        {open ? "Hide" : "Show"} {label}
+      </button>
+      {open && children}
+    </div>
+  );
+}
+
+// CodeWell — machine text lives here and nowhere else: sunk plane, mono, and it
+// scrolls INSIDE ITSELF so a 200-column manifest never widens the page (§4.6).
+function CodeWell({
+  children,
+  testId,
+}: {
+  children: React.ReactNode;
+  testId?: string;
+}) {
+  return (
+    <pre
+      data-testid={testId}
+      className="mt-3 max-h-96 min-w-0 overflow-auto rounded-md bg-surface-3 p-4 font-mono text-xs leading-relaxed text-secondary-foreground"
+    >
+      {children}
+    </pre>
+  );
+}
+
+// ConfigFacts — the review's fact register (§5.25). Every value a person has to
+// weigh is here, in the kv register, at full strength: nothing that decides what
+// gets created hides behind a disclosure. Machine-owned values (name, image,
+// route, tools) are mono; prose (the system prompt) is not.
+function ConfigFacts({
+  summary,
+  namespace,
+  modelPick,
+}: {
+  summary: YAMLSummary;
+  namespace?: string;
+  modelPick?: { connection?: string; provider: string; model: string };
+}) {
+  const items: KeyValueItem[] = [
+    {
+      key: "Name",
+      value: summary.name,
+      absent: "not named yet",
+      title: summary.name || "You haven’t named it yet.",
+    },
+    {
+      key: "Runtime",
+      value: <Badge variant="muted">{summary.runtime}</Badge>,
+      mono: false,
+    },
+    {
+      key: "Image",
+      value: summary.image,
+      absent:
+        summary.runtime === "managed"
+          ? "the platform’s stock image"
+          : "not set yet",
+      title: summary.image
+        ? summary.image
+        : summary.runtime === "managed"
+          ? "A managed agent runs the platform’s own image — there is nothing to build or push."
+          : "A custom-runtime agent needs an image, and none is set yet.",
+    },
+  ];
+
+  if (modelPick) {
+    items.push({
+      key: "Model",
+      value: modelPick.model,
+      title: modelPick.connection
+        ? `via the “${modelPick.connection}” connection (${modelPick.provider}) — a route is created for it`
+        : modelPick.provider,
+    });
+  } else {
+    items.push({
+      key: "Model route",
+      value: summary.model,
+      absent: "none — the registry default applies",
+      title:
+        summary.model ??
+        "No route is named on this config, so the registry’s default is used.",
+    });
+  }
+
+  if (namespace) items.push({ key: "Workspace", value: namespace });
+
+  items.push({
+    key: "System prompt",
+    value: summary.systemPrompt ? (
+      <span className="italic">“{truncate(summary.systemPrompt, 140)}”</span>
+    ) : undefined,
+    mono: false,
+    absent: "none — the stock loop’s own instructions",
+    title:
+      summary.systemPrompt ??
+      "No system prompt is set, so the managed loop uses its own instructions.",
+  });
+
+  items.push({
+    key: `Tools${summary.tools.length > 0 ? ` · ${summary.tools.length}` : ""}`,
+    mono: false,
+    value:
+      summary.tools.length > 0 ? (
+        <span
+          className="flex flex-wrap justify-end gap-1.5"
+          data-testid="summary-tools"
+        >
+          {summary.tools.map((t) => (
+            <span
+              key={t}
+              className="rounded-sm border border-border-soft bg-surface-2 px-1.5 py-0.5 font-mono text-2xs text-secondary-foreground"
+            >
+              {t}
+            </span>
+          ))}
+        </span>
+      ) : (
+        // A known zero — the user chose no tools. `text-ghost` is the sanctioned
+        // register for a real zero (quantity.tsx), and the words carry it.
+        <span className="text-ghost" data-testid="summary-tools">
+          none selected
+        </span>
+      ),
+  });
+
+  return (
+    <div className="min-w-0" data-testid="friendly-summary">
+      <KeyValueList items={items} />
     </div>
   );
 }
@@ -2259,7 +2666,7 @@ function SharedReview({
 // pending badges. Pre-selected tools (from generation) start checked; the user
 // adjusts. A pending tool is bindable-if-approved — it's still checkable (the
 // selection flows into the agent's tools; the operator's approval gates binding
-// server-side), it just carries the honest badge.
+// server-side), it just carries the honest tag.
 function ToolPicker({
   catalog,
   selected,
@@ -2284,9 +2691,9 @@ function ToolPicker({
 
   if (catalog.kind === "loading") {
     return (
-      <p className="text-sm text-muted-foreground" data-testid="tools-loading">
-        Loading the tool catalog…
-      </p>
+      <div data-testid="tools-loading">
+        <SkeletonText lines={3} />
+      </div>
     );
   }
 
@@ -2303,19 +2710,22 @@ function ToolPicker({
   const serverGroups = groupToolsByServer(filtered);
 
   return (
-    <div className="space-y-3">
+    <div className="min-w-0 space-y-3">
       {catalog.kind === "error" && (
-        <p
-          className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-muted-foreground"
-          data-testid="tools-error"
-        >
-          Couldn&apos;t load the full catalog ({catalog.message}). Your
-          pre-selected tools are shown; you can still create the agent.
-        </p>
+        <div data-testid="tools-error">
+          <QuietNote title="The full tool catalogue didn’t load.">
+            {catalog.message}. The tools already selected for this agent are
+            listed below and you can still create it — but this is not the whole
+            catalogue, so read the list as partial rather than complete.
+          </QuietNote>
+        </div>
       )}
-      <div className="flex items-center gap-2">
-        <div className="relative flex-1">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative min-w-0 flex-1">
+          <Search
+            aria-hidden="true"
+            className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-faint"
+          />
           <Input
             aria-label="Search tools"
             placeholder="Search tools…"
@@ -2337,18 +2747,18 @@ function ToolPicker({
           Add MCP server
         </a>
       </div>
-      {/* At-a-glance selection summary — count + a clear affordance. */}
-      <div className="flex items-center justify-between px-0.5 text-xs text-muted-foreground">
+
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-faint">
         <span>
-          <span className="font-semibold text-foreground">{selected.length}</span>{" "}
-          selected{" · "}
-          {tools.length} tool{tools.length === 1 ? "" : "s"} across{" "}
-          {serverGroups.length} server{serverGroups.length === 1 ? "" : "s"}
+          <QuantityValue value={selected.length} className="text-foreground" />{" "}
+          selected of <QuantityValue value={tools.length} /> across{" "}
+          <QuantityValue value={serverGroups.length} /> server
+          {serverGroups.length === 1 ? "" : "s"}
         </span>
         {selected.length > 0 && (
           <button
             type="button"
-            className="font-medium underline-offset-2 hover:text-foreground hover:underline"
+            className="border-b border-accent font-semibold text-primary hover:border-primary"
             onClick={() => onSelectMany(selected, false)}
             data-testid="tool-clear-selected"
           >
@@ -2359,9 +2769,9 @@ function ToolPicker({
 
       {/* MCP servers, collapsed by default; expand to pick individual tools. The server
           checkbox selects/clears the whole server (indeterminate when partial, m25 S12/S13). */}
-      <div className="space-y-2" data-testid="tool-picker-list">
+      <div className="min-w-0 space-y-2" data-testid="tool-picker-list">
         {filtered.length === 0 && (
-          <p className="rounded-lg border border-dashed py-8 text-center text-sm text-muted-foreground">
+          <p className="rounded-lg border border-dashed border-border-strong py-8 text-center text-sm text-faint">
             No tools match{query.trim() ? ` “${query.trim()}”` : ""}.
           </p>
         )}
@@ -2374,7 +2784,7 @@ function ToolPicker({
           return (
             <div
               key={server}
-              className="overflow-hidden rounded-lg border bg-card"
+              className="min-w-0 overflow-hidden rounded-lg border border-border"
             >
               {/* Server header: [select-all checkbox] [expand toggle] [selected + count]. */}
               <div className="flex items-center gap-3 px-3 py-2.5">
@@ -2385,13 +2795,13 @@ function ToolPicker({
                     if (el) el.indeterminate = someOn;
                   }}
                   onChange={() => onSelectMany(names, !allOn)}
-                  className="h-4 w-4 rounded border-input accent-primary"
+                  className="h-4 w-4 rounded-sm border-input accent-primary"
                   aria-label={`Select all tools from ${server}`}
                   data-testid={`tool-server-checkbox-${server}`}
                 />
                 <button
                   type="button"
-                  className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                  className="flex min-w-0 flex-1 items-center gap-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   onClick={() =>
                     setExpanded((s) => {
                       const next = new Set(s);
@@ -2404,55 +2814,61 @@ function ToolPicker({
                   data-testid={`tool-server-toggle-${server}`}
                 >
                   <ChevronRight
-                    className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${isOpen ? "rotate-90" : ""}`}
+                    aria-hidden="true"
+                    className={`h-4 w-4 shrink-0 text-faint transition-transform ${isOpen ? "rotate-90" : ""}`}
                   />
-                  <Server className="h-4 w-4 shrink-0 text-primary" />
-                  <span className="min-w-0 truncate text-sm font-medium">
+                  <Server aria-hidden="true" className="h-4 w-4 shrink-0 text-faint" />
+                  <span className="min-w-0 truncate font-mono text-sm">
                     {server}
                   </span>
                 </button>
-                <div className="flex shrink-0 items-center gap-2">
+                <div className="flex shrink-0 items-center gap-2 text-xs text-faint">
                   {selectedCount > 0 && (
-                    <Badge variant="success" className="text-[10px]">
-                      {selectedCount} selected
-                    </Badge>
+                    <span>
+                      <QuantityValue value={selectedCount} /> selected
+                    </span>
                   )}
-                  <span className="text-xs tabular-nums text-muted-foreground">
-                    {groupTools.length} tool{groupTools.length === 1 ? "" : "s"}
+                  <span>
+                    <QuantityValue value={groupTools.length} /> tool
+                    {groupTools.length === 1 ? "" : "s"}
                   </span>
                 </div>
               </div>
               {isOpen && (
-                <div className="divide-y border-t">
+                <div className="border-t border-border">
                   {groupTools.map((t) => {
                     const on = selected.includes(t.name);
                     const pending = t.approvalStatus === "pending";
                     const hasSchema = t.inputSchema != null;
                     const schemaShown = schemaOpen.has(t.name);
                     return (
-                      <div key={t.name} className="bg-surface-2/30">
-                        <label className="flex cursor-pointer items-start gap-3 py-2.5 pl-10 pr-3 transition-colors hover:bg-accent/40">
+                      <div
+                        key={t.name}
+                        className="min-w-0 border-b border-border-soft bg-surface-2 last:border-0"
+                      >
+                        <label className="flex cursor-pointer items-start gap-3 py-2.5 pl-10 pr-3 transition-colors hover:bg-accent">
                           <input
                             type="checkbox"
                             checked={on}
                             onChange={() => onToggle(t.name)}
-                            className="mt-0.5 h-4 w-4 shrink-0 rounded border-input accent-primary"
+                            className="mt-0.5 h-4 w-4 shrink-0 rounded-sm border-input accent-primary"
                             aria-label={`Bind ${t.name}`}
                           />
                           <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2">
-                              <Wrench className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                              <span className="truncate font-mono text-sm font-medium">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="truncate font-mono text-sm">
                                 {t.name}
                               </span>
+                              {/* A person must approve it — that is hold, not
+                                  a warning about a bound (§2.4). */}
                               {pending && (
-                                <Badge variant="warning" className="shrink-0 text-[10px]">
+                                <Badge variant="hold" className="shrink-0">
                                   pending approval
                                 </Badge>
                               )}
                             </div>
                             {t.description && (
-                              <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                              <p className="mt-0.5 truncate text-xs text-faint">
                                 {t.description}
                               </p>
                             )}
@@ -2473,19 +2889,17 @@ function ToolPicker({
                                 });
                               }}
                               data-testid={`tool-schema-toggle-${t.name}`}
-                              className="shrink-0 self-center"
+                              // A link, not a chip: a tag never carries an
+                              // affordance (§2.3), so the disclosure is written
+                              // in the link register instead.
+                              className="shrink-0 self-center border-b border-accent text-xs font-semibold text-primary hover:border-primary"
                             >
-                              <Badge
-                                variant="outline"
-                                className="cursor-pointer text-[10px] hover:bg-muted"
-                              >
-                                {schemaShown ? "hide schema" : "schema"}
-                              </Badge>
+                              {schemaShown ? "hide schema" : "schema"}
                             </button>
                           )}
                         </label>
                         {schemaShown && hasSchema && (
-                          <pre className="mb-3 ml-10 mr-3 max-h-64 overflow-auto rounded-md border bg-muted/40 p-3 text-xs">
+                          <pre className="mb-3 ml-10 mr-3 max-h-64 min-w-0 overflow-auto rounded-md bg-surface-3 p-3 font-mono text-xs text-secondary-foreground">
                             {JSON.stringify(t.inputSchema, null, 2)}
                           </pre>
                         )}
@@ -2502,8 +2916,11 @@ function ToolPicker({
   );
 }
 
-// FriendlySummary renders the config as a readable key/value list — the primary
-// review (raw YAML stays behind Advanced, no hand-editing as the main path).
+// ── agent.yaml helpers (a tiny, tolerant reader of our OWN serializer) ───────
+// These parse only the fields our serializer emits (a full YAML lib is overkill
+// for output we control) — the review summary + the tool round-trip. The BFF
+// `expand` is the real validator; these are display + a targeted tools rewrite.
+
 interface YAMLSummary {
   name: string;
   runtime: string;
@@ -2512,92 +2929,6 @@ interface YAMLSummary {
   systemPrompt?: string;
   tools: string[];
 }
-
-function FriendlySummary({ summary }: { summary: YAMLSummary }) {
-  const rows: { k: string; v: React.ReactNode; block?: boolean }[] = [
-    {
-      k: "Name",
-      v: summary.name || <span className="text-muted-foreground">—</span>,
-    },
-    {
-      k: "Runtime",
-      v: (
-        <Badge variant="secondary" className="text-[10px]">
-          {summary.runtime}
-        </Badge>
-      ),
-    },
-  ];
-  if (summary.image)
-    rows.push({
-      k: "Image",
-      v: <span className="font-mono text-xs">{summary.image}</span>,
-    });
-  if (summary.model)
-    rows.push({
-      k: "Model route",
-      v: <span className="font-mono text-xs">{summary.model}</span>,
-    });
-  if (summary.systemPrompt)
-    rows.push({
-      k: "System prompt",
-      v: (
-        <span className="text-muted-foreground">
-          &ldquo;{truncate(summary.systemPrompt, 80)}&rdquo;
-        </span>
-      ),
-    });
-  rows.push({
-    k: summary.tools.length > 0 ? `Tools · ${summary.tools.length}` : "Tools",
-    block: true,
-    v:
-      summary.tools.length > 0 ? (
-        <div className="flex flex-wrap gap-1.5" data-testid="summary-tools">
-          {summary.tools.map((t) => (
-            <Badge
-              key={t}
-              variant="secondary"
-              className="font-mono text-[10px] font-normal"
-            >
-              {t}
-            </Badge>
-          ))}
-        </div>
-      ) : (
-        <span className="text-muted-foreground" data-testid="summary-tools">
-          none
-        </span>
-      ),
-  });
-
-  return (
-    <dl className="divide-y rounded-md border" data-testid="friendly-summary">
-      {rows.map((r) =>
-        r.block ? (
-          // Full-width row: label on top, value left-aligned below (for long/rich
-          // values like the tools chip cloud — a right-justified comma wall reads badly).
-          <div key={r.k} className="space-y-2 px-3 py-2.5 text-sm">
-            <dt className="text-muted-foreground">{r.k}</dt>
-            <dd>{r.v}</dd>
-          </div>
-        ) : (
-          <div
-            key={r.k}
-            className="flex items-start justify-between gap-4 px-3 py-2 text-sm"
-          >
-            <dt className="text-muted-foreground">{r.k}</dt>
-            <dd className="text-right">{r.v}</dd>
-          </div>
-        ),
-      )}
-    </dl>
-  );
-}
-
-// ─── agent.yaml helpers (a tiny, tolerant reader of our OWN serializer) ──────
-// These parse only the fields our serializer emits (a full YAML lib is overkill
-// for output we control) — the friendly summary + the tool round-trip. The BFF
-// `expand` is the real validator; these are display + a targeted tools rewrite.
 
 function scalar(yaml: string, key: string): string | undefined {
   const m = new RegExp(`(?:^|\\n)${key}:[ \\t]*([^\\n]*)`).exec(yaml);
@@ -2652,6 +2983,33 @@ function yamlName(v: string): string {
   return JSON.stringify(v);
 }
 
+/**
+ * The model route, in both shapes our own writers emit: the flat `model: <id>`
+ * from generation, and the nested block `model:\n  route: <alias>` from
+ * `toAgentYAML`.
+ *
+ * The nested case used to be read with a top-level `route:` lookup, which never
+ * matches an INDENTED key — so a config that plainly names `anthropic-primary`
+ * rendered as "none — the registry default applies". That is not a formatting
+ * miss, it is the review stating the opposite of the config it is reviewing,
+ * which is the one thing this surface exists to prevent.
+ */
+function readModelRoute(yaml: string): string | undefined {
+  const flat = scalar(yaml, "model");
+  if (flat) return flat;
+  const lines = yaml.split("\n");
+  const start = lines.findIndex((l) => /^model:\s*$/.test(l));
+  if (start >= 0) {
+    for (let i = start + 1; i < lines.length; i++) {
+      // A non-indented line ends the block.
+      if (!/^\s+\S/.test(lines[i])) break;
+      const m = /^\s+route:\s*(.+?)\s*$/.exec(lines[i]);
+      if (m) return m[1].replace(/^"(.*)"$/, "$1") || undefined;
+    }
+  }
+  return scalar(yaml, "route");
+}
+
 function summarizeYAML(yaml: string): YAMLSummary {
   const runtime = scalar(yaml, "runtime") ?? "custom";
   // systemPrompt may be a block scalar (`systemPrompt: |`) — grab its first line
@@ -2661,8 +3019,7 @@ function summarizeYAML(yaml: string): YAMLSummary {
     const m = /systemPrompt:\s*\|\s*\n\s+([^\n]*)/.exec(yaml);
     systemPrompt = m ? m[1].trim() : systemPrompt === "|" ? "" : undefined;
   }
-  // model may be `model: <id>` (generation) or `model:\n  route: <alias>` (form).
-  const model = scalar(yaml, "model") ?? scalar(yaml, "route");
+  const model = readModelRoute(yaml);
   return {
     name: scalar(yaml, "name") ?? "",
     runtime,
@@ -2678,7 +3035,7 @@ function truncate(s: string, n: number): string {
 }
 
 // errorState maps a thrown error to the CreateState error, flagging a 403 so the
-// surface renders ForbiddenInline (the explain-and-suggest primitive).
+// surface renders the calm permission boundary (explain-and-suggest).
 function errorState(err: unknown): CreateState {
   if (err instanceof ApiError) {
     return {

@@ -19,6 +19,9 @@ const config: Config = {
     extend: {
       colors: {
         border: "hsl(var(--border))",
+        // Row separators inside a bordered panel — lighter than the panel frame
+        // so a table reads as one object with internal divisions (M151 §1.4).
+        "border-soft": "hsl(var(--border-soft))",
         "border-strong": "hsl(var(--border-strong))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
@@ -39,11 +42,18 @@ const config: Config = {
         destructive: {
           DEFAULT: "hsl(var(--destructive))",
           foreground: "hsl(var(--destructive-foreground))",
+          surface: "hsl(var(--destructive-surface))",
         },
         muted: {
           DEFAULT: "hsl(var(--muted))",
           foreground: "hsl(var(--muted-foreground))",
         },
+        // The ink ramp below muted-foreground. `faint` is tertiary meta that must
+        // still be READ (timestamps, eyebrows, column heads) and clears WCAG.
+        // `ghost` is decoration only — disabled text, placeholders, pips — and is
+        // deliberately contrast-exempt. Never put information in `ghost`.
+        faint: "hsl(var(--faint))",
+        ghost: "hsl(var(--ghost))",
         accent: {
           DEFAULT: "hsl(var(--accent))",
           foreground: "hsl(var(--accent-foreground))",
@@ -56,40 +66,65 @@ const config: Config = {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
-        // Semantic status tokens for topology/health (dashboard m12.5).
+        // Semantic status hues (M151 §2.2). Each carries THREE values, and the
+        // recipe is the same in both themes:
+        //   tint chip  = bg-{hue}-surface text-{hue}
+        //   solid fill = bg-{hue}        text-{hue}-foreground
+        // Dark mode swaps the underlying values, not the classes, so no surface
+        // ever needs a per-theme utility.
         success: {
           DEFAULT: "hsl(var(--success))",
           foreground: "hsl(var(--success-foreground))",
+          surface: "hsl(var(--success-surface))",
         },
         warning: {
           DEFAULT: "hsl(var(--warning))",
           foreground: "hsl(var(--warning-foreground))",
+          surface: "hsl(var(--warning-surface))",
         },
+        // `info` is the LEGACY NAME for what is now the hold hue — violet,
+        // meaning "a person must decide" (ADR 0128). It is kept only so existing
+        // utilities keep compiling during the M151 migration. NEW CODE WRITES
+        // `hold`. Retiring this alias is carded as m52 M151-info-rename.
         info: {
           DEFAULT: "hsl(var(--info))",
           foreground: "hsl(var(--info-foreground))",
+          surface: "hsl(var(--info-surface))",
+        },
+        hold: {
+          DEFAULT: "hsl(var(--info))",
+          foreground: "hsl(var(--info-foreground))",
+          surface: "hsl(var(--info-surface))",
         },
       },
+      // Near-square (M151 §2.6): --radius is 3px, not 12px. The old derivation
+      // (+4 / r / r-3 / r-6) goes NEGATIVE at this base, so the steps are
+      // re-derived. Cards already use rounded-lg and controls rounded-md, so
+      // they inherit the new geometry without touching a single class.
       borderRadius: {
-        xl: "calc(var(--radius) + 4px)",
-        lg: "var(--radius)",
-        md: "calc(var(--radius) - 3px)",
-        sm: "calc(var(--radius) - 6px)",
+        xl: "calc(var(--radius) + 3px)", // 6px — dialogs, popovers, command palette
+        lg: "calc(var(--radius) + 1px)", // 4px — cards, tables, drawers
+        md: "var(--radius)", //             3px — buttons, inputs, selects
+        sm: "calc(var(--radius) - 1px)", // 2px — tags, kbd, meters, mini-bars
       },
       fontFamily: {
+        serif: "var(--font-serif)",
         sans: "var(--font-sans)",
         mono: "var(--font-mono)",
       },
-      // Modular type scale — surfaces size text by role via these tokens.
+      // Role-mapped type scale (M151 §3.2) — sized by what the text IS, not by a
+      // strict modular ratio. 2xs is the uppercase-mono register: eyebrows,
+      // column heads, tag text. Serif headings never exceed weight 500.
       fontSize: {
-        xs: ["var(--text-xs)", { lineHeight: "1rem" }],
+        "2xs": ["var(--text-2xs)", { lineHeight: "0.875rem", letterSpacing: "var(--tracking-wide)" }],
+        xs: ["var(--text-xs)", { lineHeight: "0.9375rem" }],
         sm: ["var(--text-sm)", { lineHeight: "1.1875rem" }],
-        base: ["var(--text-base)", { lineHeight: "1.375rem" }],
+        base: ["var(--text-base)", { lineHeight: "1.3125rem" }],
         md: ["var(--text-md)", { lineHeight: "1.4375rem" }],
-        lg: ["var(--text-lg)", { lineHeight: "1.5rem" }],
+        lg: ["var(--text-lg)", { lineHeight: "1.5rem", letterSpacing: "var(--tracking-snug)" }],
         xl: ["var(--text-xl)", { lineHeight: "1.75rem", letterSpacing: "var(--tracking-snug)" }],
         "2xl": ["var(--text-2xl)", { lineHeight: "2rem", letterSpacing: "var(--tracking-tight)" }],
-        "3xl": ["var(--text-3xl)", { lineHeight: "2.5rem", letterSpacing: "var(--tracking-tight)" }],
+        "3xl": ["var(--text-3xl)", { lineHeight: "2.25rem", letterSpacing: "var(--tracking-tight)" }],
       },
       letterSpacing: {
         tight: "var(--tracking-tight)",

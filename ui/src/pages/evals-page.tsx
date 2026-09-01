@@ -1,31 +1,43 @@
 import * as React from "react";
-import {
-  CheckCircle,
-  ChevronRight,
-  Loader2,
-  RefreshCw,
-  ShieldCheck,
-  TestTube2,
-  XCircle,
-} from "lucide-react";
+import { Filter, RefreshCw, Sparkles, TestTube2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  CellEntity,
+  ClosingNote,
   ConfirmDialog,
-  EmptyState,
+  DataTable,
+  DetailDrawer,
   ErrorState,
+  FilterChipRow,
   ForbiddenInline,
-  SkeletonTable,
+  KeyValueList,
+  NextStepLink,
+  PageHeader,
+  QuantityValue,
+  QuietNote,
+  SectionHeader,
+  SkeletonText,
+  StatusBadge,
+  UNKNOWN,
+  UnknownValue,
   Wizard,
+  nextStepRank,
+  useFocusTrap,
   useToast,
+  type Column,
+  type DataTableError,
+  type EmptyStateProps,
+  type FilterChip,
+  type NextStepTone,
   type WizardStep,
 } from "@/components/kit";
 import { useCapabilities } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
+import { cn } from "@/lib/utils";
 import {
   api,
   ApiError,
@@ -39,28 +51,63 @@ import {
 } from "@/lib/api";
 import { RES_EVALSUITES } from "@/lib/nav";
 
-// EvalsPage — the EvalSuite builder + results browser (m17.12).
-// Three surfaces in one page:
-//   1. List — all EvalSuites for the current namespace.
-//   2. Builder wizard — create a new EvalSuite (dataset ref + scorers + gate).
-//   3. Results browser — honest results from GET .../results:
-//        • conditions = the controller's gate outcome (always present)
-//        • scores only when scoresAvailable=true (Langfuse wired)
-//        • when false, scoresUnavailableReason shown calmly — NEVER fabricated
+// EvalsPage — archetype A1 (index/table) with two extras the §6.2 mapping names:
+// an in-page builder Wizard and a per-suite results panel (M151; the surface
+// itself is m17.12). PageHeader → stat band → FilterChipRow → DataTable →
+// ClosingNote, with the results panel in the row's drawer.
 //
-// RBAC: list/read is open; create/delete gated on evalsuites/create+delete.
+// ── THIS IS THE PAGE WHERE "NO COSMETIC AUTHORITY" IS LOAD-BEARING ──────────
+// An eval suite exists to decide whether an agent may ship. A console that
+// invents a number here does not merely look untidy: it green-lights a deploy
+// on a figure nobody computed. So the three honesty rules are absolute:
+//
+//   1. CONDITIONS ALWAYS, SCORES ONLY WHEN `scoresAvailable` (§6.2). A score
+//      the backend did not compute is not drawn — not as 0, not as "—" beside
+//      a scorer name that implies one was attempted. The whole Scores section
+//      collapses to a QuietNote carrying the backend's own reason.
+//   2. A PENDING GATE SHOWS NO FIGURE. `GateResult.pending` means the agent
+//      references this suite and no gate has run. It renders the `open` Tag
+//      ("not scored yet"), never a 0.0000 that reads as a failing score.
+//   3. A SCORER THAT RETURNED NEITHER A NUMBER NOR A STRING renders the honest
+//      dash with its reason in `title` — the one place on this page where a
+//      value is genuinely unknown rather than absent.
+//
+// ── SORTED BY WHAT IS BLOCKING (§6.1 A1) ────────────────────────────────────
+// `nextStepRank` is the primary key, so anything that needs a person sits above
+// everything that does not and "Nothing needed" sinks — identically to the
+// other twenty list pages. Inside the needs-a-person half, a suite that can
+// never produce a score (no scorers) outranks one that simply has not reported
+// ready, because the first will never resolve on its own.
+//
+// ── WHAT THE LIST MAY NOT CLAIM ─────────────────────────────────────────────
+// `EvalSuiteSummary` carries identity + readiness and nothing else: no scores,
+// no last-run, no pass rate. Those live behind GET .../results and are fetched
+// only when a row is opened, so no column here pretends to know them. The
+// fleet-level "eval-gated deploys" ratio is a SEPARATE endpoint; when it
+// answers 501 the band is replaced by a QuietNote rather than silently
+// vanishing — an absent capability the reader cannot see is indistinguishable
+// from a bug.
+//
+// data-testid contract:
+//   evals-page                       — root container
+//   eval-gated-stat / -percent / -sub / -target — the PRD §5 ratio band
+//   eval-gated-unavailable           — the calm 501 replacement for that band
+//   eval-suite-{name}                — each row's entity cell
+//   next-step-{name}                 — the row's Next step cell
+//   eval-delete-{name}               — the row's delete action (RBAC-gated)
+//   eval-results-panel-{name}        — the drawer's results body
+//   eval-results-loading|forbidden|error-{name}
+//   eval-gate-unavailable-{name} / eval-gate-results-{name} / eval-gate-result-{agent}
+//   eval-scores-unavailable-{name} / eval-score-{scorer}
 
 // ---- discriminated state types -----------------------------------------------
 
 type PageState =
   | { kind: "loading" }
-  | { kind: "ready"; suites: EvalSuiteSummary[] }
-  | { kind: "empty" }
-  | { kind: "forbidden"; message: string }
-  | { kind: "error"; message: string };
+  | { kind: "ready"; suites: EvalSuiteSummary[]; nextCursor: string }
+  | { kind: "error"; message: string; forbidden: boolean };
 
 type ResultsState =
-  | { kind: "idle" }
   | { kind: "loading" }
   | { kind: "ready"; results: EvalSuiteResults }
   | { kind: "forbidden"; message: string }
@@ -70,6 +117,15 @@ type DeleteState =
   | { kind: "idle" }
   | { kind: "deleting" }
   | { kind: "error"; message: string };
+
+// MetricState holds the eval-gated metric load state (PRD §5, ADR 0062
+// governance #2). "unavailable" (501) is a calm degrade — the endpoint requires
+// a wired cluster; "error" is a real failure. Neither is ever fabricated.
+type MetricState =
+  | { kind: "loading" }
+  | { kind: "ready"; data: EvalGatedMetricResponse }
+  | { kind: "unavailable" }
+  | { kind: "error" };
 
 // ---- wizard step indices ------------------------------------------------------
 
@@ -84,81 +140,194 @@ type BuilderState =
   | { kind: "done"; suite: EvalSuiteDetail }
   | { kind: "error"; message: string; forbidden?: boolean };
 
-// ---- main page ----------------------------------------------------------------
+// ---- triage: the state model the page sorts and speaks from --------------------
 
-// MetricState holds the eval-gated metric load state (PRD §5, ADR 0062
-// governance #2). "unavailable" (501) is a calm degrade — the endpoint requires
-// a wired cluster; "error" is a real failure. Neither is fabricated.
-type MetricState =
-  | { kind: "loading" }
-  | { kind: "ready"; data: EvalGatedMetricResponse }
-  | { kind: "unavailable" }
-  | { kind: "error" };
+interface NextStep {
+  /** Verb-first, ≤22 chars, no trailing arrow (§7.2). Absent when tone is "none". */
+  label?: string;
+  tone: NextStepTone;
+}
+
+interface Triaged {
+  suite: EvalSuiteSummary;
+  /** The suite's scorers, normalised: the API omits an empty list (Go omitempty). */
+  scorers: string[];
+  next: NextStep;
+  /** Tie-break inside the needs-a-person half — lower is more urgent. */
+  rank: number;
+}
+
+/**
+ * One suite → (scorers, next step, urgency). Everything the page sorts and
+ * renders is decided here so the order can never disagree with the link it
+ * ordered by.
+ *
+ * Two states ask something of a person, and neither is a failure, so neither
+ * takes the crit tone (§7.2 — crit only when the target is a failure or a stop):
+ *
+ *   • NO SCORERS — the suite runs nothing, so it can never produce a result to
+ *     gate on. It will not fix itself; it is the most urgent row on the page.
+ *   • NOT READY — the controller has not reported this suite ready. Worth a
+ *     look, but the suite is well-formed.
+ *
+ * Everything else needs nothing FROM THIS LIST. Whether a gate is currently
+ * passing lives behind the results endpoint, which the list does not call —
+ * inventing "3 agents blocked" from a list response is exactly the claim this
+ * page must not make.
+ */
+function triage(s: EvalSuiteSummary): Triaged {
+  const scorers = s.scorers ?? [];
+  if (scorers.length === 0) {
+    return { suite: s, scorers, next: { label: "Add a scorer", tone: "default" }, rank: 0 };
+  }
+  if (!s.ready) {
+    return { suite: s, scorers, next: { label: "Review the suite", tone: "default" }, rank: 1 };
+  }
+  return { suite: s, scorers, next: { tone: "none" }, rank: 2 };
+}
+
+/** The gate, as one string so it never renders as a bare threshold number. */
+function gateLabel(s: EvalSuiteSummary): string | null {
+  if (!s.gate) return null;
+  return s.threshold !== undefined ? `${s.gate} ≥ ${s.threshold}` : s.gate;
+}
+
+// ---- the chip views (§5.28): one question, one answer at a time ---------------
+
+const EVAL_VIEWS = ["all", "needs-you", "gating"] as const;
+type EvalView = (typeof EVAL_VIEWS)[number];
+
+const EVAL_VIEW_LABEL: Record<EvalView, string> = {
+  all: "Everything",
+  "needs-you": "Needs you",
+  gating: "Gating a deploy",
+};
+
+// The chips are BUILT from this union below, so a chip whose id is not a view
+// stops compiling instead of silently filtering to nothing.
+const EVAL_VIEW_MATCH: Record<EvalView, (t: Triaged) => boolean> = {
+  all: () => true,
+  "needs-you": (t) => t.next.tone !== "none",
+  gating: (t) => Boolean(t.suite.gate),
+};
+
+const EVAL_VIEW_EMPTY: Record<
+  Exclude<EvalView, "all">,
+  { title: string; description: string }
+> = {
+  "needs-you": {
+    title: "Nothing needs a person",
+    description:
+      "Every suite in view has its scorers and has reported ready. Show everything to see them all.",
+  },
+  gating: {
+    title: "No suite gates a deploy",
+    description:
+      "No suite in view declares a gate, so none of them can block a promotion — they only report. Show everything to see them all.",
+  },
+};
+
+/**
+ * The §5.18 closing line: the honest ratio in words, restating what the table
+ * already showed. Every number is counted from the rows in hand, and the
+ * sentence says so whenever the rows in hand are not the whole list.
+ */
+export function closingLine(rows: Triaged[], complete: boolean): string | null {
+  const total = rows.length;
+  if (total === 0) return null;
+  const needs = rows.filter((t) => nextStepRank(t.next.tone) === 0).length;
+  const quiet = total - needs;
+  if (total === 1) {
+    return needs === 1
+      ? "The one suite here needs a person before it can gate anything."
+      : "The one suite here is ready to gate and needs nothing from you.";
+  }
+  const where = complete ? "" : " on this page";
+  const more = complete ? "" : " More suites follow.";
+  if (needs === 0) {
+    return `All ${total} suites${where} are ready to gate. None of them needs a person.${more}`;
+  }
+  if (quiet === 0) {
+    return `Every one of the ${total} suites${where} needs a person before it can gate.${more}`;
+  }
+  return `${needs} of the ${total} suites${where} need${needs === 1 ? "s" : ""} a person. The other ${quiet} ${quiet === 1 ? "is" : "are"} ready to gate.${more}`;
+}
+
+// ---- the PRD §5 eval-gated ratio band -----------------------------------------
 
 // TARGET_PERCENT is the PRD §5 quality-discipline target: > 50% of production
-// deploys must be gated by an EvalSuite. Shown as a visual indicator on the card.
+// deploys must be gated by an EvalSuite.
 const TARGET_PERCENT = 50;
 
-// EvalGatedStatCard renders the PRD §5 ">50% of production deploys gated by an
-// EvalSuite" quality metric as a compact stat card (M69, ADR 0062 governance #2).
-// Shows gated/total (percent%) with a clear label and a >50% target indicator.
-// Degrades to "…" while loading; shows "—" on error (no fabricated numbers).
-function EvalGatedStatCard({ metric }: { metric: MetricState }) {
-  const isLoading = metric.kind === "loading";
-  const isError = metric.kind === "error";
-  const data = metric.kind === "ready" ? metric.data : undefined;
+/** One decimal, always — `75` and `75.0` must not read as different measurements. */
+function formatPercent(n: number): string {
+  return `${n.toFixed(1)}%`;
+}
 
+/**
+ * EvalGatedStatBand — the PRD §5 ">50% of production deploys gated by an
+ * EvalSuite" metric, as the A1 stat-band variant above the table.
+ *
+ * The figure goes through `QuantityValue`, so an unread metric CANNOT render as
+ * a number: the honest dash is a compile-time consequence of handing it
+ * `UNKNOWN` rather than a discipline the next editor has to remember.
+ */
+function EvalGatedStatBand({ metric }: { metric: MetricState }) {
+  const data = metric.kind === "ready" ? metric.data : undefined;
   const meetsTarget = data !== undefined && data.percent > TARGET_PERCENT;
-  const percentStr = data !== undefined ? `${data.percent.toFixed(1)}%` : "—";
-  const subStr =
-    data !== undefined ? `${data.gated}/${data.total} deployments` : "";
 
   return (
-    <Card data-testid="eval-gated-stat">
-      <CardContent className="p-4">
-        <div className="flex items-center justify-between">
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Eval-gated deploys
-          </p>
-          <ShieldCheck
-            className={`h-4 w-4 shrink-0 ${
-              meetsTarget ? "text-success" : "text-muted-foreground"
-            }`}
-          />
-        </div>
+    <div
+      className="flex min-w-0 flex-wrap items-baseline gap-x-8 gap-y-2 rounded-lg border bg-card px-5 py-4"
+      data-testid="eval-gated-stat"
+    >
+      <div className="min-w-0">
+        <p className="font-mono text-2xs font-medium uppercase tracking-wide text-faint">
+          Eval-gated deploys
+        </p>
+        <p className="mt-1 text-2xl" data-testid="eval-gated-percent">
+          {metric.kind === "loading" ? (
+            <span className="font-mono tabular-nums text-ghost">…</span>
+          ) : (
+            <QuantityValue
+              value={data === undefined ? UNKNOWN : data.percent}
+              format={formatPercent}
+              title="The eval-gated ratio could not be read — unknown, not zero."
+            />
+          )}
+        </p>
+        <p className="mt-0.5 h-4 text-xs text-faint" data-testid="eval-gated-sub">
+          {metric.kind === "loading"
+            ? ""
+            : data !== undefined
+              ? `${data.gated}/${data.total} deployments`
+              : "Couldn't load metric"}
+        </p>
+      </div>
+      {data !== undefined && (
+        // Above the bar is a verified condition, so it takes the ok hue; below
+        // it is not a warning — it is simply the target, restated (§2.2).
         <p
-          className={`mt-2 text-2xl font-semibold tracking-tight tabular-nums ${
-            isLoading || isError ? "text-muted-foreground" : ""
-          }`}
-          data-testid="eval-gated-percent"
+          className={cn("text-sm", meetsTarget ? "text-success" : "text-faint")}
+          data-testid="eval-gated-target"
         >
-          {isLoading ? "…" : percentStr}
+          {meetsTarget
+            ? `Above ${TARGET_PERCENT}% target`
+            : `Target: >${TARGET_PERCENT}% of deploys eval-gated`}
         </p>
-        <p className="mt-0.5 h-4 text-xs text-muted-foreground" data-testid="eval-gated-sub">
-          {isLoading ? "" : (isError ? "Couldn't load metric" : subStr)}
-        </p>
-        {/* PRD §5 target indicator: >50% threshold */}
-        {data !== undefined && (
-          <p
-            className={`mt-1 text-xs font-medium ${
-              meetsTarget ? "text-success" : "text-muted-foreground"
-            }`}
-            data-testid="eval-gated-target"
-          >
-            {meetsTarget
-              ? `✓ Above ${TARGET_PERCENT}% target`
-              : `Target: >${TARGET_PERCENT}% of deploys eval-gated`}
-          </p>
-        )}
-      </CardContent>
-    </Card>
+      )}
+    </div>
   );
 }
+
+// ---- main page ----------------------------------------------------------------
 
 export function EvalsPage() {
   const [page, setPage] = React.useState<PageState>({ kind: "loading" });
   const [showBuilder, setShowBuilder] = React.useState(false);
-  const [expandedSuite, setExpandedSuite] = React.useState<string | null>(null);
+  const [query, setQuery] = React.useState("");
+  const [view, setView] = React.useState<EvalView>("all");
+  const [open, setOpen] = React.useState<EvalSuiteSummary | null>(null);
   const [resultsMap, setResultsMap] = React.useState<Map<string, ResultsState>>(
     new Map(),
   );
@@ -186,25 +355,14 @@ export function EvalsPage() {
         .listEvalSuites({ namespace: shellNs || undefined }, signal)
         .then((res) => {
           if (signal?.aborted) return;
-          if (res.items.length === 0) {
-            setPage({ kind: "empty" });
-          } else {
-            setPage({ kind: "ready", suites: res.items });
-          }
+          setPage({ kind: "ready", suites: res.items, nextCursor: res.nextCursor });
         })
         .catch((err: unknown) => {
           if (signal?.aborted) return;
-          if (err instanceof ApiError) {
-            if (err.isForbidden) {
-              setPage({ kind: "forbidden", message: err.message });
-              return;
-            }
-            setPage({ kind: "error", message: err.message });
-            return;
-          }
           setPage({
             kind: "error",
             message: err instanceof Error ? err.message : "request failed",
+            forbidden: err instanceof ApiError && err.isForbidden,
           });
         });
 
@@ -217,7 +375,7 @@ export function EvalsPage() {
         })
         .catch((err: unknown) => {
           if (signal?.aborted) return;
-          // 501 = endpoint not yet wired (dev substrate) — calm degrade.
+          // 501 = the endpoint is not wired on this install — calm, not an error.
           if (err instanceof ApiError && err.status === 501) {
             setMetric({ kind: "unavailable" });
             return;
@@ -234,7 +392,7 @@ export function EvalsPage() {
     return () => controller.abort();
   }, [load]);
 
-  function loadResults(suite: EvalSuiteSummary) {
+  const loadResults = React.useCallback((suite: EvalSuiteSummary) => {
     const key = `${suite.namespace}/${suite.name}`;
     setResultsMap((m) => new Map(m).set(key, { kind: "loading" }));
     api
@@ -243,15 +401,9 @@ export function EvalsPage() {
         setResultsMap((m) => new Map(m).set(key, { kind: "ready", results }));
       })
       .catch((err: unknown) => {
-        if (err instanceof ApiError) {
-          if (err.isForbidden) {
-            setResultsMap((m) =>
-              new Map(m).set(key, { kind: "forbidden", message: err.message }),
-            );
-            return;
-          }
+        if (err instanceof ApiError && err.isForbidden) {
           setResultsMap((m) =>
-            new Map(m).set(key, { kind: "error", message: err.message }),
+            new Map(m).set(key, { kind: "forbidden", message: err.message }),
           );
           return;
         }
@@ -262,20 +414,18 @@ export function EvalsPage() {
           }),
         );
       });
-  }
+  }, []);
 
-  function handleRowExpand(suite: EvalSuiteSummary) {
-    const key = `${suite.namespace}/${suite.name}`;
-    if (expandedSuite === key) {
-      setExpandedSuite(null);
-    } else {
-      setExpandedSuite(key);
-      const existing = resultsMap.get(key);
-      if (!existing || existing.kind === "error") {
-        loadResults(suite);
-      }
-    }
-  }
+  // Opening a row is what fetches its results — the list endpoint carries none,
+  // and a per-row prefetch would be N requests for data most rows never show.
+  const openSuite = React.useCallback(
+    (suite: EvalSuiteSummary) => {
+      setOpen(suite);
+      const existing = resultsMap.get(`${suite.namespace}/${suite.name}`);
+      if (!existing || existing.kind === "error") loadResults(suite);
+    },
+    [resultsMap, loadResults],
+  );
 
   async function handleDelete() {
     if (!deleteTarget) return;
@@ -284,174 +434,347 @@ export function EvalsPage() {
       await api.removeEvalSuite(deleteTarget.namespace, deleteTarget.name);
       setDeleteState({ kind: "idle" });
       setDeleteTarget(null);
-      toast({
-        variant: "success",
-        title: `Deleted ${deleteTarget.name}`,
-      });
+      toast({ variant: "success", title: `Deleted ${deleteTarget.name}` });
       load();
     } catch (err) {
       const msg =
         err instanceof ApiError
           ? err.message
           : err instanceof Error
-          ? err.message
-          : "delete failed";
+            ? err.message
+            : "delete failed";
       setDeleteState({ kind: "error", message: msg });
     }
   }
 
-  return (
-    <div className="mx-auto max-w-4xl space-y-6" data-testid="evals-page">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight">Evals</h2>
-          <p className="text-sm text-muted-foreground">
-            Build and run eval suites. Results show the controller's gate
-            outcome; scores only when Langfuse is wired.
-          </p>
+  const all = React.useMemo(
+    () => (page.kind === "ready" ? page.suites : []),
+    [page],
+  );
+  // The loaded window IS the whole list only when no cursor follows it. That is
+  // the one condition under which counting the rows in hand is a FACT rather
+  // than a windowed guess (kit FilterChipRow contract).
+  const complete = page.kind === "ready" && page.nextCursor === "";
+
+  // Triage once, sort once. Attention-first (§6.1 A1).
+  const sorted = React.useMemo(() => {
+    const rows = all.map(triage);
+    rows.sort(
+      (x, y) =>
+        nextStepRank(x.next.tone) - nextStepRank(y.next.tone) ||
+        x.rank - y.rank ||
+        x.suite.name.localeCompare(y.suite.name),
+    );
+    return rows;
+  }, [all]);
+
+  const q = query.trim().toLowerCase();
+  const visible = React.useMemo(() => {
+    const inView = sorted.filter(EVAL_VIEW_MATCH[view]);
+    return q
+      ? inView.filter(
+          (t) =>
+            t.suite.name.toLowerCase().includes(q) ||
+            t.suite.datasetRef.toLowerCase().includes(q),
+        )
+      : inView;
+  }, [sorted, view, q]);
+
+  const chips: FilterChip[] = EVAL_VIEWS.map((id) => ({
+    id,
+    label: EVAL_VIEW_LABEL[id],
+    // No number unless the loaded window provably IS the whole list — a count
+    // that describes one page while looking like a total hides work.
+    count: complete ? sorted.filter(EVAL_VIEW_MATCH[id]).length : undefined,
+  }));
+
+  const error: DataTableError | null =
+    page.kind === "error"
+      ? {
+          message: page.message,
+          forbidden: page.forbidden,
+          resource: "eval suites",
+          onRetry: page.forbidden ? undefined : () => load(),
+        }
+      : null;
+
+  // §4.4 resource-list budget, in visual order. Suite, State and Next step are
+  // priority 1 and survive every width — the row's identity, its condition, and
+  // what to do about it.
+  //
+  // The caps are chosen so the six columns PLUS the delete action fit inside the
+  // frame at 1440 (256+208+144+160+112+160+action ≈ 1130 of ~1136). A cap that
+  // is merely generous is not free: the table then exceeds its frame and the
+  // last column is clipped at the very width the budget promises renders whole.
+  const columns: Column<Triaged>[] = [
+    {
+      id: "suite",
+      header: "Suite",
+      priority: 1,
+      className: "max-w-[16rem]",
+      cell: (t) => (
+        <div data-testid={`eval-suite-${t.suite.name}`}>
+          <CellEntity name={t.suite.name} namespace={t.suite.namespace} />
         </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => load()}
-            aria-label="Refresh evals"
-            data-testid="evals-refresh"
+      ),
+    },
+    {
+      id: "dataset",
+      header: "Dataset",
+      priority: 4,
+      className: "max-w-[13rem]",
+      cell: (t) => (
+        <span
+          className="block truncate font-mono text-xs text-secondary-foreground"
+          title={t.suite.datasetRef}
+        >
+          {t.suite.datasetRef}
+        </span>
+      ),
+    },
+    {
+      id: "scorers",
+      header: "Scorers",
+      priority: 3,
+      className: "max-w-[9rem]",
+      cell: (t) =>
+        // An empty list is a REAL answer (the API omits it when empty), not a
+        // missing measurement — so it takes the `open` Tag, never a dash.
+        t.scorers.length === 0 ? (
+          <Badge variant="open">no scorers</Badge>
+        ) : t.scorers.length === 1 ? (
+          <span className="block truncate font-mono text-xs" title={t.scorers[0]}>
+            {t.scorers[0]}
+          </span>
+        ) : (
+          <span
+            className="whitespace-nowrap font-mono text-xs tabular-nums"
+            title={t.scorers.join(", ")}
           >
-            <RefreshCw className="h-4 w-4" />
-          </Button>
-          {canCreate && (
-            <Button
-              size="sm"
-              onClick={() => setShowBuilder(true)}
-              data-testid="evals-new-btn"
-            >
-              New eval suite
-            </Button>
-          )}
-        </div>
-      </div>
-
-      {/* PRD §5 eval-gated metric — live snapshot (ADR 0062 governance #2).
-          Hides when the endpoint is unavailable (dev substrate, 501). */}
-      {metric.kind !== "unavailable" && (
-        <EvalGatedStatCard metric={metric} />
-      )}
-
-      {page.kind === "loading" && <SkeletonTable rows={4} />}
-
-      {page.kind === "forbidden" && (
-        <ForbiddenInline
-          title="Not allowed to view eval suites"
-          description="Reading eval suites requires list permission."
-          detail={page.message}
-        />
-      )}
-
-      {page.kind === "error" && (
-        <ErrorState
-          title="Couldn't load eval suites"
-          description={page.message}
-          onRetry={() => load()}
-        />
-      )}
-
-      {page.kind === "empty" && (
-        <EmptyState
-          icon={TestTube2}
-          title="No eval suites yet"
-          description="Create an eval suite to define a dataset + scorers + gate for your agents."
-          action={
-            canCreate
-              ? {
-                  label: "New eval suite",
-                  onClick: () => setShowBuilder(true),
-                  variant: "default",
-                }
-              : undefined
+            {`${t.scorers.length} scorers`}
+          </span>
+        ),
+    },
+    {
+      id: "gate",
+      header: "Gate",
+      priority: 3,
+      className: "max-w-[10rem]",
+      cell: (t) => {
+        const gate = gateLabel(t.suite);
+        // The gate and its threshold render as ONE string. Split apart, the
+        // bare number reads as a score the suite achieved rather than the bar
+        // it must clear.
+        return gate ? (
+          <span className="block truncate font-mono text-xs" title={gate}>
+            {gate}
+          </span>
+        ) : (
+          <Badge variant="open">no gate</Badge>
+        );
+      },
+    },
+    {
+      id: "state",
+      header: "State",
+      priority: 1,
+      className: "w-[7rem]",
+      cell: (t) => <StatusBadge ready={t.suite.ready} />,
+    },
+    {
+      id: "next",
+      header: "Next step",
+      // Never dropped and never truncated (§4.4) — it is the page's point.
+      priority: 1,
+      className: "w-[10rem]",
+      cell: (t) => (
+        <NextStepLink
+          label={t.next.label}
+          tone={t.next.tone}
+          onClick={t.next.tone === "none" ? undefined : () => openSuite(t.suite)}
+          ariaLabel={
+            t.next.label ? `${t.next.label} — ${t.suite.name}` : undefined
           }
+          testId={`next-step-${t.suite.name}`}
+        />
+      ),
+    },
+  ];
+
+  // The chip views filter the LOADED window, so an emptied view is the
+  // "empty-filtered" truth (§7) — it offers a way back out rather than teaching
+  // a user who already has suites how to make their first.
+  const chipEmptied = all.length > 0 && visible.length === 0 && view !== "all";
+  const empty: EmptyStateProps = chipEmptied
+    ? {
+        intent: "filtered",
+        icon: Filter,
+        title: EVAL_VIEW_EMPTY[view as Exclude<EvalView, "all">].title,
+        description: EVAL_VIEW_EMPTY[view as Exclude<EvalView, "all">].description,
+        action: {
+          label: "Show everything",
+          variant: "outline",
+          onClick: () => setView("all"),
+        },
+        totalCount: complete ? all.length : undefined,
+        countNoun: "suites",
+      }
+    : {
+        icon: TestTube2,
+        title: "No eval suites yet",
+        description:
+          "An eval suite is a dataset, the scorers to run over it, and the bar an agent must clear before it ships. Create the first one to see it here.",
+        action: canCreate
+          ? {
+              label: "New eval suite",
+              icon: Sparkles,
+              onClick: () => setShowBuilder(true),
+            }
+          : undefined,
+      };
+
+  const closing = page.kind === "ready" ? closingLine(sorted, complete) : null;
+  const metaLine =
+    page.kind === "ready"
+      ? complete
+        ? `${all.length} suite${all.length === 1 ? "" : "s"}`
+        : `${all.length} on this page`
+      : undefined;
+  const openKey = open ? `${open.namespace}/${open.name}` : "";
+  const openResults = openKey ? resultsMap.get(openKey) : undefined;
+
+  return (
+    <div className="min-w-0 space-y-6" data-testid="evals-page">
+      <PageHeader
+        title="Evals"
+        meta={metaLine}
+        loading={page.kind === "loading"}
+        lede="Sorted by what is blocking. A suite is a dataset, its scorers, and the bar an agent must clear — open one to see the gate outcome the controller actually recorded."
+        // Both controls go through `actionsSlot` rather than the structured
+        // `actions` list: `PageHeaderAction` carries no `testId`, and the viewer
+        // suite asserts `evals-new-btn` is ABSENT — an assertion that would pass
+        // forever if the id quietly disappeared.
+        actionsSlot={
+          <>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => load()}
+              aria-label="Refresh evals"
+              data-testid="evals-refresh"
+            >
+              <RefreshCw className="h-4 w-4" />
+            </Button>
+            {canCreate && (
+              <Button
+                size="sm"
+                className="text-sm"
+                onClick={() => setShowBuilder(true)}
+                data-testid="evals-new-btn"
+              >
+                <Sparkles className="h-4 w-4" />
+                New eval suite
+              </Button>
+            )}
+          </>
+        }
+      />
+
+      {/* The PRD §5 ratio. A 501 replaces the band with the §7.1 note rather
+          than removing it silently — a capability the reader cannot see is
+          indistinguishable from a page that forgot to render. */}
+      {metric.kind === "unavailable" ? (
+        <div data-testid="eval-gated-unavailable">
+          <QuietNote title="The eval-gated ratio isn’t available on this install.">
+            How many production deploys are gated by an eval suite is computed by
+            the platform, and this install doesn’t answer for it. The suites
+            below are live and unaffected. Nothing here is estimated — the ratio
+            is simply absent.
+          </QuietNote>
+        </div>
+      ) : (
+        <EvalGatedStatBand metric={metric} />
+      )}
+
+      {all.length > 0 && (
+        <FilterChipRow
+          chips={chips}
+          value={view}
+          onChange={(id) => setView(id as EvalView)}
+          label="Filter eval suites"
+          className="min-w-0"
         />
       )}
 
-      {page.kind === "ready" && (
-        <div className="rounded-lg border bg-card shadow-card divide-y" data-testid="eval-suite-list">
-          {page.suites.map((suite) => {
-            const key = `${suite.namespace}/${suite.name}`;
-            const isExpanded = expandedSuite === key;
-            const results = resultsMap.get(key);
-            return (
-              <div key={key} data-testid={`eval-suite-${suite.name}`}>
-                <div className="flex items-center gap-4 px-4 py-3">
-                  <TestTube2 className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <div className="min-w-0 flex-1 space-y-0.5">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-mono text-sm font-medium">
-                        {suite.name}
-                      </span>
-                      <Badge variant="secondary" className="text-[10px]">
-                        {suite.namespace}
-                      </Badge>
-                      {suite.gate && (
-                        <Badge variant="outline" className="text-[10px]">
-                          gate: {suite.gate}
-                          {suite.threshold !== undefined
-                            ? ` ≥ ${suite.threshold}`
-                            : ""}
-                        </Badge>
-                      )}
-                      <Badge
-                        variant={suite.ready ? "secondary" : "warning"}
-                        className="text-[10px]"
-                      >
-                        {suite.ready ? "ready" : "not ready"}
-                      </Badge>
-                    </div>
-                    <p className="font-mono text-xs text-muted-foreground">
-                      dataset: {suite.datasetRef}
-                    </p>
-                    {(suite.scorers?.length ?? 0) > 0 && (
-                      <p className="text-xs text-muted-foreground">
-                        scorers: {suite.scorers!.join(", ")}
-                      </p>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => handleRowExpand(suite)}
-                      data-testid={`eval-results-${suite.name}`}
-                    >
-                      {isExpanded ? "Hide results" : "View results"}
-                      <ChevronRight
-                        className={`ml-1 h-3.5 w-3.5 transition-transform ${
-                          isExpanded ? "rotate-90" : ""
-                        }`}
-                      />
-                    </Button>
-                    {canDelete && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-destructive hover:text-destructive"
-                        onClick={() => setDeleteTarget(suite)}
-                        data-testid={`eval-delete-${suite.name}`}
-                      >
-                        Delete
-                      </Button>
-                    )}
-                  </div>
-                </div>
-                {isExpanded && (
-                  <div className="border-t bg-muted/30 px-4 py-4">
-                    <ResultsPanel results={results ?? { kind: "loading" }} suiteName={suite.name} />
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
+      <DataTable<Triaged>
+        columns={columns}
+        rows={visible}
+        rowKey={(t) => `${t.suite.namespace}/${t.suite.name}`}
+        loading={page.kind === "loading"}
+        error={error}
+        query={query}
+        onQueryChange={setQuery}
+        queryPlaceholder="Filter suites by name or dataset…"
+        ariaLabel="Eval suites"
+        tableClassName="min-w-[52rem]"
+        onRowClick={(t) => openSuite(t.suite)}
+        rowActions={
+          canDelete
+            ? (t) => (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-faint hover:text-destructive"
+                  onClick={() => setDeleteTarget(t.suite)}
+                  data-testid={`eval-delete-${t.suite.name}`}
+                >
+                  Delete
+                </Button>
+              )
+            : undefined
+        }
+        empty={empty}
+      />
+
+      {closing && <ClosingNote>{closing}</ClosingNote>}
+
+      {/* Dropped ≠ lost (§4.4): every field the budget hides renders here, plus
+          the results the list endpoint never carries. */}
+      <DetailDrawer
+        open={open !== null}
+        onClose={() => setOpen(null)}
+        title={open?.name ?? ""}
+        subtitle={open?.namespace}
+        size="lg"
+        status={open ? <StatusBadge ready={open.ready} /> : undefined}
+      >
+        {open && (
+          <div className="space-y-6">
+            <KeyValueList
+              items={[
+                { key: "Dataset", value: open.datasetRef, absent: "not set" },
+                {
+                  key: "Scorers",
+                  value: (open.scorers ?? []).join(", "),
+                  absent: "none — this suite scores nothing",
+                  mono: false,
+                },
+                {
+                  key: "Gate",
+                  value: gateLabel(open) ?? "",
+                  absent: "no gate — it reports, it does not block",
+                  mono: false,
+                },
+              ]}
+            />
+            <ResultsPanel
+              results={openResults ?? { kind: "loading" }}
+              suite={open}
+              onRetry={() => loadResults(open)}
+            />
+          </div>
+        )}
+      </DetailDrawer>
 
       {showBuilder && (
         <EvalBuilderWizard
@@ -466,6 +789,7 @@ export function EvalsPage() {
       {deleteTarget && (
         <ConfirmDialog
           open
+          destructive
           title={`Delete ${deleteTarget.name}?`}
           description={`This will delete the eval suite "${deleteTarget.name}" in namespace "${deleteTarget.namespace}". This cannot be undone.`}
           confirmLabel={deleteState.kind === "deleting" ? "Deleting…" : "Delete"}
@@ -489,52 +813,49 @@ export function EvalsPage() {
 }
 
 // ---- ResultsPanel ------------------------------------------------------------
-// Renders the honest results from GET .../results:
-//   • conditions → the controller's gate outcome (always)
-//   • scoresAvailable=true → render scores (real numbers only)
-//   • scoresAvailable=false → render scoresUnavailableReason calmly
-// NEVER fabricate scores.
+// The honest rendering of GET .../results:
+//   • conditions + gate results → ALWAYS (or the backend's own reason for their
+//     absence, as a QuietNote — never a silently empty panel)
+//   • scores → ONLY when scoresAvailable=true
+//   • scoresAvailable=false → the reason, calmly. NEVER a fabricated figure.
 
 interface ResultsPanelProps {
   results: ResultsState;
-  suiteName: string;
+  suite: EvalSuiteSummary;
+  onRetry: () => void;
 }
 
-function ResultsPanel({ results, suiteName }: ResultsPanelProps) {
-  if (results.kind === "idle") return null;
-
+function ResultsPanel({ results, suite, onRetry }: ResultsPanelProps) {
   if (results.kind === "loading") {
     return (
-      <div
-        className="flex items-center gap-2 py-2 text-sm text-muted-foreground"
-        data-testid={`eval-results-loading-${suiteName}`}
-      >
-        <Loader2 className="h-4 w-4 animate-spin" />
-        Loading results…
+      <div data-testid={`eval-results-loading-${suite.name}`}>
+        <SectionHeader as="h3" title="Gate outcome" />
+        <SkeletonText lines={4} />
       </div>
     );
   }
 
   if (results.kind === "forbidden") {
     return (
-      <p
-        className="text-sm text-muted-foreground"
-        data-testid={`eval-results-forbidden-${suiteName}`}
-      >
-        Not allowed to view results for this suite.
-      </p>
+      <div data-testid={`eval-results-forbidden-${suite.name}`}>
+        <ForbiddenInline
+          resource="eval results"
+          title="Not allowed to view results for this suite"
+        />
+      </div>
     );
   }
 
   if (results.kind === "error") {
     return (
-      <p
-        className="text-sm text-destructive"
-        role="alert"
-        data-testid={`eval-results-error-${suiteName}`}
-      >
-        Failed to load results: {results.message}
-      </p>
+      <div data-testid={`eval-results-error-${suite.name}`}>
+        <ErrorState
+          title="Couldn’t load results"
+          description="The results endpoint did not answer. Nothing below is estimated in its place."
+          detail={results.message}
+          onRetry={onRetry}
+        />
+      </div>
     );
   }
 
@@ -549,183 +870,206 @@ function ResultsPanel({ results, suiteName }: ResultsPanelProps) {
   } = results.results;
 
   return (
-    <div className="space-y-4" data-testid={`eval-results-panel-${suiteName}`}>
-      {/* Gate outcome — the real per-agent offline gate result (ADR 0094), projected
-          from the AgentDeployments that gate on this suite. */}
-      <div>
-        <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
-          Gate outcome
-        </h4>
+    <div className="space-y-6" data-testid={`eval-results-panel-${suite.name}`}>
+      {/* Gate outcome — the real per-agent offline gate result (ADR 0094),
+          projected from the AgentDeployments that gate on this suite. */}
+      <section>
+        <SectionHeader
+          as="h3"
+          title="Gate outcome"
+          lede="What the offline gate decided for each agent that gates on this suite."
+        />
         {!gateResultsAvailable ? (
-          // RBAC / list degrade — surface CALMLY, never a silently-empty panel.
-          <p
-            className="text-sm text-muted-foreground"
-            data-testid={`eval-gate-unavailable-${suiteName}`}
-          >
-            {gateResultsUnavailableReason ?? "Gate results unavailable."}
-          </p>
+          // An RBAC / list degrade. Calm, and it says WHY — never an empty panel
+          // that reads as "no agents gate on this".
+          <div data-testid={`eval-gate-unavailable-${suite.name}`}>
+            <QuietNote title="The gate outcome can’t be read from here.">
+              <p className="font-mono text-xs">
+                {gateResultsUnavailableReason ??
+                  "The backend gave no reason for the absence."}
+              </p>
+              <p className="mt-2">
+                Nothing here is estimated — the outcome is simply absent, not
+                empty.
+              </p>
+            </QuietNote>
+          </div>
         ) : gateResults.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No agents gate on this suite yet.
-          </p>
+          // A real, backend-confirmed zero: the list was readable and held
+          // nothing. Stated in words, never as a dash.
+          <p className="text-sm text-faint">No agent gates on this suite yet.</p>
         ) : (
-          <div className="space-y-2" data-testid={`eval-gate-results-${suiteName}`}>
+          <div data-testid={`eval-gate-results-${suite.name}`}>
             {gateResults.map((g: GateResult, i: number) => (
-              <GateResultRow key={i} result={g} />
+              <GateResultRow key={`${g.agent}-${i}`} result={g} />
             ))}
           </div>
         )}
-        {/* CRD status.conditions (empty today — no EvalSuite reconciler); shown only
-            if a future reconciler ever writes them, never fabricated. */}
+        {/* CRD status.conditions (empty today — no EvalSuite reconciler); shown
+            only if a reconciler ever writes them, never fabricated. */}
         {conditions.length > 0 && (
-          <div className="mt-2 space-y-2">
+          <div className="mt-3">
             {conditions.map((c: EvalCondition, i: number) => (
-              <ConditionRow key={i} condition={c} />
+              <ConditionRow key={`${c.type}-${i}`} condition={c} />
             ))}
           </div>
         )}
-      </div>
+      </section>
 
-      {/* Scores — only when scoresAvailable=true */}
-      <div>
-        <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
-          Scores
-        </h4>
+      {/* Scores — ONLY when scoresAvailable=true (§6.2). */}
+      <section>
+        <SectionHeader
+          as="h3"
+          title="Scores"
+          lede="What each scorer returned on the suite’s dataset."
+        />
         {scoresAvailable ? (
           scores && scores.length > 0 ? (
-            <div className="space-y-1">
+            <div>
               {scores.map((s: EvalScore, i: number) => (
-                <ScoreRow key={i} score={s} />
+                <ScoreRow key={`${s.scorer}-${i}`} score={s} />
               ))}
             </div>
           ) : (
-            <p className="text-sm text-muted-foreground">
-              No scores returned from scorers.
+            <p className="text-sm text-faint">
+              The scorers ran and returned no scores.
             </p>
           )
         ) : (
-          // scoresAvailable=false — surface reason CALMLY, never fabricate
-          <p
-            className="text-sm text-muted-foreground"
-            data-testid={`eval-scores-unavailable-${suiteName}`}
-          >
-            {scoresUnavailableReason
-              ? scoresUnavailableReason
-              : "Scores unavailable."}
-          </p>
+          // scoresAvailable=false — the backend's own reason, calmly. This is
+          // the branch the whole page is built around: no zero, no estimate, no
+          // half-drawn score row.
+          <div data-testid={`eval-scores-unavailable-${suite.name}`}>
+            <QuietNote title="Scores aren’t available for this suite.">
+              <p className="font-mono text-xs">
+                {scoresUnavailableReason ?? "Scores unavailable."}
+              </p>
+              <p className="mt-2">
+                The gate outcome above is unaffected — it comes from the
+                controller, not the scorer store. Nothing here is estimated: the
+                scores are simply absent, not zero.
+              </p>
+            </QuietNote>
+          </div>
         )}
-      </div>
+      </section>
     </div>
   );
 }
 
-// GateResultRow renders one AgentDeployment's offline eval-gate outcome (ADR 0094):
-// the agent, its real weighted-mean score vs threshold, the decision, a "pending" chip
-// when no gate has run yet, and the scored revision. Never a fake 0.0 — pending shows
-// no number.
+/**
+ * One AgentDeployment's offline eval-gate outcome (ADR 0094).
+ *
+ * `pending` means the agent references the suite and no gate has run yet, so it
+ * renders the `open` Tag and NO figure. A 0.0000 in that slot would read as a
+ * catastrophic score rather than an absent one — the single most damaging
+ * fabrication this page could make.
+ */
 function GateResultRow({ result }: { result: GateResult }) {
-  const promoted = result.decision === "promoted";
-  const blocked = result.decision === "blocked";
+  const blocked = result.decision === "blocked" || result.decision === "fail";
   return (
     <div
-      className="flex items-start gap-2 text-sm"
+      className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-border-soft py-2 last:border-0"
       data-testid={`eval-gate-result-${result.agent}`}
     >
+      <span
+        className="min-w-0 flex-1 truncate font-mono text-xs font-medium"
+        title={result.agent}
+      >
+        {result.agent}
+      </span>
       {result.pending ? (
-        <Loader2 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-      ) : promoted ? (
-        <CheckCircle className="mt-0.5 h-4 w-4 shrink-0 text-success" />
-      ) : blocked ? (
-        <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+        <Badge variant="open">not scored yet</Badge>
       ) : (
-        <CheckCircle className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+        <>
+          {result.score && (
+            <span className="whitespace-nowrap font-mono text-xs tabular-nums">
+              score {result.score}
+            </span>
+          )}
+          {result.threshold && (
+            <span className="whitespace-nowrap font-mono text-xs tabular-nums text-faint">
+              / threshold {result.threshold}
+            </span>
+          )}
+          {result.decision && (
+            <Badge variant={blocked ? "crit" : "ok"}>{result.decision}</Badge>
+          )}
+        </>
       )}
-      <div>
-        <span className="font-mono text-xs font-medium">{result.agent}</span>
-        {result.pending ? (
-          <Badge variant="outline" className="ml-2 text-[10px]">
-            pending
-          </Badge>
-        ) : (
-          <>
-            {result.score && (
-              <span className="ml-2 text-xs font-medium">
-                score {result.score}
-                {result.threshold && (
-                  <span className="text-muted-foreground">
-                    {" "}
-                    / threshold {result.threshold}
-                  </span>
-                )}
-              </span>
-            )}
-            {result.decision && (
-              <Badge
-                variant={blocked ? "destructive" : "secondary"}
-                className="ml-2 text-[10px]"
-              >
-                {result.decision}
-              </Badge>
-            )}
-          </>
-        )}
-        {result.scoredRevision && !result.pending && (
-          <p className="text-xs text-muted-foreground">
-            scored revision {result.scoredRevision}
-          </p>
-        )}
-      </div>
+      {result.reason && !result.pending && (
+        <p className="w-full text-xs text-faint">{result.reason}</p>
+      )}
+      {result.scoredRevision && !result.pending && (
+        <p className="w-full font-mono text-2xs text-faint">
+          scored revision {result.scoredRevision}
+        </p>
+      )}
     </div>
   );
 }
 
 function ConditionRow({ condition }: { condition: EvalCondition }) {
-  const isTrue = condition.status === "True";
-  const isFalse = condition.status === "False";
+  const variant =
+    condition.status === "True"
+      ? "ok"
+      : condition.status === "False"
+        ? "crit"
+        : "progressing";
   return (
-    <div className="flex items-start gap-2 text-sm">
-      {isTrue ? (
-        <CheckCircle className="mt-0.5 h-4 w-4 shrink-0 text-success" />
-      ) : isFalse ? (
-        <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
-      ) : (
-        <Loader2 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-      )}
-      <div>
+    <div className="border-b border-border-soft py-2 last:border-0">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <span className="font-mono text-xs font-medium">{condition.type}</span>
         {condition.reason && (
-          <span className="ml-2 text-xs text-muted-foreground">
-            ({condition.reason})
-          </span>
+          <span className="text-xs text-faint">({condition.reason})</span>
         )}
-        {condition.message && (
-          <p className="text-xs text-muted-foreground">{condition.message}</p>
-        )}
+        <Badge variant={variant}>{condition.status}</Badge>
       </div>
+      {condition.message && (
+        <p className="mt-1 text-xs text-faint">{condition.message}</p>
+      )}
     </div>
   );
 }
 
+/**
+ * One scorer's result. A scorer that returned NEITHER a number nor a string is
+ * the one genuinely unknown value in this panel: it renders the honest dash
+ * with its reason, never a zero.
+ */
 function ScoreRow({ score }: { score: EvalScore }) {
-  const display =
+  const shown =
     score.value !== undefined
       ? String(score.value)
       : score.stringValue !== undefined
-      ? score.stringValue
-      : "—";
+        ? score.stringValue
+        : undefined;
   return (
-    <div className="flex items-center gap-2 text-sm">
-      <span className="font-mono text-xs text-muted-foreground w-32 truncate">
+    <div
+      className="flex items-baseline justify-between gap-3 border-b border-border-soft py-2 last:border-0"
+      data-testid={`eval-score-${score.scorer}`}
+    >
+      <span
+        className="min-w-0 truncate font-mono text-xs text-faint"
+        title={score.scorer}
+      >
         {score.scorer}
       </span>
-      <span className="font-mono text-xs font-medium">{display}</span>
+      {shown !== undefined ? (
+        <span className="whitespace-nowrap font-mono text-xs tabular-nums">
+          {shown}
+        </span>
+      ) : (
+        <UnknownValue title="This scorer returned neither a numeric nor a categorical value — unknown, not zero." />
+      )}
     </div>
   );
 }
 
 // ---- EvalBuilderWizard -------------------------------------------------------
 // A 4-step wizard: dataset ref → scorers → gate/threshold → review + create.
-// The wizard calls createEvalSuite on finish. A 403 surfaces honestly.
+// The wizard calls createEvalSuite on finish. A 403 surfaces honestly, inline
+// in the review step (§7 A4) — never as a toast.
 
 interface EvalBuilderWizardProps {
   onClose: () => void;
@@ -747,6 +1091,7 @@ function EvalBuilderWizard({ onClose, onCreated }: EvalBuilderWizardProps) {
   const { can, reprobe } = useCapabilities();
   const { namespace: shellNs } = useNamespace();
   const { toast } = useToast();
+  const panelRef = useFocusTrap<HTMLDivElement>({ active: true, onEscape: onClose });
 
   React.useEffect(() => {
     if (shellNs) setNamespace(shellNs);
@@ -832,14 +1177,13 @@ function EvalBuilderWizard({ onClose, onCreated }: EvalBuilderWizardProps) {
               placeholder="my-dataset or gs://bucket/eval.jsonl"
               data-testid="eval-dataset-ref-input"
             />
-            <p className="text-xs text-muted-foreground">
+            <p className="text-xs text-faint">
               A name or URI pointing to the evaluation dataset.
             </p>
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="eval-name">
-              Suite name{" "}
-              <span className="text-muted-foreground">(auto-generated)</span>
+              Suite name <span className="text-faint">(auto-generated)</span>
             </Label>
             <Input
               id="eval-name"
@@ -879,14 +1223,15 @@ function EvalBuilderWizard({ onClose, onCreated }: EvalBuilderWizardProps) {
               placeholder="exact-match, bleu, rouge"
               data-testid="eval-scorers-input"
             />
-            <p className="text-xs text-muted-foreground">
-              Comma-separated scorer names.
+            <p className="text-xs text-faint">
+              Comma-separated scorer names. A suite with no scorer can never
+              produce a result to gate on.
             </p>
           </div>
           {scorers.length > 0 && (
             <div className="flex flex-wrap gap-1">
               {scorers.map((s) => (
-                <Badge key={s} variant="secondary" className="text-[10px]">
+                <Badge key={s} variant="muted">
                   {s}
                 </Badge>
               ))}
@@ -903,8 +1248,7 @@ function EvalBuilderWizard({ onClose, onCreated }: EvalBuilderWizardProps) {
         <div className="space-y-4" data-testid="eval-builder-gate-step">
           <div className="space-y-1.5">
             <Label htmlFor="eval-gate">
-              Gate condition{" "}
-              <span className="text-muted-foreground">(optional)</span>
+              Gate condition <span className="text-faint">(optional)</span>
             </Label>
             <Input
               id="eval-gate"
@@ -913,14 +1257,14 @@ function EvalBuilderWizard({ onClose, onCreated }: EvalBuilderWizardProps) {
               placeholder="exact-match"
               data-testid="eval-gate-input"
             />
-            <p className="text-xs text-muted-foreground">
-              The scorer whose value is compared against the threshold.
+            <p className="text-xs text-faint">
+              The scorer whose value is compared against the threshold. Leave it
+              empty and the suite reports without blocking a promotion.
             </p>
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="eval-threshold">
-              Threshold{" "}
-              <span className="text-muted-foreground">(optional, 0–1)</span>
+              Threshold <span className="text-faint">(optional, 0–1)</span>
             </Label>
             <Input
               id="eval-threshold"
@@ -944,24 +1288,30 @@ function EvalBuilderWizard({ onClose, onCreated }: EvalBuilderWizardProps) {
       review: true,
       content: (
         <div className="space-y-4" data-testid="eval-builder-review-step">
-          <div className="rounded-lg border bg-card/50 p-4 space-y-2">
-            <ReviewRow label="Name" value={name || "(auto-generated)"} />
-            <ReviewRow label="Namespace" value={namespace || "default"} />
-            <ReviewRow label="Dataset" value={datasetRef} mono />
-            <ReviewRow
-              label="Scorers"
-              value={scorers.join(", ") || "—"}
+          <div className="rounded-lg border bg-surface-2 p-4">
+            <KeyValueList
+              items={[
+                { key: "Name", value: name, absent: "auto-generated" },
+                { key: "Namespace", value: namespace, absent: "default" },
+                { key: "Dataset", value: datasetRef, absent: "not set" },
+                {
+                  key: "Scorers",
+                  value: scorers.join(", "),
+                  absent: "none — this suite would score nothing",
+                  mono: false,
+                },
+                {
+                  key: "Gate",
+                  value: gate ? `${gate}${threshold ? ` ≥ ${threshold}` : ""}` : "",
+                  absent: "no gate — it reports, it does not block",
+                  mono: false,
+                },
+              ]}
             />
-            {gate && (
-              <ReviewRow
-                label="Gate"
-                value={`${gate}${threshold ? ` ≥ ${threshold}` : ""}`}
-              />
-            )}
           </div>
           {builderState.kind === "error" && (
             <p
-              className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+              className="rounded-md border border-destructive bg-destructive-surface px-3 py-2 text-sm text-destructive"
               role="alert"
               data-testid="eval-builder-error"
             >
@@ -969,8 +1319,9 @@ function EvalBuilderWizard({ onClose, onCreated }: EvalBuilderWizardProps) {
             </p>
           )}
           {!canBuild && (
-            <p className="text-sm text-muted-foreground">
-              You don't have permission to create eval suites.
+            <p className="text-sm text-faint">
+              You don’t have permission to create eval suites. Ask an admin for a
+              role that can create eval suites.
             </p>
           )}
         </div>
@@ -980,14 +1331,31 @@ function EvalBuilderWizard({ onClose, onCreated }: EvalBuilderWizardProps) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="New eval suite"
       data-testid="eval-builder"
     >
-      <div className="w-full max-w-2xl rounded-xl bg-background shadow-xl">
+      {/* The overlay tint is the kit's dialog treatment (a token, not a raw
+          palette colour) so every floating layer dims the page identically. */}
+      <div
+        className="absolute inset-0 bg-foreground/40 backdrop-blur-[2px]"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <div
+        ref={panelRef}
+        tabIndex={-1}
+        className="relative flex max-h-[85vh] w-full max-w-2xl flex-col overflow-y-auto rounded-lg border bg-card shadow-overlay outline-none"
+      >
         <div className="p-6">
-          <h3 className="text-lg font-semibold">New eval suite</h3>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Define a dataset, scorers, and optional gate to evaluate your agents.
+          <h3 className="font-serif text-lg font-medium tracking-snug">
+            New eval suite
+          </h3>
+          <p className="mt-1 text-sm text-faint">
+            A dataset, the scorers to run over it, and the bar an agent must
+            clear before it ships.
           </p>
         </div>
         <div className="px-6 pb-6">
@@ -1004,25 +1372,6 @@ function EvalBuilderWizard({ onClose, onCreated }: EvalBuilderWizardProps) {
           />
         </div>
       </div>
-    </div>
-  );
-}
-
-function ReviewRow({
-  label,
-  value,
-  mono = false,
-}: {
-  label: string;
-  value: string;
-  mono?: boolean;
-}) {
-  return (
-    <div className="flex items-start gap-2">
-      <span className="text-sm font-medium text-muted-foreground w-24 shrink-0">
-        {label}
-      </span>
-      <span className={`text-sm ${mono ? "font-mono" : ""}`}>{value}</span>
     </div>
   );
 }

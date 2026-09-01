@@ -43,9 +43,9 @@ describe("design gallery", () => {
     expect(
       screen.getByText("Information architecture"),
     ).toBeInTheDocument();
-    // Reads from the shared NAV_SECTIONS source.
-    expect(screen.getByText("Overview")).toBeInTheDocument();
-    expect(screen.getByText("Platform")).toBeInTheDocument();
+    // Reads from the shared NAV_SECTIONS source (the M151 six-section IA).
+    expect(screen.getByText("Govern")).toBeInTheDocument();
+    expect(screen.getByText("Activity")).toBeInTheDocument();
   });
 
   it("shows an honest not-found for an unknown wireframe slug", () => {

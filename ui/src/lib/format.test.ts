@@ -25,8 +25,13 @@ describe("formatUSD", () => {
   it("renders zero as $0.00, not a dash", () => {
     expect(formatUSD(0)).toBe("$0.00");
   });
-  it("keeps sub-cent precision trimmed", () => {
-    expect(formatUSD(0.000297)).toBe("$0.000297");
+  it("rounds sub-cent to the four-decimal register, and never to a zero-looking figure", () => {
+    expect(formatUSD(0.000297)).toBe("$0.0003");
+    // The floor matters more than the rounding: `$0.0000` is the one string
+    // reserved as indistinguishable from an unknown, so a real cost below it
+    // says it is small rather than saying it is nothing.
+    expect(formatUSD(0.00002)).toBe("<$0.0001");
+    expect(formatUSD(0.00002)).not.toBe("$0.0000");
   });
   it("rounds whole-dollar amounts to cents", () => {
     expect(formatUSD(12.404)).toBe("$12.40");

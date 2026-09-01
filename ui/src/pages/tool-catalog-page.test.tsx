@@ -454,3 +454,61 @@ describe("ToolCatalogPage — RBAC (viewer)", () => {
     expect(screen.getByTestId("catalog-bind-risky-tool")).toBeDisabled();
   });
 });
+
+// ── Provenance: three claims, three renderings (M151 §6.2) ───────────────────
+describe("ToolCatalogPage — provenance states", () => {
+  it("reads source='curated' as CURATED, not user-added", async () => {
+    // `source` is the ORIGIN CLASS ("curated" | "user-added"), not a server
+    // name. The old heuristic treated ANY non-empty source as user-added, so
+    // every tool the BFF marks `source: "curated"` was labelled "user-added" —
+    // three backend states collapsing into two on screen.
+    renderPage(EDITOR_CAPS, {
+      tools: [
+        { name: "search_customers", description: "Search the CRM.", registry: "acme-crm", source: "curated", approvalStatus: "approved" },
+        { name: "list_issues", description: "List issues.", registry: "github-mcp", source: "user-added", approvalStatus: "approved" },
+      ],
+    });
+
+    expect(await screen.findByTestId("catalog-tool-state-search_customers")).toHaveTextContent(
+      "curated",
+    );
+    expect(screen.getByTestId("catalog-tool-state-list_issues")).toHaveTextContent(
+      "user-added",
+    );
+  });
+
+  it("names the MCP server each tool came from", async () => {
+    renderPage(EDITOR_CAPS, {
+      tools: [
+        { name: "list_issues", registry: "github-mcp", source: "user-added", approvalStatus: "approved" },
+        { name: "code-search", description: "Search code repositories" },
+      ],
+    });
+
+    const fromServer = await screen.findByTestId("catalog-tool-list_issues");
+    expect(fromServer).toHaveTextContent("from github-mcp");
+    // A curated tool has no MCP server — it says so rather than showing a blank.
+    expect(screen.getByTestId("catalog-tool-code-search")).toHaveTextContent(
+      "from the built-in registry",
+    );
+  });
+
+  it("a pending tool says WHY its CTA is dead, in readable ink", async () => {
+    // §6.2: "pending cards' CTA disabled with the reason line". The reason used
+    // to render in `text-warning-foreground` — the ink for text ON a filled
+    // warning surface, which is pure white in light theme, on a white card.
+    renderPage();
+
+    const reason = await screen.findByTestId("catalog-pending-reason-risky-tool");
+    expect(reason).toHaveTextContent(/operator has to approve/i);
+    expect(reason.className).toContain("text-hold");
+    expect(reason.className).not.toContain("text-warning-foreground");
+    expect(screen.getByTestId("catalog-bind-risky-tool")).toBeDisabled();
+  });
+
+  it("gives a tool with no reason no reason line", async () => {
+    renderPage();
+    await screen.findByTestId("catalog-tool-code-search");
+    expect(screen.queryByTestId("catalog-pending-reason-code-search")).toBeNull();
+  });
+});

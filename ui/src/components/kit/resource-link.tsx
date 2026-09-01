@@ -13,7 +13,11 @@ export type ResourceKind =
   | "agent"
   | "registry"
   | "route"
-  | "secretbinding";
+  | "secretbinding"
+  // The team detail page (M151 A3) — a roster's members and its supervisor are
+  // agents, but the team itself is now a destination too, so a team name
+  // rendered anywhere obeys the same "if it names a resource, it's a link" rule.
+  | "team";
 
 // resourcePath maps a resource to its detail route, or null when there is no
 // detail page for that kind (then ResourceLink renders honest text, not a dead link).
@@ -33,6 +37,8 @@ export function resourcePath(
       return `/routes/${ns}/${nm}`;
     case "secretbinding":
       return `/secrets/${ns}/${nm}`;
+    case "team":
+      return `/teams/${ns}/${nm}`;
     default:
       return null;
   }
@@ -53,9 +59,10 @@ export function ResourceLink({
 }) {
   const path = namespace && name ? resourcePath(kind, namespace, name) : null;
   if (!path) {
-    // Honest non-link: no detail page (or missing coordinates) → plain text.
+    // Honest non-link: no detail page (or missing coordinates) → plain mono ink,
+    // explicitly NOT underlined — the resting underline is the promise of a destination.
     return (
-      <span className={className} data-testid={testId}>
+      <span className={cn("font-mono no-underline", className)} data-testid={testId}>
         {name}
       </span>
     );
@@ -64,7 +71,9 @@ export function ResourceLink({
     <Link
       to={path}
       className={cn(
-        "text-primary underline-offset-2 hover:underline",
+        // The ONE link treatment console-wide (§2.3/§5.7): pine text over a resting
+        // pine-surface rule that firms to pine on hover — not a decoration-underline.
+        "font-mono text-primary border-b border-accent hover:border-primary",
         className,
       )}
       data-testid={testId}

@@ -1,20 +1,114 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Pencil, Plus, Trash2, Users } from "lucide-react";
+import { Pencil, Trash2, Users } from "lucide-react";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { DataTable, StatusBadge, type Column, type DataTableError } from "@/components/kit";
+import {
+  CellEntity,
+  ClosingNote,
+  DataTable,
+  FilterChipRow,
+  NextStepLink,
+  PageHeader,
+  QuantityValue,
+  StatusBadge,
+  UNKNOWN,
+  nextStepRank,
+  resolveStatus,
+  type Column,
+  type DataTableError,
+  type NextStepTone,
+  type StatusTone,
+} from "@/components/kit";
 import { api, ApiError, type AgentRegistrySummary } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_REGISTRIES } from "@/lib/nav";
 
-// AgentRegistriesPage — list of AgentRegistries.
+// AgentRegistriesPage — archetype A1 (index/table), resource-list column budget
+// (M151 spec §6.1/§4.4).
 //
 // NO egress/allowlist field anywhere in this UI — the egress NetworkPolicy is
 // controller-managed and cannot be altered through the console.
+//
+// ── WHAT THE PAGE IS SORTED BY ──────────────────────────────────────────────
+// Not the name. A registry index answers "which of these is holding something
+// up?", so the rows are ordered by what is BLOCKING (§6.1 A1 sort doctrine):
+// every row that needs a person first, "Nothing needed" last, and within each
+// group by status attention (failing → held → converging → serving → draft).
+// `nextStepRank` is the primary key so this column sorts identically on all
+// ~20 list pages.
+//
+// ── THE ONE UNKNOWN THIS PAGE RENDERS ───────────────────────────────────────
+// `guards` is optional on the wire: a registry may simply never have declared a
+// delegation bound. That is NOT zero — an undeclared hop budget is unbounded
+// delegation, the opposite of nought — so the cells render the §7.1 unknown
+// glyph with its own reason, and the row's next step is to declare them.
 
 const PAGE_LIMIT = 50;
+
+/** Attention order inside a next-step group (§6.1 A1): failing first, off last. */
+const TONE_RANK: Record<StatusTone, number> = {
+  failed: 0,
+  waiting: 1,
+  progressing: 2,
+  ready: 3,
+  draft: 4,
+};
+
+/**
+ * The closing line's copy (§5.18) — a SIGHTED FLOURISH that restates the table's
+ * ratio and never carries a fact alone. It is built from counts of the rows the
+ * response actually contained, and says "on this page" whenever the cursor tells
+ * us those rows are a window onto a larger set.
+ */
+function closingNote(total: number, needing: number, windowed: boolean): string {
+  const scope = windowed ? " on this page" : "";
+  const noun = total === 1 ? "registry" : "registries";
+  if (total === 1)
+    return needing > 0
+      ? `The one registry${scope} needs a person.`
+      : `The one registry${scope} is settled — nothing here needs a person.`;
+  if (needing === 0)
+    return `Nothing${scope} needs a person — all ${total} ${noun} are settled.`;
+  if (needing === total)
+    return `Every one of the ${total} ${noun}${scope} needs a person.`;
+  return `${needing} of the ${total} ${noun}${scope} need a person. The other ${total - needing} are settled.`;
+}
+
+/** The §7.1 reason for an absent guard — "not declared", never "zero". */
+const GUARDS_ABSENT_TITLE =
+  "No delegation bound is declared on this registry — unknown, not zero.";
+
+interface NextStep {
+  label?: string;
+  tone: NextStepTone;
+  to?: string;
+}
+
+/**
+ * The user's next action on one registry (§7.2) — verb-first, ≤22 chars, and
+ * never a restatement of the system's state. A converging registry deliberately
+ * says "Nothing needed": the controller is doing its own work and asks nothing
+ * of a person (§2.5). It still sorts above a serving one, via TONE_RANK.
+ */
+function nextStep(
+  r: AgentRegistrySummary,
+  tone: StatusTone,
+  canEdit: boolean,
+): NextStep {
+  const detail = `/registries/${encodeURIComponent(r.namespace)}/${encodeURIComponent(r.name)}`;
+  if (tone === "failed") return { label: "Fix the registry", tone: "crit", to: detail };
+  if (tone === "waiting") return { label: "Review the hold", tone: "default", to: detail };
+  if (!r.guards)
+    return {
+      label: "Set the guards",
+      tone: "default",
+      to: canEdit ? `${detail}?edit=1` : detail,
+    };
+  return { tone: "none" };
+}
 
 function RowActions({
   registry,
@@ -75,6 +169,8 @@ type Load =
   | { kind: "ready"; items: AgentRegistrySummary[]; nextCursor: string }
   | { kind: "error"; message: string; forbidden: boolean };
 
+type View = "all" | "attention";
+
 export function AgentRegistriesPage() {
   const navigate = useNavigate();
   const { namespace } = useNamespace();
@@ -84,6 +180,7 @@ export function AgentRegistriesPage() {
   const canDelete = can(RES_REGISTRIES, "delete");
 
   const [query, setQuery] = useState("");
+  const [view, setView] = useState<View>("all");
   const [pageStack, setPageStack] = useState<string[]>([""]);
   const [state, setState] = useState<Load>({ kind: "loading" });
   const abortRef = useRef<AbortController | null>(null);
@@ -140,11 +237,46 @@ export function AgentRegistriesPage() {
     }
   }, [namespace, resetPaging]);
 
-  const items = state.kind === "ready" ? state.items : [];
+  const items = useMemo(
+    () => (state.kind === "ready" ? state.items : []),
+    [state],
+  );
   const nextCursor = state.kind === "ready" ? state.nextCursor : "";
+  // hasNext keys off the CURSOR (BFF), never items.length — an empty filtered
+  // window with more pages must keep Next live (the cursor-vs-q rule).
   const hasNext = nextCursor !== "";
   const hasPrev = pageStack.length > 1;
   const pageNumber = pageStack.length;
+  // The loaded rows are one WINDOW of a larger set whenever a page exists on
+  // either side. Every count this page states is scoped to that window in
+  // words, because the console cannot see past it.
+  const windowed = hasPrev || hasNext;
+
+  // Decorate once: status, next step and sort key all come from the same
+  // resolve, so a row can never disagree with itself.
+  const decorated = useMemo(
+    () =>
+      items
+        .map((r) => {
+          const status = resolveStatus(r.ready, r.phase);
+          return { row: r, tone: status.tone, step: nextStep(r, status.tone, canEdit) };
+        })
+        .sort(
+          (a, b) =>
+            nextStepRank(a.step.tone) - nextStepRank(b.step.tone) ||
+            TONE_RANK[a.tone] - TONE_RANK[b.tone] ||
+            a.row.name.localeCompare(b.row.name),
+        ),
+    [items, canEdit],
+  );
+
+  const needing = decorated.filter((d) => d.step.tone !== "none").length;
+  const visible =
+    view === "attention" ? decorated.filter((d) => d.step.tone !== "none") : decorated;
+  const rows = visible.map((d) => d.row);
+  const stepFor = new Map(
+    visible.map((d) => [`${d.row.namespace}/${d.row.name}`, d.step] as const),
+  );
 
   function onNext() {
     if (!hasNext) return;
@@ -165,93 +297,156 @@ export function AgentRegistriesPage() {
         }
       : null;
 
+  const detailPath = (r: AgentRegistrySummary) =>
+    `/registries/${encodeURIComponent(r.namespace)}/${encodeURIComponent(r.name)}`;
+
+  // §4.4 resource-list budget. Entity / State / Next step are priority 1 and
+  // survive every width; the id takes the p4 (first-to-drop) slot and the roles
+  // + the two guard numerics take p3, so 768 renders exactly the three columns
+  // the archetype promises. Dropped ≠ lost — every row opens its detail page.
   const columns: Column<AgentRegistrySummary>[] = [
     {
       id: "name",
-      header: "Name",
-      cell: (r) => <span className="font-medium">{r.name}</span>,
-    },
-    {
-      id: "namespace",
-      header: "Namespace",
-      cell: (r) => <span className="text-muted-foreground">{r.namespace}</span>,
+      header: "Registry",
+      className: "max-w-[18rem]",
+      cell: (r) => <CellEntity name={r.name} namespace={r.namespace} />,
     },
     {
       id: "registryId",
       header: "Registry ID",
-      hideOnMobile: true,
-      cell: (r) => <span className="font-mono text-xs text-muted-foreground">{r.registryId}</span>,
-    },
-    {
-      id: "roles",
-      header: "Roles",
-      hideOnMobile: true,
+      priority: 4,
+      className: "max-w-[14rem]",
       cell: (r) => (
-        <span className="text-muted-foreground">
-          {r.roles.length > 0 ? r.roles.join(", ") : "—"}
+        <span className="block truncate font-mono text-xs text-faint" title={r.registryId}>
+          {r.registryId}
         </span>
       ),
     },
     {
-      id: "phase",
-      header: "Status",
-      className: "w-32",
+      id: "roles",
+      header: "Roles",
+      priority: 3,
+      className: "max-w-[14rem]",
+      cell: (r) =>
+        r.roles.length > 0 ? (
+          <span
+            className="block truncate text-sm text-muted-foreground"
+            title={r.roles.join(", ")}
+          >
+            {r.roles.join(", ")}
+          </span>
+        ) : (
+          // "Declared but never exercised" is a Tag, not a dash (§2.5): a
+          // registry with no roles is a real, readable state, not a missing
+          // measurement.
+          <Badge variant="open">no roles</Badge>
+        ),
+    },
+    {
+      id: "maxDepth",
+      header: "Max depth",
+      priority: 3,
+      numeric: true,
       cell: (r) => (
-        <StatusBadge ready={r.ready} phase={r.phase} />
+        <QuantityValue
+          value={r.guards?.maxDepth ?? UNKNOWN}
+          title={GUARDS_ABSENT_TITLE}
+        />
       ),
     },
-    ...(canEdit || canDelete
-      ? [
-          {
-            id: "actions" as const,
-            header: "",
-            className: "w-20 text-right",
-            cell: (r: AgentRegistrySummary) => (
-              <RowActions
-                registry={r}
-                canEdit={canEdit}
-                canDelete={canDelete}
-                onEdit={(reg) =>
-                  navigate(
-                    `/registries/${encodeURIComponent(reg.namespace)}/${encodeURIComponent(reg.name)}?edit=1`,
-                  )
-                }
-                onDelete={(reg) =>
-                  navigate(
-                    `/registries/${encodeURIComponent(reg.namespace)}/${encodeURIComponent(reg.name)}?delete=1`,
-                  )
-                }
-              />
-            ),
-          },
-        ]
-      : []),
+    {
+      id: "hopBudget",
+      header: "Hop budget",
+      priority: 3,
+      numeric: true,
+      cell: (r) => (
+        <QuantityValue
+          value={r.guards?.hopBudget ?? UNKNOWN}
+          title={GUARDS_ABSENT_TITLE}
+        />
+      ),
+    },
+    {
+      id: "phase",
+      header: "State",
+      className: "w-[7rem]",
+      cell: (r) => <StatusBadge ready={r.ready} phase={r.phase} />,
+    },
+    {
+      id: "nextStep",
+      header: "Next step",
+      className: "w-[10rem]",
+      cell: (r) => {
+        const step = stepFor.get(`${r.namespace}/${r.name}`);
+        return (
+          <NextStepLink
+            label={step?.label}
+            to={step?.to}
+            tone={step?.tone ?? "none"}
+            testId={`next-step-${r.name}`}
+          />
+        );
+      },
+    },
   ];
 
+  // The empties are different truths (§7). A chip that matched nothing is NOT a
+  // first run: the rows exist, this view excluded them — so it says so, offers
+  // the way back, and never re-teaches what the surface is for.
+  const emptyState =
+    view === "attention"
+      ? {
+          icon: Users,
+          intent: "filtered" as const,
+          title: "Nothing here needs you",
+          description:
+            "No registry on this page is failing, held, or missing its delegation guards.",
+          totalCount: decorated.length > 0 ? decorated.length : undefined,
+          countNoun: "registries",
+          action: {
+            label: "Show everything",
+            variant: "outline" as const,
+            onClick: () => setView("all"),
+          },
+        }
+      : {
+          icon: Users,
+          title: "No agent registries yet",
+          description: namespace
+            ? `No AgentRegistries in ${namespace}.`
+            : "No AgentRegistries visible. Create one to group agents into a named registry.",
+        };
+
   return (
-    <div className="mx-auto max-w-5xl space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight">Agent Registries</h2>
-          <p className="text-sm text-muted-foreground">
-            Registries group your agents and decide who may join a team.
-          </p>
-        </div>
-        {canCreate && (
-          <Button
-            size="sm"
-            onClick={() => navigate("/registries/new")}
-            data-testid="create-registry-button"
-          >
-            <Plus className="h-4 w-4" />
-            New registry
-          </Button>
-        )}
-      </div>
+    <div className="min-w-0 space-y-6">
+      <PageHeader
+        title="Agent registries"
+        lede="Registries group your agents and decide who may join a team. Whatever needs a person is at the top."
+        actions={
+          canCreate
+            ? [{ id: "new", label: "New registry", to: "/registries/new", primary: true }]
+            : undefined
+        }
+      />
+
+      {/* Views, not filters — one question, one answer (§5.28). No counts: this
+          list is a cursor-paged window, so a number counted here would be a
+          claim about a set the console cannot see. */}
+      {decorated.length > 0 && (
+        <FilterChipRow
+          label="Filter registries"
+          value={view}
+          onChange={(id) => setView(id as View)}
+          chips={[
+            { id: "all", label: "Everything" },
+            { id: "attention", label: "Needs attention" },
+          ]}
+        />
+      )}
 
       <DataTable<AgentRegistrySummary>
         columns={columns}
-        rows={items}
+        rows={rows}
         rowKey={(r) => `${r.namespace}/${r.name}`}
         loading={state.kind === "loading"}
         error={error}
@@ -264,19 +459,28 @@ export function AgentRegistriesPage() {
         onNext={onNext}
         rangeLabel={`Page ${pageNumber}`}
         ariaLabel="Agent registries"
-        onRowClick={(r) =>
-          navigate(
-            `/registries/${encodeURIComponent(r.namespace)}/${encodeURIComponent(r.name)}`,
-          )
+        onRowClick={(r) => navigate(detailPath(r))}
+        rowActions={
+          canEdit || canDelete
+            ? (r) => (
+                <RowActions
+                  registry={r}
+                  canEdit={canEdit}
+                  canDelete={canDelete}
+                  onEdit={(reg) => navigate(`${detailPath(reg)}?edit=1`)}
+                  onDelete={(reg) => navigate(`${detailPath(reg)}?delete=1`)}
+                />
+              )
+            : undefined
         }
-        empty={{
-          icon: Users,
-          title: "No agent registries yet",
-          description: namespace
-            ? `No AgentRegistries in ${namespace}.`
-            : "No AgentRegistries visible. Create one to group agents into a named registry.",
-        }}
+        empty={emptyState}
       />
+
+      {/* The honest ratio, restated — never the only place a fact appears
+          (§5.18), and always scoped to the window the console can actually see. */}
+      {state.kind === "ready" && decorated.length > 0 && (
+        <ClosingNote>{closingNote(decorated.length, needing, windowed)}</ClosingNote>
+      )}
     </div>
   );
 }

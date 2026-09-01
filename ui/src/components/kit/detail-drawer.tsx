@@ -16,6 +16,13 @@ import { useFocusTrap } from "@/components/kit/use-focus-trap";
 // panel, focus returns to the opener on close, Esc handled once via the shared
 // useFocusTrap), a labelled dialog (aria-labelledby → the title), sizes, a
 // status slot, and a footer actions slot (RBAC-gated by the parent).
+//
+// Editorial restyle (M151 §5.11): the panel is the ONE surface that legitimately
+// floats, so it is the one that keeps a shadow (`shadow-overlay`) — on-page
+// elevation is rules, not shadows (§2.7), and `--shadow-card` is now `none`.
+// The title carries the two-face rule (§3.1): a drawer almost always names a
+// resource, so the title is MONO 600 by default; prose-titled drawers pass
+// `mono={false}` and get the serif display face instead.
 
 export interface DetailDrawerProps {
   open: boolean;
@@ -26,6 +33,12 @@ export interface DetailDrawerProps {
   status?: React.ReactNode;
   /** Sticky footer — primary/secondary actions (omit for viewers). */
   footer?: React.ReactNode;
+  /**
+   * The title names a RESOURCE (mono 600) rather than reading as prose (serif).
+   * Defaults to true — drawers almost always front a K8s object, whose name is
+   * a machine string and belongs in the mono face (§3.1, §5.11).
+   */
+  mono?: boolean;
   /** Drawer width preset. */
   size?: "sm" | "md" | "lg";
   children?: React.ReactNode;
@@ -44,6 +57,7 @@ export function DetailDrawer({
   subtitle,
   status,
   footer,
+  mono = true,
   size = "md",
   children,
 }: DetailDrawerProps) {
@@ -68,23 +82,30 @@ export function DetailDrawer({
         aria-labelledby={titleId}
         tabIndex={-1}
         className={cn(
-          "absolute right-0 top-0 flex h-full w-full flex-col border-l bg-card shadow-overlay outline-none",
+          "absolute right-0 top-0 flex h-full w-full max-w-full flex-col border-l bg-card shadow-overlay outline-none",
           SIZES[size],
         )}
       >
-        <header className="flex items-start justify-between gap-4 border-b px-6 py-4">
+        <header className="flex items-start justify-between gap-4 border-b border-border p-6">
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
+            <div className="flex min-w-0 items-center gap-2">
               <h2
                 id={titleId}
-                className="truncate text-lg font-semibold tracking-snug"
+                className={cn(
+                  "min-w-0 truncate text-lg tracking-snug",
+                  // A resource name is a machine string: mono 600. Prose titles
+                  // take the serif display face, which never exceeds 500 (§3.2).
+                  mono
+                    ? "font-mono font-semibold"
+                    : "font-serif font-medium",
+                )}
               >
                 {title}
               </h2>
               {status}
             </div>
             {subtitle && (
-              <p className="mt-0.5 truncate text-sm text-muted-foreground">
+              <p className="mt-1 truncate font-mono text-xs text-faint">
                 {subtitle}
               </p>
             )}
@@ -102,7 +123,7 @@ export function DetailDrawer({
         <div className="flex-1 overflow-y-auto px-6 py-5">{children}</div>
 
         {footer && (
-          <footer className="flex items-center justify-end gap-2 border-t bg-surface-2/40 px-6 py-3">
+          <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-border bg-surface-2/40 px-6 py-3">
             {footer}
           </footer>
         )}

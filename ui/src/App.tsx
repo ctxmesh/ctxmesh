@@ -38,6 +38,7 @@ import { RunDetailPage } from "@/pages/run-detail-page";
 import { AuditPage } from "@/pages/audit-page";
 import { AlertsPage } from "@/pages/alerts-page";
 import { TeamsPage } from "@/pages/teams-page";
+import { TeamDetailPage } from "@/pages/team-detail-page";
 import { CreateTeamPage } from "@/pages/create-team-page";
 import { GuardrailPoliciesPage } from "@/pages/guardrail-policies-page";
 import { WorkflowsPage } from "@/pages/workflows-page";
@@ -53,11 +54,12 @@ import { TopologyPage } from "@/pages/topology-page";
 import { TracePage } from "@/pages/trace-page";
 import { MySharesPage } from "@/pages/my-shares-page";
 import { ApprovalsPage } from "@/pages/approvals-page";
+import { StopsPage } from "@/pages/stops-page";
 import { SharedRunPage } from "@/pages/shared-run-page";
 import { RequireAuth, SessionProvider } from "@/lib/session-provider";
 import { ToastProvider } from "@/components/kit";
 import { NAV_ITEMS } from "@/lib/nav";
-import { designGalleryEnabled } from "@/design/flag";
+import { DESIGN_GALLERY_ENABLED } from "@/design/flag";
 
 // SoonPage resolves the /soon/:id placeholder for a nav destination the approved
 // IA lists but a later milestone ships (m13.5 keeps the full IA walkable without
@@ -74,15 +76,20 @@ function SoonPage() {
   );
 }
 
-// The design gallery is a REVIEW-only surface (m13.1 design gate). It's loaded
-// lazily and ONLY when the flag is on, so a normal production build splits it
-// into a separate chunk that is never requested (the route isn't mounted) —
-// invisible by construction. VITE_DESIGN_GALLERY=1 (build) or ?design (runtime)
-// enables it. It is STATIC wireframes and is reachable WITHOUT auth (it renders
-// OUTSIDE the SessionProvider guard) — the design gate must not require a login.
-const DesignGallery = lazy(() =>
-  import("@/design/gallery").then((m) => ({ default: m.DesignGallery })),
-);
+// The design gallery is a REVIEW-only surface (m13.1 design gate) holding
+// static internal wireframes. It renders OUTSIDE the SessionProvider guard, so
+// anything that can reach the route can read it with no login — which is fine
+// on a dev server and was a disclosure hole in production (M151 hardening, A2).
+//
+// The gate is therefore the BUILD, not a runtime check: `lazy()` is called only
+// in the enabled branch of a statically-inlined constant, so a production build
+// folds this to `null`, Rollup drops the dynamic import, and no gallery chunk
+// is emitted at all. `hack/ui-no-internal-routes.sh` asserts that on every
+// build. Keep the ternary — hoisting `lazy()` out of it makes the import
+// unconditional again and the gallery ships even with the route unmounted.
+const DesignGallery = DESIGN_GALLERY_ENABLED
+  ? lazy(() => import("@/design/gallery").then((m) => ({ default: m.DesignGallery })))
+  : null;
 
 // readAgentPin reads the agent this ORIGIN is pinned to (m37.3): when the SPA is served at an agent's
 // OWN hostname, the BFF injects `<meta name="agent-pin" content="namespace/name">` into index.html (a
@@ -150,13 +157,11 @@ export function App() {
     return <ChatboxApp pin={agentPin} />;
   }
 
-  const designOn = designGalleryEnabled();
-
   return (
     <SessionProvider>
       <ToastProvider>
         <Routes>
-          {designOn && (
+          {DESIGN_GALLERY_ENABLED && DesignGallery && (
             <Route
               path="design/*"
               element={
@@ -195,6 +200,9 @@ export function App() {
             <Route path="teams" element={<TeamsPage />} />
             {/* m71.7: CreateTeamPage — describe → generate → review → create. */}
             <Route path="teams/new" element={<CreateTeamPage />} />
+            {/* m151: the team OUTLINE (spec §6.1 archetype A3) — the roster as an
+                indented tree, its spawn bounds, and the delegation tree of a run. */}
+            <Route path="teams/:ns/:name" element={<TeamDetailPage />} />
             {/* m66.10: GuardrailPolicies — the content-governance policies (read-only). */}
             <Route path="guardrails" element={<GuardrailPoliciesPage />} />
             {/* m67.9: Workflows — the declarative agent graph CRs (read-only list + invoke). */}
@@ -267,6 +275,9 @@ export function App() {
             <Route path="my-shares" element={<MySharesPage />} />
             {/* V5/V15, M112-M113: Approvals — namespace-scoped unified queue of runs paused on plan_approval OR mid-run approval. */}
             <Route path="approvals" element={<ApprovalsPage />} />
+            {/* m151.7: Stops — the scoped kill switch's landing surface (ADR 0126, spec §6.2
+                gap 2). What is halted right now, what it holds, who stopped it, and the lift. */}
+            <Route path="stops" element={<StopsPage />} />
             {/* m16.7: native trace page — full one-trace view with TraceExplorer
                 + Langfuse link-out demotion + FeedbackPanel (m16.9). */}
             <Route path="traces/:id" element={<TracePage />} />

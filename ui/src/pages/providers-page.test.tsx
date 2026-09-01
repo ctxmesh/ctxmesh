@@ -91,13 +91,15 @@ describe("ProvidersPage", () => {
   it("lists connected providers from the real DTO shape", async () => {
     renderPage(OPERATOR);
     expect(await screen.findByText("Anthropic")).toBeInTheDocument();
-    // The fixture's provider has 2 models — rendered as a count, never key material.
-    expect(screen.getByText(/2 models/)).toBeInTheDocument();
+    // The fixture's provider has 2 models — rendered as a count, never key
+    // material. M151 §4.8 puts a count in the numeric register (mono, tabular,
+    // right-aligned), so the cell reads "2" under a "Models" head rather than
+    // the prose "2 models"; the assertion is scoped to the row's own cell so it
+    // cannot be satisfied by the closing line elsewhere on the page.
+    const models = screen.getByTestId("provider-models-anthropic");
+    expect(models).toHaveTextContent(/^2$/);
     // …and the count is DISCOVERABLE (M100 UI99-refs): hovering reveals the actual model names.
-    expect(screen.getByTestId("provider-models-anthropic")).toHaveAttribute(
-      "title",
-      expect.stringContaining("claude"),
-    );
+    expect(models).toHaveAttribute("title", expect.stringContaining("claude"));
     expect(screen.getByTestId("row-actions-anthropic")).toBeInTheDocument();
     // m54.6: the per-row action reads "Create agent" (parity with the connect
     // flow's "Create agent with this"), not the ambiguous "Use".
@@ -168,6 +170,28 @@ describe("ProvidersPage", () => {
     expect(screen.queryByTestId("rotate-anthropic")).not.toBeInTheDocument();
     expect(screen.queryByTestId("disconnect-anthropic")).not.toBeInTheDocument();
     expect(screen.queryByTestId("connect-provider-button")).not.toBeInTheDocument();
+  });
+
+  it("points a not-ready connection at its model route, where the reason is", async () => {
+    // `ready` is the backing ModelRoute's Ready condition and this list cannot
+    // see WHY it is false, so the next step must not guess at a cause — it
+    // sends the reader to the route that carries the condition message.
+    renderPage(OPERATOR, {
+      providers: [
+        {
+          name: "broken",
+          namespace: "default",
+          provider: "openai",
+          displayName: "Broken key",
+          models: [],
+          secretName: "broken",
+          ready: false,
+        },
+      ],
+    });
+    const next = await screen.findByTestId("provider-next-broken");
+    expect(next).toHaveTextContent("Open its route");
+    expect(next).toHaveAttribute("href", "/routes/default/broken");
   });
 
   it("shows the empty state when no providers are connected", async () => {

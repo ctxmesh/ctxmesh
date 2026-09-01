@@ -1,40 +1,73 @@
-// topology-page.tsx — m15.13 Topology v2
-//
-// A full-page topology view with:
-//   - Grouped mode: agents folded into registry/namespace groups (scale-safe at 200+)
-//   - List↔graph toggle: same data, two presentations
-//   - Search: ?q= filters within groups (debounced)
-//   - Click group to expand/collapse (adds/removes from ?expand set)
-//   - Click expanded agent node → DetailDrawer with summary + link to detail page
-//   - ForbiddenInline on 403
-//
-// Data contract: GET /api/topology?group=registry&q=&expand=<ids>
-//   → { nodes[], edges[], groups[] }
-// groups[] is the scale-safe unit; nodes/edges only contain expanded members.
-//
-// This page uses the BFF's grouped mode ONLY — the flat/raw mode is the
-// dashboard mini-graph. The two views share the same api.topology() call.
-
 import * as React from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
-  Boxes,
   ChevronDown,
   ChevronRight,
   List,
   Network,
   Search,
   Shield,
+  Sparkles,
 } from "lucide-react";
 
 import { api, ApiError } from "@/lib/api";
 import type { TopologyGroup, TopologyNode, TopologyResponse } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { DetailDrawer, EmptyState, ForbiddenInline } from "@/components/kit";
+import {
+  ClosingNote,
+  DetailDrawer,
+  EmptyState,
+  ErrorState,
+  ForbiddenInline,
+  KeyValueList,
+  PageHeader,
+  QuantityValue,
+  Skeleton,
+  type KeyValueItem,
+} from "@/components/kit";
+import { buttonVariants } from "@/components/ui/button";
+import { useCapabilities } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
+import { RES_AGENTS } from "@/lib/nav";
 import { cn } from "@/lib/utils";
+
+// TopologyPage — the fleet CANVAS (m15.13 Topology v2; M151 §6.1 archetype A6,
+// §6.2 "grouped canvas + list toggle; drawer on node click").
+//
+// ── THE PAGE'S ONE IDEA: TWO VIEWS OF ONE TRUTH, NEITHER A CONSOLATION ──────
+// A canvas answers "how is the fleet arranged?" and a list answers "which of
+// these needs me?". Both questions are real, so both views render the SAME
+// grouped payload with the SAME node grammar and the SAME status vocabulary —
+// the only difference is the layout. That matters most at scale: a graph of 400
+// nodes is a picture of a haystack, and the list is the view people will
+// actually use. It is therefore built as a proper scannable table (aligned
+// tracks, mono names, counts in a tabular column, health stated in words), not
+// as a fallback rendered grudgingly.
+//
+// ── THE CANVAS IS A PAN SURFACE IN A FIXED FRAME (§4.6) ────────────────────
+// The frame is a fixed-height bordered `bg-card` box; the map pans INSIDE it.
+// The page around it never scrolls sideways, and the frame's silhouette does
+// not move between loading, empty, forbidden, error and ready — every one of
+// those states renders inside the same box, so the page never jumps.
+//
+// ── COLOUR (ADR 0128 §2.1 / §2.2 / §2.5) ───────────────────────────────────
+// A node's KIND (registry / agent) is identity and takes the neutral register:
+// a mono uppercase eyebrow, the word doing the work. Only HEALTH carries hue,
+// and only through the two devices §2.2 allows — a status tag on its own tint,
+// and `text-{hue}` on a numeric cell that carries the state ("1 failed"). Pine
+// appears on this page exactly twice, both times as interactivity: the selected
+// view chip and the links. Never on a node.
+//
+// data-testid contract (the black-box operator journey drives this page by it —
+// see agent-brain/harness/ui-e2e/support/pages.ts):
+//   topology-page / topology-search / toggle-graph / toggle-list
+//   topology-graph-view / topology-list-view / topology-count-badge
+//   topology-loading / topology-empty / topology-error / topology-forbidden
+//   group-card-{id} / group-label-{id} / group-row-{id} / group-row-label-{id}
+//   agent-node-{id} / list-agent-node-{id} / truncated-{id} / group-truncated
+//   health-dots / node-drawer-content / drawer-agent-{name,ns,health,detail}
+//   drawer-open-detail
 
 // ---------------------------------------------------------------------------
 // Types
@@ -46,59 +79,165 @@ type LoadState =
   | { kind: "error"; message: string; forbidden: boolean }
   | { kind: "ready"; data: TopologyResponse };
 
+type Health = TopologyNode["health"];
+
 // ---------------------------------------------------------------------------
-// HealthDots — compact health rollup for a group card
+// The status vocabulary — health, and ONLY health, carries hue
 // ---------------------------------------------------------------------------
 
-function HealthDots({ health }: { health: TopologyGroup["health"] }) {
+/**
+ * Topology health → the §5.1 tag vocabulary.
+ *
+ * Deliberately NOT routed through `resolveStatus`/`StatusBadge`: that helper
+ * reads free-form phase/reason text, and the literal string "unknown" falls
+ * through its ladder to the `failed` tone. A cluster that reported no status
+ * for an agent has not told us the agent is broken — it has told us nothing,
+ * and rendering silence as a failure is the same lie as rendering it as zero
+ * (§7.1). "Unknown" therefore takes the dashed `open` tag, which is the
+ * console's word for "declared, but nothing has been observed".
+ */
+const HEALTH_TAG: Record<Health, "ok" | "crit" | "progressing" | "open"> = {
+  ready: "ok",
+  notReady: "crit",
+  pending: "progressing",
+  unknown: "open",
+};
+
+const HEALTH_LABEL: Record<Health, string> = {
+  ready: "Ready",
+  notReady: "Not ready",
+  pending: "Pending",
+  unknown: "Unknown",
+};
+
+const UNKNOWN_HEALTH_TITLE =
+  "No status was reported for this agent — unknown, not unhealthy.";
+
+function HealthTag({ health }: { health: Health }) {
+  return (
+    <Badge
+      variant={HEALTH_TAG[health]}
+      title={health === "unknown" ? UNKNOWN_HEALTH_TITLE : undefined}
+    >
+      {HEALTH_LABEL[health]}
+    </Badge>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// HealthLine — a group's rollup, worst first, in words
+// ---------------------------------------------------------------------------
+
+/**
+ * The fleet rollup for one group. §2.2's second sanctioned hue device: the
+ * colour sits on a numeric cell that CARRIES the state, never on a surface.
+ *
+ * Order is the §6.1 attention order — what is blocking comes first, "serving"
+ * comes last — so a single failure is never hidden behind a healthy majority.
+ * `pending` and `unknown` are neutral on purpose: converging needs no person
+ * (§2.5), and an unreported status is not a claim at all.
+ */
+function HealthLine({ health }: { health: TopologyGroup["health"] }) {
   const total = health.ready + health.notReady + health.pending + health.unknown;
   if (total === 0) {
-    return <span className="text-[10px] text-muted-foreground">no agents</span>;
+    return (
+      <span
+        data-testid="health-dots"
+        className="font-mono text-2xs uppercase tracking-wide text-faint"
+      >
+        no agents
+      </span>
+    );
   }
   return (
-    <div className="flex items-center gap-1.5 text-[10px]" data-testid="health-dots">
-      {health.ready > 0 && (
-        <span className="flex items-center gap-0.5">
-          <span className="h-2 w-2 rounded-full bg-success" />
-          {health.ready}
-        </span>
-      )}
-      {health.pending > 0 && (
-        <span className="flex items-center gap-0.5">
-          <span className="h-2 w-2 rounded-full bg-warning" />
-          {health.pending}
-        </span>
-      )}
+    <div
+      data-testid="health-dots"
+      className="flex min-w-0 flex-wrap items-baseline justify-end gap-x-2 gap-y-0.5 font-mono text-2xs tabular-nums"
+    >
       {health.notReady > 0 && (
-        <span className="flex items-center gap-0.5">
-          <span className="h-2 w-2 rounded-full bg-destructive" />
-          {health.notReady}
-        </span>
+        <span className="text-destructive">{health.notReady} failed</span>
       )}
+      {health.pending > 0 && <span className="text-faint">{health.pending} pending</span>}
       {health.unknown > 0 && (
-        <span className="flex items-center gap-0.5">
-          <span className="h-2 w-2 rounded-full bg-muted-foreground" />
-          {health.unknown}
+        <span className="text-faint" title={UNKNOWN_HEALTH_TITLE}>
+          {health.unknown} unknown
         </span>
       )}
+      {health.ready > 0 && <span className="text-success">{health.ready} ready</span>}
+    </div>
+  );
+}
+
+/** Worst-first: the ONE thing about a group that asks for attention. */
+function groupAccent(health: TopologyGroup["health"]): string {
+  // Only a failure earns the accent rule. "Everything is fine" and "the machine
+  // is still converging" are not attention states, and an accent that is always
+  // on is an accent that says nothing (§2.2 — annotation, not alarm).
+  return health.notReady > 0 ? "border-l-destructive" : "border-l-border-strong";
+}
+
+// ---------------------------------------------------------------------------
+// The canvas frame (§6.1 A6, §4.6)
+// ---------------------------------------------------------------------------
+
+/**
+ * The bordered `bg-card` box the map pans inside. Fixed height so the page
+ * silhouette is identical in every state, `overflow-auto` so the map — not the
+ * document — is what scrolls.
+ *
+ * NOTE (recorded deviation): this grammar is shared verbatim with
+ * `workflow-detail-page.tsx`, the other A6 surface. It belongs in `kit/` as a
+ * `Canvas` primitive; the M151 page-conversion fence puts `components/kit/`
+ * off-limits to this task, so the two pages carry the same class strings and a
+ * pointer to each other instead. Lifting it is carded for the backlog.
+ */
+const CANVAS_FRAME =
+  "relative min-h-[35rem] max-h-[42rem] min-w-0 overflow-auto rounded-lg border border-border bg-card p-6";
+
+/** The pan surface's dot grid — a token consumed, never a colour invented. */
+const CANVAS_GRID =
+  "bg-[radial-gradient(hsl(var(--border))_1px,transparent_1px)] [background-size:22px_22px]";
+
+function CanvasFrame({
+  children,
+  grid = true,
+  className,
+  ...rest
+}: {
+  children: React.ReactNode;
+  grid?: boolean;
+  className?: string;
+} & React.HTMLAttributes<HTMLDivElement>) {
+  return (
+    <div className={cn(CANVAS_FRAME, grid && CANVAS_GRID, className)} {...rest}>
+      {children}
+    </div>
+  );
+}
+
+/** §7 A6 loading: the frame with node-shaped blocks, and no edges. */
+function CanvasSkeleton() {
+  return (
+    <div
+      role="status"
+      aria-busy="true"
+      aria-label="Loading topology"
+      data-testid="topology-loading"
+      className="flex flex-wrap gap-6"
+    >
+      {[0, 1, 2, 3, 4].map((i) => (
+        <div key={i} className="space-y-3">
+          <Skeleton decorative className="h-[5.5rem] w-56 rounded-lg" />
+          <Skeleton decorative className="ml-4 h-16 w-52 rounded-md" />
+        </div>
+      ))}
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// GroupCard — one collapsible registry/namespace group in graph view
+// GroupCard — one collapsible registry/namespace group on the canvas
 // ---------------------------------------------------------------------------
-
-// The health-accent left rule — the canvas status vocabulary applied to a fleet
-// group: red if anything's failing, amber if anything's pending, green if all
-// resolved, muted if empty. Worst-first, so a problem is never hidden by a healthy
-// majority.
-function groupAccent(health: TopologyGroup["health"]): string {
-  if (health.notReady > 0) return "border-l-destructive";
-  if (health.pending > 0) return "border-l-warning";
-  if (health.ready > 0) return "border-l-success";
-  return "border-l-muted-foreground/40";
-}
 
 function GroupCard({
   group,
@@ -109,55 +248,57 @@ function GroupCard({
   expanded: boolean;
   onToggle: () => void;
 }) {
-  // Canvas grammar (ADR 0115): a registry is a trust boundary — drawn with the
-  // same dashed-fence + Shield vocabulary as the Team Sheet, tinted by fleet health.
+  // A registry is a TRUST BOUNDARY, and the console draws every trust boundary
+  // the same way (ADR 0115): a dashed fence with the Shield mark. The dash is
+  // the boundary; the left rule is the health inside it.
   return (
     <button
       type="button"
       data-testid={`group-card-${group.id}`}
       onClick={onToggle}
+      aria-expanded={expanded}
       className={cn(
-        "w-56 rounded-lg border border-dashed border-l-2 border-muted-foreground/40 bg-card p-3 text-left shadow-card transition-shadow hover:shadow-elevated",
+        "w-64 rounded-lg border border-dashed border-border-strong border-l-2 bg-card p-3 text-left transition-colors hover:bg-surface-2",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
         groupAccent(group.health),
       )}
     >
-      <div className="mb-2 flex items-center gap-2">
-        <Shield className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+      <div className="mb-2 flex items-start gap-2">
+        <Shield className="mt-0.5 h-4 w-4 shrink-0 text-faint" aria-hidden />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-[10px] uppercase tracking-wide text-muted-foreground">
+          <p className="font-mono text-2xs uppercase tracking-wide text-faint">
             registry
           </p>
-          <p className="truncate text-sm font-medium" data-testid={`group-label-${group.id}`}>
+          <p
+            className="truncate font-mono text-sm font-medium"
+            title={group.label}
+            data-testid={`group-label-${group.id}`}
+          >
             {group.label}
           </p>
-          <p className="truncate text-[11px] text-muted-foreground">{group.namespace}</p>
+          <p className="truncate font-mono text-2xs text-faint" title={group.namespace}>
+            {group.namespace}
+          </p>
         </div>
         {expanded ? (
-          <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <ChevronDown className="h-4 w-4 shrink-0 text-faint" aria-hidden />
         ) : (
-          <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <ChevronRight className="h-4 w-4 shrink-0 text-faint" aria-hidden />
         )}
       </div>
-      <div className="flex items-center justify-between">
-        <span className="text-xs text-muted-foreground">
+      <div className="flex items-baseline justify-between gap-2 border-t border-border-soft pt-2">
+        <span className="shrink-0 whitespace-nowrap font-mono text-2xs tabular-nums text-faint">
           {group.memberCount} {group.memberCount === 1 ? "agent" : "agents"}
         </span>
-        <HealthDots health={group.health} />
+        <HealthLine health={group.health} />
       </div>
     </button>
   );
 }
 
 // ---------------------------------------------------------------------------
-// AgentNodeCard — an expanded individual agent in graph view
+// AgentNodeCard — an expanded individual agent on the canvas
 // ---------------------------------------------------------------------------
-
-const NODE_HEALTH_DOT: Record<string, string> = {
-  ready: "bg-success",
-  notReady: "bg-destructive",
-  pending: "bg-warning",
-  unknown: "bg-muted-foreground",
-};
 
 function AgentNodeCard({
   node,
@@ -166,37 +307,48 @@ function AgentNodeCard({
   node: TopologyNode;
   onClick: () => void;
 }) {
-  // Canvas grammar: readiness is a status DOT (as on the Team Sheet + Live lens),
-  // not a full-border color — one consistent vocabulary across every lens.
   return (
     <button
       type="button"
       data-testid={`agent-node-${node.id}`}
       onClick={onClick}
-      className="min-w-36 rounded-md border bg-card px-3 py-2 text-left shadow-card transition-shadow hover:shadow-elevated"
+      className={cn(
+        "w-60 rounded-md border border-border bg-card px-3 py-2 text-left transition-colors hover:bg-surface-2",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+        // §6.1 A6's node grammar: the border says what STATE the node is in —
+        // a crit rule when it is failing, a dashed frame when nothing has been
+        // reported about it at all. A healthy node needs no rule.
+        node.health === "notReady" && "border-l-2 border-l-destructive",
+        node.health === "unknown" && "border-dashed",
+      )}
     >
-      <div className="flex items-center gap-1.5">
-        <span
-          className={cn(
-            "h-2 w-2 shrink-0 rounded-full",
-            NODE_HEALTH_DOT[node.health] ?? "bg-muted-foreground",
-          )}
-        />
-        <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-          Agent
-        </p>
+      <p className="font-mono text-2xs uppercase tracking-wide text-faint">Agent</p>
+      <p className="truncate font-mono text-sm font-medium" title={node.name}>
+        {node.name}
+      </p>
+      <div className="mt-1.5 flex items-center gap-2">
+        <HealthTag health={node.health} />
       </div>
-      <p className="truncate text-sm font-semibold text-card-foreground">{node.name}</p>
       {node.detail && (
-        <p className="truncate font-mono text-[10px] text-muted-foreground">{node.detail}</p>
+        <p className="mt-1 truncate font-mono text-2xs text-faint" title={node.detail}>
+          {node.detail}
+        </p>
       )}
     </button>
   );
 }
 
 // ---------------------------------------------------------------------------
-// GroupRow — one row in the list view
+// The list view — the same data, as a table you can actually scan
 // ---------------------------------------------------------------------------
+
+/**
+ * One track set shared by group rows, agent rows and the column heads, so the
+ * three read as one object. The table lives in its own horizontal scroller with
+ * a `min-w` floor (§4.6): below ~672px the TABLE scrolls, never the page.
+ */
+const LIST_GRID =
+  "grid grid-cols-[minmax(0,1fr)_minmax(0,9rem)_4.5rem_minmax(0,10rem)] items-center gap-3";
 
 function GroupRow({
   group,
@@ -212,76 +364,81 @@ function GroupRow({
   expandedNodes: TopologyNode[];
 }) {
   return (
-    <div>
+    <div className="border-b border-border-soft last:border-b-0">
       <button
         type="button"
         data-testid={`group-row-${group.id}`}
         onClick={onToggle}
-        className="flex w-full items-center gap-3 rounded-md border bg-card px-4 py-3 text-left shadow-card hover:bg-surface-2"
-      >
-        <Boxes className="h-4 w-4 text-primary shrink-0" />
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium" data-testid={`group-row-label-${group.id}`}>
-            {group.label}
-          </p>
-          <p className="text-xs text-muted-foreground">
-            {group.namespace} · {group.memberCount}{" "}
-            {group.memberCount === 1 ? "agent" : "agents"}
-          </p>
-        </div>
-        <div className="flex items-center gap-2 text-xs">
-          {group.health.ready > 0 && (
-            <Badge variant="success" className="text-[10px]">
-              {group.health.ready} ready
-            </Badge>
-          )}
-          {group.health.notReady > 0 && (
-            <Badge variant="destructive" className="text-[10px]">
-              {group.health.notReady} failed
-            </Badge>
-          )}
-          {group.health.pending > 0 && (
-            <Badge variant="warning" className="text-[10px]">
-              {group.health.pending} pending
-            </Badge>
-          )}
-        </div>
-        {expanded ? (
-          <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
-        ) : (
-          <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+        aria-expanded={expanded}
+        className={cn(
+          LIST_GRID,
+          "w-full px-4 py-2.5 text-left transition-colors hover:bg-surface-2",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
         )}
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          {expanded ? (
+            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-faint" aria-hidden />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-faint" aria-hidden />
+          )}
+          <Shield className="h-3.5 w-3.5 shrink-0 text-faint" aria-hidden />
+          <span
+            className="truncate font-mono text-sm font-medium"
+            title={group.label}
+            data-testid={`group-row-label-${group.id}`}
+          >
+            {group.label}
+          </span>
+        </span>
+        <span className="truncate font-mono text-xs text-faint" title={group.namespace}>
+          {group.namespace}
+        </span>
+        <span className="text-right" data-testid={`group-row-count-${group.id}`}>
+          <QuantityValue value={group.memberCount} className="text-xs" />
+        </span>
+        <HealthLine health={group.health} />
       </button>
-      {/* Expanded member agents in list view */}
+
+      {/* Expanded member agents. A sub-row is the sunk band (§4.1) so the
+          hierarchy reads without an indent guessing game. */}
       {expanded && expandedNodes.length > 0 && (
-        <div className="ml-10 mt-1 space-y-1">
+        <div className="border-t border-border-soft bg-surface-2">
           {expandedNodes.map((n) => (
             <button
               key={n.id}
               type="button"
               data-testid={`list-agent-node-${n.id}`}
               onClick={() => onNodeClick(n)}
-              className="flex w-full items-center gap-3 rounded-md border border-border-subtle bg-surface-2 px-4 py-2 text-left text-sm hover:bg-surface-3"
+              className={cn(
+                LIST_GRID,
+                "w-full border-b border-border-soft px-4 py-2 text-left transition-colors last:border-b-0 hover:bg-surface-3",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+              )}
             >
-              <span className="flex-1 truncate font-medium">{n.name}</span>
-              <span className="text-xs text-muted-foreground">{n.namespace}</span>
-              <Badge
-                variant={
-                  n.health === "ready"
-                    ? "success"
-                    : n.health === "notReady"
-                      ? "destructive"
-                      : "secondary"
-                }
-                className="text-[10px]"
-              >
-                {n.health}
-              </Badge>
+              <span className="flex min-w-0 items-center gap-2 pl-6">
+                <span className="truncate font-mono text-sm" title={n.name}>
+                  {n.name}
+                </span>
+              </span>
+              <span className="truncate font-mono text-xs text-faint" title={n.namespace}>
+                {n.namespace}
+              </span>
+              {/* A member row has no member count. Inapplicable is not zero and
+                  not unknown — it is simply nothing, and prints as nothing. */}
+              <span aria-hidden="true" />
+              <span>
+                <HealthTag health={n.health} />
+              </span>
             </button>
           ))}
           {group.truncated && (
-            <p className="px-4 py-1 text-xs text-muted-foreground" data-testid="group-truncated">
-              +{group.memberCount - group.shownCount} more agents (expand limit reached)
+            <p
+              className="px-4 py-2 pl-14 font-mono text-2xs text-faint"
+              data-testid="group-truncated"
+            >
+              +{group.memberCount - group.shownCount} more agents — the expand
+              limit was reached. Search to narrow the group.
             </p>
           )}
         </div>
@@ -301,15 +458,39 @@ function NodeDetailDrawer({
   node: TopologyNode | null;
   onClose: () => void;
 }) {
-  const navigate = useNavigate();
   if (!node) return null;
 
-  const healthBadge =
-    node.health === "ready"
-      ? "success"
-      : node.health === "notReady"
-        ? "destructive"
-        : "secondary";
+  const facts: KeyValueItem[] = [
+    {
+      key: "Name",
+      value: <span data-testid="drawer-agent-name">{node.name}</span>,
+      title: node.name,
+    },
+    {
+      key: "Namespace",
+      value: <span data-testid="drawer-agent-ns">{node.namespace}</span>,
+      title: node.namespace,
+    },
+    {
+      key: "Health",
+      // The human word, not the raw enum: `notReady` is a wire value, and the
+      // drawer is a reading surface.
+      value: (
+        <span data-testid="drawer-agent-health">{HEALTH_LABEL[node.health]}</span>
+      ),
+      title: node.health === "unknown" ? UNKNOWN_HEALTH_TITLE : node.health,
+    },
+    {
+      key: "Image",
+      value: node.detail ? (
+        <span data-testid="drawer-agent-detail" className="break-all">
+          {node.detail}
+        </span>
+      ) : undefined,
+      absent: "not reported",
+      title: "The topology payload carries no image for this agent.",
+    },
+  ];
 
   return (
     <DetailDrawer
@@ -317,40 +498,19 @@ function NodeDetailDrawer({
       onClose={onClose}
       title={node.name}
       subtitle={node.namespace}
-      status={
-        <Badge variant={healthBadge as "success" | "destructive" | "secondary"} className="text-[10px]">
-          {node.health}
-        </Badge>
-      }
+      status={<HealthTag health={node.health} />}
       footer={
-        <Button
-          size="sm"
-          onClick={() => navigate(`/agents/${node.namespace}/${node.name}`)}
+        <Link
+          to={`/agents/${encodeURIComponent(node.namespace)}/${encodeURIComponent(node.name)}`}
           data-testid="drawer-open-detail"
+          className={buttonVariants({ size: "sm" })}
         >
           Open detail
-        </Button>
+        </Link>
       }
     >
       <div className="space-y-4" data-testid="node-drawer-content">
-        <dl className="grid grid-cols-[8rem_1fr] gap-y-2 text-sm">
-          <dt className="text-muted-foreground">Name</dt>
-          <dd className="font-medium" data-testid="drawer-agent-name">
-            {node.name}
-          </dd>
-          <dt className="text-muted-foreground">Namespace</dt>
-          <dd data-testid="drawer-agent-ns">{node.namespace}</dd>
-          <dt className="text-muted-foreground">Health</dt>
-          <dd data-testid="drawer-agent-health">{node.health}</dd>
-          {node.detail && (
-            <>
-              <dt className="text-muted-foreground">Image</dt>
-              <dd className="font-mono text-xs break-all" data-testid="drawer-agent-detail">
-                {node.detail}
-              </dd>
-            </>
-          )}
-        </dl>
+        <KeyValueList items={facts} />
       </div>
     </DetailDrawer>
   );
@@ -361,9 +521,12 @@ function NodeDetailDrawer({
 // ---------------------------------------------------------------------------
 
 export function TopologyPage() {
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   // The header namespace scope filters the graph (m24.3) — "" = cluster-wide.
   const { namespace } = useNamespace();
+  const { can } = useCapabilities();
+  const canCreate = can(RES_AGENTS, "create");
   const [state, setState] = React.useState<LoadState>({ kind: "loading" });
   const [view, setView] = React.useState<ViewMode>("graph");
   const [searchInput, setSearchInput] = React.useState("");
@@ -386,6 +549,12 @@ export function TopologyPage() {
     searchTimerRef.current = setTimeout(() => {
       setQ(value.trim());
     }, 300);
+  }
+
+  function clearSearch() {
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    setSearchInput("");
+    setQ("");
   }
 
   // Fetch topology on q or expandedGroups change
@@ -448,177 +617,202 @@ export function TopologyPage() {
   }
 
   // nodesByGroup indexes the loaded nodes (expanded members) by their group id.
-  // The group id for a registry member is "registry/<ns>/<name>"; for namespace
-  // groups it is "namespace/<ns>". The node ids are
-  // "<kind>/<ns>/<name>" — we derive the group key from the kind/ns of the node.
+  // Partition members by the AUTHORITATIVE group id the BFF stamped on each node
+  // (node.group). Namespace matching is wrong when two registries share a
+  // namespace — both would then claim every agent in it (the m25 shakedown bug).
+  // Fall back to namespace only for older payloads that predate node.group.
   function nodesForGroup(group: TopologyGroup, nodes: TopologyNode[]): TopologyNode[] {
-    // Partition members by the AUTHORITATIVE group id the BFF stamped on each node
-    // (node.group). Namespace matching is wrong when two registries share a namespace
-    // — both would then claim every agent in it (the m25 shakedown bug). Fall back to
-    // namespace only for older payloads that predate node.group.
     if (nodes.some((n) => n.group)) {
       return nodes.filter((n) => n.kind === "agent" && n.group === group.id);
     }
     return nodes.filter((n) => n.kind === "agent" && n.namespace === group.namespace);
   }
 
-  // ---------------------------------------------------------------------------
-  // Render
-  // ---------------------------------------------------------------------------
+  const groups = state.kind === "ready" ? (state.data.groups ?? []) : [];
+  const nodes = state.kind === "ready" ? state.data.nodes : [];
+  const isEmpty = state.kind === "ready" && groups.length === 0 && nodes.length === 0;
+  const agentTotal = groups.reduce((sum, g) => sum + g.memberCount, 0);
+  const unitNoun = groups[0]?.kind === "namespace" ? "namespace" : "registry";
+  const unitPlural = unitNoun === "namespace" ? "namespaces" : "registries";
 
-  if (state.kind === "error") {
-    if (state.forbidden) {
-      return (
-        <div className="mx-auto max-w-5xl" data-testid="topology-forbidden">
+  // ── The view toggle ────────────────────────────────────────────────────────
+  //
+  // RECORDED DEVIATION: this is the kit's `FilterChipRow` vocabulary, hand-rolled.
+  // FilterChipRow is the right primitive and its radiogroup semantics are copied
+  // exactly — but it takes no per-chip `data-testid`, and `toggle-graph` /
+  // `toggle-list` are a SHIPPED black-box contract (the operator journey in
+  // agent-brain/harness/ui-e2e drives the page through them). Rebuilding the
+  // chip styling is the smaller sin than breaking a suite that cannot be edited
+  // from here; adding a `testId` to `FilterChip` is carded for the backlog.
+  const CHIP =
+    "inline-flex items-center gap-1.5 rounded-sm border px-3 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
+  const chipClass = (active: boolean) =>
+    cn(
+      CHIP,
+      active
+        ? // Selection is always pine-family, never a status hue (§2.3).
+          "border-primary bg-accent font-semibold text-primary"
+        : "border-border-strong bg-card text-secondary-foreground hover:bg-surface-2",
+    );
+
+  const viewToggle = (
+    <div role="radiogroup" aria-label="Topology view" className="flex gap-2">
+      <button
+        type="button"
+        role="radio"
+        aria-checked={view === "graph"}
+        tabIndex={view === "graph" ? 0 : -1}
+        data-testid="toggle-graph"
+        onClick={() => setView("graph")}
+        className={chipClass(view === "graph")}
+      >
+        <Network className="h-4 w-4" aria-hidden />
+        Graph
+      </button>
+      <button
+        type="button"
+        role="radio"
+        aria-checked={view === "list"}
+        tabIndex={view === "list" ? 0 : -1}
+        data-testid="toggle-list"
+        onClick={() => setView("list")}
+        className={chipClass(view === "list")}
+      >
+        <List className="h-4 w-4" aria-hidden />
+        List
+      </button>
+    </div>
+  );
+
+  // ── What goes inside the frame, in every state (§7 A6) ────────────────────
+  let frame: React.ReactNode;
+  if (state.kind === "loading") {
+    frame = (
+      <CanvasFrame>
+        <CanvasSkeleton />
+      </CanvasFrame>
+    );
+  } else if (state.kind === "error" && state.forbidden) {
+    frame = (
+      <CanvasFrame grid={false} className="grid place-items-center">
+        <div className="w-full max-w-lg" data-testid="topology-forbidden">
           <ForbiddenInline
-            title="Not allowed to view topology"
-            description="Your account can't list agent registries or deployments."
+            title="You don't have permission to view the topology."
+            description="It reads agent registries and deployments across the cluster."
+            resource="agent registries"
             detail={state.message}
           />
         </div>
-      );
-    }
-    return (
-      <div className="mx-auto max-w-5xl">
-        <div
-          className="rounded-lg border bg-card p-6 text-sm text-destructive shadow-card"
-          role="alert"
-          data-testid="topology-error"
-        >
-          Couldn&apos;t load topology: {state.message}
-        </div>
-      </div>
+      </CanvasFrame>
     );
-  }
-
-  const groups = state.kind === "ready" ? (state.data.groups ?? []) : [];
-  const nodes = state.kind === "ready" ? state.data.nodes : [];
-
-  return (
-    <div className="mx-auto max-w-6xl space-y-4" data-testid="topology-page">
-      {/* Controls row */}
-      <div className="flex flex-wrap items-center gap-3">
-        {/* Search */}
-        <div className="relative min-w-[18rem] flex-1">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            placeholder="Search agents, registries, namespaces…"
-            className="pl-9"
-            value={searchInput}
-            onChange={(e) => handleSearchChange(e.target.value)}
-            data-testid="topology-search"
+  } else if (state.kind === "error") {
+    frame = (
+      <CanvasFrame grid={false} className="grid place-items-center">
+        <div className="w-full max-w-lg" data-testid="topology-error">
+          <ErrorState
+            title="The topology didn't load."
+            description="The fleet itself is unaffected — only the map failed to read."
+            detail={state.message}
+            onRetry={() => load()}
           />
         </div>
-
-        {/* View toggle */}
-        <div className="flex items-center rounded-md border bg-card">
-          <button
-            type="button"
-            data-testid="toggle-graph"
-            onClick={() => setView("graph")}
+      </CanvasFrame>
+    );
+  } else if (isEmpty) {
+    frame = (
+      <CanvasFrame grid={false} className="grid place-items-center">
+        <div className="w-full max-w-lg" data-testid="topology-empty">
+          {q ? (
+            <EmptyState
+              intent="filtered"
+              icon={Search}
+              title="No nodes match"
+              description={`Nothing in the map matches “${q}”. Clear the search to see the whole fleet.`}
+              action={{
+                label: "Clear the search",
+                variant: "outline",
+                onClick: clearSearch,
+              }}
+            />
+          ) : (
+            <EmptyState
+              icon={Network}
+              title="Nothing to draw yet"
+              description="The map shows every registry and the agents inside it. It appears as soon as the first agent is created."
+              action={
+                canCreate
+                  ? {
+                      label: "New agent",
+                      icon: Sparkles,
+                      onClick: () => navigate("/agents/new"),
+                    }
+                  : undefined
+              }
+            />
+          )}
+        </div>
+      </CanvasFrame>
+    );
+  } else if (view === "graph") {
+    frame = (
+      <CanvasFrame data-testid="topology-graph-view">
+        <div className="flex flex-wrap gap-6">
+          {groups.map((g) => {
+            const isExpanded = expandedGroups.has(g.id) || q.length > 0;
+            const memberNodes = isExpanded ? nodesForGroup(g, nodes) : [];
+            return (
+              <div key={g.id} className="space-y-3">
+                <GroupCard
+                  group={g}
+                  expanded={isExpanded}
+                  onToggle={() => toggleGroup(g.id)}
+                />
+                {isExpanded && memberNodes.length > 0 && (
+                  <div className="ml-4 flex flex-col gap-2">
+                    {memberNodes.map((n) => (
+                      <AgentNodeCard
+                        key={n.id}
+                        node={n}
+                        onClick={() => setDrawerNode(n)}
+                      />
+                    ))}
+                    {g.truncated && (
+                      <p
+                        className="px-2 font-mono text-2xs text-faint"
+                        data-testid={`truncated-${g.id}`}
+                      >
+                        +{g.memberCount - g.shownCount} more
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </CanvasFrame>
+    );
+  } else {
+    frame = (
+      <div
+        className="overflow-x-auto rounded-lg border border-border bg-card"
+        data-testid="topology-list-view"
+      >
+        <div className="min-w-[42rem]">
+          {/* Column heads in the §4.8 mono eyebrow register. Hidden from
+              assistive tech — each row states its own values in full. */}
+          <div
+            aria-hidden="true"
             className={cn(
-              "flex items-center gap-1.5 rounded-l-md px-3 py-1.5 text-sm transition-colors",
-              view === "graph" ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:text-foreground",
+              LIST_GRID,
+              "border-b border-border px-4 py-2 font-mono text-2xs uppercase tracking-wide text-faint",
             )}
           >
-            <Network className="h-4 w-4" />
-            Graph
-          </button>
-          <button
-            type="button"
-            data-testid="toggle-list"
-            onClick={() => setView("list")}
-            className={cn(
-              "flex items-center gap-1.5 rounded-r-md px-3 py-1.5 text-sm transition-colors",
-              view === "list" ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:text-foreground",
-            )}
-          >
-            <List className="h-4 w-4" />
-            List
-          </button>
-        </div>
-
-        {/* Agent count badge */}
-        {state.kind === "ready" && groups.length > 0 && (
-          <Badge variant="secondary" className="text-[10px]" data-testid="topology-count-badge">
-            {groups.reduce((sum, g) => sum + g.memberCount, 0)} agents ·{" "}
-            {groups.length} {groups[0]?.kind === "namespace" ? "namespaces" : "registries"}
-          </Badge>
-        )}
-      </div>
-
-      {/* Loading */}
-      {state.kind === "loading" && (
-        <p className="text-sm text-muted-foreground" data-testid="topology-loading">
-          Loading topology…
-        </p>
-      )}
-
-      {/* Empty */}
-      {state.kind === "ready" && groups.length === 0 && nodes.length === 0 && (
-        <EmptyState
-          icon={Network}
-          title="No registries or agents"
-          description={
-            q
-              ? "No agents match your search. Try a different query."
-              : "Create an AgentRegistry and deploy some agents to see the topology."
-          }
-          data-testid="topology-empty"
-        />
-      )}
-
-      {/* Graph view */}
-      {state.kind === "ready" && view === "graph" && groups.length > 0 && (
-        <div
-          className="relative min-h-[28rem] overflow-auto rounded-lg border bg-[radial-gradient(hsl(var(--border))_1px,transparent_1px)] [background-size:22px_22px] p-8"
-          data-testid="topology-graph-view"
-        >
-          <div className="flex flex-wrap gap-6">
-            {groups.map((g) => {
-              const isExpanded = expandedGroups.has(g.id) || q.length > 0;
-              const memberNodes = isExpanded ? nodesForGroup(g, nodes) : [];
-              return (
-                <div key={g.id} className="space-y-3">
-                  <GroupCard
-                    group={g}
-                    expanded={isExpanded}
-                    onToggle={() => toggleGroup(g.id)}
-                  />
-                  {/* Expanded agent nodes beneath their group card */}
-                  {isExpanded && memberNodes.length > 0 && (
-                    <div className="ml-4 flex flex-col gap-2">
-                      {memberNodes.map((n) => (
-                        <AgentNodeCard
-                          key={n.id}
-                          node={n}
-                          onClick={() => setDrawerNode(n)}
-                        />
-                      ))}
-                      {g.truncated && (
-                        <p
-                          className="px-2 text-xs text-muted-foreground"
-                          data-testid={`truncated-${g.id}`}
-                        >
-                          +{g.memberCount - g.shownCount} more
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+            <span>Registry / agent</span>
+            <span>Namespace</span>
+            <span className="text-right">Agents</span>
+            <span>Health</span>
           </div>
-          {/* hint */}
-          <div className="absolute left-3 top-3 rounded-md border bg-card/80 px-2.5 py-1 text-xs text-muted-foreground backdrop-blur">
-            Grouped by registry — click to expand
-          </div>
-        </div>
-      )}
-
-      {/* List view */}
-      {state.kind === "ready" && view === "list" && groups.length > 0 && (
-        <div className="space-y-2" data-testid="topology-list-view">
           {groups.map((g) => {
             const isExpanded = expandedGroups.has(g.id) || q.length > 0;
             const memberNodes = isExpanded ? nodesForGroup(g, nodes) : [];
@@ -634,6 +828,57 @@ export function TopologyPage() {
             );
           })}
         </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-w-0 space-y-5" data-testid="topology-page">
+      <PageHeader
+        title="Topology"
+        lede="Every registry in the cluster and the agents inside it. Open a registry to see its members; open a member to see what it is."
+        actionsSlot={viewToggle}
+      />
+
+      {/* The canvas chrome: one filter over both views, and the honest count. */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="relative min-w-0 flex-1 basis-64">
+          <Search
+            className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-faint"
+            aria-hidden
+          />
+          <Input
+            placeholder="Filter agents, registries, namespaces…"
+            aria-label="Filter the topology"
+            className="pl-9"
+            value={searchInput}
+            onChange={(e) => handleSearchChange(e.target.value)}
+            data-testid="topology-search"
+          />
+        </div>
+        {state.kind === "ready" && groups.length > 0 && (
+          // Counts come from the BFF's own memberCount, never from the rows in
+          // hand — a truncated group still reports its true size.
+          <p
+            className="font-mono text-xs tabular-nums text-faint"
+            data-testid="topology-count-badge"
+          >
+            {agentTotal} agents · {groups.length}{" "}
+            {groups.length === 1 ? unitNoun : unitPlural}
+          </p>
+        )}
+      </div>
+
+      {frame}
+
+      {state.kind === "ready" && groups.length > 0 && (
+        <ClosingNote>
+          {q
+            ? `Filtered to “${q}”. Clear the filter to see the whole fleet.`
+            : view === "graph"
+              ? "Grouped by registry — open one to see the agents inside it."
+              : "The same fleet as the map, in the order you can scan it."}
+        </ClosingNote>
       )}
 
       {/* Node detail drawer — click-through detail without leaving the map */}

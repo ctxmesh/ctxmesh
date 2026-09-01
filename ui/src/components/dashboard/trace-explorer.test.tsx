@@ -150,3 +150,123 @@ describe("TraceExplorer (m16.6)", () => {
     expect(screen.getByTestId("trace-explorer")).toHaveTextContent("no spans");
   });
 });
+
+// ── M151: kind is identity, state is hue (ADR 0128 §2.1/§2.2, spec §5.26) ────
+//
+// The regression these lock down is the one this component shipped with: span
+// KIND was the taxonomy that carried colour (RUN → bg-primary, GENERATION →
+// bg-info, TOOL → bg-success) while the rows that actually needed annotating —
+// a guardrail, a held approval, a failure — took bg-muted and disappeared.
+
+/** Every hue the doctrine defines. None of them may land on an identity chip. */
+const SEMANTIC = [
+  "bg-primary",
+  "bg-info",
+  "bg-hold",
+  "bg-success",
+  "bg-warning",
+  "bg-destructive",
+  "text-primary",
+  "text-info",
+  "text-hold",
+  "text-success",
+  "text-warning",
+  "text-destructive",
+];
+
+const GOVERNED: SpanSummary[] = [
+  span({ id: "root",      type: "SPAN",       name: "run: billing-agent",             startMs: 0,    durationMs: 4000, nestingDepth: 0 }),
+  span({ id: "gen",       type: "GENERATION", name: "generate response",              startMs: 10,   durationMs: 900,  nestingDepth: 1, tokensIn: 10, tokensOut: 5 }),
+  span({ id: "guardrail", type: "EVENT",      name: "guardrail: pii scan",            startMs: 950,  durationMs: 40,   nestingDepth: 2, level: "WARNING" }),
+  span({ id: "approval",  type: "EVENT",      name: "awaiting approval: create_refund", startMs: 1000, durationMs: 1800, nestingDepth: 1 }),
+  span({ id: "failtool",  type: "SPAN",       name: "tool: post_message",             startMs: 2900, durationMs: 120,  nestingDepth: 1, status: "error", level: "ERROR" }),
+  span({ id: "retry",     type: "EVENT",      name: "retry 1/1",                      startMs: 3030, durationMs: 90,   nestingDepth: 2, level: "WARNING" }),
+  span({ id: "plain",     type: "SPAN",       name: "tool: get_invoice",              startMs: 3200, durationMs: 300,  nestingDepth: 1 }),
+];
+
+describe("TraceExplorer — kind is identity, state is hue (M151)", () => {
+  it("draws every kind chip in ONE neutral register — no semantic hue on identity", () => {
+    render(<TraceExplorer spans={SPANS} />);
+    const registers = new Set<string>();
+    for (const s of SPANS) {
+      const chip = screen.getByTestId(`span-kind-${s.id}`);
+      registers.add(chip.className);
+      for (const hue of SEMANTIC) {
+        expect(chip.className.split(/\s+/)).not.toContain(hue);
+      }
+    }
+    // One register, literally: RUN, GENERATION, TOOL, EVENT and SPAN are told
+    // apart by the WORD, never by the colour.
+    expect(registers.size).toBe(1);
+  });
+
+  it("annotates governance and failure with the state chip its hue means", () => {
+    render(<TraceExplorer spans={GOVERNED} />);
+
+    // A guardrail crossed a bound → warn.
+    expect(screen.getByTestId("span-state-guardrail")).toHaveTextContent("Guardrail");
+    expect(screen.getByTestId("span-state-guardrail").className).toContain("text-warning");
+    // A retry: degraded, but it recovered → warn.
+    expect(screen.getByTestId("span-state-retry")).toHaveTextContent("Retry");
+    expect(screen.getByTestId("span-state-retry").className).toContain("text-warning");
+    // A person had to decide → hold, and ONLY here.
+    expect(screen.getByTestId("span-state-approval")).toHaveTextContent("Approval");
+    expect(screen.getByTestId("span-state-approval").className).toContain("text-hold");
+    // It will not proceed without a change → crit.
+    expect(screen.getByTestId("span-state-failtool")).toHaveTextContent("Failed");
+    expect(screen.getByTestId("span-state-failtool").className).toContain("text-destructive");
+  });
+
+  it("gives ordinary steps no state chip and no hue at all", () => {
+    render(<TraceExplorer spans={GOVERNED} />);
+    for (const id of ["root", "gen", "plain"]) {
+      expect(screen.queryByTestId(`span-state-${id}`)).toBeNull();
+      const bar = screen.getByTestId(`span-timing-bar-${id}`);
+      for (const hue of SEMANTIC) {
+        expect(bar.className.split(/\s+/)).not.toContain(hue);
+      }
+    }
+  });
+
+  it("makes a governance row MORE visible than an ordinary one, not less", () => {
+    render(<TraceExplorer spans={GOVERNED} />);
+    // The §5.26 treatment: a hue left rule + a row wash on the governance row…
+    const held = screen.getByTestId("span-row-approval");
+    expect(held.className).toContain("border-l-hold");
+    expect(held.className).toContain("from-hold-surface");
+    // …and its waterfall bar carries the hue too, so it is findable in the
+    // SHAPE of the trace and not only in its text.
+    expect(screen.getByTestId("span-timing-bar-approval").className).toContain("bg-hold");
+    // An ordinary row keeps the same rule WIDTH (nothing shifts) with no hue.
+    expect(screen.getByTestId("span-row-plain").className).toContain("border-l-transparent");
+  });
+
+  it("prints the duration beside the bar, never inside it", () => {
+    render(<TraceExplorer spans={GOVERNED} />);
+    // The root bar spans the whole window; its label used to be painted over
+    // that fill in low-contrast meta text. The bar now carries no text at all…
+    const rootBar = screen.getByTestId("span-timing-bar-root");
+    expect(rootBar).toHaveTextContent("");
+    // …and the duration is a mono cell of its own.
+    expect(screen.getByTestId("span-duration-root")).toHaveTextContent("4.00s");
+    expect(screen.getByTestId("span-duration-guardrail")).toHaveTextContent("40ms");
+  });
+
+  it("draws the root RUN bar as a hollow track — it is the ruler, not a step", () => {
+    render(<TraceExplorer spans={GOVERNED} />);
+    const rootBar = screen.getByTestId("span-timing-bar-root");
+    expect(rootBar.className).toContain("border-border-strong");
+    // A child step IS a measurement, so it is a fill.
+    expect(screen.getByTestId("span-timing-bar-plain").className).toContain("bg-faint");
+  });
+
+  it("renders a measured 0ms as `0ms`, never as the unknown dash", () => {
+    render(
+      <TraceExplorer
+        spans={[span({ id: "instant", name: "trace-metadata", type: "EVENT", durationMs: 0 })]}
+      />,
+    );
+    expect(screen.getByTestId("span-duration-instant")).toHaveTextContent("0ms");
+    expect(screen.getByTestId("span-duration-instant")).not.toHaveTextContent("—");
+  });
+});

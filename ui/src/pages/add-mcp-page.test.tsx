@@ -21,6 +21,13 @@ const BEARER = "mcp-bearer-secret-token-xyz";
 
 function recordingFetch(opts: {
   add?: (body: string) => { ok: boolean; status?: number; json: unknown };
+  /**
+   * Make the POST itself REJECT — the transport failing, not the server
+   * answering. `fetch` rejects with a TypeError when the request never
+   * completes (offline, DNS, the BFF down), and that is a different truth from
+   * any status code: nothing was sent to the MCP server at all.
+   */
+  addRejects?: Error;
   caps?: Record<string, Record<string, boolean>>;
 }) {
   const calls: Captured[] = [];
@@ -41,6 +48,9 @@ function recordingFetch(opts: {
           status: 200,
           json: async () => ({ namespace: "", allowed: opts.caps ?? { agentregistries: { create: true } } }),
         } as Response);
+      }
+      if (url === "/api/mcpservers" && method === "POST" && opts.addRejects) {
+        return Promise.reject(opts.addRejects);
       }
       if (url === "/api/mcpservers" && method === "POST") {
         const r = opts.add
@@ -206,6 +216,96 @@ describe("AddMcpPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /Probe \+ discover/ }));
 
     expect(await screen.findByTestId("kill-switch-fallback")).toBeInTheDocument();
+  });
+});
+
+// A probe that RAN and was refused, a probe that NEVER RAN, and a probe this
+// install cannot run are three different truths (M151 §7). Collapsing them into
+// one "couldn't reach that server" sends a user to fix a URL that was never
+// tried — so each gets its own surface, and only the refusal blames a field.
+describe("AddMcpPage — the three ways a probe ends", () => {
+  it("a REFUSED probe blames the server field and quotes what it said", async () => {
+    recordingFetch({
+      add: () => ({ ok: false, status: 422, json: { error: "MCP handshake failed: connection refused" } }),
+    });
+    renderPage();
+
+    await fillServer();
+    fireEvent.click(screen.getByRole("button", { name: /Probe \+ discover/ }));
+
+    await screen.findByTestId("probe-error");
+    // The address is the thing that has to change, and the field says so.
+    const urlField = screen.getByLabelText(/MCP server URL/);
+    expect(urlField).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByText(/didn.t complete the MCP handshake/i)).toBeInTheDocument();
+    // The other two states are NOT rendered.
+    expect(screen.queryByTestId("probe-unreachable")).toBeNull();
+    expect(screen.queryByTestId("probe-unsupported")).toBeNull();
+  });
+
+  it("a probe that NEVER RAN is a different state, and blames no field", async () => {
+    // fetch rejects — the request never completed, so nothing reached the server.
+    recordingFetch({ addRejects: new TypeError("Failed to fetch") });
+    renderPage();
+
+    await fillServer();
+    fireEvent.click(screen.getByRole("button", { name: /Probe \+ discover/ }));
+
+    const note = await screen.findByTestId("probe-unreachable");
+    expect(note).toHaveTextContent(/never ran/i);
+    expect(note).toHaveTextContent(/nothing was sent to the server/i);
+    // It is NOT the refusal surface, and the server is not accused.
+    expect(screen.queryByTestId("probe-error")).toBeNull();
+    expect(screen.getByLabelText(/MCP server URL/)).not.toHaveAttribute("aria-invalid");
+    expect(screen.queryByTestId("tool-list")).toBeNull();
+  });
+
+  it("a 501 is a calm 'not wired here' note, never an error", async () => {
+    recordingFetch({
+      add: () => ({ ok: false, status: 501, json: { error: "mcp discovery not implemented" } }),
+    });
+    renderPage();
+
+    await fillServer();
+    fireEvent.click(screen.getByRole("button", { name: /Probe \+ discover/ }));
+
+    const note = await screen.findByTestId("probe-unsupported");
+    expect(note).toHaveTextContent(/isn.t wired up on this install/i);
+    // role="note", never role="alert" — nothing is broken.
+    expect(note.querySelector("[role=note]")).not.toBeNull();
+    expect(note.querySelector("[role=alert]")).toBeNull();
+    expect(screen.queryByTestId("probe-error")).toBeNull();
+    expect(screen.getByLabelText(/MCP server URL/)).not.toHaveAttribute("aria-invalid");
+  });
+
+  it("a URL that could never be probed is caught in the field, before a round trip", async () => {
+    const calls = recordingFetch({});
+    renderPage();
+
+    await fillServer({ url: "mcp.acme.dev" }); // no scheme — not an absolute http(s) URL
+    expect(screen.getByLabelText(/MCP server URL/)).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByText(/absolute http:\/\/ or https:\/\/ address/i)).toBeInTheDocument();
+    // Forward is gated, so no request is spent proving what the field knows.
+    expect(screen.getByRole("button", { name: /Probe \+ discover/ })).toBeDisabled();
+    expect(calls.find((c) => c.url === "/api/mcpservers" && c.method === "POST")).toBeUndefined();
+  });
+
+  it("editing the server retires a stale verdict", async () => {
+    recordingFetch({
+      add: () => ({ ok: false, status: 422, json: { error: "MCP handshake failed" } }),
+    });
+    renderPage();
+
+    await fillServer();
+    fireEvent.click(screen.getByRole("button", { name: /Probe \+ discover/ }));
+    await screen.findByTestId("probe-error");
+
+    // The verdict described the URL that was submitted, not this one.
+    fireEvent.change(screen.getByLabelText(/MCP server URL/), {
+      target: { value: "https://mcp.acme.dev/other" },
+    });
+    expect(screen.queryByTestId("probe-error")).toBeNull();
+    expect(screen.getByLabelText(/MCP server URL/)).not.toHaveAttribute("aria-invalid");
   });
 });
 

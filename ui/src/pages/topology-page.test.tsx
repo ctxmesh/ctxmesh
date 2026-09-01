@@ -179,8 +179,11 @@ describe("TopologyPage — grouped graph view", () => {
     fireEvent.click(screen.getByTestId("toggle-list"));
     expect(screen.getByTestId(`group-row-${GROUP_A.id}`)).toBeInTheDocument();
     expect(screen.getByTestId(`group-row-label-${GROUP_A.id}`)).toHaveTextContent("billing-team");
-    // GROUP_A has 3 agents
-    expect(screen.getByTestId(`group-row-${GROUP_A.id}`)).toHaveTextContent("3 agents");
+    // GROUP_A has 3 agents. The list view is a TABLE now (M151 A6): the member
+    // count lives in its own numeric column, so the figure is on the row and
+    // the noun is on the column head — same fact, table register.
+    expect(screen.getByTestId(`group-row-count-${GROUP_A.id}`)).toHaveTextContent("3");
+    expect(screen.getByTestId("topology-list-view")).toHaveTextContent("Agents");
   });
 });
 
@@ -410,6 +413,113 @@ describe("TopologyPage — API call params", () => {
     await screen.findByTestId("topology-page");
     // The topology-page ALWAYS uses ?group=registry
     expect(calls.every((c) => c.url.includes("group="))).toBe(true);
+  });
+});
+
+// ── M151: health is the only hue, and unknown is not a failure ─────────────
+
+const NODE_UNKNOWN = makeNode("ingest-coordinator", "prod", "unknown");
+const NODE_BROKEN = makeNode("billing-agent", "prod", "notReady");
+
+const MIXED_RESPONSE: TopologyResponse = {
+  nodes: [NODE_INVOICE, NODE_BROKEN, NODE_UNKNOWN],
+  edges: [],
+  groups: [{ ...GROUP_A, memberCount: 3, shownCount: 3 }, GROUP_B],
+};
+
+describe("TopologyPage — the status vocabulary (M151 §2.2)", () => {
+  async function expandGroupA() {
+    installFetch((url) => {
+      if (url.includes("expand=")) return { ok: true, body: MIXED_RESPONSE };
+      return { ok: true, body: GROUPED_RESPONSE };
+    });
+    renderPage();
+    await screen.findByTestId(`group-card-${GROUP_A.id}`);
+    fireEvent.click(screen.getByTestId(`group-card-${GROUP_A.id}`));
+    await waitFor(() =>
+      expect(screen.getByTestId(`agent-node-${NODE_INVOICE.id}`)).toBeInTheDocument(),
+    );
+  }
+
+  it("renders an unreported status as UNKNOWN in the open register — never as a failure", async () => {
+    await expandGroupA();
+    const node = screen.getByTestId(`agent-node-${NODE_UNKNOWN.id}`);
+    expect(node).toHaveTextContent("Unknown");
+    // A cluster that reported nothing has not reported a failure. Crit means
+    // "it will not proceed without a change" and this is not a claim we have.
+    expect(node).not.toHaveTextContent("Not ready");
+    expect(node.querySelector(".text-destructive")).toBeNull();
+    // The §6.1 A6 node grammar: "declared-or-missing" is the dashed frame.
+    expect(node.className).toContain("border-dashed");
+  });
+
+  it("marks only the failing node with the crit rule", async () => {
+    await expandGroupA();
+    expect(screen.getByTestId(`agent-node-${NODE_BROKEN.id}`).className).toContain(
+      "border-l-destructive",
+    );
+    // A healthy node carries no rule at all — an accent that is always on says
+    // nothing (§2.2, annotation not alarm).
+    expect(screen.getByTestId(`agent-node-${NODE_INVOICE.id}`).className).not.toContain(
+      "border-l-destructive",
+    );
+  });
+
+  it("never paints a node or a group in the brand (§2.1 — pine is never a status)", async () => {
+    await expandGroupA();
+    for (const el of [
+      screen.getByTestId(`agent-node-${NODE_INVOICE.id}`),
+      screen.getByTestId(`agent-node-${NODE_BROKEN.id}`),
+      screen.getByTestId(`group-card-${GROUP_A.id}`),
+    ]) {
+      expect(el.innerHTML).not.toContain("bg-primary");
+      expect(el.innerHTML).not.toContain("border-primary");
+    }
+  });
+
+  it("states a group's rollup worst-first, with the hue on the number that carries it", async () => {
+    installFetch(() => ({ ok: true, body: GROUPED_RESPONSE }));
+    renderPage();
+    // GROUP_A is 2 ready + 1 notReady.
+    const card = await screen.findByTestId(`group-card-${GROUP_A.id}`);
+    const line = card.querySelector('[data-testid="health-dots"]');
+    expect(line).not.toBeNull();
+    expect(line).toHaveTextContent("1 failed");
+    expect(line).toHaveTextContent("2 ready");
+    // Attention order: the failure is read before the healthy majority.
+    expect((line as HTMLElement).textContent?.indexOf("failed")).toBeLessThan(
+      (line as HTMLElement).textContent?.indexOf("ready") ?? -1,
+    );
+  });
+});
+
+describe("TopologyPage — the canvas is a pan surface in a fixed frame (§4.6)", () => {
+  it("keeps the map inside its own scroller, never widening the page", async () => {
+    installFetch(() => ({ ok: true, body: GROUPED_RESPONSE }));
+    renderPage();
+    const frame = await screen.findByTestId("topology-graph-view");
+    expect(frame.className).toContain("overflow-auto");
+    expect(frame.className).toContain("min-h-[35rem]");
+  });
+
+  it("scrolls the LIST inside its own container too", async () => {
+    installFetch(() => ({ ok: true, body: GROUPED_RESPONSE }));
+    renderPage();
+    await screen.findByTestId("topology-page");
+    fireEvent.click(screen.getByTestId("toggle-list"));
+    expect(screen.getByTestId("topology-list-view").className).toContain("overflow-x-auto");
+  });
+
+  it("offers a way out of an empty search rather than a dead end", async () => {
+    installFetch((url) =>
+      url.includes("q=")
+        ? { ok: true, body: { nodes: [], edges: [], groups: [] } satisfies TopologyResponse }
+        : { ok: true, body: GROUPED_RESPONSE },
+    );
+    renderPage("/topology?q=nothing-matches");
+    const empty = await screen.findByTestId("topology-empty");
+    expect(empty).toHaveTextContent("No nodes match");
+    expect(screen.getByRole("button", { name: /clear the search/i })).toBeInTheDocument();
   });
 });
 

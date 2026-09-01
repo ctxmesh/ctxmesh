@@ -188,6 +188,23 @@ ui-test: ## Run the UI unit/component tests (vitest run). Bootstraps the toolcha
 ui-build: ## Build the SPA to static assets (ui/dist). The BFF/image serves this output.
 	$(UI_NODE) install
 	$(UI_NODE) run build
+	./hack/ui-no-internal-routes.sh ui/dist
+
+.PHONY: ui-visual
+ui-visual: ## Render every route x 4 widths x 2 themes; assert nothing overflows; write screenshots (M151).
+	$(UI_NODE) install
+	$(UI_NODE) run build
+	$(UI_NODE) run visual
+
+.PHONY: ui-visual-baseline
+ui-visual-baseline: ## Same sweep, but RECORD failures instead of failing — the honest before-picture.
+	$(UI_NODE) install
+	$(UI_NODE) run build
+	$(UI_NODE) run visual:baseline
+
+.PHONY: ui-colour-check
+ui-colour-check: ## Fail if any colour literal appears outside ui/src/styles/tokens.css (M151).
+	./hack/ui-colour-literals.sh
 
 .PHONY: ui-versions
 ui-versions: ## Print the pinned node+pnpm the UI toolchain resolves (from .nvmrc).

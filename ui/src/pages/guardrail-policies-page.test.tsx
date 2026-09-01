@@ -113,16 +113,33 @@ describe("GuardrailPoliciesPage (m66.10)", () => {
     await waitFor(() => expect(screen.getByText("No guardrail policies")).toBeInTheDocument());
   });
 
-  it("no referencing agents shows a dash", async () => {
+  it("no referencing agents is a stated 'not applied', never the unknown dash", async () => {
     installFetch(() => ({
       ok: true,
-      // streamingMode set so the streaming column renders a badge, leaving the agents "—" unique.
+      // streamingMode set so the streaming column renders a badge — the only "—"
+      // this page can produce is an UNRECONCILED value, and this row has none.
       body: { items: [policy({ name: "orphan-policy", referencingAgents: [], streamingMode: "Buffered" })] },
     }));
     renderPage();
     await screen.findByText("orphan-policy");
-    // The agents column shows "—" when referencingAgents is empty.
-    expect(screen.getByText("—")).toBeInTheDocument();
+    // M151 §7.1: zero and unknown never share a glyph. An empty referencingAgents
+    // array is a REAL answer ("declared but never exercised", §2.5) and renders
+    // the `open` Tag — the dash is reserved for a value the backend never sent.
+    expect(screen.getByText("not applied")).toBeInTheDocument();
+    expect(screen.queryByText("—")).toBeNull();
+  });
+
+  it("an unreconciled streaming mode IS the unknown dash (and is not a zero)", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: { items: [policy({ name: "fresh-policy", referencingAgents: ["a-agent"] })] },
+    }));
+    renderPage();
+    await screen.findByText("fresh-policy");
+    // No status.streaming yet ⇒ the §7.1 unknown glyph, with its reason on hover.
+    const dash = screen.getByText("—");
+    expect(dash).toBeInTheDocument();
+    expect(dash).toHaveAttribute("title", expect.stringContaining("unknown, not off"));
   });
 });
 
@@ -179,5 +196,115 @@ describe("GuardrailPoliciesPage — K7 polish (m76.6)", () => {
     expect(screen.getByTestId("streaming-buffered")).toHaveTextContent("Buffered");
     // A policy not yet reconciled shows no streaming badge.
     expect(screen.queryByTestId("streaming-unreconciled")).toBeNull();
+  });
+});
+
+// ── M151: archetype A1 — blocking-first order, Next step, honest degraded states ──
+describe("GuardrailPoliciesPage — A1 archetype (M151)", () => {
+  function threePolicies() {
+    return {
+      ok: true,
+      body: {
+        items: [
+          // Alphabetically FIRST and perfectly healthy — it must sort LAST.
+          policy({ name: "aaa-healthy", referencingAgents: ["a-agent"], streamingMode: "Streaming" }),
+          policy({ name: "mmm-unattached", referencingAgents: [], streamingMode: "Streaming" }),
+          // Alphabetically LAST and broken — it must sort FIRST.
+          policy({ name: "zzz-broken", validated: false, reason: "InvalidPattern: pattern #3 failed to compile", referencingAgents: ["b-agent"], streamingMode: "Streaming" }),
+        ],
+      },
+    };
+  }
+
+  it("sorts by what is blocking, not alphabetically", async () => {
+    installFetch(threePolicies);
+    renderPage();
+    await screen.findByText("zzz-broken");
+
+    const names = screen
+      .getAllByRole("row")
+      .slice(1) // drop the header row
+      .map((r) => r.querySelector("td")?.textContent ?? "");
+    expect(names[0]).toContain("zzz-broken"); // won't apply — needs a person now
+    expect(names[1]).toContain("mmm-unattached"); // valid but guarding nothing
+    expect(names[2]).toContain("aaa-healthy"); // "Nothing needed" sinks to the bottom
+  });
+
+  it("gives each row a verb-first Next step, and the inert one for a healthy row", async () => {
+    installFetch(threePolicies);
+    renderPage();
+    await screen.findByText("zzz-broken");
+
+    expect(screen.getByTestId("next-step-zzz-broken")).toHaveTextContent("Fix the policy");
+    expect(screen.getByTestId("next-step-mmm-unattached")).toHaveTextContent("Attach it to an agent");
+    // Nothing needed is NOT a link: inert text, not focusable, no destination.
+    const inert = screen.getByTestId("next-step-aaa-healthy");
+    expect(inert).toHaveTextContent("Nothing needed");
+    expect(inert.tagName).toBe("SPAN");
+    // Every label stays inside the §4.4 copy budget.
+    for (const id of ["next-step-zzz-broken", "next-step-mmm-unattached"]) {
+      const label = screen.getByTestId(id).textContent!.replace(" →", "");
+      expect(label.length).toBeLessThanOrEqual(22);
+    }
+  });
+
+  it("the crit Next step opens the drawer with the FULL controller reason", async () => {
+    installFetch(threePolicies);
+    renderPage();
+    await screen.findByText("zzz-broken");
+
+    fireEvent.click(screen.getByTestId("next-step-zzz-broken"));
+    expect(await screen.findByTestId("guardrail-drawer")).toBeInTheDocument();
+    // The State cell can only abbreviate the reason; the drawer carries it whole.
+    expect(
+      screen.getByText("InvalidPattern: pattern #3 failed to compile"),
+    ).toBeInTheDocument();
+  });
+
+  it("a chip that matched nothing is NOT the first-run empty state", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: { items: [policy({ name: "aaa-healthy", referencingAgents: ["a-agent"] })] },
+    }));
+    renderPage();
+    await screen.findByText("aaa-healthy");
+
+    fireEvent.click(screen.getByRole("radio", { name: /Needs attention/ }));
+    expect(await screen.findByText("Nothing here needs you")).toBeInTheDocument();
+    // The teaching copy must NOT appear — policies exist, this view excluded them.
+    expect(screen.queryByText("No guardrail policies")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show everything" }));
+    expect(await screen.findByText("aaa-healthy")).toBeInTheDocument();
+  });
+
+  it("states the honest ratio in the closing note, from the loaded counts", async () => {
+    installFetch(threePolicies);
+    renderPage();
+    await screen.findByText("zzz-broken");
+    expect(
+      screen.getByText(
+        "2 of the 3 policies need a person: 1 won't apply until someone fixes it, 1 guards nothing yet. The other one is in force.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("a cluster that reports no streaming mode at all gets a QuietNote, not a column of unexplained dashes", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: { items: [policy({ name: "old-controller", referencingAgents: ["a-agent"] })] },
+    }));
+    renderPage();
+    await screen.findByText("old-controller");
+    const note = screen.getByRole("note");
+    expect(note).toHaveTextContent("Effective streaming mode isn't reported here.");
+    // It is a note, never an error — nothing broke.
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("does not render the QuietNote when the controller does report the mode", async () => {
+    installFetch(threePolicies);
+    renderPage();
+    await screen.findByText("zzz-broken");
+    expect(screen.queryByRole("note")).toBeNull();
   });
 });
