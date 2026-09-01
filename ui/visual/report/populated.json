@@ -1,11 +1,11 @@
 {
   "label": "populated",
   "mode": "populated",
-  "generated": "2026-09-01T03:44:35.614Z",
+  "generated": "2026-09-01T04:38:52.081Z",
   "totals": {
     "renders": 400,
-    "clean": 392,
-    "failing": 8
+    "clean": 400,
+    "failing": 0
   },
   "rows": [
     {
@@ -636,7 +636,7 @@
       "documentScrollsX": false,
       "documentOverflowPx": 0,
       "offenders": [],
-      "route": "/auth/callback",
+      "route": "/auth/callback?code=probe&state=probe",
       "id": "auth-callback",
       "label": "OIDC callback",
       "archetype": "auth",
@@ -649,7 +649,7 @@
       "documentScrollsX": false,
       "documentOverflowPx": 0,
       "offenders": [],
-      "route": "/auth/callback",
+      "route": "/auth/callback?code=probe&state=probe",
       "id": "auth-callback",
       "label": "OIDC callback",
       "archetype": "auth",
@@ -662,7 +662,7 @@
       "documentScrollsX": false,
       "documentOverflowPx": 0,
       "offenders": [],
-      "route": "/auth/callback",
+      "route": "/auth/callback?code=probe&state=probe",
       "id": "auth-callback",
       "label": "OIDC callback",
       "archetype": "auth",
@@ -675,7 +675,7 @@
       "documentScrollsX": false,
       "documentOverflowPx": 0,
       "offenders": [],
-      "route": "/auth/callback",
+      "route": "/auth/callback?code=probe&state=probe",
       "id": "auth-callback",
       "label": "OIDC callback",
       "archetype": "auth",
@@ -688,7 +688,7 @@
       "documentScrollsX": false,
       "documentOverflowPx": 0,
       "offenders": [],
-      "route": "/auth/callback",
+      "route": "/auth/callback?code=probe&state=probe",
       "id": "auth-callback",
       "label": "OIDC callback",
       "archetype": "auth",
@@ -701,7 +701,7 @@
       "documentScrollsX": false,
       "documentOverflowPx": 0,
       "offenders": [],
-      "route": "/auth/callback",
+      "route": "/auth/callback?code=probe&state=probe",
       "id": "auth-callback",
       "label": "OIDC callback",
       "archetype": "auth",
@@ -714,7 +714,7 @@
       "documentScrollsX": false,
       "documentOverflowPx": 0,
       "offenders": [],
-      "route": "/auth/callback",
+      "route": "/auth/callback?code=probe&state=probe",
       "id": "auth-callback",
       "label": "OIDC callback",
       "archetype": "auth",
@@ -727,7 +727,7 @@
       "documentScrollsX": false,
       "documentOverflowPx": 0,
       "offenders": [],
-      "route": "/auth/callback",
+      "route": "/auth/callback?code=probe&state=probe",
       "id": "auth-callback",
       "label": "OIDC callback",
       "archetype": "auth",
@@ -1363,14 +1363,7 @@
     {
       "documentScrollsX": false,
       "documentOverflowPx": 0,
-      "offenders": [
-        {
-          "selector": "div.flex.items-start.justify-between > div.min-w-0.space-y-1 > p.text-xs.text-muted-foreground",
-          "reason": "self-overflow",
-          "overflowPx": 251,
-          "text": "origin: default/unbreakablesingletokenagentnamewithnohyphens"
-        }
-      ],
+      "offenders": [],
       "route": "/gallery",
       "id": "gallery",
       "label": "Template gallery",
@@ -1383,14 +1376,7 @@
     {
       "documentScrollsX": false,
       "documentOverflowPx": 0,
-      "offenders": [
-        {
-          "selector": "div.flex.items-start.justify-between > div.min-w-0.space-y-1 > p.text-xs.text-muted-foreground",
-          "reason": "self-overflow",
-          "overflowPx": 251,
-          "text": "origin: default/unbreakablesingletokenagentnamewithnohyphens"
-        }
-      ],
+      "offenders": [],
       "route": "/gallery",
       "id": "gallery",
       "label": "Template gallery",
@@ -1403,14 +1389,7 @@
     {
       "documentScrollsX": false,
       "documentOverflowPx": 0,
-      "offenders": [
-        {
-          "selector": "div.flex.items-start.justify-between > div.min-w-0.space-y-1 > p.text-xs.text-muted-foreground",
-          "reason": "self-overflow",
-          "overflowPx": 309,
-          "text": "origin: default/unbreakablesingletokenagentnamewithnohyphens"
-        }
-      ],
+      "offenders": [],
       "route": "/gallery",
       "id": "gallery",
       "label": "Template gallery",
@@ -1423,14 +1402,7 @@
     {
       "documentScrollsX": false,
       "documentOverflowPx": 0,
-      "offenders": [
-        {
-          "selector": "div.flex.items-start.justify-between > div.min-w-0.space-y-1 > p.text-xs.text-muted-foreground",
-          "reason": "self-overflow",
-          "overflowPx": 309,
-          "text": "origin: default/unbreakablesingletokenagentnamewithnohyphens"
-        }
-      ],
+      "offenders": [],
       "route": "/gallery",
       "id": "gallery",
       "label": "Template gallery",
@@ -1443,14 +1415,7 @@
     {
       "documentScrollsX": false,
       "documentOverflowPx": 0,
-      "offenders": [
-        {
-          "selector": "div.flex.items-start.justify-between > div.min-w-0.space-y-1 > p.text-xs.text-muted-foreground",
-          "reason": "self-overflow",
-          "overflowPx": 288,
-          "text": "origin: default/unbreakablesingletokenagentnamewithnohyphens"
-        }
-      ],
+      "offenders": [],
       "route": "/gallery",
       "id": "gallery",
       "label": "Template gallery",
@@ -1463,14 +1428,7 @@
     {
       "documentScrollsX": false,
       "documentOverflowPx": 0,
-      "offenders": [
-        {
-          "selector": "div.flex.items-start.justify-between > div.min-w-0.space-y-1 > p.text-xs.text-muted-foreground",
-          "reason": "self-overflow",
-          "overflowPx": 288,
-          "text": "origin: default/unbreakablesingletokenagentnamewithnohyphens"
-        }
-      ],
+      "offenders": [],
       "route": "/gallery",
       "id": "gallery",
       "label": "Template gallery",
@@ -1483,14 +1441,7 @@
     {
       "documentScrollsX": false,
       "documentOverflowPx": 0,
-      "offenders": [
-        {
-          "selector": "div.flex.items-start.justify-between > div.min-w-0.space-y-1 > p.text-xs.text-muted-foreground",
-          "reason": "self-overflow",
-          "overflowPx": 272,
-          "text": "origin: default/unbreakablesingletokenagentnamewithnohyphens"
-        }
-      ],
+      "offenders": [],
       "route": "/gallery",
       "id": "gallery",
       "label": "Template gallery",
@@ -1503,14 +1454,7 @@
     {
       "documentScrollsX": false,
       "documentOverflowPx": 0,
-      "offenders": [
-        {
-          "selector": "div.flex.items-start.justify-between > div.min-w-0.space-y-1 > p.text-xs.text-muted-foreground",
-          "reason": "self-overflow",
-          "overflowPx": 272,
-          "text": "origin: default/unbreakablesingletokenagentnamewithnohyphens"
-        }
-      ],
+      "offenders": [],
       "route": "/gallery",
       "id": "gallery",
       "label": "Template gallery",

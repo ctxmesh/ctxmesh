@@ -78,10 +78,12 @@ for (const route of ROUTES) {
         // first baseline run render light twice and report it as two themes.)
         await page.addInitScript(
           ([key, wantDark]) => {
-            try {
-              sessionStorage.setItem(key as string, "visual-sweep-token");
-            } catch {
-              /* private mode — the app treats this as signed out; the test will show it */
+            if (key) {
+              try {
+                sessionStorage.setItem(key as string, "visual-sweep-token");
+              } catch {
+                /* private mode — the app treats this as signed out; the test will show it */
+              }
             }
             const dark = wantDark as boolean;
             const apply = () => {
@@ -103,7 +105,7 @@ for (const route of ROUTES) {
               arm();
             }
           },
-          [SESSION_KEY, theme === "dark"] as const,
+          [route.signedOut ? "" : SESSION_KEY, theme === "dark"] as const,
         );
 
         await page.route("**/api/**", async (r) => {

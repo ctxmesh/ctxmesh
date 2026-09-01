@@ -166,3 +166,76 @@ describe("AgentChatboxPage", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/not found/i);
   });
 });
+
+// ── The second door (M151 §6.1 A10) ────────────────────────────────────────
+//
+// At an agent's OWN hostname the BFF injects `<meta name="agent-pin">` and this
+// page is the whole product for someone outside the operator team. The console's
+// vocabulary — the workspace it is deployed into, the trace behind the answer —
+// is meaningless to that reader and must not appear.
+
+describe("AgentChatboxPage at the agent's own hostname", () => {
+  function pin(content: string) {
+    const meta = document.createElement("meta");
+    meta.setAttribute("name", "agent-pin");
+    meta.setAttribute("content", content);
+    document.head.appendChild(meta);
+    return () => meta.remove();
+  }
+
+  it("drops the workspace and carries the assistant's promise instead", async () => {
+    const unpin = pin("default/scalekit-agent");
+    try {
+      installFetch();
+      renderAt();
+      expect(await screen.findByTestId("chatbox-agent")).toHaveTextContent(
+        "scalekit-agent",
+      );
+      expect(
+        screen.getByText("Every answer shows where it came from."),
+      ).toBeInTheDocument();
+      // The namespace is a fact about where the platform put something.
+      expect(screen.queryByText("default")).toBeNull();
+    } finally {
+      unpin();
+    }
+  });
+
+  it("does not offer the trace link to a reader who has no console to open it in", async () => {
+    const unpin = pin("default/scalekit-agent");
+    try {
+      installFetch();
+      renderAt();
+      const input = await screen.findByTestId("chat-input");
+      fireEvent.change(input, { target: { value: "list environments" } });
+      fireEvent.click(screen.getByTestId("chat-send"));
+      expect(await screen.findByTestId("chat-turn-agent")).toHaveTextContent(
+        "hi there",
+      );
+      await waitFor(() =>
+        expect(screen.queryByTestId("chat-pending")).toBeNull(),
+      );
+      expect(screen.queryByTestId("open-trace")).toBeNull();
+      expect(document.body.textContent).not.toContain("t-1");
+    } finally {
+      unpin();
+    }
+  });
+
+  it("renders the message-shaped loading bars, not a bare 'Loading…'", async () => {
+    // A never-resolving agent lookup holds the page in its loading state.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const j = (b: unknown) =>
+          Promise.resolve({ ok: true, status: 200, json: async () => b, text: async () => "" } as Response);
+        if (url.startsWith("/api/capabilities")) return j({ allowed: {} });
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        return new Promise<Response>(() => {});
+      }),
+    );
+    renderAt();
+    expect(await screen.findByTestId("chatbox-loading")).toBeInTheDocument();
+  });
+});
