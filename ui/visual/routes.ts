@@ -44,6 +44,12 @@ export const ROUTES: RouteCase[] = [
   { id: "agent-detail", path: "/agents/default/demo-assistant", label: "Agent detail", chrome: "shell", archetype: "detail" },
   { id: "teams", path: "/teams", label: "Teams", chrome: "shell", archetype: "index" },
   { id: "teams-new", path: "/teams/new", label: "Create team", chrome: "shell", archetype: "wizard" },
+  // The A3 outline is swept at BOTH sizes on purpose. Its whole claim is that
+  // one screen reads the same at three roster rows and at a thousand-run
+  // delegation tree, and a gate that only ever photographs the small one has
+  // not looked at the claim.
+  { id: "team-detail-small", path: "/teams/default/support-pod", label: "Team outline (3 roles)", chrome: "shell", archetype: "tree" },
+  { id: "team-detail-large", path: "/teams/acme-platform-eu-west-1-team-d-shared-ingest/acme-ingest", label: "Team outline (1,025-run tree)", chrome: "shell", archetype: "tree" },
   { id: "playground", path: "/playground", label: "Playground", chrome: "shell", archetype: "playground" },
 
   // ── Library ─────────────────────────────────────────────────────────────

@@ -13,7 +13,11 @@ export type ResourceKind =
   | "agent"
   | "registry"
   | "route"
-  | "secretbinding";
+  | "secretbinding"
+  // The team detail page (M151 A3) — a roster's members and its supervisor are
+  // agents, but the team itself is now a destination too, so a team name
+  // rendered anywhere obeys the same "if it names a resource, it's a link" rule.
+  | "team";
 
 // resourcePath maps a resource to its detail route, or null when there is no
 // detail page for that kind (then ResourceLink renders honest text, not a dead link).
@@ -33,6 +37,8 @@ export function resourcePath(
       return `/routes/${ns}/${nm}`;
     case "secretbinding":
       return `/secrets/${ns}/${nm}`;
+    case "team":
+      return `/teams/${ns}/${nm}`;
     default:
       return null;
   }

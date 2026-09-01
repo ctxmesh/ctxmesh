@@ -38,6 +38,7 @@ import { RunDetailPage } from "@/pages/run-detail-page";
 import { AuditPage } from "@/pages/audit-page";
 import { AlertsPage } from "@/pages/alerts-page";
 import { TeamsPage } from "@/pages/teams-page";
+import { TeamDetailPage } from "@/pages/team-detail-page";
 import { CreateTeamPage } from "@/pages/create-team-page";
 import { GuardrailPoliciesPage } from "@/pages/guardrail-policies-page";
 import { WorkflowsPage } from "@/pages/workflows-page";
@@ -196,6 +197,9 @@ export function App() {
             <Route path="teams" element={<TeamsPage />} />
             {/* m71.7: CreateTeamPage — describe → generate → review → create. */}
             <Route path="teams/new" element={<CreateTeamPage />} />
+            {/* m151: the team OUTLINE (spec §6.1 archetype A3) — the roster as an
+                indented tree, its spawn bounds, and the delegation tree of a run. */}
+            <Route path="teams/:ns/:name" element={<TeamDetailPage />} />
             {/* m66.10: GuardrailPolicies — the content-governance policies (read-only). */}
             <Route path="guardrails" element={<GuardrailPoliciesPage />} />
             {/* m67.9: Workflows — the declarative agent graph CRs (read-only list + invoke). */}
