@@ -48,4 +48,23 @@ paths = [
   # The vendored/generated UI dependency tree is not ours to police here.
   '''^ui/node_modules/.*''',
   '''^sdk/typescript/node_modules/.*''',
+  # ── M151 ────────────────────────────────────────────────────────────────
+  # Two UI files the generic-api-key rule flags, neither of which can carry a
+  # credential. Path-scoped and reasoned, per the M147 rule that an allowlist
+  # entry without a stated reason is how a real leak eventually gets waved
+  # through.
+  #
+  # 1. The UI's Vitest suites are not covered by the global `_test.go` path, and
+  #    one of them is a SECURITY test: secret-bindings-page.test.tsx builds a
+  #    hostile DTO carrying "sk-live-MUST-NEVER-RENDER-0000" on every field a
+  #    payload could smuggle a value through, and asserts the page renders none
+  #    of them. The string is a self-describing sentinel — flagging it means the
+  #    scanner is catching the test that exists to prevent the thing it is
+  #    scanning for.
+  '''^ui/src/.*\.test\.tsx?$''',
+  # 2. ui/visual/fixtures.ts answers the API for the offline screenshot sweep.
+  #    Its `secretBindingRef` fields are SecretBinding NAMES — a reference to
+  #    where a credential lives, which is the whole point of the CRD — and it
+  #    reaches no network and ships in no image.
+  '''^ui/visual/fixtures\.ts$''',
 ]
