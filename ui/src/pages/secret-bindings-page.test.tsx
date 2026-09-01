@@ -569,3 +569,109 @@ describe("SecretBindingsPage — archetype A1 (M151)", () => {
     expect(document.querySelector("input[type=password]")).toBeNull();
   });
 });
+
+
+// ── Archetype A2 (M151 spec §6.1) — the detail surface ──────────────────────
+// The redesign's contract for the detail page: the §4.7 hub grid, a rail that
+// states the bound facts, an edit form whose divergence from the record is
+// VISIBLE — and, unchanged and non-negotiable, no secret value anywhere, ever.
+
+/** The secret a correct page can never put on screen — in text, in an
+ *  attribute (title / placeholder / value), or in a live input's value. */
+function expectNoSecretAnywhere(secret: string) {
+  expect(document.body.textContent ?? "").not.toContain(secret);
+  for (const el of Array.from(document.querySelectorAll("*"))) {
+    for (const attr of Array.from(el.attributes)) {
+      expect(`${attr.name}=${attr.value}`).not.toContain(secret);
+    }
+    const live = el as HTMLInputElement;
+    if (typeof live.value === "string") expect(live.value).not.toContain(secret);
+  }
+}
+
+describe("SecretBindingDetailPage — archetype A2 (M151)", () => {
+  // The DTO carries no value field at all; this is the hostile case — if one
+  // ever appeared in a payload, the page still may not render it.
+  const SECRET_VALUE = "sk-live-MUST-NEVER-RENDER-0000";
+  const LEAKY = {
+    ...DEFAULT_DETAIL,
+    value: SECRET_VALUE,
+    data: { apiKey: SECRET_VALUE },
+    credential: SECRET_VALUE,
+  };
+
+  it("states the value's absence in the rail, in words, where a value would be", async () => {
+    installFetch({ detail: { ok: true, body: LEAKY } });
+    renderDetail();
+    await screen.findByTestId("secret-detail-page");
+
+    // The rail's last fact is the deliberate absence — not a blank row.
+    expect(screen.getByText("never read here")).toBeInTheDocument();
+    // And the surface says why, once, beside the reference it DOES show.
+    expect(screen.getByTestId("no-value-note")).toBeInTheDocument();
+    // The reference itself is still fully readable.
+    expect(screen.getByTestId("secret-ref-name")).toHaveTextContent("my-oai-secret");
+    expect(screen.getByTestId("secret-ref-key")).toHaveTextContent("apiKey");
+
+    expectNoSecretAnywhere(SECRET_VALUE);
+  });
+
+  it("renders no secret value in the edit form either", async () => {
+    installFetch({ detail: { ok: true, body: LEAKY } });
+    renderDetail("/secrets/default/oai-key?edit=1");
+    await screen.findByTestId("edit-sb-secret-name");
+    expectNoSecretAnywhere(SECRET_VALUE);
+  });
+
+  it("renders no secret value after a successful save", async () => {
+    installFetch({
+      detail: { ok: true, body: LEAKY },
+      update: { ok: true, body: LEAKY },
+    });
+    renderDetail("/secrets/default/oai-key?edit=1");
+    await screen.findByTestId("edit-sb-secret-name");
+    fireEvent.change(screen.getByTestId("edit-sb-secret-name"), {
+      target: { value: "rotated-secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /continue/i }));
+    await screen.findByTestId("secret-edit-review");
+    fireEvent.click(screen.getByRole("button", { name: /Save changes/i }));
+
+    // The drawer closes and the page re-reads the binding.
+    await waitFor(() =>
+      expect(screen.queryByTestId("secret-edit-review")).toBeNull(),
+    );
+    await screen.findByTestId("secret-detail-page");
+    expectNoSecretAnywhere(SECRET_VALUE);
+  });
+
+  it("makes an unsaved change visibly unsaved — and un-marks one put back", async () => {
+    installFetch({});
+    renderDetail("/secrets/default/oai-key?edit=1");
+    const field = await screen.findByTestId("edit-sb-secret-name");
+
+    // Nothing diverges yet, so nothing nags.
+    expect(screen.queryByTestId("secret-edit-unsaved")).toBeNull();
+
+    fireEvent.change(field, { target: { value: "rotated-secret" } });
+    expect(screen.getByTestId("secret-edit-unsaved")).toBeInTheDocument();
+    expect(screen.getByText("Changed — not saved yet")).toBeInTheDocument();
+
+    // Edited BACK to what the record says: that is not a change, and a page
+    // that still claimed it was would train people to click through the guard.
+    fireEvent.change(field, { target: { value: "my-oai-secret" } });
+    expect(screen.queryByTestId("secret-edit-unsaved")).toBeNull();
+  });
+
+  it("shows the 404 as an honest absence with a way back, not an error", async () => {
+    installFetch({ detail: { ok: false, status: 404, body: { error: "not found" } } });
+    renderDetail();
+    expect(await screen.findByTestId("secret-not-found")).toBeInTheDocument();
+    // Calm: a note, never an alert.
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("link", { name: /Back to bindings/ })).toHaveAttribute(
+      "href",
+      "/secrets",
+    );
+  });
+});

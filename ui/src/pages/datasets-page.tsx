@@ -1,33 +1,35 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, Database, Filter, Tag } from "lucide-react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Database, Filter, Tag } from "lucide-react";
+import { Link, useNavigate, useParams } from "react-router-dom";
 
 import {
   CellEntity,
   ClosingNote,
   DataTable,
+  ErrorState,
   FilterChipRow,
+  KeyValueList,
+  Meter,
   NextStepLink,
   PageHeader,
   QuantityValue,
   QuietNote,
+  SectionHeader,
+  Skeleton,
+  SkeletonCard,
   UnknownValue,
   nextStepRank,
+  truncateId,
   type Column,
   type DataTableError,
   type EmptyStateProps,
   type FilterChip,
+  type KeyValueItem,
   type NextStepTone,
 } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, PanelHeader } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -71,18 +73,10 @@ import {
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
-function formatDate(ts?: string): string {
-  if (!ts) return "—";
-  try {
-    return new Date(ts).toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-  } catch {
-    return ts;
-  }
-}
+// `formatDate` is gone: it answered an absent timestamp with a bare "—" and no
+// reason, which is the one dash this milestone forbids — one a reader cannot
+// tell apart from a zero. Both surfaces read a timestamp through `formatStamp`
+// (present, full ISO in `title`) or `UnknownValue` (absent, with the reason).
 
 // formatStamp is the §4.5 table register for a timestamp: same year → "Aug 29",
 // older → "2025-08-29", with the full value in `title`.
@@ -406,7 +400,25 @@ export function DatasetsPage() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Detail page
+// Detail page — M151 §6.1 archetype A2
+//
+// ── THE PAGE'S ONE IDEA: UNLABELLED IS A STATE, NOT AN ABSENCE ─────────────
+// A dataset is a queue of judgements waiting to be made, and the only question
+// a labeller brings here is "which of these has nobody judged?". So an
+// unlabelled case does not render as a case with a blank where a verdict would
+// be: it wears the `open` Tag — "declared but never exercised" (§2.5), the one
+// Tag variant that carries no semantic hue — and says in words that nobody has
+// judged it yet. It is not a pass, it is not a fail, and it is not an error.
+// The rail's meter counts it out of the labelled figure and its foot line says
+// so, so the number and the rows agree.
+//
+// ── WHAT THIS PAGE MAY NOT CLAIM (§7.1) ────────────────────────────────────
+// `GET /api/datasets/{name}/cases` returns the DRAFT HEAD — the current case
+// list with each case's latest label — and nothing else: no label history, no
+// per-labeller agreement, no eval scores. `api.listDatasetCases` also absorbs a
+// 501 from an install with no dataset store and returns an empty case list, so
+// "no cases" here is genuinely ambiguous between "the store isn't configured"
+// and "nobody has added one". The empty state refuses to claim either.
 // ──────────────────────────────────────────────────────────────────────────────
 
 type DetailLoadState =
@@ -419,6 +431,23 @@ type LabelFormState =
   | { kind: "submitting" }
   | { kind: "success" }
   | { kind: "error"; message: string };
+
+/**
+ * A verdict's Tag variant. `pass` is the only ok-green here — §2.2's rule that
+ * green means "verified and serving" and nothing else. `fail` is crit: the case
+ * will not pass without a change to the agent. Everything else (flag, partial,
+ * an install's own vocabulary) is warn — degraded, not broken.
+ *
+ * A verdict is never pine, and an ABSENT verdict is never any of these: an
+ * unlabelled case gets the hueless `open` Tag, because "nobody has judged it"
+ * is not a judgement.
+ */
+function verdictVariant(value: string): "ok" | "crit" | "warn" {
+  const v = value.trim().toLowerCase();
+  if (v === "pass") return "ok";
+  if (v === "fail") return "crit";
+  return "warn";
+}
 
 interface LabelFormProps {
   datasetName: string;
@@ -460,12 +489,12 @@ function LabelForm({ datasetName, caseId, onSaved }: LabelFormProps) {
     <form
       data-testid={`label-form-${caseId}`}
       onSubmit={(e) => void onSubmit(e)}
-      className="mt-4 space-y-3 border-t pt-4"
+      className="space-y-3 border-t border-border pt-4"
     >
-      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-        Add label
+      <p className="font-mono text-2xs uppercase tracking-wide text-faint">
+        Add a label
       </p>
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <Label htmlFor={`label-value-${caseId}`} className="sr-only">
           Verdict
         </Label>
@@ -475,7 +504,7 @@ function LabelForm({ datasetName, caseId, onSaved }: LabelFormProps) {
           value={value}
           onChange={(e) => setValue(e.target.value)}
           disabled={state.kind === "submitting"}
-          className="h-9 rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="h-9 rounded-sm border border-input bg-background px-3 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
         >
           <option value="pass">pass</option>
           <option value="fail">fail</option>
@@ -498,7 +527,7 @@ function LabelForm({ datasetName, caseId, onSaved }: LabelFormProps) {
           onChange={(e) => setCorrection(e.target.value)}
           disabled={state.kind === "submitting"}
           rows={2}
-          className="text-sm font-mono"
+          className="font-mono text-sm"
         />
         <Textarea
           placeholder="Note (optional) — free-form comment for this label"
@@ -527,84 +556,123 @@ interface CaseCardProps {
   onLabelSaved: () => void;
 }
 
+/** One case: what was asked, what was expected, how it was judged (or that it
+ *  has not been), and the form that judges it. */
 function CaseCard({ datasetName, c, onLabelSaved }: CaseCardProps) {
+  const label = c.latestLabel;
+  const tags = Object.entries(c.tags ?? {});
+
   return (
-    <Card data-testid={`case-row-${c.id}`} className="space-y-0">
-      <CardHeader className="pb-3">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <span className="font-mono text-xs text-muted-foreground truncate max-w-xs">
-            {c.id}
+    <Card className="min-w-0" data-testid={`case-row-${c.id}`}>
+      <PanelHeader
+        title={
+          <span className="font-mono text-sm font-semibold" title={c.id}>
+            {truncateId(c.id)}
           </span>
-          <div className="flex flex-wrap gap-1">
-            {c.tags &&
-              Object.entries(c.tags).map(([k, v]) => (
-                <Badge key={k} variant="secondary" className="text-xs font-mono">
-                  {k}={v}
-                </Badge>
-              ))}
+        }
+        meta={c.createdAt ? formatStamp(c.createdAt) : undefined}
+      >
+        {label ? (
+          <Badge variant={verdictVariant(label.value)}>{label.value}</Badge>
+        ) : (
+          // Declared but never exercised — the one Tag that carries no hue,
+          // because "nobody has judged this" is not a judgement (§2.5).
+          <Badge variant="open">unlabelled</Badge>
+        )}
+      </PanelHeader>
+      <CardContent className="space-y-4">
+        {(tags.length > 0 || c.sourceTraceId) && (
+          <div className="flex flex-wrap items-center gap-2">
+            {tags.map(([k, v]) => (
+              <Badge key={k} variant="muted">
+                {k}={v}
+              </Badge>
+            ))}
+            {c.sourceTraceId && (
+              <Link
+                to={`/traces/${encodeURIComponent(c.sourceTraceId)}`}
+                title={c.sourceTraceId}
+                className="border-b border-accent font-mono text-xs text-primary hover:border-primary"
+              >
+                Source trace: {truncateId(c.sourceTraceId)}
+              </Link>
+            )}
+          </div>
+        )}
+
+        {/* Machine text in a code well: it keeps its own line breaks and scrolls
+            inside its own frame rather than widening the page (§4.5/§4.6). */}
+        <div>
+          <p className="mb-1 font-mono text-2xs uppercase tracking-wide text-faint">
+            Input
+          </p>
+          <div className="max-h-44 overflow-auto rounded-md bg-surface-3 p-3">
+            <pre className="whitespace-pre-wrap break-words font-mono text-xs">
+              {truncate(c.input, 400)}
+            </pre>
           </div>
         </div>
-        {c.sourceTraceId && (
-          <a
-            href={`/traces/${encodeURIComponent(c.sourceTraceId)}`}
-            className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
-          >
-            Source trace: {c.sourceTraceId}
-          </a>
-        )}
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Input</p>
-          <p className="text-sm font-mono whitespace-pre-wrap break-words rounded bg-muted px-2 py-1.5">
-            {truncate(c.input, 400)}
-          </p>
-        </div>
+
         {c.expected && (
           <div>
-            <p className="text-xs font-medium text-muted-foreground mb-1">Expected</p>
-            <p className="text-sm font-mono whitespace-pre-wrap break-words rounded bg-muted px-2 py-1.5">
-              {truncate(c.expected, 400)}
+            <p className="mb-1 font-mono text-2xs uppercase tracking-wide text-faint">
+              Expected
             </p>
+            <div className="max-h-44 overflow-auto rounded-md bg-surface-3 p-3">
+              <pre className="whitespace-pre-wrap break-words font-mono text-xs">
+                {truncate(c.expected, 400)}
+              </pre>
+            </div>
           </div>
         )}
-        {c.latestLabel && (
-          <div className="rounded-md border bg-card/60 px-3 py-2 space-y-1">
-            <div className="flex items-center gap-2">
-              <Badge
-                variant={
-                  c.latestLabel.value === "pass"
-                    ? "success"
-                    : c.latestLabel.value === "fail"
-                      ? "destructive"
-                      : "warning"
-                }
-                className="text-xs"
+
+        {label ? (
+          <div className="rounded-md border border-border bg-surface-2 px-3 py-2">
+            <p className="text-sm text-faint">
+              Judged {label.value} by {label.author} ·{" "}
+              <span
+                className="font-mono tabular-nums"
+                title={label.createdAt}
               >
-                {c.latestLabel.value}
-              </Badge>
-              <span className="text-xs text-muted-foreground">
-                by {c.latestLabel.author} · {formatDate(c.latestLabel.createdAt)}
+                {formatStamp(label.createdAt)}
               </span>
-            </div>
-            {c.latestLabel.correction && (
-              <p className="text-xs font-mono text-muted-foreground">
-                Correction: {truncate(c.latestLabel.correction, 200)}
+            </p>
+            {label.correction && (
+              <p className="mt-1 break-words font-mono text-xs text-secondary-foreground">
+                Correction: {truncate(label.correction, 200)}
               </p>
             )}
-            {c.latestLabel.note && (
-              <p className="text-xs text-muted-foreground">{c.latestLabel.note}</p>
+            {label.note && (
+              <p className="mt-1 text-sm text-secondary-foreground">
+                {label.note}
+              </p>
             )}
           </div>
+        ) : (
+          // An unlabelled case is a REAL state, and it says so — a blank here
+          // would read as a rendering gap rather than as work to be done.
+          <QuietNote title="Nobody has judged this case yet.">
+            It is in the dataset and waiting for a verdict. Until someone gives
+            it one it counts as neither a pass nor a fail — it is unjudged, and
+            the labelled figure in the rail leaves it out rather than counting it
+            against the agent.
+          </QuietNote>
         )}
-        <LabelForm datasetName={datasetName} caseId={c.id} onSaved={onLabelSaved} />
+
+        <LabelForm
+          datasetName={datasetName}
+          caseId={c.id}
+          onSaved={onLabelSaved}
+        />
       </CardContent>
     </Card>
   );
 }
 
 export function DatasetDetailPage() {
-  const navigate = useNavigate();
+  // No `useNavigate` here: the way back is the PageHeader breadcrumb, a real
+  // link rather than a button that calls navigate() — and it renders in every
+  // state, including the ones the old back button did not cover.
   const { name = "" } = useParams<{ name: string }>();
   const [loadState, setLoadState] = useState<DetailLoadState>({ kind: "loading" });
   const abortRef = useRef<AbortController | null>(null);
@@ -637,61 +705,153 @@ export function DatasetDetailPage() {
     return () => abortRef.current?.abort();
   }, [load]);
 
-  return (
-    <div className="mx-auto max-w-4xl space-y-6" data-testid="dataset-detail-page">
-      {/* Back link */}
-      <Button variant="ghost" size="sm" onClick={() => navigate("/datasets")}>
-        <ChevronLeft className="h-4 w-4" />
-        Back to Datasets
-      </Button>
+  const crumbs = [{ label: "Datasets", to: "/datasets" }, { label: name }];
+  const lede =
+    "Draft-head cases with their latest human labels. Labels are append-only — a new label supersedes the one shown here, and the history is kept.";
 
-      {/* Header */}
-      <div className="space-y-1">
-        <h2 className="text-2xl font-semibold tracking-tight font-mono">{name}</h2>
-        <p className="text-sm text-muted-foreground">
-          Draft-head cases with their latest human labels. Labels are append-only — a new
-          label supersedes the previous one (displayed here); the history is preserved.
-        </p>
-      </div>
-
-      {loadState.kind === "loading" && (
-        <p className="text-sm text-muted-foreground">Loading cases…</p>
-      )}
-
-      {loadState.kind === "error" && (
-        <div
-          className="rounded-lg border border-destructive/40 bg-destructive/5 p-6 text-sm text-destructive"
-          role="alert"
-        >
-          {loadState.message}
+  if (loadState.kind === "loading") {
+    return (
+      <div className="min-w-0 space-y-6" data-testid="dataset-detail-loading">
+        <PageHeader breadcrumb={crumbs} title={name} titleMono loading />
+        <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
+          <div className="min-w-0 space-y-5">
+            <SkeletonCard />
+            <SkeletonCard />
+          </div>
+          <Card className="min-w-0">
+            <PanelHeader title="The record" />
+            <CardContent>
+              <div role="status" aria-busy="true" aria-label="Loading the dataset facts">
+                {[0, 1, 2, 3].map((i) => (
+                  <Skeleton decorative key={i} className="mb-3 h-3.5 w-full" />
+                ))}
+              </div>
+            </CardContent>
+          </Card>
         </div>
-      )}
+      </div>
+    );
+  }
 
-      {loadState.kind === "ready" && loadState.data.cases.length === 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">No cases</CardTitle>
-            <CardDescription>
-              No cases in this dataset yet. Add a trace as a case from the trace view or
-              via{" "}
-              <span className="font-mono">
+  if (loadState.kind === "error") {
+    return (
+      <div className="min-w-0 space-y-6" data-testid="dataset-detail-error">
+        <PageHeader breadcrumb={crumbs} title={name} titleMono />
+        <ErrorState
+          title="The dataset didn't load."
+          description="Nothing has changed about the cases themselves — only this page failed to read them."
+          detail={loadState.message}
+          onRetry={load}
+        />
+      </div>
+    );
+  }
+
+  const { data } = loadState;
+  const cases = data.cases;
+  const labelled = cases.filter((c) => c.latestLabel).length;
+  const unlabelled = cases.length - labelled;
+
+  const record: KeyValueItem[] = [
+    { key: "Dataset", value: name, title: name },
+    {
+      key: "Dataset id",
+      value: data.datasetId ? (
+        <span title={data.datasetId}>{truncateId(data.datasetId)}</span>
+      ) : undefined,
+      absent: "not recorded",
+      title: "This response carried no dataset id.",
+    },
+    { key: "Cases", value: <QuantityValue value={cases.length} />, mono: false },
+    {
+      key: "Unlabelled",
+      // A real, counted zero renders `0` — the whole dataset is judged. It is
+      // never the same glyph as a figure we do not have (§7.1).
+      value: <QuantityValue value={unlabelled} />,
+      mono: false,
+    },
+  ];
+
+  return (
+    <div className="min-w-0 space-y-6" data-testid="dataset-detail-page">
+      <PageHeader
+        breadcrumb={crumbs}
+        title={name}
+        titleMono
+        meta={
+          cases.length > 0
+            ? `${cases.length} case${cases.length === 1 ? "" : "s"} · ${labelled} labelled`
+            : undefined
+        }
+        lede={lede}
+      />
+
+      {/* §4.7 hub grid: the queue of judgements on the left, how far it has got
+          in the 300px rail, which stacks UNDER the main column below `lg`. */}
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
+        <div className="min-w-0 space-y-5">
+          {cases.length === 0 ? (
+            <QuietNote title="No cases">
+              This dataset holds nothing to judge yet — and this page cannot tell
+              you which of two things that means. An install with no dataset
+              store answers the same way as a dataset nobody has added to, so
+              rather than pick one, it says so: add a run as a case from its
+              trace, or{" "}
+              <span className="break-all font-mono text-xs">
                 POST /api/datasets/{name}/cases/from-run
               </span>
               .
-            </CardDescription>
-          </CardHeader>
-        </Card>
-      )}
+            </QuietNote>
+          ) : (
+            <>
+              <SectionHeader
+                title="The cases"
+                lede={
+                  unlabelled === 0
+                    ? "Every case here has a verdict. A new label supersedes the one shown."
+                    : `${unlabelled} of ${cases.length} have no verdict yet. Judging one appends a label; it never overwrites the last.`
+                }
+              />
+              {cases.map((c) => (
+                <CaseCard
+                  key={c.id}
+                  datasetName={name}
+                  c={c}
+                  onLabelSaved={load}
+                />
+              ))}
+            </>
+          )}
+        </div>
 
-      {loadState.kind === "ready" &&
-        loadState.data.cases.map((c) => (
-          <CaseCard
-            key={c.id}
-            datasetName={name}
-            c={c}
-            onLabelSaved={load}
-          />
-        ))}
+        <div className="min-w-0 space-y-5">
+          {cases.length > 0 && (
+            <Card className="min-w-0">
+              <PanelHeader title="How much is judged" />
+              <CardContent>
+                <Meter
+                  label="Cases labelled"
+                  used={labelled}
+                  cap={cases.length}
+                  thing="dataset"
+                  foot={
+                    unlabelled === 0
+                      ? "Every case in this dataset has been judged."
+                      : `${unlabelled} still unjudged. Unlabelled is a state of its own — it counts as neither a pass nor a fail.`
+                  }
+                />
+              </CardContent>
+            </Card>
+          )}
+
+          <Card className="min-w-0">
+            <PanelHeader title="The record" />
+            <CardContent>
+              <KeyValueList items={record} />
+            </CardContent>
+          </Card>
+        </div>
+      </div>
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { DatasetsPage, DatasetDetailPage } from "@/pages/datasets-page";
@@ -321,7 +321,7 @@ describe("DatasetDetailPage", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("back button navigates to datasets list", async () => {
+  it("offers a way back to the datasets list", async () => {
     installFetch({
       listCases: {
         ok: true,
@@ -335,8 +335,11 @@ describe("DatasetDetailPage", () => {
       expect(screen.getByTestId("dataset-detail-page")).toBeInTheDocument();
     });
 
-    const backBtn = screen.getByText(/Back to Datasets/);
-    expect(backBtn).toBeInTheDocument();
+    // Same intent as the old "Back to Datasets" button, carried by the M151 A2
+    // breadcrumb: a REAL link to the list (right- and middle-clickable), and it
+    // renders in the loading and error states too, which the button did not.
+    const back = screen.getByRole("link", { name: "Datasets" });
+    expect(back).toHaveAttribute("href", "/datasets");
   });
 });
 
@@ -466,5 +469,83 @@ describe("TracePage — AddToDatasetPanel (m69.3)", () => {
     // Must NOT be an error alert — it's a calm muted message.
     expect(result).not.toHaveAttribute("role", "alert");
     expect(result.textContent).toMatch(/not configured|CONTROLPLANE_DSN/i);
+  });
+});
+
+
+// ── Archetype A2 (M151 spec §6.1) — unlabelled is a STATE ──────────────────
+// A case nobody has judged is not an empty case. It wears the hueless `open`
+// Tag, says in words that it is unjudged, and is counted OUT of the labelled
+// figure — so the rail's number and the rows on the page never disagree.
+
+describe("DatasetDetailPage — unlabelled is a state (M151)", () => {
+  const judged = kase({
+    id: "case-a",
+    input: "Judged case",
+    latestLabel: { value: "pass", author: "alice", createdAt: "2026-07-03T10:00:00Z" },
+  });
+  const unjudged = kase({ id: "case-b", input: "Unjudged case", latestLabel: undefined });
+
+  it("renders an unlabelled case as unlabelled, not as a blank", async () => {
+    installFetch({
+      listCases: {
+        ok: true,
+        body: { datasetId: "ds-1", name: "my-dataset", cases: [judged, unjudged] },
+      },
+    });
+    renderDetail();
+    await screen.findByTestId("dataset-detail-page");
+
+    const row = screen.getByTestId("case-row-case-b");
+    expect(within(row).getByText("unlabelled")).toBeInTheDocument();
+    expect(
+      within(row).getByText("Nobody has judged this case yet."),
+    ).toBeInTheDocument();
+    // It is not dressed as a failure — unjudged is neither a pass nor a fail.
+    expect(within(row).queryByRole("alert")).toBeNull();
+
+    // The judged one still reads as judged, in its own register — the verdict
+    // line names who judged it and when. (The bare word "pass" also appears as
+    // an <option> in every case's form, so assert the sentence, not the word.)
+    expect(
+      within(screen.getByTestId("case-row-case-a")).getByText(/Judged pass by alice/),
+    ).toBeInTheDocument();
+  });
+
+  it("counts the unlabelled case out of the labelled figure, in both registers", async () => {
+    installFetch({
+      listCases: {
+        ok: true,
+        body: { datasetId: "ds-1", name: "my-dataset", cases: [judged, unjudged] },
+      },
+    });
+    renderDetail();
+    await screen.findByTestId("dataset-detail-page");
+
+    // The meter's ARIA carries the numbers, so a screen reader gets them too.
+    const meter = screen.getByRole("meter", { name: "Cases labelled" });
+    expect(meter).toHaveAttribute("aria-valuenow", "1");
+    expect(meter).toHaveAttribute("aria-valuemax", "2");
+
+    // …and the record row agrees with it rather than counting separately.
+    const row = screen.getByText("Unlabelled").closest("div") as HTMLElement;
+    expect(within(row).getByText("1")).toBeInTheDocument();
+  });
+
+  it("renders a fully judged dataset's unlabelled count as a real zero", async () => {
+    installFetch({
+      listCases: {
+        ok: true,
+        body: { datasetId: "ds-1", name: "my-dataset", cases: [judged] },
+      },
+    });
+    renderDetail();
+    await screen.findByTestId("dataset-detail-page");
+
+    // Zero is a MEASUREMENT here — every case is judged — so it renders as `0`,
+    // never as the dash that means "we do not know" (§7.1).
+    const row = screen.getByText("Unlabelled").closest("div") as HTMLElement;
+    expect(within(row).getByText("0")).toBeInTheDocument();
+    expect(row.textContent).not.toContain("—");
   });
 });

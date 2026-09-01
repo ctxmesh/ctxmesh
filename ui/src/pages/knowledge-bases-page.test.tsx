@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { KnowledgeBasesPage, KBDetailPage } from "@/pages/knowledge-bases-page";
@@ -204,7 +204,12 @@ describe("KBDetailPage — test-query panel (m68.13)", () => {
 
     expect(await screen.findByTestId("kb-detail-page")).toBeInTheDocument();
     expect(screen.getByTestId("kb-detail-header")).toBeInTheDocument();
-    expect(screen.getByText("my-kb")).toBeInTheDocument();
+    // The name now appears in more than one place by design (M151 A2: the
+    // breadcrumb trail, the mono h1, and the rail's record row), exactly as
+    // "Ready" already did — so both assert presence rather than uniqueness.
+    expect(screen.getAllByText("my-kb").length).toBeGreaterThan(0);
+    // The h1 is the authoritative one: the resource name, in the mono face.
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("my-kb");
     // "Ready" legitimately appears in more than one place on the detail page (the phase badge +
     // the status summary), so assert presence rather than uniqueness.
     expect(screen.getAllByText("Ready").length).toBeGreaterThan(0);
@@ -314,5 +319,77 @@ describe("KBDetailPage — test-query panel (m68.13)", () => {
     await waitFor(() =>
       expect(screen.getByTestId("ingest-result")).toHaveTextContent("run-abc"),
     );
+  });
+});
+
+
+// ── Archetype A2 (M151 spec §6.1) — a never-run ingestion is ABSENT ─────────
+// The honesty rule this surface exists to demonstrate: an ingestion that has
+// never happened has no date, and the page must say so without inventing one.
+// "Never ingested" and "ingested, and it found nothing" are different facts,
+// and they must not render as the same glyph.
+
+/** The kv row whose key is `key`, so a value can be asserted in its own row. */
+function railRow(key: string): HTMLElement {
+  const dt = screen.getByText(key);
+  const row = dt.closest("div");
+  if (!row) throw new Error(`no row for ${key}`);
+  return row as HTMLElement;
+}
+
+describe("KBDetailPage — absent is not zero (M151)", () => {
+  it("renders a never-run ingestion as a dash with a reason — never a zero, never now", async () => {
+    installFetch({
+      get: {
+        ok: true,
+        body: kbDetail({
+          phase: "Pending",
+          lastIngestedAt: undefined,
+          documentCount: 0,
+          chunkCount: 0,
+          sizeBytes: 0,
+        }),
+      },
+    });
+    renderDetailPage();
+    await screen.findByTestId("kb-detail-page");
+
+    // The date row carries the dash and NOTHING else — no fabricated date, and
+    // in particular not today's.
+    const ingested = railRow("Last ingested");
+    expect(ingested.textContent?.replace(/\s/g, "")).toBe("Lastingested—");
+    expect(within(ingested).getByTitle(/never been ingested/i)).toBeInTheDocument();
+
+    // The counts are MEASURED zeros, and they render as real zeros — the whole
+    // point being that the reader can tell them apart from the dash above.
+    for (const key of ["Documents", "Chunks"]) {
+      const row = railRow(key);
+      expect(within(row).getByText("0")).toBeInTheDocument();
+      expect(row.textContent).not.toContain("—");
+    }
+
+    // And the page says, once, which of the two absences it is.
+    expect(screen.getByTestId("kb-never-ingested")).toBeInTheDocument();
+    // Calm: an un-ingested corpus is not a failure.
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("renders a real ingestion date when there is one, with the full stamp in title", async () => {
+    installFetch({ get: { ok: true, body: kbDetail({ lastIngestedAt: "2026-07-01T12:00:00Z" }) } });
+    renderDetailPage();
+    await screen.findByTestId("kb-detail-page");
+
+    const ingested = railRow("Last ingested");
+    expect(ingested.textContent).not.toContain("—");
+    expect(within(ingested).getByTitle("2026-07-01T12:00:00Z")).toBeInTheDocument();
+    // No note, because nothing is absent.
+    expect(screen.queryByTestId("kb-never-ingested")).toBeNull();
+  });
+
+  it("names an absent embedding route rather than leaving the row blank", async () => {
+    installFetch({ get: { ok: true, body: kbDetail({ embeddingRoute: "" }) } });
+    renderDetailPage();
+    await screen.findByTestId("kb-detail-page");
+    expect(within(railRow("Embedding route")).getByText("not set")).toBeInTheDocument();
   });
 });

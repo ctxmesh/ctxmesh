@@ -1,22 +1,30 @@
 import * as React from "react";
 import { useNavigate } from "react-router-dom";
-import { Check, KeyRound, PlugZap, ShieldAlert } from "lucide-react";
+import { KeyRound, Lock, PlugZap } from "lucide-react";
 
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { FieldError } from "@/components/ui/label";
+import { FormField } from "@/components/config/form-field";
 import {
+  CredentialSourceBadge,
   ForbiddenInline,
+  KeyValueList,
+  PageHeader,
+  QuietNote,
+  SectionHeader,
   Wizard,
   useToast,
+  type KeyValueItem,
   type WizardStep,
 } from "@/components/kit";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_SECRETS } from "@/lib/nav";
+import { cn } from "@/lib/utils";
 import { api, ApiError, type ConnectProviderResponse } from "@/lib/api";
 
-// ConnectProviderPage — the FIRST UI of the aha (spec §5, ADR 0015). A guided
-// wizard that connects a provider by pasting a key ONCE:
+// ConnectProviderPage — the FIRST UI of the aha (spec §5, ADR 0015; M151 §6.1
+// archetype A4). A guided wizard that connects a provider by pasting a key ONCE:
 //
 //   1. Provider  — pick who serves the model (anthropic / openai / google / …).
 //   2. API key   — paste the key (+ optional base URL for OpenAI-compatible).
@@ -25,17 +33,39 @@ import { api, ApiError, type ConnectProviderResponse } from "@/lib/api";
 //                  server-side (caller-scoped) and returns the LIVE model list.
 //   3. Review    — render that live model list + the created `secretName`.
 //
-// THE KEY NEVER LIVES CLIENT-SIDE AFTER SUBMIT. It is held ONLY in the key
-// field's local state until submit, snapshotted into the POST body, and CLEARED
-// the instant the request is dispatched. It is never written to a store /
-// localStorage / sessionStorage / URL. After connect the UI only ever shows the
-// model list + the `secretName` reference — the key is server-side.
+// ── THE KEY NEVER LIVES CLIENT-SIDE AFTER SUBMIT ─────────────────────────────
+// It is held ONLY in the key field's local state until submit, snapshotted into
+// the POST body, and CLEARED the instant the request is dispatched. It is never
+// written to a store / localStorage / sessionStorage / URL, never echoed back
+// into the field, and never placed in a `title` attribute. After connect the UI
+// shows the model list, the `secretName` reference, and a CredentialSourceBadge
+// — WHERE the credential came from, never what it is.
 //
-// Failure modes are honest (never swallowed):
-//   • bad key (400/401) → inline error on the key step + retry.
+// ── VALIDATION HAPPENS ON STEP-FORWARD, AND CAN END THREE WAYS ───────────────
+// Continuing off the key step submits, and that is the moment this page is most
+// likely to be wrong about something. "Couldn't connect" would fuse three
+// different truths into one unusable sentence, so they stay apart:
+//
+//   • REJECTED  — the API reached the provider and the provider refused the
+//                 credential. The key (or the base URL beside it) has to change.
+//                 Crit: the key field is marked invalid with a FieldError, and
+//                 the provider's own words are quoted verbatim.
+//   • NEVER RAN — the request never came back at all (offline, DNS, the BFF is
+//                 down). NOTHING was sent to the provider and nothing was
+//                 stored; the key may be perfectly good. Warn, no field blamed,
+//                 and the same submit is worth retrying unchanged.
+//   • NOT WIRED — the API answered 501: this install cannot validate credentials
+//                 here. Nothing tried, nothing broken, retrying will not help —
+//                 a QuietNote (§7.1), never an error.
+//
+// A rejected key is a fact about the key. A request that never left the browser
+// is a fact about the network. Telling a user to "check the key" for the second
+// one sends them to rotate a credential that was fine.
+//
+// The other two terminal states:
 //   • viewer (403)      → ForbiddenInline (the API is the real gate; ADR 0011).
-//   • kill-switch (404) → the "provider-connect is disabled" fallback state
-//     pointing at reference-an-existing-SecretBinding (hardened install).
+//   • kill-switch (404) → the "provider-connect is disabled" fallback, pointing
+//     at reference-an-existing-SecretBinding (hardened install).
 
 // The providers the connect flow supports. `custom` needs a base URL (an
 // OpenAI-compatible endpoint); the rest default to the provider's own API.
@@ -53,15 +83,40 @@ const PROVIDERS = [
 
 type ProviderId = (typeof PROVIDERS)[number]["id"];
 
-// Submit is the connect request lifecycle. `error` is the key-step honest
+/** How the credential check ended. See the header note — three different truths. */
+type Failure =
+  | { reach: "rejected"; message: string; status: number }
+  | { reach: "never-ran"; message: string }
+  | { reach: "not-wired" };
+
+// Submit is the connect request lifecycle. `failed` is the key-step honest
 // failure; `forbidden` and `killed` are the two terminal non-key states.
 type Submit =
   | { kind: "idle" }
   | { kind: "connecting" }
   | { kind: "connected"; res: ConnectProviderResponse }
-  | { kind: "error"; message: string; status?: number }
+  | { kind: "failed"; failure: Failure }
   | { kind: "forbidden"; message: string }
   | { kind: "killed" };
+
+/**
+ * Sort a thrown error into the three outcomes. 403 (RBAC) and 404 (kill-switch)
+ * are terminal page states and are peeled off by the caller first.
+ *
+ * The last line carries the doctrine: anything that is NOT an ApiError never
+ * completed a request, so the provider never saw the key and nothing about it
+ * was learned.
+ */
+function classify(err: unknown): Failure {
+  if (err instanceof ApiError) {
+    if (err.isNotImplemented) return { reach: "not-wired" };
+    return { reach: "rejected", message: err.message, status: err.status };
+  }
+  return {
+    reach: "never-ran",
+    message: err instanceof Error ? err.message : "the request never completed",
+  };
+}
 
 const STEP_PROVIDER = 0;
 const STEP_KEY = 1;
@@ -90,6 +145,12 @@ export function ConnectProviderPage() {
 
   const provider = PROVIDERS.find((p) => p.id === providerId)!;
 
+  // A verdict describes the credential that was SUBMITTED. The moment any of
+  // the inputs change it stops describing anything, so it goes.
+  function clearVerdict() {
+    setSubmit((s) => (s.kind === "failed" ? { kind: "idle" } : s));
+  }
+
   async function onConnect() {
     setSubmit({ kind: "connecting" });
     // Snapshot the key into the request body, then WIPE it from component state
@@ -108,7 +169,10 @@ export function ConnectProviderPage() {
       setCurrent(STEP_REVIEW);
       toast({
         variant: "success",
-        title: `Connected ${provider.name}`,
+        // The CONNECTION's name, not the vendor's: a user who named this one
+        // "anthropic-prod" should not be told "Connected Anthropic" and left
+        // wondering which of their three keys just landed.
+        title: `Connected ${connection.trim() || provider.name}`,
         description: `${(res.provider.models ?? []).length} model${(res.provider.models ?? []).length === 1 ? "" : "s"} available`,
       });
     } catch (err) {
@@ -124,13 +188,8 @@ export function ConnectProviderPage() {
           setSubmit({ kind: "forbidden", message: err.message });
           return;
         }
-        setSubmit({ kind: "error", message: err.message, status: err.status });
-        return;
       }
-      setSubmit({
-        kind: "error",
-        message: err instanceof Error ? err.message : "request failed",
-      });
+      setSubmit({ kind: "failed", failure: classify(err) });
     }
   }
 
@@ -146,6 +205,12 @@ export function ConnectProviderPage() {
   }
 
   const connecting = submit.kind === "connecting";
+  const failure = submit.kind === "failed" ? submit.failure : null;
+  // Only a REJECTION is a fact about the key. The field is emptied at submit, so
+  // the error line has to say "paste it again" — otherwise a field that blanked
+  // itself and turned red reads as a bug in the console rather than a verdict on
+  // the credential.
+  const keyRejected = failure?.reach === "rejected";
   const keyReady =
     apiKey.trim().length > 0 &&
     (!provider.needsBaseURL || baseURL.trim().length > 0);
@@ -160,7 +225,8 @@ export function ConnectProviderPage() {
         <ForbiddenInline
           title="Not allowed to connect a provider"
           description="Connecting a provider securely stores your API key, which needs a permission your account doesn't have on this cluster. An admin can connect the provider for you, or grant your account that permission."
-          detail={submit.message}
+          resource="provider credentials"
+          permission="create"
         />
       </PageFrame>
     );
@@ -172,11 +238,12 @@ export function ConnectProviderPage() {
       title: "Provider",
       description: "Pick who serves the model",
       content: (
-        <div className="space-y-3">
-          <p className="text-sm text-muted-foreground">
-            Which provider are you connecting?
-          </p>
-          <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-5">
+          <SectionHeader
+            title="Who serves the model"
+            lede="One provider per connection. You can connect more later — an agent picks the route it runs on, not the vendor."
+          />
+          <div className="grid gap-3 sm:grid-cols-2">
             {PROVIDERS.map((p) => {
               const active = p.id === providerId;
               return (
@@ -185,17 +252,27 @@ export function ConnectProviderPage() {
                   type="button"
                   aria-pressed={active}
                   onClick={() => setProviderId(p.id)}
-                  className={`flex items-center gap-3 rounded-lg border p-3 text-left transition-colors hover:bg-surface-2 ${
-                    active ? "border-primary ring-1 ring-primary" : ""
-                  }`}
+                  className={cn(
+                    "flex items-center gap-3 rounded-lg border p-3 text-left transition-colors",
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                    // Selection is always pine-family, never a status hue (§2.3).
+                    active
+                      ? "border-primary bg-accent text-accent-foreground"
+                      : "border-border bg-card hover:bg-surface-2",
+                  )}
                 >
-                  <div className="flex h-9 w-9 items-center justify-center rounded-md bg-surface-2">
-                    <PlugZap className="h-4 w-4 text-primary" />
-                  </div>
-                  <div>
-                    <p className="text-sm font-medium">{p.name}</p>
-                    <p className="text-xs text-muted-foreground">{p.models}</p>
-                  </div>
+                  <span
+                    className={cn(
+                      "flex h-9 w-9 shrink-0 items-center justify-center rounded-md",
+                      active ? "bg-primary text-primary-foreground" : "bg-surface-2 text-faint",
+                    )}
+                  >
+                    <PlugZap className="h-4 w-4" />
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block text-sm font-medium">{p.name}</span>
+                    <span className="block text-xs text-faint">{p.models}</span>
+                  </span>
                 </button>
               );
             })}
@@ -208,66 +285,124 @@ export function ConnectProviderPage() {
       title: "API key",
       description: "Pasted once, stored server-side",
       content: (
-        <div className="space-y-4">
-          <div className="space-y-1.5">
-            <Label htmlFor="provider-key">{provider.name} API key</Label>
-            <div className="relative">
-              <KeyRound className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <div className="space-y-5">
+          <SectionHeader
+            title="The key"
+            lede={`Continuing sends it to the console’s API, which checks it against ${provider.name} before anything is stored. Nothing is created if the check fails.`}
+          />
+          <div className="space-y-4">
+            <FormField id="provider-key" label={`${provider.name} API key`}>
+              <div className="relative">
+                <KeyRound className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-faint" />
+                <Input
+                  id="provider-key"
+                  type="password"
+                  autoComplete="off"
+                  value={apiKey}
+                  onChange={(e) => { clearVerdict(); setApiKey(e.target.value); }}
+                  placeholder="Paste your key…"
+                  className="pl-9 font-mono text-xs"
+                  aria-invalid={keyRejected || undefined}
+                  aria-describedby={keyRejected ? "provider-key-error" : undefined}
+                />
+              </div>
+              <FieldError id="provider-key-error">
+                {keyRejected
+                  ? `${provider.name} didn’t accept this key. It isn’t kept after a submit — paste it again.`
+                  : undefined}
+              </FieldError>
+            </FormField>
+            {provider.needsBaseURL && (
+              <FormField id="provider-base-url" label="Base URL">
+                <Input
+                  id="provider-base-url"
+                  value={baseURL}
+                  onChange={(e) => { clearVerdict(); setBaseURL(e.target.value); }}
+                  placeholder="https://api.example.com/v1"
+                  className="font-mono text-xs"
+                />
+                <p className="text-xs text-faint">
+                  The OpenAI-compatible endpoint the key belongs to. A rejected
+                  key on a custom endpoint can mean either one is wrong.
+                </p>
+              </FormField>
+            )}
+            <FormField id="provider-connection" label="Connection name (optional)">
               <Input
-                id="provider-key"
-                type="password"
-                autoComplete="off"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder="Paste your key…"
-                className="pl-9 font-mono text-xs"
-              />
-            </div>
-          </div>
-          {provider.needsBaseURL && (
-            <div className="space-y-1.5">
-              <Label htmlFor="provider-base-url">Base URL</Label>
-              <Input
-                id="provider-base-url"
-                value={baseURL}
-                onChange={(e) => setBaseURL(e.target.value)}
-                placeholder="https://api.example.com/v1"
+                id="provider-connection"
+                value={connection}
+                onChange={(e) => { clearVerdict(); setConnection(e.target.value); }}
+                placeholder={providerId}
                 className="font-mono text-xs"
+                data-testid="connect-connection-name"
               />
-            </div>
-          )}
-          <div className="space-y-1.5">
-            <Label htmlFor="provider-connection">Connection name (optional)</Label>
-            <Input
-              id="provider-connection"
-              value={connection}
-              onChange={(e) => setConnection(e.target.value)}
-              placeholder={providerId}
-              className="font-mono text-xs"
-              data-testid="connect-connection-name"
-            />
-            <p className="text-xs text-muted-foreground">
-              Name this connection to hold <em>multiple keys</em> for the same
-              provider (e.g. <code>{providerId}-prod</code>,{" "}
-              <code>{providerId}-team-x</code>). Leave blank to use{" "}
-              <code>{providerId}</code>.
-            </p>
+              <p className="text-xs text-faint">
+                Name this connection to hold <em>multiple keys</em> for the same
+                provider (e.g. <code>{providerId}-prod</code>,{" "}
+                <code>{providerId}-team-x</code>). Leave blank to use{" "}
+                <code>{providerId}</code>.
+              </p>
+            </FormField>
           </div>
-          <div className="rounded-md border border-info/30 bg-info/5 p-3 text-xs text-muted-foreground">
-            The key goes straight to the BFF, which validates it against the
+
+          <QuietNote title="Where the key goes.">
+            Straight to the console’s API, which validates it against the
             provider and stores it as a Kubernetes Secret under <em>your</em>{" "}
-            identity. It never returns to the browser and is never logged.
-          </div>
-          {submit.kind === "error" && (
-            <p
-              className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+            identity. It never comes back to the browser and is never logged.
+          </QuietNote>
+
+          {failure?.reach === "rejected" && (
+            <div
+              className="rounded-lg border border-destructive/40 bg-destructive-surface/40 px-4 py-3"
               role="alert"
               data-testid="connect-error"
             >
-              Couldn&apos;t connect: {submit.message}
-              {submit.status ? ` (${submit.status})` : ""}. Check the key and
-              try again.
-            </p>
+              <p className="font-serif text-md font-medium text-destructive">
+                {provider.name} refused that credential.
+              </p>
+              {/* The provider's own words, verbatim — the one clue a reader can
+                  act on. Never paraphrased into "something went wrong". */}
+              <pre className="mt-2 min-w-0 whitespace-pre-wrap break-words rounded-md bg-surface-3 px-3 py-2 font-mono text-xs text-secondary-foreground">
+                {failure.message} ({failure.status})
+              </pre>
+              <p className="mt-2 max-w-[64ch] text-sm text-secondary-foreground">
+                Nothing was stored. Check the key hasn’t expired or been revoked
+                {provider.needsBaseURL ? ", and that the base URL is the endpoint it belongs to" : ""}
+                , then try again.
+              </p>
+            </div>
+          )}
+
+          {failure?.reach === "never-ran" && (
+            <div
+              className="rounded-lg border border-warning/40 bg-warning-surface/40 px-4 py-3"
+              role="alert"
+              data-testid="connect-unreachable"
+            >
+              <p className="font-serif text-md font-medium text-warning">
+                The check never ran.
+              </p>
+              <pre className="mt-2 min-w-0 whitespace-pre-wrap break-words rounded-md bg-surface-3 px-3 py-2 font-mono text-xs text-secondary-foreground">
+                {failure.message}
+              </pre>
+              <p className="mt-2 max-w-[64ch] text-sm text-secondary-foreground">
+                The request didn’t reach the console’s API, so the key never
+                reached {provider.name} and nothing was stored. That says nothing
+                about the key itself. Check your connection, then paste it again.
+              </p>
+            </div>
+          )}
+
+          {failure?.reach === "not-wired" && (
+            <div data-testid="connect-unsupported">
+              <QuietNote title="Connecting a provider isn’t wired up on this install.">
+                The console asked its API to validate the key, and the API
+                answered that it does not do that here. Nothing was sent to{" "}
+                {provider.name} and nothing was stored — trying again will not
+                change it. An operator either turns the connect flow on, or
+                creates the SecretBinding for you.
+              </QuietNote>
+            </div>
           )}
         </div>
       ),
@@ -280,9 +415,10 @@ export function ConnectProviderPage() {
         submit.kind === "connected" ? (
           <ReviewStep res={submit.res} onDone={() => navigate("/providers")} />
         ) : (
-          <p className="text-sm text-muted-foreground">
-            Submit your key to validate it and list the provider&apos;s models.
-          </p>
+          <SectionHeader
+            title="Not connected yet"
+            lede="The model list comes from the provider itself, so it only exists once your key has been checked. Go back a step and submit it."
+          />
         ),
     },
   ];
@@ -299,58 +435,72 @@ export function ConnectProviderPage() {
 
   return (
     <PageFrame>
-      {!canConnect && (
-        <p
-          className="rounded-md border border-dashed bg-card/40 px-3 py-2 text-center text-xs text-muted-foreground"
-          data-testid="connect-readonly-note"
-        >
-          Your account doesn&apos;t have permission to connect a provider on
-          this cluster (it needs to store a credential). An admin can connect
-          one for you, or grant your account that permission.
-        </p>
-      )}
-      <div className="rounded-lg border bg-card p-6 shadow-card">
-        <Wizard
-          steps={steps}
-          current={current}
-          onStepChange={onStepChange}
-          canProceed={canProceed}
-          busy={connecting}
-          // The KEY step's forward action IS the submit (intercepted above).
-          nextLabel={current === STEP_KEY ? "Connect provider" : "Continue"}
-          // The Done step's finish keeps the momentum: straight into creating an
-          // agent that uses the model you just connected (the models are already
-          // in the create-agent picker). "Done" back to Providers is the secondary
-          // action inside ReviewStep.
-          finishLabel="Create an agent with this"
-          onFinish={() => navigate("/agents/new")}
-        />
-      </div>
+      {!canConnect && <ReadOnlyNote />}
+      <Wizard
+        steps={steps}
+        current={current}
+        onStepChange={onStepChange}
+        canProceed={canProceed}
+        busy={connecting}
+        // The KEY step's forward action IS the submit (intercepted above).
+        nextLabel={current === STEP_KEY ? "Connect provider" : "Continue"}
+        // The Done step's finish keeps the momentum: straight into creating an
+        // agent that uses the model you just connected (the models are already
+        // in the create-agent picker). "Done" back to Providers is the secondary
+        // action inside ReviewStep.
+        finishLabel="Create an agent with this"
+        onFinish={() => navigate("/agents/new")}
+        // Cancel belongs in the footer (§6.1 A4) while there is still something
+        // to cancel. Once the provider IS connected there is nothing to abandon,
+        // and the review step offers "Done — back to Providers" instead.
+        onCancel={
+          submit.kind === "connected" ? undefined : () => navigate("/providers")
+        }
+        dirty={apiKey !== "" || connection.trim() !== "" || baseURL.trim() !== ""}
+      />
     </PageFrame>
   );
 }
 
-// PageFrame — the page header + a max-width column shared by the wizard, the
-// forbidden state, and the kill-switch fallback.
+// PageFrame — the §6.1 A4 shell: the page band, then a column wide enough for
+// the Wizard's 15rem rail + its 2rem gap + the 46rem content column the
+// archetype fixes. Capping the OUTER column is what sizes the inner one without
+// reaching into the kit. Shared by the wizard, the forbidden state, and the
+// kill-switch fallback.
 function PageFrame({ children }: { children: React.ReactNode }) {
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">
-          Connect a provider
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Paste a key once → validated server-side → pick a model. The first
-          step of running your first agent (no YAML, no kubectl).
-        </p>
-      </div>
-      {children}
+    <div className="min-w-0 space-y-6">
+      <PageHeader
+        title="Connect a provider"
+        lede="Paste a key once. The console checks it with the provider, stores it server-side, and the models it unlocks become available to your agents — no YAML, no kubectl."
+      />
+      <div className="max-w-[63rem] space-y-5">{children}</div>
+    </div>
+  );
+}
+
+// ReadOnlyNote — the display-only RBAC gate above the wizard (ADR 0011). A
+// permission boundary is routine, not a failure, so it reads in the calm lock
+// register (M99 C1); the API is still the real gate.
+function ReadOnlyNote() {
+  return (
+    <div
+      className="flex items-start gap-3 rounded-lg border border-border bg-surface-2/40 px-4 py-3"
+      data-testid="connect-readonly-note"
+    >
+      <Lock className="mt-0.5 h-4 w-4 shrink-0 text-faint" />
+      <p className="max-w-[64ch] text-sm text-secondary-foreground">
+        You have read-only access here. Connecting a provider stores a credential
+        in this cluster, which your account can’t do — an admin can connect one
+        for you, or grant your account that role.
+      </p>
     </div>
   );
 }
 
 // ReviewStep renders the LIVE model list from the connect response + the created
-// route reference. No secret material — only the `secretName` reference.
+// route reference. No secret material — only the `secretName` reference and a
+// CredentialSourceBadge saying where the credential came from.
 function ReviewStep({
   res,
   onDone,
@@ -358,48 +508,77 @@ function ReviewStep({
   res: ConnectProviderResponse;
   onDone: () => void;
 }) {
+  const models = res.provider.models ?? [];
+  const label = res.provider.displayName || res.provider.provider;
+  const facts: KeyValueItem[] = [
+    { key: "Connection", value: label },
+    { key: "Provider", value: res.provider.provider },
+    { key: "Models", value: models.length },
+    {
+      key: "Credential",
+      // What it IS is never rendered; where it came from is (kit
+      // CredentialSourceBadge). Every agent on this route uses this one key.
+      value: <CredentialSourceBadge credentialSource="shared" name={res.provider.provider} />,
+      mono: false,
+    },
+    {
+      key: "State",
+      value: res.provider.ready ? (
+        <Badge variant="ok">ready</Badge>
+      ) : (
+        <Badge variant="progressing">settling</Badge>
+      ),
+      mono: false,
+    },
+  ];
+
   return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2 text-success">
-        <Check className="h-5 w-5" />
-        <p className="text-sm font-medium text-foreground">
-          {res.provider.displayName || res.provider.provider} connected —{" "}
-          {(res.provider.models ?? []).length} model
-          {(res.provider.models ?? []).length === 1 ? "" : "s"} available
+    <div className="space-y-5">
+      <SectionHeader
+        title={`${label} is connected`}
+        lede={
+          models.length === 0
+            ? "The key was accepted, but the provider listed no models on it. Check the key's scope with the provider."
+            : `The provider listed ${models.length} model${models.length === 1 ? "" : "s"} on this key. They are ready to route to.`
+        }
+      />
+      <KeyValueList items={facts} />
+
+      <div className="space-y-2">
+        <p className="font-mono text-2xs uppercase tracking-wide text-faint">
+          Available models
         </p>
-      </div>
-      <div className="space-y-1.5">
-        <p className="text-sm font-medium">Available models</p>
         <div className="space-y-2" data-testid="model-list">
-          {(res.provider.models ?? []).map((m: string) => (
+          {models.map((m: string) => (
             <div
               key={m}
-              className="flex items-center gap-3 rounded-md border bg-surface-2/40 px-3 py-2 text-sm"
+              className="flex items-center gap-3 rounded-md border border-border bg-surface-2/40 px-3 py-2 text-sm"
             >
               <span className="font-mono">{m}</span>
             </div>
           ))}
         </div>
       </div>
-      <div className="rounded-md border bg-surface-2/40 px-3 py-2 text-xs text-muted-foreground">
-        Your key is stored securely under your identity and stays server-side —
-        the browser only ever sees the models above, never the key.
-      </div>
+
+      <QuietNote title="The key stayed server-side.">
+        It is stored under your identity and never returned to the browser — the
+        console only ever sees the model list above and the reference below.
+      </QuietNote>
 
       {/* Storage plumbing is Advanced detail — collapsed by default so the happy
           path reads as intent ("connected, models ready"), not Kubernetes nouns. */}
-      <details className="rounded-md border bg-surface-2/20 px-3 py-2 text-xs text-muted-foreground">
+      <details className="rounded-lg border border-border bg-surface-2/40 px-4 py-3 text-sm text-secondary-foreground">
         <summary className="cursor-pointer select-none font-medium text-foreground">
-          Advanced: how it&apos;s stored
+          Advanced: how it’s stored
         </summary>
-        <p className="mt-2 leading-relaxed">
+        <p className="mt-2 max-w-[64ch] leading-relaxed">
           Stored as{" "}
-          <span className="font-mono text-foreground">
+          <span className="font-mono text-xs text-foreground">
             {res.provider.secretName}
           </span>{" "}
-          — a Secret (the key), a SecretBinding (the reference), and a
-          ModelRoute (which provider serves which models), all created under
-          your identity. You never need to touch these for the common path.
+          — a Secret (the key), a SecretBinding (the reference), and a ModelRoute
+          (which provider serves which models), all created under your identity.
+          You never need to touch these for the common path.
         </p>
       </details>
 
@@ -409,7 +588,7 @@ function ReviewStep({
         type="button"
         onClick={onDone}
         data-testid="connect-done"
-        className="text-xs font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+        className="text-sm font-medium text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
       >
         Done — back to Providers
       </button>
@@ -418,31 +597,27 @@ function ReviewStep({
 }
 
 // KillSwitchFallback — the hardened-install state: provider-connect is disabled
-// (the endpoint 404s), so we teach the operator-driven alternative rather than
-// dead-ending (ADR 0015 kill-switch).
+// (the endpoint 404s). Nothing is broken, so it reads as a calm note (§7.1)
+// rather than an error, and it teaches the operator-driven alternative instead
+// of dead-ending (ADR 0015 kill-switch).
 function KillSwitchFallback() {
   return (
     <PageFrame>
-      <Card data-testid="kill-switch-fallback">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <ShieldAlert className="h-4 w-4 text-warning" />
-            Provider-connect is disabled on this cluster
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3 text-sm text-muted-foreground">
+      <div data-testid="kill-switch-fallback">
+        <QuietNote title="Provider-connect is turned off on this cluster.">
           <p>
-            This is a hardened install — the guided connect flow is turned off.
-            Provider keys are managed out-of-band by an operator.
+            This is a hardened install — the guided connect flow is disabled and
+            provider keys are managed out-of-band by an operator.
           </p>
-          <p>
+          <p className="mt-2">
             To run an agent, reference an existing{" "}
-            <span className="font-mono text-foreground">SecretBinding</span> +{" "}
-            <span className="font-mono text-foreground">ModelRoute</span>{" "}
+            <span className="font-mono text-xs text-foreground">SecretBinding</span>{" "}
+            +{" "}
+            <span className="font-mono text-xs text-foreground">ModelRoute</span>{" "}
             (created by your operator) when you configure the agent.
           </p>
-        </CardContent>
-      </Card>
+        </QuietNote>
+      </div>
     </PageFrame>
   );
 }

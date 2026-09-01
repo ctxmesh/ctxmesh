@@ -23,6 +23,21 @@ UI_SRC="$(cd "$SCRIPT_DIR/../ui" && pwd)/src"
 # #rgba form would slip through; that trade is worth a gate people trust.
 PATTERN='#([0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3})([^0-9a-fA-F]|$)|rgba?\(|hsla?\('
 
+# A second class of literal the hex grep cannot see: Tailwind's own palette
+# utilities. `bg-amber-500/10` is not a hex value, so it slipped through the
+# gate entirely — and it was found in the wild, on the playground's consent and
+# approval panels, painting a human gate in a colour the design system does not
+# know about. A palette name is a hardcoded colour with better spelling.
+PALETTE='\b(bg|text|border|ring|from|via|to|fill|stroke|shadow|divide|outline|accent|caret|decoration)-(slate|gray|grey|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-(50|[1-9]00|950)\b'
+
+palette_hits="$(
+  grep -rnE "$PALETTE" "$UI_SRC" \
+    --include='*.ts' --include='*.tsx' --include='*.css' \
+    2>/dev/null \
+  | grep -vE '^\S+\.(test|spec)\.tsx?:' \
+  || true
+)"
+
 violations="$(
   grep -rnE "$PATTERN" "$UI_SRC" \
     --include='*.ts' --include='*.tsx' --include='*.css' \
@@ -33,6 +48,16 @@ violations="$(
   | grep -vE '#[0-9a-fA-F]{3,8}\b.*(eslint|https?://)' \
   || true
 )"
+
+if [ -n "$palette_hits" ]; then
+  echo "FAIL: Tailwind palette colours found — the design system does not define these" >&2
+  echo "" >&2
+  echo "$palette_hits" >&2
+  echo "" >&2
+  echo "A palette name is a hardcoded colour with better spelling. Use a semantic" >&2
+  echo "token: ok / warn / crit / hold / faint / ghost / accent / primary." >&2
+  exit 1
+fi
 
 if [ -n "$violations" ]; then
   echo "FAIL: colour literals found outside ui/src/styles/tokens.css" >&2

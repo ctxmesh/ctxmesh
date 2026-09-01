@@ -306,3 +306,116 @@ describe("NewModelRoutePage", () => {
     });
   });
 });
+
+
+// ── Archetype A2 (M151 spec §6.1) — the detail surface ──────────────────────
+// The redesign's contract: the providers read as a failover ORDER rather than a
+// bag, an absent credential says so in words, the rate cap draws the bound it
+// was given without inventing a usage figure, and a form that has diverged from
+// the record says so before it is saved.
+
+const ROUTE = (over: Record<string, unknown> = {}) => ({
+  name: "gpt4",
+  namespace: "default",
+  phase: "Ready",
+  ready: true,
+  providers: [
+    { provider: "openai", model: "gpt-4o", priority: 1, secretBindingRef: "oai-key" },
+  ],
+  ...over,
+});
+
+describe("ModelRouteDetailPage — archetype A2 (M151)", () => {
+  it("renders the providers as a failover order, not in payload order", async () => {
+    installFetch({
+      detail: {
+        ok: true,
+        body: ROUTE({
+          providers: [
+            { provider: "openai", model: "gpt-4o", priority: 3, secretBindingRef: "oai-key" },
+            { provider: "anthropic", model: "claude-opus-4", priority: 1, secretBindingRef: "anthropic" },
+            // No binding and no apiBase — an absence the row must NAME.
+            { provider: "vertex", model: "gemini-2.5-pro", priority: 2 },
+          ],
+        }),
+      },
+    });
+    renderDetail();
+    await screen.findByTestId("route-detail-page");
+
+    const first = screen.getByTestId("provider-row-0");
+    const second = screen.getByTestId("provider-row-1");
+    const third = screen.getByTestId("provider-row-2");
+
+    // Priority 1 leads, whatever order the array arrived in.
+    expect(first).toHaveTextContent("First choice");
+    expect(first).toHaveTextContent("anthropic");
+    expect(second).toHaveTextContent("Falls back to");
+    expect(second).toHaveTextContent("vertex");
+    expect(third).toHaveTextContent("openai");
+
+    // An unattached credential is a stated absence, never a blank cell.
+    expect(second).toHaveTextContent("not attached");
+    // A provider with no override says which endpoint it will actually use.
+    expect(first).toHaveTextContent("the provider default");
+  });
+
+  it("teaches, rather than sits blank, when a route has no providers", async () => {
+    installFetch({ detail: { ok: true, body: ROUTE({ providers: [] }) } });
+    renderDetail();
+    await screen.findByTestId("route-detail-page");
+    expect(screen.getByText("This route has no providers yet.")).toBeInTheDocument();
+    // Calm — an unconfigured route is not a failure.
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("draws the rate cap but never a usage figure it was not given", async () => {
+    installFetch({ detail: { ok: true, body: ROUTE({ rateLimit: { tenantRPM: 600 } }) } });
+    renderDetail();
+    await screen.findByTestId("route-detail-page");
+
+    // The bound is real and shown; the usage against it is absent, and the
+    // meter says so in words rather than drawing a fill at zero.
+    expect(screen.getByText("600/min")).toBeInTheDocument();
+    expect(screen.getByText(/not recorded for this install/)).toBeInTheDocument();
+  });
+
+  it("says an uncapped route is uncapped, rather than showing a zero cap", async () => {
+    installFetch({ detail: { ok: true, body: ROUTE() } });
+    renderDetail();
+    await screen.findByTestId("route-detail-page");
+    expect(screen.getByText("not capped")).toBeInTheDocument();
+    expect(screen.queryByText("0")).toBeNull();
+  });
+
+  it("makes an unsaved edit visibly unsaved — and un-marks one put back", async () => {
+    installFetch({ detail: { ok: true, body: ROUTE() } });
+    renderDetail("/routes/default/gpt4?edit=1");
+    await screen.findByTestId("provider-entry-0");
+
+    expect(screen.queryByTestId("route-edit-unsaved")).toBeNull();
+
+    fireEvent.change(screen.getByTestId("provider-priority-0"), {
+      target: { value: "5" },
+    });
+    expect(screen.getByTestId("route-edit-unsaved")).toBeInTheDocument();
+    expect(screen.getByText("changed — not saved yet")).toBeInTheDocument();
+
+    // Put back to what the record says: not a change.
+    fireEvent.change(screen.getByTestId("provider-priority-0"), {
+      target: { value: "1" },
+    });
+    expect(screen.queryByTestId("route-edit-unsaved")).toBeNull();
+  });
+
+  it("shows the 404 as an honest absence with a way back, not an error", async () => {
+    installFetch({ detail: { ok: false, status: 404, body: { error: "not found" } } });
+    renderDetail();
+    expect(await screen.findByTestId("route-not-found")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("link", { name: /Back to routes/ })).toHaveAttribute(
+      "href",
+      "/routes",
+    );
+  });
+});

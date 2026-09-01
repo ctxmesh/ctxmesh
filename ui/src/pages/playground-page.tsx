@@ -1,20 +1,27 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, GitFork, Play, Rocket } from "lucide-react";
+import { Play, Rocket } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { Badge, type BadgeProps } from "@/components/ui/badge";
-import { Button, buttonVariants } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, PanelHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { ComboSelect, ForbiddenInline } from "@/components/kit";
+import {
+  ClosingNote,
+  ComboSelect,
+  ForbiddenInline,
+  KeyValueList,
+  NextStepLink,
+  PageHeader,
+  QuietNote,
+  SkeletonText,
+  Timeline,
+  truncateId,
+  type KeyValueItem,
+  type TimelineStep,
+} from "@/components/kit";
 import { FormField } from "@/components/config/form-field";
 import {
   api,
@@ -40,12 +47,61 @@ import {
   type FieldErrors,
 } from "@/lib/config-form";
 
-// PlaygroundPage — the m12.7 surface: define + RUN a fully-traced agent, then see
-// its response and navigate to the native trace explorer, and EXPORT the same
-// definition to a CRD. It reuses the config-builder's define model (toAgentYAML +
-// validate) so define/run/export share ONE agent schema. Every control composes
-// design tokens. The post-run trace affordance is a "View full trace" Link to
-// /traces/:id (native trace page, m16.7) — no embedded Langfuse iframe (m17.13).
+// PlaygroundPage — define on the left, run and its story on the right (M151
+// §6.1 archetype A8, the workbench). Route: /playground
+//
+// ── THE PAGE'S ONE IDEA: THE RUN IS A STORY, NOT A STATUS FIELD ─────────────
+// A model reply, a consent gate, an approval, a workflow suspending between
+// nodes — to the person watching, those are not four subsystems, they are what
+// happened, in order. So the right column is the kit Timeline (§5.26), the same
+// spine the run reader uses, and governance renders IN it rather than in a
+// second panel with its own clock. The decision affordance sits directly under
+// the spine that says a decision is needed.
+//
+// ── THE HUE RULING ON A SUSPENDED WORKFLOW (§2.2, §2.4, §2.5) ───────────────
+// `waiting` used to render amber, which is now reserved for "a bound is near or
+// crossed". It is NOT amber. It is also NOT hold-violet, and that is the part
+// worth writing down, because hold is the tempting answer:
+//
+//   internal/run/run.go — "StatusWaiting — paused parked on one or more CHILD
+//   RUNS, MACHINE-woken (vs requires_action = human-woken), per ADR 0060 §3 …
+//   when the wait condition is met the store flips it back to `queued`".
+//
+// A suspended workflow instance is waiting on a CHILD RUN, not on a person. It
+// holds no lease and no worker and it wakes itself. Painting it hold-violet
+// would tell an operator to go and decide something about a run that needs
+// nobody — the exact confusion §2.4 exists to prevent, and the same defect the
+// run reader removed from its orchestration dots. It is the machine converging
+// on its own, so it is `progressing` (§2.5). Hold is worn here by exactly two
+// states, both genuinely human-woken: `consent_required` and `approval`.
+//
+// ── WHAT THE PAGE MAY NOT CLAIM (§7.1) ──────────────────────────────────────
+// The run endpoints return identity, status, the message list and the pending
+// action. No token counts, no spend, no per-step timing. The run panel states
+// those absences in words rather than printing a zero, and a run with no trace
+// id says "not linked" rather than offering a link to nowhere.
+//
+// ── STACKED ORDER BELOW `lg` (§4.7) ─────────────────────────────────────────
+// The grid collapses to one column at `lg`, and DOM order is the reading order:
+// what to run → the Run button at the form's foot → what happened → what it
+// produced → the decision → the run's facts. Export-to-CRD is a separate errand
+// and sits below both columns, after the result, so it never lands between a
+// run and its outcome.
+//
+// data-testid contract:
+//   playground-namespace / playground-agent — the identity pickers
+//   playground-advanced      — the define-and-export fields disclosure
+//   run-readonly-note        — the viewer's read-only explanation (no Run button)
+//   chat-transcript          — the run's story panel
+//   run-streaming / run-step — the live stream indicator and its step label
+//   cancel-run               — stop a streaming run
+//   trace-building           — the run panel while no trace id exists yet
+//   trace-id                 — the trace id, whole
+//   view-full-trace          — the link to the native trace explorer
+//   approval-request         — the approve/deny decision panel
+//   connect-{server}         — one inline consent button per server
+//   workflow-graph-section   — the per-node panel of a workflow instance run
+//   crd-export-preview       — the exported CRD well
 
 // Run is the lifecycle of a Playground invoke. On success we hold the returned
 // traceId — the hand-off we link to the native /traces/:id (m16.7, m17.13).
@@ -60,6 +116,7 @@ type Run =
   | { kind: "running"; runId: string; response: string; step?: string }
   | {
       kind: "done";
+      runId: string;
       traceId: string;
       response: string;
       runStatus: string;
@@ -82,6 +139,147 @@ type Export =
   | { kind: "applying"; yaml: string; manifest: string }
   | { kind: "applied"; created: CreatedObject[] }
   | { kind: "error"; message: string; status?: number; forbidden?: boolean };
+
+// ── The run's vocabulary: one status → one tag, one closing sentence ─────────
+
+type TagVariant = NonNullable<BadgeProps["variant"]>;
+
+/**
+ * The tag for the run panel. Tag labels are budgeted to ≤16 characters (§4.5)
+ * and are `whitespace-nowrap`, so the full sentence lives in the ClosingNote
+ * under the spine instead — a 30-character tag is a width bug waiting for a
+ * narrow viewport.
+ */
+function runTag(run: Run): { label: string; variant: TagVariant } | null {
+  if (run.kind === "idle") return null;
+  if (run.kind === "running") return { label: "Running", variant: "progressing" };
+  if (run.kind === "error") return { label: "Failed", variant: "crit" };
+  // A person is genuinely blocking this one — the only two states that are.
+  if (run.approval || (run.consentRequired && run.consentRequired.length > 0)) {
+    return { label: "Waiting on you", variant: "hold" };
+  }
+  switch (run.runStatus) {
+    case "succeeded":
+    case "completed":
+      return { label: "Succeeded", variant: "ok" };
+    case "cancelled":
+      return { label: "Cancelled", variant: "crit" };
+    case "requires_action":
+      return { label: "Waiting on you", variant: "hold" };
+    // Machine-woken, parked on a child run — converging, not held. See the hue
+    // ruling in the file header.
+    case "waiting":
+      return { label: "Suspended", variant: "progressing" };
+    default:
+      return { label: "Running", variant: "progressing" };
+  }
+}
+
+/**
+ * The §5.18 closing line: restates in words what the spine already showed. It
+ * is also where the two long-form phrases live, because they say something a
+ * ≤16-character tag cannot.
+ */
+function closingLine(run: Run): string | null {
+  if (run.kind === "running") return "The story fills in as the run makes it.";
+  if (run.kind !== "done") return null;
+  if (run.approval || (run.consentRequired && run.consentRequired.length > 0)) {
+    return "It is held, not failed — the tool has not been called and the run is holding its place.";
+  }
+  if (run.runStatus === "waiting") {
+    return "Suspended — awaiting next node. The run parked on the child it launched and holds no worker; the platform wakes it when that child finishes, so nothing is asked of you.";
+  }
+  if (run.runStatus === "cancelled") {
+    return "The run was stopped. Whatever it had already done stands.";
+  }
+  return "Traced run complete — every step above was recorded, and the full waterfall is one click away.";
+}
+
+/**
+ * The run's story, in order, from what this page actually knows. Titles are
+ * SENTENCES (§5.26); the machine words — the JSON you sent, the step label the
+ * stream reported — render as inline mono evidence in the detail line.
+ */
+function buildStory(input: string, run: Run): TimelineStep[] {
+  const steps: TimelineStep[] = [
+    {
+      id: "sent",
+      title: "You sent the request",
+      detail: (
+        <span className="whitespace-pre-wrap break-words font-mono text-xs">
+          {input.trim() || "{}"}
+        </span>
+      ),
+    },
+  ];
+
+  if (run.kind === "running") {
+    steps.push({
+      id: "working",
+      title: "The agent is working",
+      detail: run.step ? (
+        <>
+          It is on <span className="font-mono text-xs">{run.step}</span> right now.
+        </>
+      ) : (
+        "Tokens arrive below as the model produces them."
+      ),
+    });
+    return steps;
+  }
+
+  if (run.kind !== "done") return steps;
+
+  if (run.consentRequired && run.consentRequired.length > 0) {
+    steps.push({
+      id: "consent",
+      tone: "hold",
+      title: "The run needs your own account connected before it goes on",
+      detail:
+        "Nothing has been lost. The tool has not been called — connect below and the run picks up exactly where it stopped.",
+    });
+    return steps;
+  }
+
+  if (run.approval) {
+    steps.push({
+      id: "approval",
+      tone: "hold",
+      title: "A person has to approve this before it goes on",
+      detail: run.approval.summary || undefined,
+    });
+    return steps;
+  }
+
+  if (run.runStatus === "waiting") {
+    // A plain moment, not a governance gate: nobody is being asked for
+    // anything. See the hue ruling in the file header.
+    steps.push({
+      id: "suspended",
+      title: "The workflow parked between nodes",
+      detail:
+        "It launched a child run and is holding no worker while that child works. The platform wakes it again on its own.",
+    });
+    return steps;
+  }
+
+  if (run.runStatus === "cancelled") {
+    steps.push({
+      id: "cancelled",
+      tone: "failed",
+      title: "The run was stopped before it finished",
+      detail: "It will not go on. Nothing it had not already done was done.",
+    });
+    return steps;
+  }
+
+  steps.push({
+    id: "end",
+    tone: "done",
+    title: "The run finished and answered",
+  });
+  return steps;
+}
 
 export function PlaygroundPage() {
   const [form, setForm] = useState<ConfigForm>(emptyForm);
@@ -116,7 +314,7 @@ export function PlaygroundPage() {
   });
 
   // Mirror the durable engine's LIVE stream state (running + accumulated tokens + step label)
-  // into the `Run` union so the "Streaming…" panel + Cancel keep working exactly as before.
+  // into the `Run` union so the streaming panel + Cancel keep working exactly as before.
   useEffect(() => {
     if (runEngine.status === "streaming" || runEngine.status === "creating") {
       setRun({
@@ -233,7 +431,13 @@ export function PlaygroundPage() {
   async function onDeny(runId: string) {
     try {
       await api.resumeRun(runId, "deny");
-      setRun({ kind: "done", traceId: "", response: "Approval denied — run cancelled.", runStatus: "cancelled" });
+      setRun({
+        kind: "done",
+        runId,
+        traceId: "",
+        response: "Approval denied — run cancelled.",
+        runStatus: "cancelled",
+      });
     } catch (err) {
       if (err instanceof ApiError && err.isForbidden) reprobe();
       setRun(errorRun(err));
@@ -354,402 +558,522 @@ export function PlaygroundPage() {
 
   const running = run.kind === "running";
   const exporting = exp.kind === "previewing" || exp.kind === "applying";
+  const started = run.kind === "running" || run.kind === "done";
+  const tag = runTag(run);
+  const closing = closingLine(run);
+  const story = started ? buildStory(input, run) : [];
+  const runId =
+    run.kind === "running" || run.kind === "done" ? run.runId : "";
+  const traceId = run.kind === "done" ? run.traceId : "";
+  const consent = run.kind === "done" ? (run.consentRequired ?? []) : [];
+  const approval = run.kind === "done" ? run.approval : undefined;
+  const response = run.kind === "running" || run.kind === "done" ? run.response : "";
+  const manifest =
+    exp.kind === "preview" || exp.kind === "applying" ? exp.manifest : "";
+
+  // The record, as the run endpoints actually answer it (§7.1). Absences are
+  // stated in words; nothing here is inferred.
+  const facts: KeyValueItem[] = [
+    { key: "Agent", value: form.name.trim() || undefined, absent: "not chosen yet" },
+    { key: "Workspace", value: namespace.trim() || undefined, absent: "default" },
+    {
+      key: "Run id",
+      value: runId ? <span title={runId}>{truncateId(runId)}</span> : undefined,
+      absent: "not started",
+      title: runId ? undefined : "No run has been created from this form yet.",
+    },
+    {
+      key: "Trace",
+      value: traceId ? (
+        <span data-testid="trace-id" title={traceId}>
+          {truncateId(traceId)}
+        </span>
+      ) : undefined,
+      absent: "not linked",
+      title: traceId ? undefined : "No trace was recorded for this run.",
+    },
+  ];
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Playground</h2>
-        <p className="text-sm text-muted-foreground">
-          Pick a deployed agent, send it a message, and watch the trace build live —
-          then open the full trace or export the definition to a CRD.
-        </p>
-      </div>
+    <div className="min-w-0 space-y-6">
+      <PageHeader
+        title="Playground"
+        lede="Pick a deployed agent and send it a message. Its story builds on the right as the run makes it — then open the full trace, or export the definition to a CRD."
+      />
 
-      <div className="grid gap-6 lg:grid-cols-[1fr_1fr]">
-        {/* ── LEFT: chat ───────────────────────────────────────────────── */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Chat</CardTitle>
-            <CardDescription>
-              Pick an agent and send it a message — each turn is invoked on the live
-              agent and traced end to end.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-5">
-            {oauthReturn && (
-              <div
-                data-testid="mcp-oauth-return"
-                className={`rounded-md border p-3 text-xs ${
-                  oauthReturn.error
-                    ? "border-destructive/40 text-destructive"
-                    : "border-success/40 text-success"
-                }`}
+      {/* §4.7: two equal columns above `lg`, one below it — with explicit grid
+          placement, because DOM order is the stacked reading order. Both
+          children carry `min-w-0` so neither pane can push the page sideways
+          (§4.6). */}
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        {/* ── Define ─────────────────────────────────────────────────────── */}
+        <div className="min-w-0 space-y-5 lg:col-start-1 lg:row-start-1">
+          {oauthReturn && (
+            // Not an alert. The connect either worked or it did not, and the
+            // one hue it wears is a 2px left rule — §2.2 allows no full-bleed
+            // semantic surface here.
+            <div
+              role="status"
+              data-testid="mcp-oauth-return"
+              className={
+                oauthReturn.error
+                  ? "border border-border border-l-2 border-l-destructive bg-surface-2 px-4 py-3 text-sm"
+                  : "border border-border border-l-2 border-l-success bg-surface-2 px-4 py-3 text-sm"
+              }
+            >
+              {oauthReturn.error
+                ? `Couldn't connect ${oauthReturn.server || "the server"}: ${oauthReturn.error}`
+                : `Connected ${oauthReturn.server || "your account"} — run again to continue.`}
+              <button
+                type="button"
+                className="ml-2 border-b border-accent font-semibold text-primary hover:border-primary"
+                onClick={() => setOauthReturn(null)}
               >
-                {oauthReturn.error
-                  ? `Couldn't connect ${oauthReturn.server || "the server"}: ${oauthReturn.error}`
-                  : `Connected ${oauthReturn.server || "your account"} — run again to continue.`}
-                <button
-                  type="button"
-                  className="ml-2 underline"
-                  onClick={() => setOauthReturn(null)}
-                >
-                  dismiss
-                </button>
-              </div>
-            )}
+                dismiss
+              </button>
+            </div>
+          )}
 
-            <FormField
-              id="namespace"
-              label="Namespace"
-              hint="Pick a namespace you can access — empty → the default namespace."
-            >
-              <ComboSelect
+          <Card className="min-w-0">
+            <PanelHeader title="What to run" />
+            <CardContent className="space-y-5">
+              <FormField
                 id="namespace"
-                value={namespace}
-                options={namespaceOptions}
-                onChange={setNamespace}
-                placeholder="default namespace"
-                customPlaceholder="namespace"
-                testId="playground-namespace"
-              />
-            </FormField>
+                label="Namespace"
+                hint="Pick a namespace you can access — empty → the default namespace."
+              >
+                <ComboSelect
+                  id="namespace"
+                  value={namespace}
+                  options={namespaceOptions}
+                  onChange={setNamespace}
+                  placeholder="default namespace"
+                  customPlaceholder="namespace"
+                  testId="playground-namespace"
+                />
+              </FormField>
 
-            <FormField
-              id="name"
-              label="Agent"
-              error={errors.name}
-              hint="Pick a deployed agent to run, or name a new one to define + export (≤ 44 chars)."
-            >
-              <ComboSelect
+              <FormField
                 id="name"
-                value={form.name}
-                options={agentOptions}
-                onChange={(v) => set("name", v)}
-                placeholder="— pick an agent —"
-                customPlaceholder="new agent name"
-                testId="playground-agent"
-              />
-            </FormField>
+                label="Agent"
+                error={errors.name}
+                hint="Pick a deployed agent to run, or name a new one to define + export (≤ 44 chars)."
+              >
+                <ComboSelect
+                  id="name"
+                  value={form.name}
+                  options={agentOptions}
+                  onChange={(v) => set("name", v)}
+                  placeholder="— pick an agent —"
+                  customPlaceholder="new agent name"
+                  testId="playground-agent"
+                />
+              </FormField>
 
-            {/* Advanced — the CRD-authoring fields, needed only to define + export a
-                new agent (a deployed agent runs from just its name). Collapsed by
-                default so the primary flow is: pick agent → message → run. */}
-            <details
-              className="rounded-md border bg-card/40 px-3 py-2"
-              data-testid="playground-advanced"
-            >
-              <summary className="cursor-pointer text-sm font-medium text-muted-foreground">
-                Advanced — image, execution model, route (define &amp; export)
-              </summary>
-              <div className="space-y-4 pt-3">
-                <FormField id="image" label="Image" error={errors.image} hint="Used when exporting to a CRD.">
-                  <Input
-                    id="image"
-                    value={form.image}
-                    onChange={(e) => set("image", e.target.value)}
-                    placeholder="ghcr.io/ctxmesh/echo:v1"
-                  />
-                </FormField>
-
-                <FormField id="executionModel" label="Execution model">
-                  <Select
-                    id="executionModel"
-                    value={form.executionModel}
-                    onChange={(e) =>
-                      set("executionModel", e.target.value as ConfigForm["executionModel"])
-                    }
-                  >
-                    <option value="serving">serving (request-driven)</option>
-                    <option value="eventing">eventing (broker-triggered)</option>
-                    <option value="job">job (one-shot)</option>
-                  </Select>
-                </FormField>
-
-                <FormField id="modelRoute" label="Model route" hint="ModelRoute alias for the agent's LLM calls (optional).">
-                  <Input
-                    id="modelRoute"
-                    value={form.modelRoute}
-                    onChange={(e) => set("modelRoute", e.target.value)}
-                    placeholder="default-model"
-                  />
-                </FormField>
-              </div>
-            </details>
-
-            <FormField id="input" label="Message (JSON)" hint="Posted verbatim to the agent's /invoke.">
-              <Textarea
+              <FormField
                 id="input"
-                className="min-h-[6rem] font-mono text-xs"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-              />
-            </FormField>
+                label="Message (JSON)"
+                hint="Posted verbatim to the agent's /invoke."
+              >
+                <Textarea
+                  id="input"
+                  className="min-h-[6rem] font-mono text-xs"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                />
+              </FormField>
 
-            <div className="space-y-3 pt-1">
-              <div className="flex items-center gap-3">
-                {canRun ? (
+              {/* Advanced — the CRD-authoring fields, needed only to define + export a
+                  new agent (a deployed agent runs from just its name). Collapsed by
+                  default so the primary flow is: pick agent → message → run. */}
+              <details
+                className="rounded-md border border-border bg-surface-2 px-4 py-3"
+                data-testid="playground-advanced"
+              >
+                <summary className="cursor-pointer text-sm font-medium text-secondary-foreground">
+                  Advanced — image, execution model, route (define &amp; export)
+                </summary>
+                <div className="space-y-4 pt-4">
+                  <FormField
+                    id="image"
+                    label="Image"
+                    error={errors.image}
+                    hint="Used when exporting to a CRD."
+                  >
+                    <Input
+                      id="image"
+                      value={form.image}
+                      onChange={(e) => set("image", e.target.value)}
+                      placeholder="ghcr.io/ctxmesh/echo:v1"
+                    />
+                  </FormField>
+
+                  <FormField id="executionModel" label="Execution model">
+                    <Select
+                      id="executionModel"
+                      value={form.executionModel}
+                      onChange={(e) =>
+                        set("executionModel", e.target.value as ConfigForm["executionModel"])
+                      }
+                    >
+                      <option value="serving">serving (request-driven)</option>
+                      <option value="eventing">eventing (broker-triggered)</option>
+                      <option value="job">job (one-shot)</option>
+                    </Select>
+                  </FormField>
+
+                  <FormField
+                    id="modelRoute"
+                    label="Model route"
+                    hint="ModelRoute alias for the agent's LLM calls (optional)."
+                  >
+                    <Input
+                      id="modelRoute"
+                      value={form.modelRoute}
+                      onChange={(e) => set("modelRoute", e.target.value)}
+                      placeholder="default-model"
+                    />
+                  </FormField>
+                </div>
+              </details>
+            </CardContent>
+          </Card>
+
+          {/* The primary action at the foot of the form column (§6.1 A8), with
+              run errors beside the press that produced them (§7 A8). */}
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-3">
+              {canRun ? (
+                <>
                   <Button onClick={onRun} disabled={running}>
                     <Play className="h-4 w-4" />
                     {running ? "Running…" : "Run agent"}
                   </Button>
-                ) : (
-                  // RBAC-aware chrome: a viewer has no Run affordance (running is
-                  // a write-shaped op). They can still Preview/Export below.
-                  <p
-                    className="rounded-md border border-dashed bg-card/40 px-3 py-2 text-xs text-muted-foreground"
-                    data-testid="run-readonly-note"
-                  >
-                    You have read-only access — running an agent requires create
-                    permission on AgentDeployments.
-                  </p>
-                )}
-                {run.kind === "error" && !run.forbidden && (
-                  <p className="text-sm text-destructive" role="alert">
-                    {run.message}
-                    {run.status ? ` (${run.status})` : ""}
-                  </p>
-                )}
-              </div>
-              {run.kind === "error" && run.forbidden && (
-                // A surface-level 403 → the explain-and-suggest 403 primitive.
-                <ForbiddenInline
-                  title="Not allowed to run this agent"
-                  description="Your account can't invoke agents in this cluster."
-                  detail={run.message}
-                />
-              )}
-            </div>
-
-            {/* ── Conversation (M144.8 chat-first) — your message + the agent's reply.
-                The response is the same traced invoke; the trace itself renders in the
-                pane to the right. ─────────────────────────────────────────────────── */}
-            {(run.kind === "running" || run.kind === "done") && (
-              <div className="space-y-3 border-t pt-4" data-testid="chat-transcript">
-                {/* your message */}
-                <div className="flex justify-end">
-                  <div className="max-w-[88%] whitespace-pre-wrap break-words rounded-lg rounded-br-sm bg-primary/10 px-3 py-2 font-mono text-xs">
-                    {input}
-                  </div>
-                </div>
-                {/* agent reply */}
-                <div className="space-y-2 rounded-lg rounded-bl-sm border bg-card p-3">
                   {run.kind === "running" && (
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <span className="text-xs text-muted-foreground" data-testid="run-streaming">
-                          Streaming…
-                        </span>
-                        {run.step && (
-                          <Badge
-                            variant="secondary"
-                            className="truncate font-mono text-[10px]"
-                            data-testid="run-step"
-                          >
-                            {run.step}
-                          </Badge>
-                        )}
-                      </div>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => void onCancel(run.runId)}
-                        data-testid="cancel-run"
-                      >
-                        Cancel
-                      </Button>
-                    </div>
-                  )}
-                  {run.kind === "done" && (
-                    <div className="flex items-center gap-2 text-success">
-                      <CheckCircle2 className="h-4 w-4" />
-                      <span className="text-sm font-medium">
-                        {run.runStatus === "waiting"
-                          ? "Suspended — awaiting next node"
-                          : "Traced run complete"}
-                      </span>
-                    </div>
-                  )}
-                  <Textarea
-                    aria-label="Agent response"
-                    readOnly
-                    className="min-h-[8rem] resize-y border-0 bg-transparent p-0 font-mono text-xs focus-visible:ring-0"
-                    value={run.response}
-                  />
-                  {run.kind === "done" && run.consentRequired && run.consentRequired.length > 0 && (
-                    <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
-                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-                      <div className="space-y-2">
-                        <p className="font-medium">Connect your account to continue</p>
-                        <p className="text-muted-foreground">
-                          This run needs your own credentials. Connect, and it re-runs
-                          automatically.
-                        </p>
-                        <div className="flex flex-wrap gap-2">
-                          {run.consentRequired.map((server) => (
-                            <Button
-                              key={server}
-                              size="sm"
-                              variant="outline"
-                              disabled={connecting !== null}
-                              onClick={() => void onConnect(server)}
-                              data-testid={`connect-${server}`}
-                            >
-                              {connecting === server ? "Connecting…" : `Connect ${server}`}
-                            </Button>
-                          ))}
-                        </div>
-                        {connectError && (
-                          <p className="text-destructive" data-testid="connect-error">
-                            {connectError}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                  {run.kind === "done" && run.approval && (
-                    <div
-                      className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"
-                      data-testid="approval-request"
+                    <Button
+                      variant="outline"
+                      onClick={() => void onCancel(run.runId)}
+                      data-testid="cancel-run"
                     >
-                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-                      <div className="space-y-2">
-                        <p className="font-medium">Waiting for your approval</p>
-                        <p className="text-muted-foreground">{run.approval.summary}</p>
-                        <div className="flex flex-wrap gap-2">
-                          <Button
-                            size="sm"
-                            disabled={running}
-                            onClick={() => run.approval && void onApprove(run.approval.runId)}
-                            data-testid="approve-run"
-                          >
-                            Approve
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={running}
-                            onClick={() => run.approval && void onDeny(run.approval.runId)}
-                            data-testid="deny-run"
-                          >
-                            Deny
-                          </Button>
-                        </div>
-                      </div>
-                    </div>
+                      Cancel
+                    </Button>
                   )}
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* ── RIGHT: live trace pane ─────────────────────────────────────── */}
-        <div className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Trace</CardTitle>
-              <CardDescription>
-                The run's spans as they arrive. Open the full waterfall for the native
-                span explorer.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {run.kind === "running" ? (
-                <div
-                  className="flex items-center gap-2 text-sm text-muted-foreground"
-                  data-testid="trace-building"
-                >
-                  <span className="h-2 w-2 animate-pulse rounded-full bg-info motion-reduce:animate-none" />
-                  Building trace…{run.step ? ` — ${run.step}` : ""}
-                </div>
-              ) : run.kind === "done" ? (
-                <>
-                  {run.traceId && (
-                    <div className="rounded-md border p-3">
-                      <p className="text-xs text-muted-foreground">trace id</p>
-                      <p className="truncate font-mono text-xs" data-testid="trace-id">
-                        {run.traceId}
-                      </p>
-                    </div>
+                  {started && (
+                    <a
+                      href="#run-story"
+                      className="whitespace-nowrap border-b border-accent text-sm font-semibold text-primary hover:border-primary lg:hidden"
+                    >
+                      Jump to the run
+                      <span aria-hidden="true"> ↓</span>
+                    </a>
                   )}
-                  {run.nodes && run.nodes.length > 0 && (
-                    <WorkflowGraphSection
-                      nodes={run.nodes}
-                      currentNode={run.currentNode}
-                      runStatus={run.runStatus}
-                    />
-                  )}
-                  {/* Native trace explorer (/traces/:id, m16.7) — link-out only (m17.13). */}
-                  <Link
-                    to={`/traces/${encodeURIComponent(run.traceId)}`}
-                    data-testid="view-full-trace"
-                    className={buttonVariants({ variant: "outline", size: "sm" })}
-                  >
-                    View full trace
-                  </Link>
                 </>
               ) : (
-                <p className="py-6 text-center text-sm text-muted-foreground">
-                  Run an agent to see its trace build here.
+                // RBAC-aware chrome: a viewer has no Run affordance (running is
+                // a write-shaped op). They can still Preview/Export below.
+                <div data-testid="run-readonly-note">
+                  <QuietNote title="You have read-only access.">
+                    Running an agent needs create permission on AgentDeployments —
+                    ask an admin for a role that has it. Previewing and exporting
+                    the definition stay available.
+                  </QuietNote>
+                </div>
+              )}
+            </div>
+            {run.kind === "error" && !run.forbidden && (
+              <p className="font-mono text-xs text-destructive" role="alert">
+                {run.message}
+                {run.status ? ` (${run.status})` : ""}
+              </p>
+            )}
+            {run.kind === "error" && run.forbidden && (
+              // A surface-level 403 → the explain-and-suggest 403 primitive.
+              <ForbiddenInline
+                title="Not allowed to run this agent"
+                description="Your account can't invoke agents in this cluster."
+                detail={run.message}
+              />
+            )}
+          </div>
+        </div>
+
+        {/* ── Run ────────────────────────────────────────────────────────── */}
+        <div
+          id="run-story"
+          className="min-w-0 space-y-5 lg:col-start-2 lg:row-start-1"
+        >
+          <Card className="min-w-0" data-testid="chat-transcript">
+            <PanelHeader
+              title="What happened"
+              meta={
+                story.length > 0 ? (
+                  <span className="tabular-nums">
+                    {story.length} step{story.length === 1 ? "" : "s"}
+                  </span>
+                ) : undefined
+              }
+            >
+              {tag ? <Badge variant={tag.variant}>{tag.label}</Badge> : null}
+            </PanelHeader>
+            <CardContent>
+              {story.length === 0 ? (
+                <QuietNote title="Nothing has run yet.">
+                  Pick an agent, write the message it should receive, and press{" "}
+                  <span className="font-medium">Run agent</span>. Every step the
+                  run takes appears here in order, and the full trace is one link
+                  from it.
+                </QuietNote>
+              ) : (
+                <>
+                  <Timeline steps={story} label="Steps in this run" />
+                  {closing && <ClosingNote>{closing}</ClosingNote>}
+                </>
+              )}
+            </CardContent>
+          </Card>
+
+          {started && (
+            <Card className="min-w-0">
+              <PanelHeader title="What it produced">
+                {run.kind === "running" && (
+                  <>
+                    <span className="text-xs text-faint" data-testid="run-streaming">
+                      Streaming…
+                    </span>
+                    {run.step && (
+                      <Badge
+                        variant="progressing"
+                        className="max-w-[12rem] overflow-hidden"
+                        data-testid="run-step"
+                      >
+                        <span className="block truncate">{run.step}</span>
+                      </Badge>
+                    )}
+                  </>
+                )}
+              </PanelHeader>
+              <CardContent>
+                {/* The agent's answer is prose as often as it is JSON, so this
+                    well wraps (`pre-wrap` + `break-words`, never `break-all`)
+                    rather than scrolling like the YAML well below — a paragraph
+                    on a horizontal scrollbar is unreadable. It still owns its
+                    own height. */}
+                <div
+                  role="region"
+                  aria-label="Agent response"
+                  tabIndex={0}
+                  className="max-h-[24rem] overflow-auto rounded-md bg-surface-3 p-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {response ? (
+                    <p className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
+                      {response}
+                    </p>
+                  ) : (
+                    <p className="font-mono text-xs text-ghost">
+                      {run.kind === "running"
+                        ? "waiting for the first token…"
+                        : "the run returned no content"}
+                    </p>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {consent.length > 0 && (
+            // A 2px hold rule, not a hold fill: §2.2 allows exactly two
+            // full-bleed semantic surfaces console-wide and this is not one.
+            <Card className="min-w-0 border-l-2 border-l-hold">
+              <PanelHeader title="Connect your account to continue" />
+              <CardContent className="space-y-3">
+                <p className="text-sm text-secondary-foreground">
+                  This run needs your own credentials, not the platform's.
+                  Connect and it re-runs automatically — nothing has been lost.
                 </p>
+                <div className="flex flex-wrap gap-2">
+                  {consent.map((server) => (
+                    <Button
+                      key={server}
+                      size="sm"
+                      variant="outline"
+                      disabled={connecting !== null}
+                      onClick={() => void onConnect(server)}
+                      data-testid={`connect-${server}`}
+                    >
+                      {connecting === server ? "Connecting…" : `Connect ${server}`}
+                    </Button>
+                  ))}
+                </div>
+                {connectError && (
+                  <p
+                    className="font-mono text-xs text-destructive"
+                    role="alert"
+                    data-testid="connect-error"
+                  >
+                    {connectError}
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {approval && (
+            <Card
+              className="min-w-0 border-l-2 border-l-hold"
+              data-testid="approval-request"
+            >
+              <PanelHeader title="Your decision" />
+              <CardContent className="space-y-4">
+                <p className="text-sm text-secondary-foreground">
+                  This run is holding on one step. Approving lets it continue;
+                  denying stops it for good. It is held, not failed — the tool
+                  has not been called.
+                </p>
+                {approval.summary && (
+                  <p className="border-l-2 border-l-hold bg-surface-2 px-4 py-3 font-serif text-md italic">
+                    {approval.summary}
+                  </p>
+                )}
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    disabled={running}
+                    onClick={() => void onApprove(approval.runId)}
+                    data-testid="approve-run"
+                  >
+                    Approve
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={running}
+                    onClick={() => void onDeny(approval.runId)}
+                    data-testid="deny-run"
+                  >
+                    Deny
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {run.kind === "done" && run.nodes && run.nodes.length > 0 && (
+            <WorkflowGraphSection
+              nodes={run.nodes}
+              currentNode={run.currentNode}
+              runStatus={run.runStatus}
+            />
+          )}
+
+          <Card className="min-w-0">
+            <PanelHeader title="The record" />
+            <CardContent className="space-y-4">
+              <KeyValueList items={facts} />
+              {traceId ? (
+                <NextStepLink
+                  label="Open the trace"
+                  to={`/traces/${encodeURIComponent(traceId)}`}
+                  ariaLabel="Open the full trace for this run"
+                  testId="view-full-trace"
+                />
+              ) : (
+                <div data-testid="trace-building">
+                  <QuietNote>
+                    {started
+                      ? "No trace id has come back yet. It appears the moment the run reports one; per-step timing and token counts live there, not here."
+                      : "Per-step timing, token counts and spend are span-level facts — they live in the trace backend. A trace id appears here once a run reports one."}
+                  </QuietNote>
+                </div>
               )}
             </CardContent>
           </Card>
         </div>
       </div>
 
-      {/* ── Export to CRD ──────────────────────────────────────────────── */}
-      <Card>
-        <CardHeader className="flex-row items-center justify-between space-y-0">
-          <div>
-            <CardTitle className="text-base">Export to CRD</CardTitle>
-            <CardDescription>
-              Take this definition to a CRD — the same server-side expand + apply
-              as the config builder. Preview, then apply (client-go, RBAC-scoped).
-            </CardDescription>
-          </div>
-          {(exp.kind === "preview" || exp.kind === "applying") && (
-            <Badge variant="secondary">preview</Badge>
-          )}
-        </CardHeader>
+      {/* ── Export to CRD ──────────────────────────────────────────────────
+          A separate errand from running, so it sits BELOW both columns: in one
+          stacked column it would otherwise land between the run and its
+          outcome. */}
+      <Card className="min-w-0">
+        <PanelHeader title="Export to CRD">
+          {exp.kind === "applied" ? (
+            // `progressing`, not `ok`: the create call reports what it CREATED
+            // and nothing about readiness, so a green tag here would be a claim
+            // the backend never made (§7.1).
+            <Badge variant="progressing">applied</Badge>
+          ) : manifest ? (
+            <Badge variant="muted">preview</Badge>
+          ) : null}
+        </PanelHeader>
         <CardContent className="space-y-4">
           {exp.kind === "applied" ? (
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 text-success">
-                <CheckCircle2 className="h-5 w-5" />
-                <span className="text-sm font-medium">Applied to the cluster</span>
-              </div>
-              <div className="grid gap-2 sm:grid-cols-2">
+            <>
+              <p className="font-serif text-md font-medium">Applied to the cluster</p>
+              <p className="text-sm text-secondary-foreground">
+                {exp.created.length === 1
+                  ? "One object was"
+                  : `${exp.created.length} objects were`}{" "}
+                created. They are not serving yet — the controller reconciles
+                them next.
+              </p>
+              <ul className="grid gap-2 sm:grid-cols-2" data-testid="crd-export-created">
                 {exp.created.map((obj) => (
-                  <div
+                  <li
                     key={`${obj.kind}/${obj.namespace}/${obj.name}`}
-                    className="flex items-center justify-between rounded-md border p-3"
+                    className="flex min-w-0 items-center justify-between gap-3 rounded-md border border-border bg-surface-2 p-3"
                   >
-                    <div>
-                      <p className="text-sm font-medium">{obj.name}</p>
-                      <p className="text-xs text-muted-foreground">{obj.namespace}</p>
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium" title={obj.name}>
+                        {obj.name}
+                      </p>
+                      <p
+                        className="truncate font-mono text-xs text-faint"
+                        title={obj.namespace}
+                      >
+                        {obj.namespace}
+                      </p>
                     </div>
-                    <Badge variant="success">{obj.kind}</Badge>
-                  </div>
+                    {/* A Kind is identity, not health — never the ok hue. */}
+                    <Badge variant="muted">{obj.kind}</Badge>
+                  </li>
                 ))}
-              </div>
+              </ul>
               <Button variant="outline" onClick={() => setExp({ kind: "idle" })}>
                 Export again
               </Button>
-            </div>
+            </>
           ) : (
             <>
-              <Textarea
-                aria-label="Exported CRD preview"
-                readOnly
-                className="min-h-[16rem] font-mono text-xs"
-                value={
-                  exp.kind === "preview" || exp.kind === "applying"
-                    ? exp.manifest
-                    : ""
-                }
-                placeholder="Press “Preview CRD” to see the generated manifest."
-              />
+              {exp.kind === "previewing" ? (
+                <div className="rounded-md bg-surface-3 p-4">
+                  <SkeletonText lines={8} />
+                </div>
+              ) : manifest ? (
+                // The YAML well (§4.5/§4.6): `white-space: pre`, so indentation —
+                // which in YAML is the structure — is never reflowed, and the
+                // element owns its own scrollbars so a long line scrolls HERE
+                // rather than widening the page. Keyboard-reachable, because a
+                // scroll container a mouse can reach must be one (WCAG 2.1.1).
+                <pre
+                  role="region"
+                  aria-label="Exported CRD preview"
+                  data-testid="crd-export-preview"
+                  tabIndex={0}
+                  className="max-h-[24rem] overflow-auto rounded-md bg-surface-3 p-4 font-mono text-xs leading-relaxed text-secondary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {manifest}
+                </pre>
+              ) : (
+                <QuietNote
+                  title="The preview appears when the form is valid."
+                  className="max-w-[72ch]"
+                >
+                  Take this definition to a CRD — the same server-side expand and
+                  apply the config builder performs. Press{" "}
+                  <span className="font-medium">Preview CRD</span> to read the
+                  exact manifest; nothing reaches the cluster until you apply it.
+                </QuietNote>
+              )}
               {exp.kind === "error" && exp.forbidden ? (
                 <ForbiddenInline
                   title="Not allowed to apply"
@@ -758,13 +1082,13 @@ export function PlaygroundPage() {
                 />
               ) : (
                 exp.kind === "error" && (
-                  <p className="text-sm text-destructive" role="alert">
+                  <p className="font-mono text-xs text-destructive" role="alert">
                     {exp.message}
                     {exp.status ? ` (${exp.status})` : ""}
                   </p>
                 )
               )}
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
                 <Button onClick={onPreview} disabled={exporting} variant="outline">
                   {exp.kind === "previewing" ? "Expanding…" : "Preview CRD"}
                 </Button>
@@ -786,17 +1110,25 @@ export function PlaygroundPage() {
 }
 
 // WorkflowGraphSection renders the per-node status panel for a workflow instance run (m67.15).
-// It mirrors the RuntimeSection / guardrail-section idiom on agent-detail-page.tsx.
 //
-// When the run status is "waiting", the overall label reads "Suspended — awaiting next node"
-// (surfaced in the run-done banner above). The current node is highlighted.
-// A failed node shows a destructive badge; a running node shows an info badge; pending = muted.
+// The hues here follow §2.2 exactly, and two of them moved in M151:
+//   pending  muted        declared, not in motion, not a problem
+//   running  progressing  the machine converging on its own (was `secondary`,
+//                         which said "idle" about a node doing work)
+//   done     ok           it completed
+//   failed   crit         it will not proceed
+//
+// The suspended tag is `progressing`, NOT warn and NOT hold: a suspended
+// workflow instance is parked on a CHILD RUN and is machine-woken (ADR 0060 §3
+// / internal/run/run.go). See the ruling in this file's header. Its tag reads
+// one word so it stays inside the ≤16-character tag budget (§4.5); the sentence
+// that explains it is the run panel's ClosingNote.
 type NodeBadgeVariant = BadgeProps["variant"];
 const NODE_STATUS_VARIANT: Record<WorkflowNodeStatus["status"], NodeBadgeVariant> = {
-  pending: "secondary",
-  running: "secondary",
-  done: "success",
-  failed: "destructive",
+  pending: "muted",
+  running: "progressing",
+  done: "ok",
+  failed: "crit",
 };
 const NODE_STATUS_LABEL: Record<WorkflowNodeStatus["status"], string> = {
   pending: "pending",
@@ -815,77 +1147,82 @@ function WorkflowGraphSection({
   runStatus: string;
 }) {
   return (
-    <div
-      className="rounded-lg border bg-card p-4 shadow-card"
-      data-testid="workflow-graph-section"
-    >
-      <div className="mb-3 flex items-center gap-2">
-        <GitFork className="h-4 w-4 text-muted-foreground" />
-        <p className="text-sm font-medium">Workflow</p>
+    <Card className="min-w-0" data-testid="workflow-graph-section">
+      <PanelHeader title="Workflow" meta={`${nodes.length} nodes`}>
         {runStatus === "waiting" && (
-          <Badge variant="warning" className="text-[10px]" data-testid="workflow-suspended-badge">
-            Suspended — awaiting next node
+          <Badge variant="progressing" data-testid="workflow-suspended-badge">
+            Suspended
           </Badge>
         )}
-      </div>
-      <ol className="space-y-2" data-testid="workflow-node-list">
-        {nodes.map((node) => {
-          const isCurrent = node.name === currentNode;
-          return (
-            <li
-              key={node.name}
-              data-testid={`workflow-node-${node.name}`}
-              className={`flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm ${
-                isCurrent ? "border-primary/40 bg-primary/5" : "bg-surface-2/40"
-              }`}
-            >
-              <div className="flex min-w-0 items-center gap-2">
-                {isCurrent && (
+      </PanelHeader>
+      <CardContent>
+        <ol className="space-y-2" data-testid="workflow-node-list">
+          {nodes.map((node) => {
+            const isCurrent = node.name === currentNode;
+            return (
+              <li
+                key={node.name}
+                data-testid={`workflow-node-${node.name}`}
+                className={
+                  // Selection is pine-family, never a status hue (§2.3).
+                  isCurrent
+                    ? "flex items-center justify-between gap-3 rounded-md border border-primary bg-accent px-3 py-2 text-sm"
+                    : "flex items-center justify-between gap-3 rounded-md border border-border bg-surface-2 px-3 py-2 text-sm"
+                }
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  {isCurrent && (
+                    <span
+                      className="h-2 w-2 shrink-0 rounded-full bg-primary"
+                      aria-label="current node"
+                      data-testid={`workflow-node-current-${node.name}`}
+                    />
+                  )}
                   <span
-                    className="h-2 w-2 shrink-0 rounded-full bg-primary"
-                    aria-label="current node"
-                    data-testid={`workflow-node-current-${node.name}`}
-                  />
-                )}
-                <span className={`truncate font-medium ${isCurrent ? "" : "text-muted-foreground"}`}>
-                  {node.name}
-                </span>
-                {node.agent && (
-                  <span className="truncate font-mono text-xs text-muted-foreground">
-                    {node.agent}
-                  </span>
-                )}
-              </div>
-              <div className="flex shrink-0 items-center gap-2">
-                <Badge
-                  variant={NODE_STATUS_VARIANT[node.status]}
-                  className="text-[10px]"
-                  data-testid={`workflow-node-status-${node.name}`}
-                >
-                  {NODE_STATUS_LABEL[node.status]}
-                </Badge>
-                {node.childRunId && (
-                  <Link
-                    to={`/traces/${encodeURIComponent(node.childRunId)}`}
-                    data-testid={`workflow-node-run-link-${node.name}`}
-                    className="truncate font-mono text-[10px] text-primary hover:underline"
-                    onClick={(e) => e.stopPropagation()}
+                    className={
+                      isCurrent
+                        ? "truncate font-medium"
+                        : "truncate font-medium text-secondary-foreground"
+                    }
                   >
-                    {node.childRunId.slice(0, 8)}…
-                  </Link>
-                )}
-              </div>
-            </li>
-          );
-        })}
-      </ol>
-    </div>
+                    {node.name}
+                  </span>
+                  {node.agent && (
+                    <span className="truncate font-mono text-xs text-faint">
+                      {node.agent}
+                    </span>
+                  )}
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Badge
+                    variant={NODE_STATUS_VARIANT[node.status]}
+                    data-testid={`workflow-node-status-${node.name}`}
+                  >
+                    {NODE_STATUS_LABEL[node.status]}
+                  </Badge>
+                  {node.childRunId && (
+                    <Link
+                      to={`/traces/${encodeURIComponent(node.childRunId)}`}
+                      data-testid={`workflow-node-run-link-${node.name}`}
+                      className="truncate border-b border-accent font-mono text-xs text-primary hover:border-primary"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {node.childRunId.slice(0, 8)}…
+                    </Link>
+                  )}
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      </CardContent>
+    </Card>
   );
 }
 
 // finalizedRun projects a finalized RunDetail (from the shared durable engine, ADR 0093) into
 // this page's richer `Run` union — the traceId + response + consent/approval affordances +
-// workflow nodes the "Run result" panel renders. A failed run maps to the error state (no trace
+// workflow nodes the run panel renders. A failed run maps to the error state (no trace
 // panel). This is exactly the projection the page's old inline finalizeRun did, now fed by the
 // hook's onFinalized callback.
 function finalizedRun(detail: RunDetail): Run {
@@ -907,6 +1244,7 @@ function finalizedRun(detail: RunDetail): Run {
   });
   return {
     kind: "done",
+    runId: detail.id,
     traceId: detail.traceId ?? "",
     response: lastMessage,
     runStatus: detail.status,

@@ -6,12 +6,18 @@ import { CreateTeamPage } from "@/pages/create-team-page";
 import { ToastProvider } from "@/components/kit";
 import { NamespaceProvider } from "@/lib/namespace";
 
-// CreateTeamPage tests (m71.7) — tier 0 (no cluster, no LLM).
+// CreateTeamPage tests (m71.7; re-pointed at the M151 wizard shape) — tier 0
+// (no cluster, no LLM).
+//
+// The flow is now the kit Wizard: Describe → Review the roster. The forward
+// control belongs to the kit, so it has no testid and the tests reach it by the
+// accessible name a person reads ("Generate the roster" / "Create the team") —
+// the same intent the old `generate-btn` / `create-btn` ids carried.
 //
 // data-testid contract (mirrors the page):
 //   create-team-page, registry-select, team-description,
-//   generate-btn, roster-review, team-supervisor, team-roster-entry-{n},
-//   create-btn, regenerate-hint, empty-registry-hint
+//   roster-review, team-supervisor, team-roster-entry-{n},
+//   regenerate-hint, empty-registry-hint, team-yaml
 
 // Minimal valid AgentTeam YAML returned by the fake model.
 const validTeamYAML = `apiVersion: agents.ctxmesh.ai/v1beta1
@@ -115,61 +121,116 @@ function renderPage() {
   );
 }
 
+/** The kit Wizard's forward control on the Describe step. */
+function generateButton() {
+  return screen.getByRole("button", { name: /Generate the roster/ });
+}
+
+/** The kit Wizard's Finish control on the Review step. */
+function createButton() {
+  return screen.getByRole("button", { name: /Create the team/ });
+}
+
+/**
+ * The registry list arrives asynchronously and the forward control is gated on
+ * a chosen registry, so every flow test waits for the picker to become the
+ * loaded <select> before typing. (Before it loads the same testid is a
+ * free-text input — deliberately, so a failed probe is never a dead end.)
+ */
+async function describeATeam(text: string) {
+  await waitFor(() =>
+    expect(screen.getByTestId("registry-select").tagName).toBe("SELECT"),
+  );
+  fireEvent.change(screen.getByTestId("team-description"), {
+    target: { value: text },
+  });
+}
+
 afterEach(() => vi.restoreAllMocks());
 
 describe("CreateTeamPage (m71.7)", () => {
-  it("renders the describe form with a registry selector and description textarea", async () => {
+  it("renders the describe step with a registry selector, a description and the forward control", async () => {
     installFetch();
     renderPage();
 
     expect(await screen.findByTestId("create-team-page")).toBeInTheDocument();
-    // Registry select should appear (either a <select> or an <input>)
+    // Registry picker (an <input> until the list loads, then a <select>).
     expect(screen.getByTestId("registry-select")).toBeInTheDocument();
     expect(screen.getByTestId("team-description")).toBeInTheDocument();
-    expect(screen.getByTestId("generate-btn")).toBeInTheDocument();
+    // The wizard's forward control names what it will do.
+    expect(generateButton()).toBeInTheDocument();
   });
 
   it("calls generateTeam and renders the roster review on success", async () => {
     installFetch();
     renderPage();
 
-    // Wait for registry to load
-    await screen.findByTestId("registry-select");
+    await describeATeam("An orchestrator with a researcher");
+    fireEvent.click(generateButton());
 
-    fireEvent.change(screen.getByTestId("team-description"), {
-      target: { value: "An orchestrator with a researcher" },
-    });
-    fireEvent.click(screen.getByTestId("generate-btn"));
-
-    // The roster review should appear
+    // The roster review step should appear.
     await waitFor(() =>
       expect(screen.getByTestId("roster-review")).toBeInTheDocument(),
     );
 
-    // Supervisor should be rendered
+    // Supervisor should be rendered.
     expect(screen.getByTestId("team-supervisor")).toHaveTextContent("orchestrator-bot");
 
-    // Roster entries
+    // Roster entries.
     expect(screen.getByTestId("team-roster-entry-0")).toBeInTheDocument();
 
-    // Create button should be available
-    expect(screen.getByTestId("create-btn")).toBeInTheDocument();
+    // Create should be available.
+    expect(createButton()).toBeInTheDocument();
+  });
+
+  it("marks the generated roster as a proposal, not a fact", async () => {
+    // The honesty rule for A4: a model wrote this and nobody has confirmed it,
+    // so the review says so — a `proposed` tag, the composing model named, and
+    // a sentence stating nothing exists yet.
+    installFetch();
+    renderPage();
+
+    await describeATeam("An orchestrator with a researcher");
+    fireEvent.click(generateButton());
+
+    const review = await screen.findByTestId("roster-review");
+    expect(review).toHaveTextContent(/proposed/i);
+    expect(review).toHaveTextContent(/does not exist yet/i);
+    expect(review).toHaveTextContent(/claude-sonnet-4-6/);
+  });
+
+  it("an unreported eligible set reads as unknown, never as none", async () => {
+    // A roster came back, so agents WERE eligible — an empty `eligibleMembers`
+    // is the generator not saying, and must never render as an empty list.
+    installFetch({
+      generateBody: {
+        teamYAML: validTeamYAML,
+        model: "claude-sonnet-4-6",
+        provider: "anthropic",
+        warnings: [],
+        eligibleMembers: [],
+      },
+    });
+    renderPage();
+
+    await describeATeam("An orchestrator with a researcher");
+    fireEvent.click(generateButton());
+
+    const review = await screen.findByTestId("roster-review");
+    expect(review).toHaveTextContent(/not reported/i);
   });
 
   it("calls createTeam and shows success state on successful create", async () => {
     installFetch();
     renderPage();
 
-    await screen.findByTestId("registry-select");
-    fireEvent.change(screen.getByTestId("team-description"), {
-      target: { value: "An orchestrator team" },
-    });
-    fireEvent.click(screen.getByTestId("generate-btn"));
+    await describeATeam("An orchestrator team");
+    fireEvent.click(generateButton());
 
-    await waitFor(() => expect(screen.getByTestId("create-btn")).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId("create-btn"));
+    await waitFor(() => expect(createButton()).toBeInTheDocument());
+    fireEvent.click(createButton());
 
-    // The success banner appears immediately after the create resolves — proves
+    // The success panel appears immediately after the create resolves — proves
     // createTeam was called and returned the team summary. The 1200ms navigate
     // delay is not tested here (it is a setTimeout side effect; routing is covered
     // by the router integration in the app).
@@ -190,17 +251,20 @@ describe("CreateTeamPage (m71.7)", () => {
     });
     renderPage();
 
-    await screen.findByTestId("registry-select");
-    fireEvent.change(screen.getByTestId("team-description"), {
-      target: { value: "a team" },
-    });
-    fireEvent.click(screen.getByTestId("generate-btn"));
+    await describeATeam("a team");
+    fireEvent.click(generateButton());
 
     await waitFor(() =>
       expect(screen.getByTestId("regenerate-hint")).toBeInTheDocument(),
     );
-    // Should NOT show roster review on failure
+    // Should NOT advance to the roster review on failure.
     expect(screen.queryByTestId("roster-review")).toBeNull();
+    // The reason is shown, and the description the user typed is still there to
+    // edit — the step is not swapped out from under them.
+    expect(screen.getByTestId("regenerate-hint")).toHaveTextContent(
+      /supervisor agentRef is not in the eligible agent set/,
+    );
+    expect(screen.getByTestId("team-description")).toHaveValue("a team");
   });
 
   it("shows empty-registry-hint when the registry has no eligible agents", async () => {
@@ -215,15 +279,26 @@ describe("CreateTeamPage (m71.7)", () => {
     });
     renderPage();
 
-    await screen.findByTestId("registry-select");
-    fireEvent.change(screen.getByTestId("team-description"), {
-      target: { value: "a team" },
-    });
-    fireEvent.click(screen.getByTestId("generate-btn"));
+    await describeATeam("a team");
+    fireEvent.click(generateButton());
 
     await waitFor(() =>
       expect(screen.getByTestId("regenerate-hint")).toBeInTheDocument(),
     );
     expect(screen.getByTestId("empty-registry-hint")).toBeInTheDocument();
+  });
+
+  it("discloses the raw team.yaml in a code well, never an editable field", async () => {
+    installFetch();
+    renderPage();
+
+    await describeATeam("An orchestrator with a researcher");
+    fireEvent.click(generateButton());
+    await screen.findByTestId("roster-review");
+
+    fireEvent.click(screen.getByTestId("team-yaml-toggle"));
+    const well = await screen.findByTestId("team-yaml");
+    expect(well.tagName).toBe("PRE");
+    expect(well).toHaveTextContent("AgentTeam");
   });
 });

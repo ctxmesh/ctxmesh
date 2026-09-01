@@ -462,10 +462,14 @@ export function ChatPanel({
             <>
               {t.consentRequired && t.consentRequired.length > 0 && (
                 <div
-                  className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs"
+                  // A consent prompt is a HUMAN GATE — the one thing violet
+                  // means (ADR 0128). It was amber, which now means "a bound is
+                  // near or crossed", and it was written in raw Tailwind palette
+                  // names the colour gate could not see until M151 taught it to.
+                  className="flex items-start gap-2 rounded-md border border-hold/40 bg-hold-surface p-2.5 text-xs"
                   data-testid="chat-consent"
                 >
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-hold" />
                   <div className="space-y-2">
                     <p className="font-medium">Connect your account to continue</p>
                     <p className="text-muted-foreground">

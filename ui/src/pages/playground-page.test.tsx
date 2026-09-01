@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { PlaygroundPage } from "@/pages/playground-page";
@@ -293,9 +293,7 @@ describe("PlaygroundPage", () => {
     // The run result shows the traceId + the agent response.
     expect(await screen.findByText(/Traced run complete/)).toBeInTheDocument();
     expect(screen.getByTestId("trace-id")).toHaveTextContent("trace-xyz");
-    expect((screen.getByLabelText("Agent response") as HTMLTextAreaElement).value).toContain(
-      "MOCK_OK",
-    );
+    expect(screen.getByLabelText("Agent response")).toHaveTextContent("MOCK_OK");
 
     // A completed run shows a "View full trace" link to the native /traces/:id (m17.13).
     // There is NO Langfuse iframe anywhere in the playground (m17.13 promise: kill the
@@ -397,8 +395,11 @@ describe("PlaygroundPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Preview CRD/ }));
 
-    const preview = (await screen.findByLabelText("Exported CRD preview")) as HTMLTextAreaElement;
-    await waitFor(() => expect(preview.value).toContain("kind: AgentDeployment"));
+    // The exported manifest renders in a <pre> code well, not a textarea
+    // (M151 §4.5): a soft-wrapped YAML line reads as a different indentation —
+    // i.e. a different manifest — than the one that would be applied.
+    const preview = await screen.findByLabelText("Exported CRD preview");
+    await waitFor(() => expect(preview).toHaveTextContent("kind: AgentDeployment"));
 
     // The expand posted the SAME agent.yaml the define form produced.
     const expandCall = calls.find((c) => c.url === "/api/expand");
@@ -408,7 +409,12 @@ describe("PlaygroundPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Apply to cluster/ }));
     expect(await screen.findByText("Applied to the cluster")).toBeInTheDocument();
-    expect(screen.getByText("echo-agent")).toBeInTheDocument();
+    // Scoped to the created list: the run record now also names the agent, so
+    // an unscoped query would match the form's own identity row too.
+    const created = within(screen.getByTestId("crd-export-created"));
+    expect(created.getByText("echo-agent")).toBeInTheDocument();
+    // A Kind is the object's identity, not its health — never the ok hue (§2.2).
+    expect(created.getByText("AgentDeployment").className).toMatch(/bg-surface-2/);
 
     // The create posted the SAME agent.yaml + the target namespace (no divergence).
     const createCall = calls.find((c) => c.url === "/api/agents" && c.method === "POST");
@@ -497,9 +503,7 @@ describe("PlaygroundPage", () => {
 
     // The streamed content lands in the response, and the run finalizes to done + trace.
     await waitFor(() =>
-      expect((screen.getByLabelText("Agent response") as HTMLTextAreaElement).value).toContain(
-        "Hello",
-      ),
+      expect(screen.getByLabelText("Agent response")).toHaveTextContent("Hello"),
     );
     expect(await screen.findByTestId("trace-id")).toHaveTextContent("trace-xyz");
   });
@@ -533,9 +537,7 @@ describe("PlaygroundPage", () => {
 
     // The stream parsed the step frames (both forms) and still finalized cleanly to done + trace.
     await waitFor(() =>
-      expect((screen.getByLabelText("Agent response") as HTMLTextAreaElement).value).toContain(
-        "Hello",
-      ),
+      expect(screen.getByLabelText("Agent response")).toHaveTextContent("Hello"),
     );
     expect(await screen.findByTestId("trace-id")).toHaveTextContent("trace-step");
   });
@@ -561,6 +563,10 @@ describe("PlaygroundPage", () => {
     // The approval affordance surfaces the summary + Approve/Deny.
     const approval = await screen.findByTestId("approval-request");
     expect(approval).toHaveTextContent("Send the email to the customer?");
+    // A run held on a PERSON wears hold-violet — a 2px rule, not a fill (§2.2),
+    // and never the amber that now means only "a bound is near or crossed".
+    expect(approval.className).toMatch(/border-l-hold/);
+    expect(document.body.innerHTML).not.toMatch(/amber/);
     fireEvent.click(screen.getByTestId("approve-run"));
 
     // Approve resumes the run with decision=approve.
@@ -699,11 +705,20 @@ describe("PlaygroundPage — workflow graph view (m67.15)", () => {
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
     await screen.findByTestId("workflow-graph-section");
-    // The "Suspended" label appears (either in the banner or the badge — both use the same text).
+    // The full phrase is said where it can be read as a sentence — the closing
+    // line under the run's story. A tag is budgeted to <=16 chars (§4.5), so the
+    // workflow tag carries the one word and never the 30-character phrase.
     const suspendedMatches = screen.getAllByText(/Suspended — awaiting next node/);
     expect(suspendedMatches.length).toBeGreaterThan(0);
-    // The suspended badge on the workflow section.
-    expect(screen.getByTestId("workflow-suspended-badge")).toBeInTheDocument();
+    // The suspended tag on the workflow section.
+    const suspendedBadge = screen.getByTestId("workflow-suspended-badge");
+    expect(suspendedBadge).toHaveTextContent("Suspended");
+    // A suspended workflow is parked on a CHILD RUN and is machine-woken
+    // (internal/run/run.go, ADR 0060 §3) — nobody has to do anything. So it
+    // wears the converging pine tint, never the amber "a bound is crossed"
+    // and never the violet "a person must decide" (§2.2 / §2.4 / §2.5).
+    expect(suspendedBadge.className).toMatch(/bg-accent/);
+    expect(suspendedBadge.className).not.toMatch(/warning|hold-surface/);
     // It is NOT shown as an error (no alert role).
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
@@ -750,7 +765,7 @@ describe("PlaygroundPage — workflow graph view (m67.15)", () => {
     fillAgent("plain-agent");
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
-    await screen.findByText("Traced run complete");
+    await screen.findByText(/Traced run complete/);
     expect(screen.queryByTestId("workflow-graph-section")).not.toBeInTheDocument();
   });
 });
@@ -811,6 +826,10 @@ describe("PlaygroundPage — RBAC-gated Run/Apply", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /Run agent/ })).toBeInTheDocument(),
     );
+    // The well now renders only once there IS a manifest (it used to be an
+    // always-present empty textarea), so the export has to be a real one.
+    fillAgent("echo-agent");
+    fill("Image", "ghcr.io/ctxmesh/echo:v1");
     fireEvent.click(screen.getByRole("button", { name: /Preview CRD/ }));
     await screen.findByLabelText("Exported CRD preview");
     await waitFor(() =>
