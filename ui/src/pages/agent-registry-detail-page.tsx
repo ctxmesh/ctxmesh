@@ -10,8 +10,12 @@ import {
   DetailDrawer,
   EmptyState,
   ForbiddenInline,
+  KeyValueList,
+  PageHeader,
   ResourceLink,
+  SectionHeader,
   Wizard,
+  type KeyValueItem,
   type WizardStep,
   useToast,
 } from "@/components/kit";
@@ -694,34 +698,45 @@ export function NewAgentRegistryPage() {
     title: "Identity",
     description: "Name, namespace, and registry ID",
     content: (
-      <div className="space-y-4">
-        <FormField id="new-reg-name" label="Name">
-          <Input
-            id="new-reg-name"
-            value={regName}
-            onChange={(e) => setRegName(e.target.value)}
-            placeholder="my-registry"
-            data-testid="new-registry-name"
-          />
-        </FormField>
-        <FormField id="new-reg-ns" label="Namespace (blank = default)">
-          <Input
-            id="new-reg-ns"
-            value={regNs}
-            onChange={(e) => setRegNs(e.target.value)}
-            placeholder="default"
-            data-testid="new-registry-namespace"
-          />
-        </FormField>
-        <FormField id="new-registry-id" label="Registry ID (immutable after create)">
-          <Input
-            id="new-registry-id"
-            value={registryId}
-            onChange={(e) => setRegistryId(e.target.value)}
-            placeholder="prod-registry"
-            data-testid="new-registry-id"
-          />
-        </FormField>
+      <div className="space-y-5">
+        <SectionHeader
+          title="Identity"
+          lede="What the registry is called, where it lives, and the ID agents address it by. The ID is fixed at creation — everything else can change later."
+        />
+        <div className="space-y-4">
+          <FormField id="new-reg-name" label="Name">
+            <Input
+              id="new-reg-name"
+              value={regName}
+              onChange={(e) => setRegName(e.target.value)}
+              placeholder="my-registry"
+              data-testid="new-registry-name"
+            />
+          </FormField>
+          <FormField id="new-reg-ns" label="Namespace (blank = default)">
+            <Input
+              id="new-reg-ns"
+              value={regNs}
+              onChange={(e) => setRegNs(e.target.value)}
+              placeholder="default"
+              data-testid="new-registry-namespace"
+            />
+          </FormField>
+          <FormField id="new-registry-id" label="Registry ID (immutable after create)">
+            <Input
+              id="new-registry-id"
+              value={registryId}
+              onChange={(e) => setRegistryId(e.target.value)}
+              placeholder="prod-registry"
+              data-testid="new-registry-id"
+              className="font-mono text-xs"
+            />
+            <p className="text-xs text-faint">
+              Choose it carefully: it cannot be edited afterwards, only replaced
+              by making a new registry.
+            </p>
+          </FormField>
+        </div>
       </div>
     ),
   };
@@ -731,9 +746,15 @@ export function NewAgentRegistryPage() {
     title: "Member selector",
     description: "Labels selecting AgentDeployments into this registry",
     content: (
-      <FormField id="new-member-selector" label="Match labels">
-        <MatchLabelsEditor labels={matchLabels} onChange={setMatchLabels} />
-      </FormField>
+      <div className="space-y-5">
+        <SectionHeader
+          title="Who is in it"
+          lede="Membership is by label, not by list: any AgentDeployment carrying these labels joins the registry, including ones created later."
+        />
+        <FormField id="new-member-selector" label="Match labels">
+          <MatchLabelsEditor labels={matchLabels} onChange={setMatchLabels} />
+        </FormField>
+      </div>
     ),
   };
 
@@ -742,7 +763,11 @@ export function NewAgentRegistryPage() {
     title: "Roles & guards",
     description: "Custom role names and conversation guards",
     content: (
-      <div className="space-y-4">
+      <div className="space-y-5">
+        <SectionHeader
+          title="Roles and guards"
+          lede="Role names members can take, and the bounds a conversation may not cross. Leave a guard blank to inherit the platform's."
+        />
         <FormField id="new-roles-input" label="Roles (comma-separated)">
           <Input
             id="new-roles-input"
@@ -752,7 +777,7 @@ export function NewAgentRegistryPage() {
             data-testid="new-registry-roles"
           />
         </FormField>
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid gap-4 sm:grid-cols-2">
           <FormField id="new-max-depth" label="Max depth">
             <Input
               id="new-max-depth"
@@ -778,64 +803,111 @@ export function NewAgentRegistryPage() {
     ),
   };
 
+  // The choices, as facts. A blank field states what blank MEANS rather than
+  // leaving an empty row (kit KeyValueList) — and no row claims a default the
+  // console cannot see.
+  const labelCount = Object.keys(matchLabels).length;
+  const registryFacts: KeyValueItem[] = [
+    { key: "Name", value: regName.trim() || undefined, absent: "not named yet" },
+    {
+      key: "Namespace",
+      value: regNs.trim() || undefined,
+      absent: "default",
+      title: "Left blank — the registry is created in the default namespace.",
+    },
+    {
+      key: "Registry ID",
+      // The node carries the testid either way, so the id is findable whether
+      // it was filled in or left for the reader to notice.
+      value: (
+        <span
+          data-testid="review-new-registry-id"
+          className={registryId.trim() ? undefined : "text-ghost"}
+        >
+          {registryId.trim() || "not set yet"}
+        </span>
+      ),
+      title: registryId.trim()
+        ? "Fixed at creation — it cannot be edited afterwards."
+        : "Set it on the Identity step; it cannot be added later.",
+    },
+    {
+      key: "Member labels",
+      value: labelCount || undefined,
+      absent: "none set",
+      title: "Membership is by label — none were added on the selector step.",
+    },
+    {
+      key: "Roles",
+      value: rolesText.trim() || undefined,
+      absent: "none set",
+      mono: false,
+    },
+    { key: "Max depth", value: maxDepth.trim() || undefined, absent: "not set" },
+    { key: "Hop budget", value: hopBudget.trim() || undefined, absent: "not set" },
+  ];
+
   const reviewStep: WizardStep = {
     id: "review",
     title: "Review",
     review: true,
     content: (
-      <div className="space-y-4" data-testid="new-registry-review">
-        <p className="text-sm font-medium">Review new AgentRegistry</p>
+      <div className="space-y-5" data-testid="new-registry-review">
+        <SectionHeader
+          title="Review the registry"
+          lede="Nothing exists in the cluster yet. Creating it writes one AgentRegistry — the agents its labels match are not modified."
+        />
         {saveState.kind === "error" && saveState.forbidden && (
           <ForbiddenInline
             title="Not allowed to create registries"
             description="Your account can't create AgentRegistries in this cluster."
-            detail={saveState.message}
+            resource="agent registries"
+            permission="create"
           />
         )}
         {saveState.kind === "error" && !saveState.forbidden && (
-          <p className="text-sm text-destructive" role="alert" data-testid="new-registry-error">
-            {saveState.message}
-          </p>
+          <div
+            className="rounded-lg border border-destructive/40 bg-destructive-surface/40 px-4 py-3"
+            role="alert"
+            data-testid="new-registry-error"
+          >
+            <p className="font-serif text-md font-medium text-destructive">
+              The registry wasn’t created.
+            </p>
+            <pre className="mt-2 min-w-0 whitespace-pre-wrap break-words rounded-md bg-surface-3 px-3 py-2 font-mono text-xs text-secondary-foreground">
+              {saveState.message}
+            </pre>
+            <p className="mt-2 max-w-[64ch] text-sm text-secondary-foreground">
+              Nothing was written to the cluster. Go back, fix what it named, and
+              create it again.
+            </p>
+          </div>
         )}
-        <dl className="divide-y rounded-md border text-sm">
-          <div className="flex items-start justify-between gap-4 px-3 py-2">
-            <dt className="text-muted-foreground">Name</dt>
-            <dd>{regName || "—"}</dd>
-          </div>
-          <div className="flex items-start justify-between gap-4 px-3 py-2">
-            <dt className="text-muted-foreground">Registry ID</dt>
-            <dd className="font-mono text-xs" data-testid="review-new-registry-id">{registryId || "—"}</dd>
-          </div>
-          {rolesText.trim() && (
-            <div className="flex items-start justify-between gap-4 px-3 py-2">
-              <dt className="text-muted-foreground">Roles</dt>
-              <dd>{rolesText}</dd>
-            </div>
-          )}
-        </dl>
+        <KeyValueList items={registryFacts} />
       </div>
     ),
   };
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">New Agent Registry</h2>
-        <p className="text-sm text-muted-foreground">
-          Group AgentDeployments into a named registry with roles and a member
-          selector. The registryId is immutable after creation.
-        </p>
-      </div>
-      <Wizard
-        steps={[identityStep, memberStep, rolesStep, reviewStep]}
-        current={current}
-        onStepChange={setCurrent}
-        busy={saveState.kind === "saving"}
-        onFinish={() => { void doCreate(); }}
-        finishLabel="Create registry"
-        onCancel={() => navigate("/registries")}
-        dirty={regName.trim() !== ""}
+    <div className="min-w-0 space-y-6">
+      <PageHeader
+        title="New agent registry"
+        lede="A registry is a named group of agents that may talk to each other, with the roles they can take and the bounds a conversation may not cross."
       />
+      {/* §6.1 A4: the Wizard's 15rem rail + its 2rem gap + the archetype's
+          46rem content column. Capping the outer column sizes the inner one. */}
+      <div className="max-w-[63rem]">
+        <Wizard
+          steps={[identityStep, memberStep, rolesStep, reviewStep]}
+          current={current}
+          onStepChange={setCurrent}
+          busy={saveState.kind === "saving"}
+          onFinish={() => { void doCreate(); }}
+          finishLabel="Create registry"
+          onCancel={() => navigate("/registries")}
+          dirty={regName.trim() !== ""}
+        />
+      </div>
     </div>
   );
 }

@@ -21,6 +21,13 @@ const SECRET_KEY = "sk-ant-super-secret-value-123";
 
 function recordingFetch(opts: {
   connect?: (body: string) => { ok: boolean; status?: number; json: unknown };
+  /**
+   * Make the POST itself REJECT — the transport failing, not the provider
+   * answering. `fetch` rejects when the request never completes (offline, DNS,
+   * the BFF down), which is a different truth from any status code: the key
+   * never reached the provider and nothing was stored.
+   */
+  connectRejects?: Error;
   caps?: Record<string, Record<string, boolean>>;
 }) {
   const calls: Captured[] = [];
@@ -48,6 +55,9 @@ function recordingFetch(opts: {
             allowed: opts.caps ?? { secretbindings: { create: true } },
           }),
         } as Response);
+      }
+      if (url === "/api/providers" && method === "POST" && opts.connectRejects) {
+        return Promise.reject(opts.connectRejects);
       }
       if (url === "/api/providers" && method === "POST") {
         const r = opts.connect
@@ -242,6 +252,99 @@ describe("ConnectProviderPage", () => {
       await screen.findByTestId("kill-switch-fallback"),
     ).toBeInTheDocument();
     expect(screen.getByText(/reference an existing/i)).toBeInTheDocument();
+  });
+});
+
+// A credential that was REJECTED, a check that NEVER RAN, and a check this
+// install cannot perform are three different truths (M151 §7). Only the first
+// is a fact about the key — telling a user to check a key that never left the
+// browser sends them to rotate a working credential.
+describe("ConnectProviderPage — the three ways a credential check ends", () => {
+  it("a REJECTED key marks the key field invalid and says to paste it again", async () => {
+    recordingFetch({
+      // 400, not 401: a mid-session 401 is the session-expiry seam in api.ts
+      // (it signs the user out), so it is never how a bad provider key arrives.
+      connect: () => ({ ok: false, status: 400, json: { error: "invalid api key" } }),
+    });
+    renderPage();
+
+    await advanceToKeyStep();
+    fireEvent.change(screen.getByLabelText("Anthropic API key"), {
+      target: { value: "sk-bad" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Connect provider/ }));
+
+    await screen.findByTestId("connect-error");
+    const keyField = screen.getByLabelText("Anthropic API key");
+    expect(keyField).toHaveAttribute("aria-invalid", "true");
+    // The invalid field POINTS AT its message — the error is not colour alone.
+    expect(keyField).toHaveAttribute("aria-describedby", "provider-key-error");
+    // The field empties itself on submit, so the message has to say so —
+    // otherwise a blanked, flagged field reads as a bug, not a verdict.
+    expect(document.getElementById("provider-key-error")).toHaveTextContent(
+      /paste it again/i,
+    );
+    expect(screen.queryByTestId("connect-unreachable")).toBeNull();
+    expect(screen.queryByTestId("connect-unsupported")).toBeNull();
+  });
+
+  it("a check that NEVER RAN is a different state, and does not accuse the key", async () => {
+    recordingFetch({ connectRejects: new TypeError("Failed to fetch") });
+    renderPage();
+
+    await advanceToKeyStep();
+    fireEvent.change(screen.getByLabelText("Anthropic API key"), {
+      target: { value: SECRET_KEY },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Connect provider/ }));
+
+    const note = await screen.findByTestId("connect-unreachable");
+    expect(note).toHaveTextContent(/never ran/i);
+    expect(note).toHaveTextContent(/nothing about the key itself/i);
+    expect(screen.queryByTestId("connect-error")).toBeNull();
+    expect(screen.getByLabelText("Anthropic API key")).not.toHaveAttribute("aria-invalid");
+    expect(screen.queryByTestId("model-list")).toBeNull();
+    // Even on a failed transport the key is gone from the page.
+    expect(document.body.innerHTML).not.toContain(SECRET_KEY);
+  });
+
+  it("a 501 is a calm 'not wired here' note, never an error", async () => {
+    recordingFetch({
+      connect: () => ({ ok: false, status: 501, json: { error: "provider connect not implemented" } }),
+    });
+    renderPage();
+
+    await advanceToKeyStep();
+    fireEvent.change(screen.getByLabelText("Anthropic API key"), {
+      target: { value: SECRET_KEY },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Connect provider/ }));
+
+    const note = await screen.findByTestId("connect-unsupported");
+    expect(note).toHaveTextContent(/isn.t wired up on this install/i);
+    expect(note.querySelector("[role=note]")).not.toBeNull();
+    expect(note.querySelector("[role=alert]")).toBeNull();
+    expect(screen.getByLabelText("Anthropic API key")).not.toHaveAttribute("aria-invalid");
+  });
+
+  it("editing the key retires a stale verdict", async () => {
+    recordingFetch({
+      connect: () => ({ ok: false, status: 400, json: { error: "invalid api key" } }),
+    });
+    renderPage();
+
+    await advanceToKeyStep();
+    fireEvent.change(screen.getByLabelText("Anthropic API key"), {
+      target: { value: "sk-bad" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Connect provider/ }));
+    await screen.findByTestId("connect-error");
+
+    fireEvent.change(screen.getByLabelText("Anthropic API key"), {
+      target: { value: "sk-different" },
+    });
+    expect(screen.queryByTestId("connect-error")).toBeNull();
+    expect(screen.getByLabelText("Anthropic API key")).not.toHaveAttribute("aria-invalid");
   });
 });
 

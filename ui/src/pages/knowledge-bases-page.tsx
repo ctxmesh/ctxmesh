@@ -1,23 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  BookOpen,
-  ChevronLeft,
-  Filter,
-  Upload,
-  Play,
-  Search,
-} from "lucide-react";
+import { BookOpen, Filter, Upload, Play, Search } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import {
   CellEntity,
   ClosingNote,
   DataTable,
+  ErrorState,
   FilterChipRow,
+  ForbiddenInline,
+  KeyValueList,
   NextStepLink,
   PageHeader,
   QuantityValue,
   QuietNote,
+  SectionHeader,
+  Skeleton,
+  SkeletonCard,
   StatusBadge,
   UnknownValue,
   nextStepRank,
@@ -26,18 +25,13 @@ import {
   type DataTableError,
   type EmptyStateProps,
   type FilterChip,
+  type KeyValueItem,
   type NextStepTone,
   type StatusTone,
 } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, PanelHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
   api,
@@ -82,19 +76,11 @@ function formatBytes(bytes: number): string {
   return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
 }
 
-// formatDate renders an ISO8601 timestamp as a short local date string.
-function formatDate(ts?: string): string {
-  if (!ts) return "—";
-  try {
-    return new Date(ts).toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-  } catch {
-    return ts;
-  }
-}
+// `formatDate` is gone: it answered an absent timestamp with a bare "—" and no
+// reason, which is the one thing this milestone's honesty rules forbid — a dash
+// a reader cannot tell apart from a zero. Both surfaces now read a timestamp
+// through `formatStamp` (present) or `UnknownValue` (absent, with the reason in
+// its title).
 
 // formatStamp is the §4.5 table register for a timestamp: same year → "Aug 29",
 // older → "2025-08-29". The full ISO string always rides along in `title`, so the
@@ -439,7 +425,10 @@ export function KnowledgeBasesPage() {
 type DetailLoadState =
   | { kind: "loading" }
   | { kind: "ready"; kb: KBDetail }
-  | { kind: "error"; message: string };
+  // `forbidden` is carried separately because a permission boundary is a
+  // different STATE from a failure (§7): one is calm and names the role to ask
+  // for, the other offers a retry.
+  | { kind: "error"; message: string; forbidden: boolean };
 
 type UploadState =
   | { kind: "idle" }
@@ -460,15 +449,43 @@ type SearchState =
   | { kind: "error"; message: string }
   | { kind: "unavailable" };
 
-// KBDetailPage — the KnowledgeBase detail surface (m68.13, ADR 0061).
+// KBDetailPage — the KnowledgeBase detail surface (m68.13, ADR 0061; re-housed
+// on the editorial system in M151 as archetype A2). Route: /knowledgebases/:ns/:name
 //
-// Shows the KB's spec + status + conditions, a document upload panel, an ingest trigger,
-// and the test-query panel that proxies to /v1/knowledge/search and renders ranked chunks
-// with citations (documentRef#chunkIndex + score + content).
+// ── THE PAGE'S ONE IDEA: A CORPUS IS A PIPELINE, NOT A RECORD ──────────────
+// Everything a reader does here is one sequence — put documents in, ingest
+// them, ask a question and see what comes back — so the main column IS that
+// sequence, in that order, and the rail holds the facts the sequence produced.
+// The old page interleaved a stat grid, a condition list and three action
+// panels in one flat column, which made "what do I do next" a scanning problem.
+//
+// ── A NEVER-RUN INGESTION IS ABSENT, NOT ZERO (§7.1) ───────────────────────
+// This is the honesty rule the surface exists to demonstrate, and the two
+// halves of it live one row apart in the rail:
+//
+//   • "Last ingested" on a corpus that has never ingested is UNKNOWN. It reads
+//     `—` with the reason in its title — never a zero, and above all never
+//     "now": `new Date(undefined)` is the current time, and a fabricated
+//     ingestion date on a retrieval corpus is a lie an operator would act on.
+//   • Documents / Chunks / Size are KNOWN ZEROS when the store answers zero,
+//     and they render as a real `0`. Zero is a measurement; unknown is the
+//     absence of one, and the two never share a glyph.
+//
+// One QuietNote in the Ingest panel says which of the two a reader is looking
+// at, once, rather than leaving the dash to be guessed at.
+//
+// ── WHAT THIS PAGE MAY NOT CLAIM (§7.1) ────────────────────────────────────
+// `GET /api/knowledgebases/{name}` returns the spec, the counts and the
+// conditions. It returns NO ingest cost, NO per-document status and NO query
+// history — so none is drawn. A 501 from the search proxy is CALM (the install
+// has no token service), never an error: a QuietNote, never a red banner.
 //
 // data-testid contract:
-//   kb-detail-page        — root container
-//   kb-detail-header      — the KB name + phase header
+//   kb-detail-page        — root container (ready state)
+//   kb-detail-loading     — the loading state
+//   kb-detail-error       — the generic error state
+//   kb-detail-header      — the page band (name / phase / route)
+//   kb-never-ingested     — the never-ingested QuietNote
 //   upload-input          — the file input
 //   upload-submit         — the upload button
 //   upload-result         — success/error message after upload
@@ -482,7 +499,10 @@ type SearchState =
 //   query-unavailable     — the 501 calm state
 
 export function KBDetailPage() {
-  const navigate = useNavigate();
+  // No `useNavigate` here any more: the way back is the PageHeader breadcrumb,
+  // which is a real link (right-clickable, middle-clickable) rather than a
+  // button that calls navigate() — and it renders in every state, including the
+  // ones where the old back button did not.
   const { ns, name } = useParams<{ ns: string; name: string }>();
 
   const [loadState, setLoadState] = useState<DetailLoadState>({ kind: "loading" });
@@ -511,6 +531,7 @@ export function KBDetailPage() {
         setLoadState({
           kind: "error",
           message: err instanceof Error ? err.message : "failed to load KB",
+          forbidden: err instanceof ApiError && err.isForbidden,
         });
       });
   }, [ns, name]);
@@ -569,265 +590,464 @@ export function KBDetailPage() {
     }
   }
 
+  const crumbs = [
+    { label: "Knowledge bases", to: "/knowledgebases" },
+    { label: name ?? "" },
+  ];
+
+  // §7 A2 loading: the header band instantly, a SkeletonCard where each action
+  // panel will be, kv-line bars in the rail. The root testid is NOT set here —
+  // `kb-detail-page` marks the ready surface, so a test that waits for it waits
+  // for the real page rather than resolving against the skeleton.
   if (loadState.kind === "loading") {
     return (
-      <div className="mx-auto max-w-4xl" data-testid="kb-detail-page">
-        <p className="text-sm text-muted-foreground">Loading knowledge base…</p>
+      <div className="min-w-0 space-y-6" data-testid="kb-detail-loading">
+        <PageHeader
+          breadcrumb={crumbs}
+          title={name ?? "Knowledge base"}
+          titleMono
+          loading
+        />
+        <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
+          <div className="min-w-0 space-y-5">
+            <SkeletonCard />
+            <SkeletonCard />
+          </div>
+          <Card className="min-w-0">
+            <PanelHeader title="What it holds" />
+            <CardContent>
+              <div role="status" aria-busy="true" aria-label="Loading the corpus facts">
+                {[0, 1, 2, 3, 4, 5].map((i) => (
+                  <Skeleton decorative key={i} className="mb-3 h-3.5 w-full" />
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       </div>
     );
   }
 
   if (loadState.kind === "error") {
+    // A permission boundary replaces the page under the header — calm,
+    // resource-named, never the raw RBAC string (M100 UI99-403).
+    if (loadState.forbidden) {
+      return (
+        <div className="min-w-0 space-y-6">
+          <PageHeader breadcrumb={crumbs} title={name ?? ""} titleMono />
+          <ForbiddenInline
+            title={`You don't have permission to view ${name}.`}
+            resource="knowledge bases"
+            detail={loadState.message}
+          />
+        </div>
+      );
+    }
     return (
-      <div className="mx-auto max-w-4xl" data-testid="kb-detail-page">
-        <Button variant="ghost" size="sm" onClick={() => navigate("/knowledgebases")}>
-          <ChevronLeft className="h-4 w-4" />
-          Back to Knowledge Bases
-        </Button>
-        <p className="text-sm text-destructive mt-4">{loadState.message}</p>
+      <div className="min-w-0 space-y-6" data-testid="kb-detail-error">
+        <PageHeader breadcrumb={crumbs} title={name ?? ""} titleMono />
+        <ErrorState
+          title="The knowledge base didn't load."
+          description="Nothing has changed about the corpus itself — only this page failed to read it."
+          detail={loadState.message}
+          onRetry={load}
+        />
       </div>
     );
   }
 
   const { kb } = loadState;
 
-  return (
-    <div className="mx-auto max-w-4xl space-y-6" data-testid="kb-detail-page">
-      {/* Back link */}
-      <Button variant="ghost" size="sm" onClick={() => navigate("/knowledgebases")}>
-        <ChevronLeft className="h-4 w-4" />
-        Back to Knowledge Bases
-      </Button>
+  // The load-bearing distinction on this page. A corpus with no ingestion
+  // behind it has no ingestion DATE — that is unknown. Its counts may still be
+  // a real, measured zero. The two are rendered differently on purpose.
+  const neverIngested = !kb.lastIngestedAt;
 
-      {/* Header */}
-      <div data-testid="kb-detail-header" className="flex items-start gap-4">
-        <div className="flex-1 space-y-1">
-          <div className="flex items-center gap-3">
-            <h2 className="text-2xl font-semibold tracking-tight font-mono">{kb.name}</h2>
-            <StatusBadge ready={kb.phase === "Ready"} phase={kb.phase} />
-          </div>
-          {kb.displayName && (
-            <p className="text-sm text-muted-foreground">{kb.displayName}</p>
-          )}
-          <p className="text-xs text-muted-foreground">
-            Embedding route: <span className="font-mono">{kb.embeddingRoute}</span>
-            {" · "}
-            Source: <span className="font-mono">{kb.sourceType}</span>
-            {" · "}
-            Chunking: {kb.chunkSize} tokens / {kb.chunkOverlap} overlap / {kb.chunkSplitter} splitter
-          </p>
-        </div>
+  // What it holds. Every figure passes through QuantityValue, so a field the
+  // BFF did not send arrives as `undefined` and reads `—`, while a store that
+  // answered zero reads `0` (§7.1).
+  const holdings: KeyValueItem[] = [
+    { key: "Documents", value: <QuantityValue value={kb.documentCount} />, mono: false },
+    { key: "Chunks", value: <QuantityValue value={kb.chunkCount} />, mono: false },
+    {
+      key: "Size",
+      value: <QuantityValue value={kb.sizeBytes} format={formatBytes} />,
+      mono: false,
+    },
+    {
+      key: "Last ingested",
+      value: kb.lastIngestedAt ? (
+        <span className="tabular-nums" title={kb.lastIngestedAt}>
+          {formatStamp(kb.lastIngestedAt)}
+        </span>
+      ) : (
+        // The dash WITH its reason — never a zero, and never today's date.
+        <UnknownValue title="This corpus has never been ingested, so it has no ingestion date. The date is absent — it is not zero, and it is not now." />
+      ),
+      mono: false,
+    },
+  ];
+
+  // The record: how the corpus is configured, as declared.
+  const record: KeyValueItem[] = [
+    { key: "Corpus", value: kb.name, title: kb.name },
+    { key: "Workspace", value: kb.namespace, absent: "not recorded" },
+    {
+      key: "Embedding route",
+      value: kb.embeddingRoute ? (
+        <span className="block truncate" title={kb.embeddingRoute}>
+          {kb.embeddingRoute}
+        </span>
+      ) : undefined,
+      absent: "not set",
+      title:
+        "No embedding route is set, so nothing can be embedded and nothing can be retrieved.",
+    },
+    { key: "Source", value: kb.sourceType, absent: "not recorded" },
+    { key: "Chunk size", value: <QuantityValue value={kb.chunkSize} />, mono: false },
+    { key: "Chunk overlap", value: <QuantityValue value={kb.chunkOverlap} />, mono: false },
+    { key: "Splitter", value: kb.chunkSplitter, absent: "not recorded" },
+    {
+      key: "Ingestion run",
+      value: kb.ingestionRunRef,
+      absent: "none recorded",
+      title:
+        "No ingestion run is recorded against this corpus — nothing has run, or the run predates the field.",
+    },
+  ];
+
+  return (
+    <div className="min-w-0 space-y-6" data-testid="kb-detail-page">
+      <div data-testid="kb-detail-header">
+        <PageHeader
+          breadcrumb={crumbs}
+          title={kb.name}
+          titleMono
+          status={<StatusBadge ready={kb.phase === "Ready"} phase={kb.phase} />}
+          meta={`${kb.namespace} · ${kb.embeddingRoute || "no embedding route"}`}
+          lede={kb.displayName}
+        />
       </div>
 
-      {/* Status summary */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Status</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
-            <div>
-              <dt className="text-muted-foreground">Documents</dt>
-              <dd className="font-medium">{kb.documentCount.toLocaleString()}</dd>
-            </div>
-            <div>
-              <dt className="text-muted-foreground">Chunks</dt>
-              <dd className="font-medium">{kb.chunkCount.toLocaleString()}</dd>
-            </div>
-            <div>
-              <dt className="text-muted-foreground">Size</dt>
-              <dd className="font-medium">{formatBytes(kb.sizeBytes)}</dd>
-            </div>
-            <div>
-              <dt className="text-muted-foreground">Last ingested</dt>
-              <dd className="font-medium">{formatDate(kb.lastIngestedAt)}</dd>
-            </div>
-          </dl>
-          {kb.conditions.length > 0 && (
-            <div className="mt-4 space-y-1">
-              {kb.conditions.map((c) => (
-                <div key={c.type} className="flex items-center gap-2 text-xs">
-                  <Badge
-                    variant={c.status === "True" ? "success" : c.status === "False" ? "destructive" : "secondary"}
-                    className="text-xs"
-                  >
-                    {c.type}
-                  </Badge>
-                  {c.reason && <span className="text-muted-foreground">{c.reason}</span>}
-                  {c.message && <span className="text-muted-foreground truncate max-w-md">{c.message}</span>}
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Document upload */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Upload document</CardTitle>
-          <CardDescription>
-            Add a document to the KB&apos;s durable bucket. Trigger ingestion after uploading to
-            chunk, embed, and index the document for retrieval.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center gap-3">
-            <Input
-              type="file"
-              data-testid="upload-input"
-              className="max-w-sm"
-              onChange={(e) => {
-                setUploadFile(e.target.files?.[0] ?? null);
-                setUploadState({ kind: "idle" });
-              }}
-              disabled={uploadState.kind === "uploading"}
-            />
-            <Button
-              data-testid="upload-submit"
-              onClick={() => void onUpload()}
-              disabled={!uploadFile || uploadState.kind === "uploading"}
-            >
-              <Upload className="h-4 w-4" />
-              {uploadState.kind === "uploading" ? "Uploading…" : "Upload"}
-            </Button>
-          </div>
-          {uploadState.kind === "success" && (
-            <p className="text-sm text-success" data-testid="upload-result">
-              Uploaded: <span className="font-mono">{uploadState.ref}</span>
-            </p>
-          )}
-          {uploadState.kind === "error" && (
-            <p className="text-sm text-destructive" role="alert" data-testid="upload-result">
-              {uploadState.message}
-            </p>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Ingest trigger */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Ingest</CardTitle>
-          <CardDescription>
-            Start an ingestion run to chunk, embed, and index the KB&apos;s documents. The KB
-            transitions to <span className="font-mono">Ingesting</span> and then{" "}
-            <span className="font-mono">Ready</span> when complete.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <Button
-            data-testid="ingest-button"
-            onClick={() => void onIngest()}
-            disabled={ingestState.kind === "running"}
-          >
-            <Play className="h-4 w-4" />
-            {ingestState.kind === "running" ? "Starting…" : "Start ingestion"}
-          </Button>
-          {ingestState.kind === "success" && (
-            <p className="text-sm text-success" data-testid="ingest-result">
-              Ingestion run started: <span className="font-mono">{ingestState.runId}</span>
-            </p>
-          )}
-          {ingestState.kind === "error" && (
-            <p className="text-sm text-destructive" role="alert" data-testid="ingest-result">
-              {ingestState.message}
-            </p>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Test-query panel */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Test query</CardTitle>
-          <CardDescription>
-            Run a retrieval query against the KB&apos;s pgvector index. Results show ranked chunks
-            with citations — document reference, chunk index, and similarity score. Requires the
-            token-service to be configured (TOKEN_SERVICE_URL).
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center gap-3">
-            <Input
-              data-testid="query-input"
-              className="flex-1"
-              placeholder="Enter a query, e.g. 'how to configure rate limits'"
-              value={queryText}
-              onChange={(e) => setQueryText(e.target.value)}
-              disabled={searchState.kind === "searching"}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void onSearch();
-              }}
-            />
-            <div className="flex items-center gap-2">
-              <label htmlFor="query-topk" className="text-xs text-muted-foreground whitespace-nowrap">
-                Top K
-              </label>
-              <Input
-                id="query-topk"
-                data-testid="query-topk"
-                type="number"
-                min={1}
-                max={50}
-                className="w-16"
-                value={queryTopK}
-                onChange={(e) => setQueryTopK(Number(e.target.value) || 5)}
-                disabled={searchState.kind === "searching"}
-              />
-            </div>
-            <Button
-              data-testid="query-submit"
-              onClick={() => void onSearch()}
-              disabled={!queryText.trim() || searchState.kind === "searching"}
-            >
-              <Search className="h-4 w-4" />
-              {searchState.kind === "searching" ? "Searching…" : "Search"}
-            </Button>
-          </div>
-
-          {searchState.kind === "unavailable" && (
-            <p className="text-sm text-muted-foreground" data-testid="query-unavailable">
-              Test-query is not available — set TOKEN_SERVICE_URL to enable KB retrieval.
-            </p>
-          )}
-
-          {searchState.kind === "error" && (
-            <p className="text-sm text-destructive" role="alert">
-              {searchState.message}
-            </p>
-          )}
-
-          {searchState.kind === "results" && (
-            <div className="space-y-3" data-testid="query-results">
-              {searchState.hits.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No results for this query.</p>
-              ) : (
-                searchState.hits.map((hit, i) => (
-                  <div
-                    key={i}
-                    data-testid={`query-hit-${i}`}
-                    className="rounded-md border p-3 space-y-1"
-                  >
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <span className="font-mono">
-                        {hit.documentRef}#{hit.chunkIndex}
-                      </span>
-                      <span className="ml-auto font-medium text-foreground">
-                        {(hit.score * 100).toFixed(1)}%
-                      </span>
-                      {hit.truncated && (
-                        <Badge variant="secondary" className="text-xs">truncated</Badge>
-                      )}
-                    </div>
-                    <p className="text-sm leading-relaxed whitespace-pre-wrap">{hit.content}</p>
-                  </div>
-                ))
+      {/* §4.7 hub grid: the pipeline on the left, the facts it produced in the
+          300px rail, which stacks UNDER the main column below `lg`. */}
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
+        <div className="min-w-0 space-y-5">
+          {/* 1 — put documents in */}
+          <Card className="min-w-0">
+            <PanelHeader title="Add a document" />
+            <CardContent className="space-y-4">
+              <p className="max-w-[64ch] text-sm text-secondary-foreground">
+                Uploading puts the file in the corpus&rsquo;s durable bucket. It is
+                not searchable until an ingestion chunks, embeds and indexes it —
+                that is the next panel, and it is a separate step on purpose.
+              </p>
+              <div className="flex flex-wrap items-center gap-3">
+                <Input
+                  type="file"
+                  data-testid="upload-input"
+                  className="max-w-sm"
+                  onChange={(e) => {
+                    setUploadFile(e.target.files?.[0] ?? null);
+                    setUploadState({ kind: "idle" });
+                  }}
+                  disabled={uploadState.kind === "uploading"}
+                />
+                <Button
+                  data-testid="upload-submit"
+                  onClick={() => void onUpload()}
+                  disabled={!uploadFile || uploadState.kind === "uploading"}
+                >
+                  <Upload className="h-4 w-4" />
+                  {uploadState.kind === "uploading" ? "Uploading…" : "Upload"}
+                </Button>
+              </div>
+              {uploadState.kind === "success" && (
+                <p className="text-sm text-success" data-testid="upload-result">
+                  Uploaded:{" "}
+                  <span className="break-all font-mono text-xs">
+                    {uploadState.ref}
+                  </span>
+                </p>
               )}
-            </div>
+              {uploadState.kind === "error" && (
+                <p
+                  className="text-sm text-destructive"
+                  role="alert"
+                  data-testid="upload-result"
+                >
+                  {uploadState.message}
+                </p>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* 2 — ingest them */}
+          <Card className="min-w-0">
+            <PanelHeader title="Ingest" />
+            <CardContent className="space-y-4">
+              <p className="max-w-[64ch] text-sm text-secondary-foreground">
+                An ingestion run chunks, embeds and indexes every document in the
+                corpus. The corpus moves to{" "}
+                <span className="font-mono text-xs">Ingesting</span>, then to{" "}
+                <span className="font-mono text-xs">Ready</span> when it finishes.
+              </p>
+              {/* Said once, where a reader meets the dash's consequence: this
+                  corpus retrieves nothing yet. */}
+              {neverIngested && (
+                <div data-testid="kb-never-ingested">
+                  <QuietNote title="This corpus has never been ingested.">
+                    No ingestion has run against it, so it has no ingestion date —
+                    the rail reads{" "}
+                    <span className="font-mono">&mdash;</span> rather than a date,
+                    because a fabricated one is worse than none. The document and
+                    chunk figures beside it are what the store actually holds, so a{" "}
+                    <span className="font-mono">0</span> there is a measurement,
+                    not a guess. Until an ingestion runs, a query against this
+                    corpus returns nothing.
+                  </QuietNote>
+                </div>
+              )}
+              <Button
+                data-testid="ingest-button"
+                onClick={() => void onIngest()}
+                disabled={ingestState.kind === "running"}
+              >
+                <Play className="h-4 w-4" />
+                {ingestState.kind === "running" ? "Starting…" : "Start ingestion"}
+              </Button>
+              {ingestState.kind === "success" && (
+                <p className="text-sm text-success" data-testid="ingest-result">
+                  Ingestion run started:{" "}
+                  <span className="break-all font-mono text-xs">
+                    {ingestState.runId}
+                  </span>
+                </p>
+              )}
+              {ingestState.kind === "error" && (
+                <p
+                  className="text-sm text-destructive"
+                  role="alert"
+                  data-testid="ingest-result"
+                >
+                  {ingestState.message}
+                </p>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* 3 — ask it something */}
+          <Card className="min-w-0">
+            <PanelHeader title="Test a query" />
+            <CardContent className="space-y-4">
+              <p className="max-w-[64ch] text-sm text-secondary-foreground">
+                Runs a retrieval query against the corpus&rsquo;s pgvector index and
+                shows what an agent would get back — the ranked chunks with their
+                citations, so a wrong answer can be traced to the passage that
+                caused it.
+              </p>
+              <div className="flex flex-wrap items-center gap-3">
+                <Input
+                  data-testid="query-input"
+                  className="min-w-[12rem] flex-1"
+                  placeholder="Ask what an agent would ask…"
+                  value={queryText}
+                  onChange={(e) => setQueryText(e.target.value)}
+                  disabled={searchState.kind === "searching"}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void onSearch();
+                  }}
+                />
+                <div className="flex items-center gap-2">
+                  <label
+                    htmlFor="query-topk"
+                    className="whitespace-nowrap font-mono text-2xs uppercase tracking-wide text-faint"
+                  >
+                    Top K
+                  </label>
+                  <Input
+                    id="query-topk"
+                    data-testid="query-topk"
+                    type="number"
+                    min={1}
+                    max={50}
+                    className="w-16 tabular-nums"
+                    value={queryTopK}
+                    onChange={(e) => setQueryTopK(Number(e.target.value) || 5)}
+                    disabled={searchState.kind === "searching"}
+                  />
+                </div>
+                <Button
+                  data-testid="query-submit"
+                  onClick={() => void onSearch()}
+                  disabled={!queryText.trim() || searchState.kind === "searching"}
+                >
+                  <Search className="h-4 w-4" />
+                  {searchState.kind === "searching" ? "Searching…" : "Search"}
+                </Button>
+              </div>
+
+              {/* 501 is CALM: the install has no token service, nothing broke. */}
+              {searchState.kind === "unavailable" && (
+                <div data-testid="query-unavailable">
+                  <QuietNote title="Test queries aren't configured on this install.">
+                    Retrieval runs through the token service, and this install has
+                    no <span className="font-mono text-xs">TOKEN_SERVICE_URL</span>{" "}
+                    set. The corpus itself is fine and agents that reach it through
+                    a configured install still retrieve from it — there is simply
+                    nothing here to run the query against.
+                  </QuietNote>
+                </div>
+              )}
+
+              {searchState.kind === "error" && (
+                <p className="text-sm text-destructive" role="alert">
+                  {searchState.message}
+                </p>
+              )}
+
+              {searchState.kind === "results" && (
+                <div data-testid="query-results">
+                  {searchState.hits.length === 0 ? (
+                    <QuietNote title="Nothing matched.">
+                      The index answered, and no chunk in this corpus was close
+                      enough to the query to return. That is a real answer, not a
+                      failure — try different wording, or a larger Top K.
+                    </QuietNote>
+                  ) : (
+                    <>
+                      <SectionHeader
+                        title={`${searchState.hits.length} passage${searchState.hits.length === 1 ? "" : "s"} came back`}
+                        lede="Ranked by similarity. This is exactly what an agent would be handed."
+                        as="h3"
+                      />
+                      {/* A wide artifact scrolls inside its OWN container so the
+                          page never scrolls sideways (§4.6). */}
+                      <div className="mt-3 max-h-[28rem] overflow-y-auto rounded-md border border-border">
+                        <ul>
+                          {searchState.hits.map((hit, i) => (
+                            <li
+                              key={i}
+                              data-testid={`query-hit-${i}`}
+                              className="border-b border-border-soft p-3 last:border-0"
+                            >
+                              <div className="flex flex-wrap items-baseline gap-2">
+                                <span
+                                  className="min-w-0 truncate font-mono text-xs text-faint"
+                                  title={`${hit.documentRef}#${hit.chunkIndex}`}
+                                >
+                                  {hit.documentRef}#{hit.chunkIndex}
+                                </span>
+                                {hit.truncated && (
+                                  // Declared, not a state: the `open` Tag, which
+                                  // carries no semantic hue (§2.5).
+                                  <Badge variant="open">truncated</Badge>
+                                )}
+                                <span className="ml-auto whitespace-nowrap font-mono text-xs tabular-nums">
+                                  {(hit.score * 100).toFixed(1)}%
+                                </span>
+                              </div>
+                              <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed">
+                                {hit.content}
+                              </p>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* What the controller has to say about it. Conditions carry prose
+              messages, so they stay in the main column — the rail is kv-lists
+              and meters only (§4.7). */}
+          {kb.conditions.length > 0 && (
+            <Card className="min-w-0">
+              <PanelHeader
+                title="What the controller says"
+                meta={`${kb.conditions.length} condition${kb.conditions.length === 1 ? "" : "s"}`}
+              />
+              <CardContent>
+                <ul>
+                  {kb.conditions.map((c) => (
+                    <li
+                      key={c.type}
+                      className="border-b border-border-soft py-3 last:border-0"
+                    >
+                      <div className="flex flex-wrap items-baseline gap-2">
+                        {/* The TAG says the state, in the console's own ≤16-char
+                            vocabulary (§4.5); the condition TYPE is a machine
+                            identifier and stays verbatim in the mono face, so it
+                            is still the string an operator greps `kubectl` for.
+                            Putting the identifier IN the tag broke both rules at
+                            once: a 22-character uppercase label, and a vocabulary
+                            nobody could learn. */}
+                        <Badge
+                          variant={
+                            c.status === "True"
+                              ? "ok"
+                              : c.status === "False"
+                                ? "crit"
+                                : // Not yet determined — the machine is still
+                                  // converging, which is progressing, not idle.
+                                  "progressing"
+                          }
+                        >
+                          {c.status === "True"
+                            ? "Met"
+                            : c.status === "False"
+                              ? "Not met"
+                              : "Undecided"}
+                        </Badge>
+                        <span className="min-w-0 truncate font-mono text-xs" title={c.type}>
+                          {c.type}
+                        </span>
+                        {c.reason && (
+                          <span className="font-mono text-xs text-faint">
+                            {c.reason}
+                          </span>
+                        )}
+                        {c.lastTransitionTime && (
+                          <span
+                            className="ml-auto whitespace-nowrap font-mono text-xs tabular-nums text-faint"
+                            title={c.lastTransitionTime}
+                          >
+                            {formatStamp(c.lastTransitionTime)}
+                          </span>
+                        )}
+                      </div>
+                      {c.message && (
+                        <p className="mt-1 max-w-[64ch] text-sm text-secondary-foreground">
+                          {c.message}
+                        </p>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
           )}
-        </CardContent>
-      </Card>
+        </div>
+
+        <div className="min-w-0 space-y-5">
+          <Card className="min-w-0">
+            <PanelHeader title="What it holds" />
+            <CardContent>
+              <KeyValueList items={holdings} />
+            </CardContent>
+          </Card>
+
+          <Card className="min-w-0">
+            <PanelHeader title="The record" />
+            <CardContent>
+              <KeyValueList items={record} />
+            </CardContent>
+          </Card>
+        </div>
+      </div>
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 
 import { ConfigBuilderPage } from "@/pages/config-builder-page";
 import { CapabilitiesProvider } from "@/lib/capabilities";
@@ -61,6 +62,17 @@ function fill(label: RegExp | string, value: string) {
   fireEvent.change(screen.getByLabelText(label), { target: { value } });
 }
 
+// The applied panel ends in a NextStepLink to the created agent (a router
+// <Link>), so the page needs a Router in scope — the same wrapper the RBAC
+// block below already uses.
+function renderPage() {
+  return render(
+    <MemoryRouter>
+      <ConfigBuilderPage />
+    </MemoryRouter>,
+  );
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -74,18 +86,19 @@ describe("ConfigBuilderPage", () => {
       }),
     });
 
-    render(<ConfigBuilderPage />);
+    renderPage();
     fill("Name", "echo-agent");
     fill("Image", "ghcr.io/ctxmesh/echo:v1");
     fill("Model route", "default-model");
 
     fireEvent.click(screen.getByRole("button", { name: /Preview CRD/ }));
 
-    // The preview textarea shows the server-expanded CRD.
-    const preview = (await screen.findByLabelText(
-      "Expanded CRD preview",
-    )) as HTMLTextAreaElement;
-    await waitFor(() => expect(preview.value).toContain("kind: AgentDeployment"));
+    // The preview well shows the server-expanded CRD. It is a <pre> code well,
+    // not a textarea (M151 §4.5): YAML must not be soft-wrapped, because a
+    // wrapped continuation line reads as a different indentation — i.e. a
+    // different manifest — than the one that would be applied.
+    const preview = await screen.findByLabelText("Expanded CRD preview");
+    await waitFor(() => expect(preview).toHaveTextContent("kind: AgentDeployment"));
 
     // The right agent.yaml was posted to /api/expand.
     const expandCall = calls.find((c) => c.url === "/api/expand");
@@ -106,7 +119,7 @@ describe("ConfigBuilderPage", () => {
       }),
     });
 
-    render(<ConfigBuilderPage />);
+    renderPage();
     fill("Name", "echo-agent");
     fill("Image", "ghcr.io/ctxmesh/echo:v1");
 
@@ -127,12 +140,66 @@ describe("ConfigBuilderPage", () => {
     expect(payload.agentYAML).toContain("image: ghcr.io/ctxmesh/echo:v1");
   });
 
+  it("renders the manifest in a scrolling code well — YAML indentation is never re-wrapped", async () => {
+    recordingFetch({
+      expand: () => ({ ok: true, text: "spec:\n  scaling:\n    min: 1\n" }),
+    });
+
+    renderPage();
+    fill("Name", "echo-agent");
+    fill("Image", "ghcr.io/ctxmesh/echo:v1");
+    fireEvent.click(screen.getByRole("button", { name: /Preview CRD/ }));
+
+    const well = await screen.findByLabelText("Expanded CRD preview");
+    // A <pre>, not a soft-wrapping <textarea>. In YAML a wrapped continuation
+    // line reads as a different indentation — i.e. a different manifest — than
+    // the one that would actually be applied.
+    expect(well.tagName).toBe("PRE");
+    await waitFor(() => expect(well.textContent).toContain("  scaling:\n    min: 1"));
+    // It owns its own scrollbar, so a long line scrolls HERE and never widens
+    // the page (§4.6), and it never break-alls mid-token (§4.5).
+    expect(well.className).toMatch(/overflow-auto/);
+    expect(well.className).not.toMatch(/break-all|whitespace-pre-wrap/);
+    // A scroll container a mouse can reach must be reachable without one.
+    expect(well).toHaveAttribute("tabindex", "0");
+  });
+
+  it("never claims the applied objects are serving — applied is not Ready", async () => {
+    recordingFetch({
+      expand: () => ({ ok: true, text: "kind: AgentDeployment\n" }),
+      create: () => ({
+        ok: true,
+        status: 201,
+        json: {
+          created: [{ kind: "AgentDeployment", name: "echo-agent", namespace: "default" }],
+        },
+      }),
+    });
+
+    renderPage();
+    fill("Name", "echo-agent");
+    fill("Image", "ghcr.io/ctxmesh/echo:v1");
+    fireEvent.click(screen.getByRole("button", { name: /Preview CRD/ }));
+    await screen.findByLabelText("Expanded CRD preview");
+    fireEvent.click(screen.getByRole("button", { name: /Apply to cluster/ }));
+
+    const panel = await screen.findByTestId("crd-applied");
+    // POST /api/agents reports what it CREATED and nothing about readiness, so
+    // the page says so instead of implying a healthy agent (§7.1).
+    expect(panel).toHaveTextContent(/not\s+serving\s+yet/);
+    // The state tag is the converging pine tint, never the ok green.
+    expect(within(panel).getByText("applied").className).toMatch(/bg-accent/);
+    expect(within(panel).getByText("applied").className).not.toMatch(/bg-success/);
+    // A Kind is the object's identity, not its health — the muted chip (§2.2).
+    expect(within(panel).getByText("AgentDeployment").className).toMatch(/bg-surface-2/);
+  });
+
   it("surfaces a validation error from the server (400) without applying", async () => {
     recordingFetch({
       expand: () => ({ ok: false, status: 400, text: "required field missing: image" }),
     });
 
-    render(<ConfigBuilderPage />);
+    renderPage();
     fill("Name", "echo-agent");
     // image is client-valid enough to submit? No — image is required client-side,
     // so put a value then have the SERVER reject (simulating a server-only rule).
@@ -147,7 +214,7 @@ describe("ConfigBuilderPage", () => {
 
   it("blocks preview on client-side validation and does not call the server", async () => {
     const calls = recordingFetch({});
-    render(<ConfigBuilderPage />);
+    renderPage();
     // Leave name+image empty → client validation fails.
     fireEvent.click(screen.getByRole("button", { name: /Preview CRD/ }));
 
@@ -161,7 +228,7 @@ describe("ConfigBuilderPage", () => {
       create: () => ({ ok: false, status: 403, json: { error: "forbidden: not allowed to create" } }),
     });
 
-    render(<ConfigBuilderPage />);
+    renderPage();
     fill("Name", "echo-agent");
     fill("Image", "ghcr.io/ctxmesh/echo:v1");
     fireEvent.click(screen.getByRole("button", { name: /Preview CRD/ }));
@@ -205,11 +272,13 @@ describe("ConfigBuilderPage — RBAC-gated Apply", () => {
 
   function renderGated() {
     return render(
-      <NamespaceProvider>
-        <CapabilitiesProvider>
-          <ConfigBuilderPage />
-        </CapabilitiesProvider>
-      </NamespaceProvider>,
+      <MemoryRouter>
+        <NamespaceProvider>
+          <CapabilitiesProvider>
+            <ConfigBuilderPage />
+          </CapabilitiesProvider>
+        </NamespaceProvider>
+      </MemoryRouter>,
     );
   }
 
@@ -226,6 +295,10 @@ describe("ConfigBuilderPage — RBAC-gated Apply", () => {
   it("shows the Apply affordance for an operator (create allowed)", async () => {
     installFetch(true);
     renderGated();
+    // The well now renders only once there IS a manifest (it used to be an
+    // always-present empty textarea), so the preview has to be a real one.
+    fill("Name", "echo-agent");
+    fill("Image", "ghcr.io/ctxmesh/echo:v1");
     fireEvent.click(screen.getByRole("button", { name: /Preview CRD/ }));
     await screen.findByLabelText("Expanded CRD preview");
     // With create allowed the Apply button is present (enabled after a preview).
