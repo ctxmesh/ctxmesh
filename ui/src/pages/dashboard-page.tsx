@@ -487,10 +487,22 @@ export function fleetSentence(c: Clauses): string | null {
   }
 
   if (parts.length === 0) {
-    // Everything that answered answered zero. That IS an all-clear, and it is
-    // the one this page has been given the authority to state.
-    const head =
-      "Nothing is waiting on a person, nothing is stopped, and nothing is failing.";
+    // Everything that answered answered zero. That IS an all-clear — but only
+    // over the ground the console actually covered. The all-clear used to be a
+    // fixed sentence naming all three categories, so a console that had been
+    // REFUSED the stop list still told the operator "nothing is stopped"
+    // (M151 hardening, B1). Compose it from the answered clauses instead, so a
+    // silent backend drops its claim rather than turning into a reassurance.
+    // Budget proximity is deliberately not named here: "near a cap" is not a
+    // thing an operator is relieved to hear nothing about, and a four-clause
+    // all-clear reads as padding. The three named are the ones that mean
+    // someone has to act.
+    const clear: string[] = [];
+    if (c.waiting !== undefined) clear.push("nothing is waiting on a person");
+    if (c.stopped !== undefined) clear.push("nothing is stopped");
+    if (c.attention !== undefined) clear.push("nothing is failing");
+    if (clear.length === 0) return serving || null;
+    const head = `${join(clear).replace(/^./, (ch) => ch.toUpperCase())}.`;
     return serving ? `${head} ${serving}` : head;
   }
 
@@ -1022,11 +1034,32 @@ export function DashboardPage() {
           <NextStepLink label="Review the stops" to="/stops" tone="crit" />
         </QuietNote>
       )}
+      {/* Every way the stop list can fail to answer says so. Gating this on
+          kind === "error" alone left 403 (forbidden) and 501 (unavailable)
+          rendering NOTHING, and Home then read as an all-clear about stops it
+          had never been shown (M151 hardening, B1). Silence about a halt is
+          the one silence this page cannot afford. */}
       {stops.kind === "error" && (
         <QuietNote title="Whether anything is stopped could not be read.">
           The stop list did not answer ({stops.message}), so this page cannot say
           that nothing is halted — only that it does not know.{" "}
           <NextStepLink label="Open the stops" to="/stops" tone="crit" />
+        </QuietNote>
+      )}
+      {stops.kind === "forbidden" && (
+        <QuietNote title="Whether anything is stopped is not yours to read.">
+          Your account cannot list emergency stops, so this page cannot say that
+          nothing is halted. Work of yours may be stopped without it showing
+          here — ask an administrator, or open the stops to see what you are
+          allowed.{" "}
+          <NextStepLink label="Open the stops" to="/stops" tone="crit" />
+        </QuietNote>
+      )}
+      {stops.kind === "unavailable" && (
+        <QuietNote title="This install cannot say whether anything is stopped.">
+          The emergency stop switch is not configured here, so there is no stop
+          list to read. Nothing on this page speaks to whether work has been
+          halted by other means.
         </QuietNote>
       )}
 

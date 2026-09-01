@@ -86,6 +86,14 @@ const KIND_WORD: Record<ApprovalQueueItem["kind"], string> = {
 const AGE_UNKNOWN_TITLE =
   "The queue did not record when this run started waiting. It is unknown — not zero.";
 
+/**
+ * Approving authorises the call the run stopped to ask about — it does not
+ * merely unblock the run. The dialog quotes the ask back, because the number in
+ * it is the thing being agreed to.
+ */
+const APPROVE_CONTRACT =
+  "The run continues and makes this call. Whatever it does — a refund, a write, a charge — happens for real, and it is recorded against you.";
+
 /** Denying resolves the run permanently; the dialog says so before it happens. */
 const DENY_CONTRACT =
   "Denying cancels the run. It stops where it is, keeps everything it has already done, and cannot be resumed — whoever started it would have to start it again.";
@@ -207,6 +215,12 @@ export function ApprovalsPage() {
   const [decided, setDecided] = useState<string[]>([]);
   const [busyRun, setBusyRun] = useState<string | null>(null);
   const [denying, setDenying] = useState<Row | null>(null);
+  // Approving is the CONSEQUENTIAL click, and it was the unguarded one: Deny
+  // merely cancels a run, while Approve authorises the very call a person was
+  // asked about — a refund, a write, a spend — and it fired on a single click
+  // eight pixels from an identically-shaped Deny. The guard was on the wrong
+  // button (M151 UX review, finding 2).
+  const [approving, setApproving] = useState<Row | null>(null);
   const [denyReason, setDenyReason] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -448,6 +462,16 @@ export function ApprovalsPage() {
               No summary was recorded. Open the run to read what it is asking.
             </p>
           )}
+          {/* Narrow widths drop the Requester and Waiting columns, and on a
+              queue those are not decoration — WHO is asking and HOW LONG it has
+              waited are two of the three facts the decision turns on. Losing
+              them while keeping the run id would leave a person authorising a
+              refund with no idea who asked (M151 UX review, finding 3). They
+              fold into this cell instead, and only one copy is ever displayed. */}
+          <p className="mt-0.5 truncate font-mono text-xs text-faint lg:hidden">
+            {item.agent} · {item.namespace}
+            {item.waitingSince ? ` · waiting ${formatRelativeTime(item.waitingSince)}` : " · age not recorded"}
+          </p>
           <p className="mt-0.5 truncate font-mono text-xs text-faint">
             {/* A run id is machine-owned: mono, middle-truncated head-8…tail-4
                 so the tail that disambiguates two ids survives (§4.5). */}
@@ -515,7 +539,10 @@ export function ApprovalsPage() {
         <DecideCell
           row={row}
           busy={busyRun === row.item.runId}
-          onApprove={() => void decide(row, "approve")}
+          onApprove={() => {
+            setActionError(null);
+            setApproving(row);
+          }}
           onDeny={() => {
             setDenyReason("");
             setActionError(null);
@@ -616,6 +643,33 @@ export function ApprovalsPage() {
       )}
 
       {closing && <ClosingNote>{closing}</ClosingNote>}
+
+      <ConfirmDialog
+        open={approving !== null}
+        onCancel={() => setApproving(null)}
+        onConfirm={() => {
+          if (approving) void decide(approving, "approve");
+        }}
+        busy={approving !== null && busyRun === approving.item.runId}
+        title="Approve this call?"
+        description={APPROVE_CONTRACT}
+        confirmLabel="Approve"
+        impact={
+          approving ? (
+            <div className="space-y-3">
+              {approving.item.message && (
+                <p className="font-serif text-md italic" title={approving.item.message}>
+                  “{approving.item.message}”
+                </p>
+              )}
+              <p className="font-mono text-xs text-faint">
+                {approving.item.agent} · {approving.item.namespace} ·{" "}
+                {truncateId(approving.item.runId)}
+              </p>
+            </div>
+          ) : null
+        }
+      />
 
       <ConfirmDialog
         open={denying !== null}
