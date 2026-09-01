@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  parseUnifiedDiff,
   api,
   ApiError,
   formatRunStep,
@@ -568,5 +569,40 @@ describe("run mutations (m32.8/m32.9)", () => {
     const handle = await api.cancelRun("run-1");
     expect(handle.status).toBe("cancelled");
     expect(String(fetchMock.mock.calls[0][0])).toContain("/api/runs/run-1/cancel");
+  });
+});
+
+// ── M151: the prompt diff contract, which had drifted ────────────────────────
+describe("promptVersionDiff derives lines from the wire", () => {
+  it("parses the BFF's unified-diff string, which is what it actually sends", () => {
+    const lines = parseUnifiedDiff(
+      [
+        "--- a/prompt.txt",
+        "+++ b/prompt.txt",
+        "@@ -1,3 +1,3 @@",
+        " You are a helpful assistant.",
+        "-Answer briefly.",
+        "+Answer briefly, and cite your sources.",
+        " Never invent a citation.",
+      ].join("\n"),
+    );
+    expect(lines).toEqual([
+      { op: " ", content: "You are a helpful assistant." },
+      { op: "-", content: "Answer briefly." },
+      { op: "+", content: "Answer briefly, and cite your sources." },
+      { op: " ", content: "Never invent a citation." },
+    ]);
+  });
+
+  it("drops diff metadata that is not prompt content", () => {
+    expect(parseUnifiedDiff("@@ -0,0 +1 @@\n+one\n\\ No newline at end of file")).toEqual([
+      { op: "+", content: "one" },
+    ]);
+  });
+
+  it("reads identical versions as an empty diff, not as an unreadable one", () => {
+    // The distinction the reader exists to carry: "nothing changed" and "we
+    // could not read it" must never render the same.
+    expect(parseUnifiedDiff("")).toEqual([]);
   });
 });

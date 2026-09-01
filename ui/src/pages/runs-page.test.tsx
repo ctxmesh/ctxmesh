@@ -116,7 +116,11 @@ describe("RunsPage — basic rendering (m16.8)", () => {
 
     const link = await screen.findByTestId("run-agent-link-t1");
     expect(link).toHaveAttribute("href", "/agents/prod/billing");
-    expect(link).toHaveTextContent("prod/billing");
+    // The entity cell puts the name on its own line with the namespace beneath
+    // it (M151 §4.5 — a namespace never shares the name's line), so the link
+    // carries the agent NAME and the cell still carries the namespace.
+    expect(link).toHaveTextContent("billing");
+    expect(link.closest("td")).toHaveTextContent("prod");
     // A run with no agent identity shows a dash, not a broken link.
     expect(screen.queryByTestId("run-agent-link-t2")).not.toBeInTheDocument();
   });
@@ -422,11 +426,17 @@ describe("RunsPage — enrichment + status column (M100, ADR 0081)", () => {
     await screen.findByText("ok-run");
 
     expect(sawEnrich).toBe(true);
-    // The enriched outcomes render as calm chips; the unknown row shows a muted em-dash.
-    expect(screen.getByText("OK")).toBeInTheDocument();
-    expect(screen.getByText("Error")).toBeInTheDocument();
-    // "Status" is a COLUMN header, not a filter input (the filter bar still has none).
-    expect(screen.getByRole("columnheader", { name: /status/i })).toBeInTheDocument();
+    // The enriched outcomes render as calm chips. Each is in the DOM twice and
+    // on screen once: the State column is hidden below 768 by the §4.4 budget,
+    // and the copy folded into the What line is hidden at 768 and up — so
+    // exactly one is ever displayed, and ever in the accessibility tree.
+    expect(screen.getAllByText("OK").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Error").length).toBeGreaterThan(0);
+    // The unenriched row claims nothing: an em dash carrying its reason, never a
+    // chip and never a fabricated pass (§7.1).
+    expect(screen.getAllByTitle(/unknown, not a pass/i).length).toBeGreaterThan(0);
+    // "State" is a COLUMN header, not a filter input (the filter bar still has none).
+    expect(screen.getByRole("columnheader", { name: /state/i })).toBeInTheDocument();
     expect(screen.queryByLabelText(/status/i)).toBeNull();
   });
 
@@ -448,14 +458,15 @@ describe("RunsPage — enrichment + status column (M100, ADR 0081)", () => {
     }));
 
     renderPage();
-    // The agent identity renders exactly once (the Agent-column link), NOT twice.
-    await waitFor(() =>
-      expect(screen.getAllByText("prod/billing")).toHaveLength(1),
-    );
-    // The single occurrence is the agent link (navigates to the agent), not a plain Name cell.
-    expect(screen.getByTestId("run-agent-link-t-dup")).toHaveTextContent(
-      "prod/billing",
-    );
+    // The agent identity is never repeated as the run's subject: the Agent cell
+    // carries it (name over namespace) and the What cell falls back to the run's
+    // own id rather than echoing the same words back at the reader.
+    const link = await screen.findByTestId("run-agent-link-t-dup");
+    expect(link).toHaveAttribute("href", "/agents/prod/billing");
+    expect(screen.getAllByText("billing")).toHaveLength(1);
+    expect(screen.queryByText("prod/billing")).toBeNull();
+    // The What cell falls back to the trace id (§4.5 id register).
+    expect(screen.getByText("t-dup")).toBeInTheDocument();
   });
 
   it("keeps a distinct run name when it differs from the agent identity", async () => {
@@ -477,5 +488,127 @@ describe("RunsPage — enrichment + status column (M100, ADR 0081)", () => {
     renderPage();
     // A meaningful, distinct name survives in the Name column.
     expect(await screen.findByText("nightly-report")).toBeInTheDocument();
+  });
+});
+
+// ── M151: the editorial ACTIVITY-FEED conversion ──────────────────────────────
+//
+// The archetype's four promises: a chronological order, a Next step column that
+// speaks in the user's voice, honest unknowns, and a 501 that is calm rather
+// than broken.
+
+describe("RunsPage — activity feed (M151, §4.4 / §7.1 / §7.2)", () => {
+  it("sorts newest-first — a feed is chronological, not triaged", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        runs: [
+          run({ traceId: "t-old-fail", timestamp: "2026-07-11T10:00:00Z", status: "error" }),
+          run({ traceId: "t-new-ok", timestamp: "2026-07-11T12:00:00Z", status: "ok" }),
+        ],
+        nextCursor: "",
+      },
+    }));
+
+    renderPage();
+    await screen.findByTestId("next-step-t-new-ok");
+
+    const order = screen
+      .getAllByTestId(/^next-step-/)
+      .map((el) => el.getAttribute("data-testid"));
+    // The newer, clean run leads — even though the older one failed. Attention
+    // order is reachable through the chips, not by reordering time.
+    expect(order).toEqual(["next-step-t-new-ok", "next-step-t-old-fail"]);
+  });
+
+  it("a failed run carries a verb-first next step; a clean one says Nothing needed", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        runs: [
+          run({ traceId: "t-bad", name: "bad-run", status: "error" }),
+          run({ traceId: "t-good", name: "good-run", status: "ok" }),
+        ],
+        nextCursor: "",
+      },
+    }));
+
+    renderPage();
+
+    const step = await screen.findByTestId("next-step-t-bad");
+    expect(step).toHaveTextContent("Open the failure");
+    expect(step).toHaveAttribute("href", "/traces/t-bad");
+
+    const quiet = screen.getByTestId("next-step-t-good");
+    expect(quiet).toHaveTextContent("Nothing needed");
+    // The inert state must not lie about being clickable (§5.19).
+    expect(quiet.tagName).not.toBe("A");
+    expect(quiet.tagName).not.toBe("BUTTON");
+  });
+
+  it("the Needs you chip narrows the loaded window to the runs that failed", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        runs: [
+          run({ traceId: "t-bad", name: "bad-run", status: "error" }),
+          run({ traceId: "t-good", name: "good-run", status: "ok" }),
+        ],
+        nextCursor: "",
+      },
+    }));
+
+    renderPage();
+    await screen.findByText("bad-run");
+
+    fireEvent.click(screen.getByRole("radio", { name: /Needs you/ }));
+    expect(screen.getByText("bad-run")).toBeInTheDocument();
+    expect(screen.queryByText("good-run")).toBeNull();
+  });
+
+  it("money keeps one precision down the column and is never elided (§4.5)", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        runs: [
+          run({ traceId: "t1", name: "cheap", costUSD: 0.0004 }),
+          run({ traceId: "t2", name: "dear", costUSD: 12.5 }),
+        ],
+        nextCursor: "",
+      },
+    }));
+
+    renderPage();
+    // Sub-dollar renders 4 decimals, so a real cost never collapses to "$0.00".
+    expect(await screen.findByText("$0.0004")).toBeInTheDocument();
+    expect(screen.getByText("$12.50")).toBeInTheDocument();
+  });
+
+  it("an unrecorded duration is a dash with a reason, never 0ms", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: { runs: [run({ traceId: "t1", name: "no-latency", latencyMs: 0 })], nextCursor: "" },
+    }));
+
+    renderPage();
+    await screen.findByText("no-latency");
+
+    expect(screen.getByTitle(/no duration was recorded/i)).toBeInTheDocument();
+    expect(screen.queryByText("0ms")).toBeNull();
+  });
+
+  it("501 is a calm note — not an error, not a zero, not a retry", async () => {
+    installFetch(() => ({ ok: false, status: 501, body: { error: "not configured" } }));
+
+    renderPage();
+
+    const wrapper = await screen.findByTestId("runs-unavailable");
+    // QuietNote's role is `note` — deliberately never `alert` or `status`.
+    expect(wrapper.querySelector('[role="note"]')).not.toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
+    // And it is not the teaching empty state either — nothing is missing, the
+    // platform is simply not wired to answer.
+    expect(screen.queryByText("No runs yet")).toBeNull();
   });
 });

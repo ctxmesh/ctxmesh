@@ -40,6 +40,47 @@ describe("EmptyState", () => {
     fireEvent.click(screen.getByRole("button", { name: /Connect a provider/ }));
     expect(onClick).toHaveBeenCalledOnce();
   });
+
+  // M151 §7: an empty view caused by a FILTER is not the same truth as a first
+  // run. When the caller knows the unfiltered count, the state says the data is
+  // still there — the user's next move is to widen, not to create.
+  it("filtered: reports how many exist unfiltered (never a guessed number)", () => {
+    render(
+      <EmptyState
+        intent="filtered"
+        title="No matches"
+        description="Nothing matched your filter."
+        totalCount={8}
+        countNoun="agents"
+        action={{ label: "Clear filter" }}
+      />,
+    );
+    expect(screen.getByRole("region", { name: "No matches" })).toHaveTextContent(
+      "8 agents exist here — your filter excluded them all.",
+    );
+  });
+
+  it("filtered: renders no count line when the caller doesn't know one", () => {
+    render(<EmptyState intent="filtered" title="No matches" />);
+    expect(
+      screen.getByRole("region", { name: "No matches" }),
+    ).not.toHaveTextContent(/exist here/);
+  });
+
+  // M151 §7.1: "this install has no backend for it" is neither an error nor a
+  // zero. The state must SAY absent — a 0 or a $0.0000 here would be a claim
+  // the console cannot make.
+  it("unavailable: an absent backend reads as absent, never as zero", () => {
+    render(
+      <EmptyState intent="unavailable" title="Per-trace cost isn't configured" />,
+    );
+    const region = screen.getByRole("region", {
+      name: "Per-trace cost isn't configured",
+    });
+    expect(region).toHaveTextContent(/Nothing here is estimated/);
+    expect(region).toHaveTextContent(/simply absent/);
+    expect(region.textContent ?? "").not.toMatch(/0/);
+  });
 });
 
 describe("ErrorState", () => {

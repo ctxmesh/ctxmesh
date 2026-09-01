@@ -1,16 +1,24 @@
 import * as React from "react";
-import { AlertTriangle, MessageSquare, Send } from "lucide-react";
+import { Send } from "lucide-react";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatMarkdown } from "@/components/chat-markdown";
-import { ForbiddenInline } from "@/components/kit";
+import {
+  ForbiddenInline,
+  NextStepLink,
+  QuietNote,
+  Timeline,
+  type TimelineStep,
+} from "@/components/kit";
 import { api, ApiError } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
 import { useDevMode } from "@/lib/dev-mode";
 import { useDurableRun } from "@/lib/use-durable-run";
 import { RES_AGENTS } from "@/lib/nav";
 import { extractAgentOutput } from "@/lib/agent-output";
+import { cn } from "@/lib/utils";
 import {
   isValidHttpUrl,
   MCP_OAUTH_MESSAGE,
@@ -27,30 +35,84 @@ function mcpCallbackOrigin(): string {
   );
 }
 
-// ChatPanel — a turn-by-turn chat with a deployed agent, threaded on the framework's OWN
-// conversationId → the memory plane: one stable id per chat session lets a memory-bound
-// agent hold context across turns (state-layer.md).
+// ChatPanel — a turn-by-turn chat with a deployed agent (M151 §6.1 archetype A10).
 //
-// Under the hood each turn is now a DURABLE, observable run (ADR 0093): createRun →
+// ── TWO FRAMES, TWO READERS ─────────────────────────────────────────────────
+//
+// This one component is BOTH the console's agent-detail chat tab and the
+// chrome-less chatbox served at an agent's own hostname, and those are not the
+// same surface for the same person:
+//
+//   frame="panel"      a Card among other Cards on a console page. It keeps its
+//                      own header, because there it is one panel of many.
+//   frame="bare"       it IS the page (agent-chatbox-page). No card, no header
+//                      of its own — the page masthead carries identity — and the
+//                      transcript owns the scroll while the composer is pinned.
+//
+//   audience="operator"  someone who runs the platform. RBAC verbs, workspaces
+//                        and run ids are their vocabulary and links into the
+//                        console resolve.
+//   audience="end-user"  someone who came to talk to an assistant. NONE of that
+//                        vocabulary appears, and no link leaves for a console
+//                        route that does not exist at an agent origin.
+//
+// The default is operator/panel, so the console's existing embedding is
+// unchanged by the props existing.
+//
+// ── THE GRAMMAR (§6.1 A10) ──────────────────────────────────────────────────
+//
+// A 46rem column. The person's messages are right-aligned pine-TINT bubbles —
+// tint, not the solid pine they used to be: solid pine is the colour of a
+// control you can press (§2.1), and a message is not one. The assistant's
+// answers are full-width bordered blocks on card with a mono eyebrow, because
+// an answer with citations is a document, not a speech bubble.
+//
+// Consent and holds are NOT bubbles. They are governance, and §5.26's ruling is
+// that governance renders in the same spine as the work it interrupted — so
+// they render as a one-step kit Timeline in the hold violet, the hue that means
+// exactly one thing: work is paused because a PERSON must decide (ADR 0128).
+// The consent prompt used to be amber, which now means "a bound is near or
+// crossed" — a quota signal painted on a human gate.
+//
+// ── WHAT THIS SURFACE MAY NOT CLAIM (§7 A10) ────────────────────────────────
+//
+// An agent with no memory binding is not an agent whose memory is empty. The
+// difference is stated once, in a QuietNote pinned above the composer, rather
+// than being left for the reader to discover when the assistant forgets what
+// they said. A failed turn renders IN the transcript with a way to try again —
+// the transcript is never blanked, because the earlier answers are still true.
+//
+// Under the hood each turn is a DURABLE, observable run (ADR 0093): createRun →
 // openRunStream → finalize (via getRun), exactly as the Playground does — so every chat
 // turn appears in the Runs list, loads its native trace, is cost-attributed, and is
-// shareable/approvable. Tokens stream LIVE into the turn (a UX upgrade over the old
-// wait-for-the-whole-response). Session threading is preserved by forwarding the shared
-// X-Conversation-Id on the create path (the isolation story is literally true — two chat
-// sessions are two distinct runs sharing a conversation id). Each agent turn keeps the
-// trace-id link (opens the run inspector ON DEMAND) and the inline per-user Connect banner
-// (ADR 0031) — connecting now RESUMES the same run rather than firing a second invisible call.
+// shareable/approvable. Tokens stream LIVE into the turn. Session threading is preserved
+// by forwarding the shared X-Conversation-Id on the create path (two chat sessions are two
+// distinct runs sharing a conversation id). Each agent turn keeps the trace-id link and the
+// inline per-user Connect banner (ADR 0031) — connecting RESUMES the same run.
 //
 // Dev-mode (`ctxmesh dev --ui`) has no cluster/run store — only /api/invoke works there —
 // so the OLD synchronous invoke path is kept as a fallback, gated on the GET /api/devmode probe
 // (ADR 0093 §2). On a real cluster the durable path is used.
 //
-// Extracted from the agent-detail page (m37) so the SAME chat drives both the console's
-// agent-detail chat tab AND the standalone per-agent chatbox surface.
+// data-testid contract:
+//   chat-panel · chat-thread · chat-empty · chat-input · chat-send · chat-new
+//   chat-turn-user · chat-turn-agent · chat-pending · chat-turn-error
+//   chat-consent · connect-<server> · connect-error · chat-hold
+//   chat-memory-note · chat-not-ready-note · chat-readonly-note · open-trace
+//   mcp-oauth-return
+
+/** Who is reading. Chooses vocabulary and whether console links resolve. */
+export type ChatAudience = "operator" | "end-user";
+
+/** Whether the chat is one panel on a page, or the page. */
+export type ChatFrame = "panel" | "bare";
+
 type ChatTurn = {
   id: number;
   role: "user" | "agent";
   text: string;
+  /** When the turn appeared in this tab. A real, local fact — not a server clock. */
+  at: number;
   // agent turns carry the user input that produced them, so a post-connect resume
   // re-runs the SAME message without appending a duplicate user turn.
   sourceText?: string;
@@ -59,6 +121,8 @@ type ChatTurn = {
   runId?: string;
   traceId?: string;
   consentRequired?: string[];
+  /** The run paused on a person's DECISION (approval / plan approval), not on consent. */
+  heldFor?: "approval" | "plan_approval";
   pending?: boolean;
   error?: string;
   // a forbidden run (viewer without invoke rights) gets the ForbiddenInline treatment —
@@ -77,21 +141,38 @@ function newConversationId(): string {
   return `chat-${rand}`;
 }
 
+/** The eyebrow clock. Local, short, and only ever a moment this tab witnessed. */
+function clock(ms: number): string {
+  return new Date(ms).toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/** The reading column (§6.1 A10). Everything the transcript owns sits inside it. */
+const COLUMN = "mx-auto w-full max-w-[46rem]";
+
 export function ChatPanel({
   ns,
   name,
   ready,
   memoryBound,
   onTraced,
+  audience = "operator",
+  frame = "panel",
 }: {
   ns: string;
   name: string;
   ready: boolean;
   memoryBound: boolean;
   onTraced: (traceId: string) => void;
+  audience?: ChatAudience;
+  frame?: ChatFrame;
 }) {
   const { can, reprobe } = useCapabilities();
   const canRun = can(RES_AGENTS, "create");
+  const endUser = audience === "end-user";
+  const bare = frame === "bare";
   // Dev-mode (ADR 0021) has no cluster run store — only /api/invoke is served there; a real
   // cluster gets the durable run path (ADR 0093 §2). Gate on the server-confirmed probe.
   const devMode = useDevMode();
@@ -115,8 +196,8 @@ export function ChatPanel({
   const activeTurnRef = React.useRef<number | null>(null);
 
   // The durable run engine (ADR 0093) — shared with the Playground. Its callbacks project the
-  // finalized run onto the active turn (traceId, consent CTA, forbidden). Streamed tokens are
-  // projected via the state-effect below. A forbidden run reprobes the RBAC-aware chrome.
+  // finalized run onto the active turn (traceId, consent CTA, hold, forbidden). Streamed tokens
+  // are projected via the state-effect below. A forbidden run reprobes the RBAC-aware chrome.
   const run = useDurableRun({
     onForbidden: () => reprobe(),
     onFinalized: (detail) => {
@@ -125,6 +206,10 @@ export function ChatPanel({
       const ra = detail.requiresAction;
       const consentRequired =
         ra?.kind === "consent_required" ? ra.servers ?? [] : undefined;
+      // A run that paused on a DECISION is held, not failed and not finished. It is a
+      // different gate from consent (which the reader can clear themselves) and it says so.
+      const heldFor =
+        ra?.kind === "approval" || ra?.kind === "plan_approval" ? ra.kind : undefined;
       const lastMessage = detail.messages?.length
         ? detail.messages[detail.messages.length - 1].content
         : "";
@@ -141,6 +226,7 @@ export function ChatPanel({
                 text: lastMessage || t.text,
                 traceId: detail.traceId,
                 consentRequired: consentRequired && consentRequired.length > 0 ? consentRequired : undefined,
+                heldFor,
                 error: failed ? detail.error || "The run failed." : undefined,
                 forbidden: false,
               }
@@ -237,7 +323,11 @@ export function ChatPanel({
   async function runTurn(text: string, agentTurnId: number) {
     activeTurnRef.current = agentTurnId;
     setTurns((ts) =>
-      ts.map((t) => (t.id === agentTurnId ? { ...t, pending: true, error: undefined } : t)),
+      ts.map((t) =>
+        t.id === agentTurnId
+          ? { ...t, pending: true, error: undefined, heldFor: undefined }
+          : t,
+      ),
     );
     if (devMode) {
       // Dev-mode fallback (ADR 0093 §2): the old synchronous /invoke — unchanged.
@@ -282,13 +372,22 @@ export function ChatPanel({
     if (!text || busy) return;
     const userId = nextId();
     const agentId = nextId();
+    const at = Date.now();
     setTurns((ts) => [
       ...ts,
-      { id: userId, role: "user", text },
-      { id: agentId, role: "agent", text: "", pending: true, sourceText: text },
+      { id: userId, role: "user", text, at },
+      { id: agentId, role: "agent", text: "", at, pending: true, sourceText: text },
     ]);
     setDraft("");
     await runTurn(text, agentId);
+  }
+
+  // retryTurn re-sends the message that produced a failed turn, IN PLACE (§7 A10: a failed
+  // send is a row in the transcript with a way to try again — the transcript is never blanked,
+  // because everything above the failure is still true).
+  async function retryTurn(t: ChatTurn) {
+    if (busy || !t.sourceText) return;
+    await runTurn(t.sourceText, t.id);
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -415,91 +514,206 @@ export function ChatPanel({
     setDraft("");
   }
 
+  // ── Governance inside a turn (§5.26): one Timeline step, never a bubble ────
+
+  /** The consent gate: the reader can clear this one themselves, right here. */
+  function consentStep(t: ChatTurn): TimelineStep {
+    return {
+      id: `consent-${t.id}`,
+      tone: "hold",
+      // Wrapped so the step's title is its own node: the tone prefix a screen
+      // reader hears must not become part of the visible sentence.
+      title: (
+        <span className="font-medium">Connect your account to continue</span>
+      ),
+      detail: (
+        <>
+          <span className="block">
+            This message needs your own credentials — the assistant is not
+            allowed to borrow anyone else&rsquo;s. Connect, and it carries on
+            from where it stopped. Nothing has been lost while it waits.
+          </span>
+          <span className="mt-2.5 flex flex-wrap gap-2">
+            {(t.consentRequired ?? []).map((server) => (
+              <Button
+                key={server}
+                size="sm"
+                variant="outline"
+                disabled={connecting !== null}
+                onClick={() => void onConnect(server, t.sourceText ?? "", t.id, t.runId)}
+                data-testid={`connect-${server}`}
+              >
+                {connecting === server ? "Connecting…" : `Connect ${server}`}
+              </Button>
+            ))}
+          </span>
+          {connectError && (
+            <span
+              className="mt-2 block text-destructive"
+              data-testid="connect-error"
+            >
+              {connectError}
+            </span>
+          )}
+        </>
+      ),
+    };
+  }
+
+  /**
+   * The decision gate: somebody ELSE has to say yes. The reader cannot clear it
+   * and must not be handed a control that pretends otherwise — so the operator
+   * gets a link into the run and the end user gets the truth and nothing to press.
+   */
+  function holdStep(t: ChatTurn): TimelineStep {
+    const plan = t.heldFor === "plan_approval";
+    return {
+      id: `hold-${t.id}`,
+      tone: "hold",
+      title: (
+        <span className="font-medium">
+          {plan
+            ? "A person has to approve the plan before this goes on"
+            : "A person has to approve this before it goes on"}
+        </span>
+      ),
+      detail: (
+        <>
+          <span className="block">
+            It is held, not failed: nothing has been done yet and the answer
+            keeps its place in the queue until someone decides.
+          </span>
+          {!endUser && t.runId && (
+            <span className="mt-2.5 block">
+              <NextStepLink
+                label="Review the hold"
+                to={`/runs/${encodeURIComponent(t.runId)}`}
+                ariaLabel={`Review the hold on run ${t.runId}`}
+              />
+            </span>
+          )}
+        </>
+      ),
+    };
+  }
+
   function renderTurn(t: ChatTurn) {
     if (t.role === "user") {
       return (
         <div key={t.id} className="flex flex-col items-end gap-1" data-testid="chat-turn-user">
-          <span className="px-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          <span className="px-1 font-mono text-2xs uppercase tracking-wide text-faint">
             You
           </span>
-          <div className="max-w-[80%] whitespace-pre-wrap break-words rounded-2xl rounded-br-sm bg-primary px-3.5 py-2 text-xs text-primary-foreground shadow-sm">
+          {/* Pine TINT, not solid pine: solid pine is the colour of something
+              you can press (§2.1/§2.3), and a message is not a control. */}
+          <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-lg bg-accent px-4 py-2.5 text-md text-accent-foreground">
             {t.text}
           </div>
         </div>
       );
     }
     const traceId = t.traceId;
+    const held = t.heldFor !== undefined;
+    const consenting = !!t.consentRequired && t.consentRequired.length > 0;
     return (
-      <div key={t.id} className="flex flex-col items-start gap-1" data-testid="chat-turn-agent">
-        <span className="flex items-center gap-1 px-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-          <MessageSquare className="h-3 w-3" />
-          {name}
-        </span>
-        <div className="w-full max-w-[92%] space-y-2 rounded-2xl rounded-bl-sm border border-border bg-card px-3.5 py-2.5">
+      <div key={t.id} className="flex flex-col gap-1.5" data-testid="chat-turn-agent">
+        <div className="flex items-center gap-2 px-1 font-mono text-2xs uppercase tracking-wide text-faint">
+          <span className="truncate">{name}</span>
+          <span aria-hidden="true" className="text-ghost">
+            ·
+          </span>
+          <span className="tabular-nums">{clock(t.at)}</span>
+          {held && (
+            <Badge variant="hold" className="ml-1">
+              Held
+            </Badge>
+          )}
+        </div>
+        <div className="min-w-0 space-y-3 rounded-lg border border-border bg-card px-4 py-3.5">
           {t.pending ? (
             <span
               className="inline-flex items-center gap-1 py-1"
               data-testid="chat-pending"
-              aria-label="Agent is thinking"
+              aria-label={`${name} is thinking`}
             >
-              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-foreground/40 [animation-delay:-0.25s]" />
-              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-foreground/40 [animation-delay:-0.12s]" />
-              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-foreground/40" />
+              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-ghost [animation-delay:-0.25s]" />
+              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-ghost [animation-delay:-0.12s]" />
+              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-ghost" />
             </span>
           ) : t.error ? (
             t.forbidden ? (
               <ForbiddenInline
-                title="Not allowed to run this agent"
-                description="Your account can't invoke agents in this cluster."
+                // The turn block is already a frame; a second bordered box
+                // inside it is two frames saying one thing.
+                className="border-0 bg-transparent px-0 py-2"
+                title={
+                  endUser
+                    ? "This assistant isn't yours to talk to"
+                    : "Not allowed to run this agent"
+                }
+                description={
+                  endUser
+                    ? "Ask whoever runs it for access. Nothing you have already asked is affected."
+                    : "Your account can't invoke agents in this cluster."
+                }
                 detail={t.error}
               />
             ) : (
-              <span className="text-xs text-destructive" role="alert" data-testid="chat-turn-error">
-                {t.error}
-              </span>
+              // §7 A10: a failed send is a row IN the transcript, with a way to
+              // try again. Everything above it still stands.
+              <div className="space-y-2" data-testid="chat-turn-error">
+                <p className="text-sm text-destructive" role="alert">
+                  {endUser
+                    ? "That message didn't get an answer. Nothing above has changed."
+                    : "That turn didn't complete."}
+                </p>
+                {/* The server's own words help whoever runs this and are noise
+                    — sometimes leaked internals — to whoever came to ask a
+                    question. The reader outside gets the sentence and the way
+                    forward; the operator also gets the reason. */}
+                {!endUser && (
+                  <p className="break-words font-mono text-xs text-faint">{t.error}</p>
+                )}
+                {t.sourceText && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() => void retryTurn(t)}
+                    data-testid={`chat-retry-${t.id}`}
+                  >
+                    Try again
+                  </Button>
+                )}
+              </div>
             )
           ) : (
             <>
-              {t.consentRequired && t.consentRequired.length > 0 && (
-                <div
-                  className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs"
-                  data-testid="chat-consent"
-                >
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-                  <div className="space-y-2">
-                    <p className="font-medium">Connect your account to continue</p>
-                    <p className="text-muted-foreground">
-                      This message needs your own credentials. Connect, and it continues
-                      automatically.
-                    </p>
-                    <div className="flex flex-wrap gap-2">
-                      {t.consentRequired.map((server) => (
-                        <Button
-                          key={server}
-                          size="sm"
-                          variant="outline"
-                          disabled={connecting !== null}
-                          onClick={() => void onConnect(server, t.sourceText ?? "", t.id, t.runId)}
-                          data-testid={`connect-${server}`}
-                        >
-                          {connecting === server ? "Connecting…" : `Connect ${server}`}
-                        </Button>
-                      ))}
-                    </div>
-                    {connectError && (
-                      <p className="text-destructive" data-testid="connect-error">
-                        {connectError}
-                      </p>
-                    )}
-                  </div>
+              {(consenting || held) && (
+                <div data-testid={consenting ? "chat-consent" : "chat-hold"}>
+                  <Timeline
+                    label={`What this answer is waiting on, from ${name}`}
+                    steps={[consenting ? consentStep(t) : holdStep(t)]}
+                  />
                 </div>
               )}
-              {t.text && <ChatMarkdown>{extractAgentOutput(t.text)}</ChatMarkdown>}
-              {traceId && (
+              {t.text && (
+                // ChatMarkdown sets its body at the 11px mono-meta step, which is
+                // the register for a table cell and not for something a person
+                // reads a paragraph of. Lifted here, at the one call site that is
+                // a reading surface, rather than by editing the shared renderer.
+                <div className="[&_li]:text-md [&_p]:text-md">
+                  <ChatMarkdown>{extractAgentOutput(t.text)}</ChatMarkdown>
+                </div>
+              )}
+              {traceId && !endUser && (
+                // Operator vocabulary and an operator destination. At an agent
+                // origin the console route does not exist, so the link is not
+                // offered rather than being offered and broken.
                 <button
                   type="button"
                   onClick={() => onTraced(traceId)}
-                  className="pt-0.5 font-mono text-[11px] text-muted-foreground hover:text-primary hover:underline"
+                  className="block truncate font-mono text-xs text-faint hover:text-primary hover:underline"
                   data-testid="open-trace"
                 >
                   trace {traceId} →
@@ -512,129 +726,224 @@ export function ChatPanel({
     );
   }
 
-  return (
-    <div className="flex h-full flex-col rounded-lg border bg-card shadow-card" data-testid="chat-panel">
-      <div className="flex items-center justify-between gap-2 border-b px-4 py-3">
-        <div className="flex items-center gap-2">
-          <span className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/10 text-primary">
-            <MessageSquare className="h-4 w-4" />
-          </span>
-          <div className="leading-tight">
-            <p className="text-sm font-medium">Chat</p>
-            <p className="text-[11px] text-muted-foreground" data-testid="chat-memory-hint">
-              {!canRun
-                ? "read-only access"
-                : memoryBound
-                  ? "keeps context across turns"
-                  : "no memory — won't remember earlier turns"}
+  // ── The notes that sit above the composer ─────────────────────────────────
+
+  const notReadyNote = !ready && turns.length === 0 && (
+    // A pre-flight heads-up only: once a turn has been sent, the reply (or the
+    // error turn) is the real signal. Converging is not a crossed bound, so this
+    // wears the progressing tag rather than the amber it used to (§2.2/§2.5).
+    <div
+      className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border border-border bg-surface-2 px-4 py-3 text-sm text-secondary-foreground"
+      data-testid="chat-not-ready-note"
+    >
+      <Badge variant="progressing">Starting up</Badge>
+      <span className="min-w-0">
+        {endUser
+          ? "This assistant is still starting up — a message may not get through until it is."
+          : "The agent isn't Ready yet — a message may fail until it comes up."}
+      </span>
+    </div>
+  );
+
+  const memoryNote = !memoryBound && (
+    // §7 A10's backend-cannot-answer state: an agent with no memory binding is
+    // not an agent whose memory is empty, and the reader finds out here rather
+    // than by being forgotten mid-conversation.
+    <div data-testid="chat-memory-note">
+      <QuietNote>
+        {endUser
+          ? "This assistant has no memory. Each message is answered on its own — it won't remember what you said earlier in this chat."
+          : "No memory is bound to this agent, so each message is answered on its own — nothing from an earlier turn is carried forward."}
+      </QuietNote>
+    </div>
+  );
+
+  // ── The composer ──────────────────────────────────────────────────────────
+
+  const composer = (
+    <div className={cn("border-t border-border", bare ? "bg-card" : undefined)}>
+      <div className={cn(bare ? cn(COLUMN, "px-4 py-4 sm:px-6") : "p-4")}>
+        {(notReadyNote || memoryNote) && (
+          <div className="mb-3 space-y-2">
+            {notReadyNote}
+            {memoryNote}
+          </div>
+        )}
+        <div className="flex items-end gap-2">
+          <Textarea
+            aria-label="Chat message"
+            rows={2}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={onKeyDown}
+            placeholder={`Message ${name || "the agent"}…`}
+            className="resize-none text-md"
+            data-testid="chat-input"
+          />
+          <Button
+            onClick={() => void send()}
+            disabled={busy || draft.trim() === ""}
+            data-testid="chat-send"
+            className="h-11 shrink-0"
+          >
+            <Send className="h-4 w-4" />
+            Send
+          </Button>
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+          <p className="text-xs text-faint">
+            Enter to send · Shift+Enter for a new line
+          </p>
+          {bare && turns.length > 0 && (
+            <button
+              type="button"
+              onClick={newChat}
+              className="ml-auto text-xs text-primary hover:underline"
+              data-testid="chat-new"
+            >
+              Start a new chat
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  // ── The transcript ────────────────────────────────────────────────────────
+
+  const transcript = (
+    <div
+      ref={scrollRef}
+      className={cn(
+        "min-h-0 flex-1 overflow-y-auto",
+        bare ? "px-4 py-6 sm:px-6" : "px-4 py-4",
+      )}
+      style={bare ? undefined : { minHeight: "18rem" }}
+      data-testid="chat-thread"
+    >
+      <div className={cn("flex min-h-full flex-col gap-6", bare && COLUMN)}>
+        {turns.length === 0 ? (
+          // §7 A10: the empty state teaches. The agent carries no greeting in
+          // its payload today, so this is the spec's stated fallback — not an
+          // invented one attributed to the assistant.
+          <div
+            className="m-auto max-w-sm text-center"
+            data-testid="chat-empty"
+          >
+            <p className="font-serif text-lg font-medium">
+              Say something to {name || "the agent"} to start.
+            </p>
+            <p className="mt-1.5 text-sm text-faint">
+              {memoryBound
+                ? "It remembers what you say earlier in this chat."
+                : "Each message is answered on its own — it keeps no memory of this chat."}
             </p>
           </div>
+        ) : (
+          turns.map(renderTurn)
+        )}
+      </div>
+    </div>
+  );
+
+  // ── The MCP-consent same-tab return (DX-6) ────────────────────────────────
+
+  const oauthBanner = oauthReturn && (
+    <div
+      data-testid="mcp-oauth-return"
+      className={cn(
+        "border px-4 py-2.5 text-sm",
+        oauthReturn.error
+          ? "border-destructive/40 bg-destructive-surface text-destructive"
+          : "border-success/40 bg-success-surface text-success",
+      )}
+    >
+      {oauthReturn.error
+        ? `Couldn't connect ${oauthReturn.server || "the server"}: ${oauthReturn.error}`
+        : `Connected ${oauthReturn.server || "your account"} — send your message again to continue.`}
+      <button
+        type="button"
+        className="ml-2 underline"
+        onClick={() => setOauthReturn(null)}
+      >
+        dismiss
+      </button>
+    </div>
+  );
+
+  // ── The read-only gate ────────────────────────────────────────────────────
+
+  const readOnly = (
+    <div
+      className={cn(bare ? cn(COLUMN, "px-4 py-8 sm:px-6") : "p-4")}
+      data-testid="chat-readonly-note"
+    >
+      <QuietNote
+        title={
+          endUser
+            ? "This assistant isn't open to you for chatting."
+            : "You have read-only access."
+        }
+      >
+        {endUser
+          ? "Your sign-in worked — it just doesn't carry permission to send this assistant a message. Ask whoever runs it for access."
+          : "Chatting with an agent needs create permission on AgentDeployments. Ask an admin for a role that can create agentdeployments."}
+      </QuietNote>
+    </div>
+  );
+
+  const body = canRun ? (
+    <>
+      {oauthBanner}
+      {transcript}
+      {composer}
+    </>
+  ) : (
+    <>
+      {oauthBanner}
+      {readOnly}
+    </>
+  );
+
+  if (bare) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col" data-testid="chat-panel">
+        {body}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="flex h-full min-h-0 flex-col rounded-lg border border-border bg-card"
+      data-testid="chat-panel"
+    >
+      <div className="flex items-center gap-3 border-b border-border px-5 py-4">
+        <div
+          aria-hidden="true"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-sm bg-primary font-serif text-base font-medium text-primary-foreground"
+        >
+          {(name || "a").charAt(0).toUpperCase()}
+        </div>
+        <div className="min-w-0">
+          <p className="font-serif text-lg font-medium tracking-snug">Chat</p>
+          <p className="truncate font-mono text-2xs uppercase tracking-wide text-faint">
+            {name}
+          </p>
         </div>
         {turns.length > 0 && (
-          <Button size="sm" variant="ghost" onClick={newChat} data-testid="chat-new">
+          <Button
+            size="sm"
+            variant="ghost"
+            className="ml-auto"
+            onClick={newChat}
+            data-testid="chat-new"
+          >
             New chat
           </Button>
         )}
       </div>
-
-      {oauthReturn && (
-        <div
-          data-testid="mcp-oauth-return"
-          className={`mx-4 mt-3 rounded-md border px-3 py-2 text-xs ${
-            oauthReturn.error
-              ? "border-destructive/40 text-destructive"
-              : "border-success/40 text-success"
-          }`}
-        >
-          {oauthReturn.error
-            ? `Couldn't connect ${oauthReturn.server || "the server"}: ${oauthReturn.error}`
-            : `Connected ${oauthReturn.server || "your account"} — send your message again to continue.`}
-          <button
-            type="button"
-            className="ml-2 underline"
-            onClick={() => setOauthReturn(null)}
-          >
-            dismiss
-          </button>
-        </div>
-      )}
-
-      {!canRun ? (
-        <p
-          className="m-4 rounded-md border border-dashed bg-card/40 px-3 py-2 text-xs text-muted-foreground"
-          data-testid="chat-readonly-note"
-        >
-          You have read-only access — chatting with an agent requires create permission on
-          AgentDeployments.
-        </p>
-      ) : (
-        <>
-          {/* A pre-flight warning only: once the user has sent a turn, the actual result (a reply or an
-              error turn) is the real signal, so stop nagging. This also avoids a misleading "not Ready"
-              over a WORKING answer when the ksvc Ready is a transient-false (a Knative revision-creation
-              race leaves ConfigurationsReady=false while the latestReady revision already serves). */}
-          {!ready && turns.length === 0 && (
-            <p
-              className="mx-4 mt-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning-foreground"
-              data-testid="chat-not-ready-note"
-            >
-              The agent isn't Ready yet — a message may fail until it comes up.
-            </p>
-          )}
-
-          <div
-            ref={scrollRef}
-            className="flex flex-1 flex-col gap-4 overflow-y-auto px-4 py-4"
-            style={{ minHeight: "18rem" }}
-            data-testid="chat-thread"
-          >
-            {turns.length === 0 ? (
-              <div
-                className="m-auto max-w-xs text-center text-xs text-muted-foreground"
-                data-testid="chat-empty"
-              >
-                <MessageSquare className="mx-auto mb-2 h-6 w-6 opacity-40" />
-                <p>Start a conversation with {name}.</p>
-                <p className="mt-1 opacity-80">
-                  {memoryBound
-                    ? "It remembers earlier turns in this chat."
-                    : "Each message is independent (no memory bound)."}
-                </p>
-              </div>
-            ) : (
-              turns.map(renderTurn)
-            )}
-          </div>
-
-          <div className="border-t p-3">
-            <div className="flex items-end gap-2">
-              <Textarea
-                aria-label="Chat message"
-                rows={2}
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={onKeyDown}
-                placeholder="Message the agent…"
-                className="resize-none text-xs"
-                data-testid="chat-input"
-              />
-              <Button
-                size="icon"
-                onClick={() => void send()}
-                disabled={busy || draft.trim() === ""}
-                data-testid="chat-send"
-                aria-label="Send message"
-                className="h-9 w-9 shrink-0"
-              >
-                <Send className="h-4 w-4" />
-              </Button>
-            </div>
-            <p className="mt-1.5 px-0.5 text-[10px] text-muted-foreground">
-              Enter to send · Shift+Enter for a new line
-            </p>
-          </div>
-        </>
-      )}
+      {body}
     </div>
   );
 }

@@ -14,9 +14,16 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "typecheck": "tsc -b --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "visual": "playwright test",
+    "visual:baseline": "VISUAL_BASELINE=1 VISUAL_LABEL=baseline playwright test",
+    "visual:empty": "VISUAL_MODE=empty VISUAL_LABEL=empty playwright test",
+    "visual:forbidden": "VISUAL_MODE=forbidden VISUAL_LABEL=forbidden playwright test"
   },
   "dependencies": {
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource-variable/newsreader": "^5.3.0",
+    "@fontsource-variable/public-sans": "^5.3.0",
     "@radix-ui/react-slot": "1.1.1",
     "@xyflow/react": "12.3.6",
     "class-variance-authority": "0.7.1",
@@ -32,6 +39,7 @@
   },
   "devDependencies": {
     "@eslint/js": "9.17.0",
+    "@playwright/test": "^1.62.1",
     "@testing-library/dom": "10.4.0",
     "@testing-library/jest-dom": "6.6.3",
     "@testing-library/react": "16.1.0",

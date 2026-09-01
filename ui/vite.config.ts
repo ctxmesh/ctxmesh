@@ -21,6 +21,22 @@ export default defineConfig({
     outDir: "dist",
     // Fail the build on any asset over the warn limit so bundle bloat is caught.
     chunkSizeWarningLimit: 900,
+    // NEVER inline a font as a data: URI.
+    //
+    // Vite base64-inlines assets under 4KB, and one JetBrains Mono subset fell
+    // under it — which the BFF's Content-Security-Policy (`font-src 'self'`,
+    // internal/bff/server.go) then REFUSED on every page load. The fixture
+    // sweep could not see it: `vite preview` sets no CSP, so the font loaded
+    // there and failed only in production. The live walkthrough found it on all
+    // 208 visits.
+    //
+    // Weakening the CSP to allow `data:` would have been the smaller diff and
+    // the wrong fix: a strict font-src is worth more than four kilobytes, and
+    // an inlined font is uncacheable besides.
+    assetsInlineLimit: (filePath: string) => {
+      if (/\.(woff2?|ttf|otf|eot)$/i.test(filePath)) return false;
+      return undefined;
+    },
   },
   server: {
     proxy: {

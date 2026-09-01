@@ -133,4 +133,43 @@ describe("FeedbackPanel (m16.9)", () => {
     expect(screen.queryByTestId("feedback-attribution-s1")).toBeNull();
     expect(screen.getByTestId("feedback-score-s1")).toHaveTextContent("API");
   });
+
+  // ── M151 (ADR 0128) ───────────────────────────────────────────────────────
+
+  it("wears the shared serif panel header, not a hand-rolled sans one", async () => {
+    stubFeedback({ scores: [] });
+    render(<FeedbackPanel traceId="t1" />);
+    const title = await screen.findByText("Feedback scores");
+    expect(title.className).toContain("font-serif");
+  });
+
+  it("never paints attribution in the brand — WHO left a score is identity", async () => {
+    stubFeedback({
+      scores: [
+        { id: "h1", name: "thumbs", value: 1, source: "API", attributedSource: "human" },
+        { id: "u1", name: "mystery", value: 0.5, source: "API", attributedSource: "unattributed" },
+      ],
+    });
+    render(<FeedbackPanel traceId="t1" />);
+    const human = await screen.findByTestId("feedback-attribution-h1");
+    // Pine means "you can act here, and this is us" and is never a taxonomy.
+    expect(human.className).not.toContain("bg-primary");
+    expect(human.className).not.toContain("text-primary");
+    // "We could not attribute this" and "a named source" must not look alike:
+    // the unattributed one takes the dashed open register (§7.1).
+    expect(screen.getByTestId("feedback-attribution-u1").className).toContain(
+      "border-dashed",
+    );
+  });
+
+  it("says an unconfigured backend is ABSENT, in the calm note register", async () => {
+    stubFeedback({ error: "not implemented" }, false, 501);
+    render(<FeedbackPanel traceId="t1" />);
+    const note = await screen.findByRole("note");
+    expect(note).toHaveTextContent("unavailable");
+    expect(note).toHaveTextContent(/simply absent/i);
+    // Never an alarm, and never a zero.
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(note).not.toHaveTextContent("0");
+  });
 });

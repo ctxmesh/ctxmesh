@@ -1,3 +1,5 @@
+import { formatMoney } from "@/components/kit/quantity";
+
 // Shared formatting helpers for the observability surfaces (dashboard, runs, cost).
 // Kept dependency-free and locale-aware; every surface formats identically.
 
@@ -5,12 +7,10 @@
 // enough significant digits to be meaningful ($0.0003), whole-dollar amounts round to
 // cents ($12.40). Exactly 0 renders "$0.00" (a real zero, not "—").
 export function formatUSD(n: number): string {
-  if (!Number.isFinite(n)) return "$0.00";
-  if (n === 0) return "$0.00";
-  if (n >= 1) return `$${n.toFixed(2)}`;
-  if (n >= 0.01) return `$${n.toFixed(3)}`;
-  // Sub-cent: show up to 6 decimals, trimming trailing zeros so $0.000297 reads clean.
-  return `$${n.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")}`;
+  // Delegates to the kit's single money register (M151 §4.5). It used to carry
+  // its own 3-then-6-decimal rule, which meant the same figure read differently
+  // depending on which page you were standing on.
+  return formatMoney(n);
 }
 
 // formatTokens renders an LLM token count, distinguishing "not captured" from a real zero (M99 A1).

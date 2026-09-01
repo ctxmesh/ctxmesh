@@ -1,11 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 
-import { TeamsPage } from "@/pages/teams-page";
+import { TeamsPage, teamsClosingLine, triageTeam } from "@/pages/teams-page";
 import type { AgentTeamSummary } from "@/lib/api";
 
-// TeamsPage (m64.11) — the AgentTeam orchestration rosters (read-only).
+// TeamsPage — the AgentTeam index (M151 §6.1 A1, §4.4 "Teams index" budget).
+//
+// The page was rebuilt in M151: the old inline roster panel became a real
+// detail page at /teams/:ns/:name, and the table became the §4.4 budget. The
+// tests moved with it rather than being dropped — every behaviour the old
+// panel suite pinned (the roster is reachable from a row click, a not-ready
+// team says WHY, a 403 is not a fake empty list) is still asserted here, with
+// the panel assertions rewritten as navigation ones, plus a new group covering
+// the property the redesign added: the page never prints a traffic number the
+// teams API cannot answer.
 
 function team(over: Partial<AgentTeamSummary> = {}): AgentTeamSummary {
   return {
@@ -36,11 +45,18 @@ function installFetch(respond: () => { ok: boolean; status?: number; body?: unkn
   );
 }
 
+/** Renders the page with a probe on the detail route, so navigation is observable. */
+function LocationProbe() {
+  const loc = useLocation();
+  return <div data-testid="location">{loc.pathname}</div>;
+}
+
 function renderPage() {
   return render(
     <MemoryRouter initialEntries={["/teams"]}>
       <Routes>
         <Route path="/teams" element={<TeamsPage />} />
+        <Route path="/teams/:ns/:name" element={<LocationProbe />} />
       </Routes>
     </MemoryRouter>,
   );
@@ -48,14 +64,23 @@ function renderPage() {
 
 afterEach(() => vi.restoreAllMocks());
 
-describe("TeamsPage (m64.11)", () => {
-  it("renders teams with supervisor, roster, budget, and a ready badge", async () => {
+describe("TeamsPage — the §4.4 teams-index budget", () => {
+  it("renders each team's declared shape, agent count, state and next step", async () => {
     installFetch(() => ({
       ok: true,
       body: {
         items: [
           team({ name: "research", supervisor: "planner", ready: true }),
-          team({ name: "support", supervisor: "triage", ready: false, reason: "MemberNotFound" }),
+          team({
+            name: "support",
+            supervisor: "triage",
+            ready: false,
+            reason: "MemberNotFound",
+            roster: [
+              { name: "a", agentRef: "one" },
+              { name: "b", agentRef: "two" },
+            ],
+          }),
         ],
       },
     }));
@@ -65,13 +90,37 @@ describe("TeamsPage (m64.11)", () => {
     expect(await screen.findByTestId("teams-page")).toBeInTheDocument();
     expect(screen.getByRole("table", { name: "Agent teams" })).toBeInTheDocument();
     expect(screen.getByText("research")).toBeInTheDocument();
-    expect(screen.getByText("planner")).toBeInTheDocument();
-    // The spawn budget renders with inline labels (fan-out / depth / total).
-    expect(screen.getAllByText(/fan-out 4 · depth 3 · total\s*20/).length).toBeGreaterThan(0);
-    // Readiness badges (M144.1 unified vocabulary): one Ready (green), one showing
-    // its reason humanized in the failed tone.
+
+    // Shape: the declared ladder — roster length + the three resolved ceilings.
+    expect(screen.getByText(/1 supervisor → 1 role$/)).toBeInTheDocument();
+    expect(screen.getByText(/1 supervisor → 2 roles$/)).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/depth ≤ 3 · fan-out ≤ 4 · 20 spawns/).length,
+    ).toBeGreaterThan(0);
+
+    // Readiness, and the humanized cause line under it (M144.1 vocabulary).
     expect(screen.getByText("Ready")).toBeInTheDocument();
-    expect(screen.getByText("Member not found")).toBeInTheDocument();
+    expect(screen.getByTestId("team-reason-support")).toHaveTextContent(
+      "Member not found",
+    );
+  });
+
+  it("sorts what is blocking above what is not", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        items: [
+          team({ name: "aaa-ready", ready: true }),
+          team({ name: "zzz-broken", ready: false, reason: "MemberNotFound" }),
+        ],
+      },
+    }));
+    renderPage();
+    await screen.findByText("aaa-ready");
+
+    const rows = screen.getAllByRole("row").slice(1); // drop the header row
+    expect(rows[0]).toHaveTextContent("zzz-broken");
+    expect(rows[1]).toHaveTextContent("aaa-ready");
   });
 
   it("filters teams by name", async () => {
@@ -103,102 +152,84 @@ describe("TeamsPage (m64.11)", () => {
   });
 });
 
-// ── I3 m76.6: inline detail panel (row-click) ──────────────────────────────
-describe("TeamsPage detail panel (I3 m76.6)", () => {
-  it("row-click opens the detail panel with roster members (name → agentRef · description)", async () => {
+// ── The roster is still one click away; it just lives on its own page now ────
+// (These replace the m76.6 inline-panel suite one for one.)
+describe("TeamsPage → team detail", () => {
+  it("row-click navigates to the team's detail route", async () => {
     installFetch(() => ({
       ok: true,
-      body: {
-        items: [
-          team({
-            name: "research",
-            supervisor: "planner",
-            roster: [
-              { name: "researcher", agentRef: "web-researcher", description: "searches the web" },
-              { name: "writer", agentRef: "doc-writer" },
-            ],
-            ready: true,
-          }),
-        ],
-      },
+      body: { items: [team({ name: "research", namespace: "team-a" })] },
     }));
-
     renderPage();
-    await screen.findByText("research");
-
-    // Panel not visible yet.
-    expect(screen.queryByTestId("team-detail")).toBeNull();
-
-    // Click the row to open the panel.
-    fireEvent.click(screen.getByText("research"));
-    expect(await screen.findByTestId("team-detail")).toBeInTheDocument();
-
-    // Member details: name → agentRef + description.
-    const member = screen.getByTestId("team-member-researcher");
-    expect(member).toHaveTextContent("researcher");
-    expect(member).toHaveTextContent("web-researcher");
-    expect(member).toHaveTextContent("searches the web");
-
-    // Member without description renders agentRef but no description text.
-    const writer = screen.getByTestId("team-member-writer");
-    expect(writer).toHaveTextContent("writer");
-    expect(writer).toHaveTextContent("doc-writer");
-  });
-
-  it("shows team-level readiness in the detail panel", async () => {
-    installFetch(() => ({
-      ok: true,
-      body: {
-        items: [
-          team({ name: "broken", ready: false, reason: "MemberNotFound" }),
-        ],
-      },
-    }));
-
-    renderPage();
-    await screen.findByText("broken");
-
-    fireEvent.click(screen.getByText("broken"));
-    await screen.findByTestId("team-detail");
-
-    // H5: the badge is a status label ("Not ready"); the reason lives in the span (not duplicated).
-    expect(screen.getByTestId("team-detail-notready-badge")).toHaveTextContent("Not ready");
-    expect(screen.getByTestId("team-detail-notready-reason")).toHaveTextContent("MemberNotFound");
-    // The reason must NOT also appear in the badge (the H5 double-render fix).
-    expect(screen.getByTestId("team-detail-notready-badge")).not.toHaveTextContent("MemberNotFound");
-  });
-
-  it("clicking the same row again closes the panel (toggle)", async () => {
-    installFetch(() => ({
-      ok: true,
-      body: { items: [team({ name: "research" })] },
-    }));
-
-    renderPage();
-    // Wait for the table row to appear (inside the <table>).
     const row = await screen.findByRole("row", { name: /research/ });
 
     fireEvent.click(row);
-    expect(await screen.findByTestId("team-detail")).toBeInTheDocument();
-
-    // Click the row again to toggle the panel closed.
-    fireEvent.click(row);
-    await waitFor(() => expect(screen.queryByTestId("team-detail")).toBeNull());
+    expect(await screen.findByTestId("location")).toHaveTextContent(
+      "/teams/team-a/research",
+    );
   });
 
-  it("Close button dismisses the detail panel", async () => {
+  it("the next step on a broken roster points at the team, in the crit tone", async () => {
     installFetch(() => ({
       ok: true,
-      body: { items: [team({ name: "research" })] },
+      body: {
+        items: [team({ name: "broken", ready: false, reason: "MemberNotFound" })],
+      },
     }));
+    renderPage();
 
+    const next = await screen.findByTestId("next-step-broken");
+    expect(next).toHaveTextContent("Fix the roster");
+    expect(next).toHaveAttribute("href", "/teams/default/broken");
+    expect(next.className).toContain("text-destructive");
+  });
+
+  it("a ready team asks nothing of a person", async () => {
+    installFetch(() => ({ ok: true, body: { items: [team({ name: "fine", ready: true })] } }));
+    renderPage();
+    expect(await screen.findByTestId("next-step-fine")).toHaveTextContent(
+      "Nothing needed",
+    );
+  });
+});
+
+// ── §7.1: the page may not print what the endpoint cannot answer ────────────
+describe("TeamsPage honesty", () => {
+  it("states once that delegation traffic is not in the team API, and draws no strip", async () => {
+    installFetch(() => ({ ok: true, body: { items: [team()] } }));
     renderPage();
     await screen.findByText("research");
 
-    fireEvent.click(screen.getByText("research"));
-    await screen.findByTestId("team-detail");
+    const notes = screen.getAllByRole("note");
+    expect(notes).toHaveLength(1);
+    expect(notes[0].textContent).toMatch(/Live delegation traffic isn.t in the team API/);
+    // No column for running / queued / held: those counts do not exist.
+    expect(screen.queryByRole("columnheader", { name: /running/i })).toBeNull();
+    expect(screen.queryByRole("columnheader", { name: /held/i })).toBeNull();
+  });
 
-    fireEvent.click(screen.getByTestId("team-detail-close"));
-    await waitFor(() => expect(screen.queryByTestId("team-detail")).toBeNull());
+  it("counts DISTINCT declared agents, not roster entries", () => {
+    // Two roles pointing at the same agent is legal, and it is two roles but
+    // ONE agent. Counting entries would overstate the fleet.
+    const t = triageTeam(
+      team({
+        supervisor: "planner",
+        roster: [
+          { name: "first", agentRef: "worker" },
+          { name: "second", agentRef: "worker" },
+        ],
+      }),
+    );
+    expect(t.roles).toBe(2);
+    expect(t.declaredAgents).toBe(2); // planner + worker
+  });
+
+  it("the closing line counts only the rows it can see", () => {
+    const rows = [
+      triageTeam(team({ name: "a", ready: true })),
+      triageTeam(team({ name: "b", ready: false, reason: "MemberNotFound" })),
+    ];
+    expect(teamsClosingLine(rows)).toContain("1 of the 2 teams needs a person");
+    expect(teamsClosingLine([])).toBeNull();
   });
 });

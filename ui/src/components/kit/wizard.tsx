@@ -114,6 +114,7 @@ export function Wizard({
                 onClick={() => i < current && onStepChange(i)}
                 className={cn(
                   "flex w-full items-start gap-3 rounded-md px-3 py-2 text-left transition-colors",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed",
                   active && "bg-accent",
                   !active && done && "hover:bg-surface-2",
                   i > current && "opacity-50",
@@ -121,10 +122,10 @@ export function Wizard({
               >
                 <span
                   className={cn(
-                    "mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold",
+                    "mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full font-mono text-xs font-semibold",
                     done && "bg-success text-success-foreground",
                     active && "bg-primary text-primary-foreground",
-                    !done && !active && "border bg-card text-muted-foreground",
+                    !done && !active && "border bg-card text-faint",
                   )}
                 >
                   {done ? <Check className="h-3.5 w-3.5" /> : i + 1}
@@ -139,7 +140,7 @@ export function Wizard({
                     {s.title}
                   </span>
                   {s.description && (
-                    <span className="block text-xs text-muted-foreground">
+                    <span className="block text-xs text-faint">
                       {s.description}
                     </span>
                   )}
@@ -152,15 +153,16 @@ export function Wizard({
 
       {/* Mobile progress: a compact "Step n of m" bar. */}
       <div className="md:hidden">
-        <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
-          <span>
+        <div className="mb-1 flex items-center justify-between text-xs text-faint">
+          <span className="font-mono">
             Step {current + 1} of {steps.length}
           </span>
-          <span>{step.title}</span>
+          <span className="font-medium text-foreground">{step.title}</span>
         </div>
-        <div className="h-1.5 overflow-hidden rounded-full bg-surface-2">
+        {/* A meter, not a pip — §1.4 puts meters/mini-bars on rounded-sm. */}
+        <div className="h-1.5 overflow-hidden rounded-sm bg-surface-2">
           <div
-            className="h-full rounded-full bg-primary transition-all"
+            className="h-full rounded-sm bg-primary transition-all"
             style={{ width: `${((current + 1) / steps.length) * 100}%` }}
           />
         </div>

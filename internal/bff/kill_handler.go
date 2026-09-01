@@ -201,23 +201,85 @@ func (s *Server) handleUnkill(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, killResponse{Scope: sc.Key(), Applied: lifted})
 }
 
+// canReadAgents answers the caller-scoped "may this caller list agentdeployments here?" SSAR that
+// gates what of the stop list they are shown. ns == "" asks cluster-wide.
+func (s *Server) canReadAgents(ctx context.Context, caller client.Client, ns string) bool {
+	return s.authorizer.Authorize(ctx, caller, authz.Action{
+		Verb:      verbList,
+		Group:     agentsv1alpha1.GroupVersion.Group,
+		Resource:  resourceAgentDeployments,
+		Namespace: ns,
+	}) == nil
+}
+
 // handleListKills serves GET /api/kills — the active stops, for the console banner.
+//
+// This read is CALLER-SCOPED (ADR 0011). It used to be unauthenticated in effect: any caller with a
+// token got every stop in the cluster, including the operator's free-text reason and the principal who
+// recorded it. That was survivable while nothing consumed it; M151 made the shell poll it on every
+// page and gave it a Stops page, so it became a cluster-wide disclosure to anyone who can log in.
+//
+// The rule balances two things that pull against each other:
+//
+//   - Free text and identity are the sensitive parts. `reason` is whatever a person typed during an
+//     incident and `principal` is who they are, so both are shown only to a caller who could read the
+//     agents that scope covers.
+//   - But a caller must never be told "nothing is stopped" when something that halts THEIR work is.
+//     A fleet or tenant stop is therefore always listed — a stop you cannot see is the same as no stop
+//     at all, and that is the one failure this feature cannot have.
+//
+// So: cluster-wide readers get everything; everyone else gets namespace-scoped stops for the
+// namespaces they can read, plus every wider stop with its reason and principal redacted.
 func (s *Server) handleListKills(w http.ResponseWriter, r *http.Request) {
 	if s.killScopes == nil {
 		writeJSON(w, http.StatusOK, []activeKill{})
 		return
 	}
-	kills, err := s.killScopes.Active(r.Context())
+	ctx := r.Context()
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+	kills, err := s.killScopes.Active(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not read the active stops")
 		return
 	}
+
+	clusterWide := s.canReadAgents(ctx, caller, "")
+	// One SSAR per distinct namespace, not per stop: an incident can hold many stops in one namespace.
+	nsAllowed := map[string]bool{}
+
 	out := make([]activeKill, 0, len(kills))
 	for _, k := range kills {
-		out = append(out, activeKill{
+		ak := activeKill{
 			Scope: k.Scope.Key(), Level: string(k.Scope.Level), Namespace: k.Scope.Namespace,
 			Agent: k.Scope.Agent, Tenant: k.Scope.Tenant, Reason: k.Reason, Principal: k.Principal,
-		})
+		}
+		if clusterWide {
+			out = append(out, ak)
+			continue
+		}
+		switch k.Scope.Level {
+		case killscope.LevelAgent, killscope.LevelNamespace:
+			ns := k.Scope.Namespace
+			allowed, seen := nsAllowed[ns]
+			if !seen {
+				allowed = s.canReadAgents(ctx, caller, ns)
+				nsAllowed[ns] = allowed
+			}
+			// A namespace the caller cannot read is one whose stop is not theirs to know about.
+			if !allowed {
+				continue
+			}
+			out = append(out, ak)
+		default:
+			// Tenant- and fleet-wide: the caller is TOLD, because it halts their work — but the
+			// words and the name are withheld, because those are what needed cluster-wide authority.
+			ak.Reason = ""
+			ak.Principal = ""
+			out = append(out, ak)
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }

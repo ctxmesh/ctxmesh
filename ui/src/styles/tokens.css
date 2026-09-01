@@ -13,136 +13,186 @@
  *  construction (ADR 0010). Colors are HSL channels (no hsl() wrapper) so
  *  Tailwind can compose them with opacity, e.g. `hsl(var(--primary) / 0.5)`.
  *
- *  ── v2 refinement (m13.1 design gate) ────────────────────────────────────
- *  The M12 system read as "rudimentary" in review. This v2 pass sharpens the
- *  visual language WITHOUT breaking the token contract:
- *    • Cooler, deeper brand indigo→violet with a real hierarchy of accents.
- *    • A tighter neutral ramp (--surface-2 / --surface-3) so panels, rows and
- *      chrome read as distinct planes instead of one flat gray.
- *    • A modular type scale (--text-xs … --text-3xl) + tracking tokens so
- *      headings and data feel intentional, not browser-default.
- *    • A spacing rhythm token (--space-unit) and a denser radius set.
- *    • Softer, layered elevation (ambient + key light) instead of a single box.
- *  Every value stays a semantic token; both themes are kept in lockstep.
+ *  That claim is now CHECKED, not asserted: `hack/ui-colour-literals.sh` fails
+ *  the build if a colour literal appears anywhere in src/ outside this file,
+ *  and `tokens.contrast.test.ts` computes the WCAG ratio of every text/surface
+ *  pair in BOTH themes directly from these values.
+ *
+ *  ── v3, the editorial system (M151 — ADR 0128, specs/console-design-system) ─
+ *  Replaces the M12/m13.1 indigo palette, which read as generic. The language:
+ *  cool paper, ONE bold colour (deep pine), hairline rules instead of shadows,
+ *  near-square corners, and a three-face register — a display serif for voice,
+ *  a working sans for the job, and mono for everything the machine owns.
+ *
+ *  Three rules carry the whole system:
+ *
+ *    1. PINE IS NEVER A STATUS. --primary means "you can act here, and this is
+ *       us": links, primary buttons, active nav, focus rings, selection. The
+ *       rule predates the re-brand (it was written for the old purple) and
+ *       survives it verbatim.
+ *    2. A HUE MEANS ONE THING. ok = verified and serving. warn = a bound is near
+ *       or crossed. crit = it will not proceed without a change. hold (violet,
+ *       carried in the --info slot) = a PERSON must decide. Nothing else.
+ *    3. TWO GREENS ARE TOLD APART BY FORM, NOT HUE. Interactive pine is always
+ *       sentence-case with an underline or a button shape; status green is
+ *       always an uppercase mono tag on its tint. A chip is never a link.
+ *
+ *  Why violet is no longer the brand: it used to be BOTH the brand and (in the
+ *  mocks) the "awaiting a person" hue. The console's whole information design
+ *  sorts by who is blocked on whom, so "the system hit a bound" and "a person is
+ *  holding up work right now" must not share a colour. Violet lost the brand and
+ *  kept the human gate; pine took brand and interactivity. See ADR 0128.
+ *
+ *  Dark is a DESIGNED palette, not an inversion: planes get lighter as they
+ *  rise, and every hue moves to a lifted, desaturated register so chips stay
+ *  annotations rather than neon. The solid/tint recipe inverts values but not
+ *  classes, so `bg-success-surface text-success` is correct in both themes with
+ *  no per-theme utilities.
  */
 
 @layer base {
   :root {
-    /* --- Typography -------------------------------------------------------- */
-    --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
-      Roboto, "Helvetica Neue", Arial, sans-serif;
-    --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", "Menlo",
-      "Consolas", monospace;
+    /* --- Typography (§3) -------------------------------------------------- */
+    --font-serif: "Newsreader Variable", Newsreader, Georgia,
+      "Times New Roman", serif; /* NEW — @fontsource variable name first */
+    --font-sans: "Public Sans Variable", "Public Sans", ui-sans-serif,
+      system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+      sans-serif;
+    --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace,
+      "SFMono-Regular", "Menlo", "Consolas", monospace;
 
-    /* Modular type scale (1.20 minor-third) — surfaces size text by role,
-       not by ad-hoc pixel guesses. Mapped into Tailwind fontSize. */
-    --text-xs: 0.75rem; /* 12 — captions, meta */
-    --text-sm: 0.8125rem; /* 13 — body-dense, table cells */
-    --text-base: 0.875rem; /* 14 — default body */
-    --text-md: 0.9375rem; /* 15 — emphasized body */
-    --text-lg: 1.0625rem; /* 17 — card titles */
-    --text-xl: 1.3125rem; /* 21 — page headings */
-    --text-2xl: 1.625rem; /* 26 — hero-lite */
-    --text-3xl: 2.125rem; /* 34 — prompt-first hero */
+    /* Type scale (§3.2) — role-mapped, not a strict modular ratio. */
+    --text-2xs: 0.625rem;   /* 10 — eyebrows, table column heads, tag text  NEW */
+    --text-xs: 0.6875rem;   /* 11 — mono meta, timestamps, counts */
+    --text-sm: 0.8125rem;   /* 13 — dense body, table cells, buttons */
+    --text-base: 0.875rem;  /* 14 — default body */
+    --text-md: 0.9375rem;   /* 15 — ledes, emphasized body */
+    --text-lg: 1.125rem;    /* 18 — panel titles (serif) */
+    --text-xl: 1.375rem;    /* 22 — section heads (serif) */
+    --text-2xl: 1.6875rem;  /* 27 — sub-hero, auth-card titles (serif) */
+    --text-3xl: 2rem;       /* 32 — page h1 (serif) */
 
-    /* Tracking (letter-spacing) — tight for display, open for micro-labels. */
-    --tracking-tight: -0.02em;
-    --tracking-snug: -0.011em;
-    --tracking-wide: 0.04em; /* eyebrow / kicker labels */
+    /* Tracking — serif display tightens, mono micro-labels open up. */
+    --tracking-tight: -0.018em;  /* serif 2xl/3xl */
+    --tracking-snug: -0.01em;    /* serif lg/xl; mono resource-name h1 */
+    --tracking-wide: 0.12em;     /* uppercase mono eyebrows + column heads */
 
-    /* --- Spacing rhythm ---------------------------------------------------- */
-    --space-unit: 0.25rem; /* the 4px grid every gap/pad derives from */
+    /* --- Spacing rhythm --------------------------------------------------- */
+    --space-unit: 0.25rem; /* the 4px grid every gap/pad derives from (§4.1) */
 
-    /* --- Radius (single knob; sm/md derive from it in Tailwind) ------------ */
-    --radius: 0.75rem;
+    /* --- Radius (§2.6 ruling) — near-square ------------------------------- */
+    --radius: 0.1875rem; /* 3px. Tailwind derives sm 2 / md 3 / lg 4 / xl 6. */
 
-    /* --- Surface / text — a real plane hierarchy --------------------------- */
-    --background: 220 24% 97%;
-    --foreground: 224 40% 12%;
-    --surface-2: 220 22% 94%; /* subtle raised rows / hovered rails */
-    --surface-3: 222 20% 90%; /* wells, inset code blocks */
-    --card: 0 0% 100%;
-    --card-foreground: 224 40% 12%;
+    /* --- Surfaces: cool paper, white card, sunk wells --------------------- */
+    --background: 120 7% 97%;        /* #f7f8f7  paper — the page ground */
+    --foreground: 156 19% 11%;       /* #16201c  ink — near-black, green cast */
+    --surface-2: 120 8% 95%;         /* #f1f3f1  sunk — collapsed-row bands, hovered rails */
+    --surface-3: 135 10% 92%;        /* #e9edea  wells — code blocks, inset previews */
+    --card: 0 0% 100%;               /* #ffffff  card — tables, panels, header band */
+    --card-foreground: 156 19% 11%;
     --popover: 0 0% 100%;
-    --popover-foreground: 224 40% 12%;
+    --popover-foreground: 156 19% 11%;
 
-    /* --- Brand: primary (indigo→violet) ------------------------------------ */
-    --primary: 250 84% 60%;
+    /* --- Brand: deep pine, the single bold colour ------------------------- */
+    --primary: 157 72% 21%;          /* #0f5c3f  pine — interactive + brand ONLY */
     --primary-foreground: 0 0% 100%;
-    --brand-2: 268 78% 62%; /* gradient partner for hero / logo */
+    --brand-2: 159 75% 15%;          /* #0a4530  pine-dark — hover/pressed pine,
+                                        the end-user chat ground. No gradients. */
 
-    /* --- Neutrals ---------------------------------------------------------- */
-    --secondary: 220 20% 94%;
-    --secondary-foreground: 224 36% 22%;
-    --muted: 220 20% 94%;
-    --muted-foreground: 220 12% 46%;
-    --accent: 250 84% 96%;
-    --accent-foreground: 250 62% 34%;
+    /* --- Ink ramp + neutrals ---------------------------------------------- */
+    --secondary: 120 8% 95%;         /* #f1f3f1  quiet chip/button ground */
+    --secondary-foreground: 152 9% 32%;  /* #4b5a53  ink-2 */
+    --muted: 120 8% 95%;             /* #f1f3f1 */
+    --muted-foreground: 152 9% 32%;  /* #4b5a53  ink-2 — secondary prose, meta */
+    --faint: 148 7% 40%;             /* #5f6e66  ink-3 — tertiary meta that must
+                                        still be READ (timestamps, eyebrows) NEW */
+    --ghost: 144 7% 72%;             /* #b3bdb7  ink-4 — disabled, placeholder,
+                                        decorative pips ONLY (contrast-exempt) NEW */
+    --accent: 145 27% 91%;           /* #e3efe8  pine surface — selected nav,
+                                        hover fills, link underlines at rest */
+    --accent-foreground: 159 75% 15%;/* #0a4530  pine-dark on pine surface */
 
-    /* --- Status ------------------------------------------------------------ */
-    --destructive: 356 72% 52%;
-    --destructive-foreground: 0 0% 100%;
-    --success: 152 62% 40%;
+    /* --- Status: annotation, not alarm (§2) -------------------------------- */
+    /* Recipe everywhere: tint chip = bg {hue}-surface + text {hue};
+       solid (buttons/pills) = bg {hue} + text {hue}-foreground. */
+    --success: 152 67% 25%;          /* #156b43  ok */
     --success-foreground: 0 0% 100%;
-    --warning: 34 92% 50%;
-    --warning-foreground: 28 60% 12%;
-    --info: 205 85% 48%;
+    --success-surface: 145 32% 93%;  /* #e6f2eb                              NEW */
+    --warning: 36 83% 30%;           /* #8a570d  warn — a bound is near/crossed */
+    --warning-foreground: 0 0% 100%;
+    --warning-surface: 42 66% 92%;   /* #f8f0dd                              NEW */
+    --destructive: 0 56% 42%;        /* #a52f2f  crit */
+    --destructive-foreground: 0 0% 100%;
+    --destructive-surface: 0 56% 94%;/* #f8e6e6                              NEW */
+    --info: 259 36% 48%;             /* #6b4fa8  HOLD — awaiting a person (§2.4).
+                                        Slot name kept; meaning is now "held". */
     --info-foreground: 0 0% 100%;
+    --info-surface: 264 52% 94%;     /* #efe9f8                              NEW */
 
-    /* --- Lines / focus ----------------------------------------------------- */
-    --border: 220 18% 88%;
-    --border-strong: 220 16% 80%;
-    --input: 220 18% 86%;
-    --ring: 250 84% 60%;
+    /* --- Rules (hairlines) / focus ----------------------------------------- */
+    --border: 150 7% 88%;            /* #dfe3e1  rule — panel + table frame */
+    --border-soft: 140 9% 93%;       /* #ecefed  rule-soft — row separators  NEW */
+    --border-strong: 150 8% 81%;     /* #cbd3cf  rule-firm — outlined buttons,
+                                        tree gutter lines, fence dashes */
+    /* --input is the INTERACTIVE boundary: the edge that tells you where a field
+       or an outlined control is. It is the one hairline held to WCAG 1.4.11
+       (3:1), because on this palette the card (#ffffff) and the paper (#f7f8f7)
+       differ by 1.03:1 — adjacency cannot identify the control, so the border
+       carries it alone. The approved #cbd3cf measured 1.44:1: invisible.
+       Deviation from spec §1.2, forced by measurement (§10.4). */
+    --input: 150 8% 54%;             /* #80938a  3.05:1 on paper, 3.25:1 on card */
+    --ring: 157 72% 21%;             /* pine focus ring */
 
-    /* --- Elevation — layered ambient + key light -------------------------- */
-    --shadow-card: 0 1px 2px 0 hsl(224 40% 12% / 0.04),
-      0 2px 6px -1px hsl(224 40% 12% / 0.06);
-    --shadow-elevated: 0 2px 4px -1px hsl(224 40% 12% / 0.07),
-      0 12px 28px -6px hsl(224 40% 12% / 0.14);
-    --shadow-overlay: 0 8px 10px -6px hsl(224 40% 12% / 0.1),
-      0 24px 48px -12px hsl(224 40% 12% / 0.28);
+    /* --- Elevation (§2.7): rules on-page; shadow only for floating layers -- */
+    --shadow-card: none;
+    --shadow-elevated: 0 2px 8px -2px hsl(156 19% 11% / 0.12);
+    --shadow-overlay: 0 8px 32px -8px hsl(156 19% 11% / 0.25);
   }
 
   .dark {
-    --background: 224 38% 7%;
-    --foreground: 216 28% 94%;
-    --surface-2: 223 32% 12%;
-    --surface-3: 223 30% 16%;
-    --card: 223 34% 10%;
-    --card-foreground: 216 28% 94%;
-    --popover: 223 34% 11%;
-    --popover-foreground: 216 28% 94%;
+    --background: 156 14% 7%;        /* #101513  charcoal paper, pine cast */
+    --foreground: 144 11% 91%;       /* #e6ebe8 */
+    --surface-2: 150 12% 13%;        /* #1c2420  raised rows / hovered rails */
+    --surface-3: 147 12% 15%;        /* #222b26  wells, code blocks */
+    --card: 150 12% 10%;             /* #161c19 */
+    --card-foreground: 144 11% 91%;
+    --popover: 146 12% 12%;          /* #1a211d */
+    --popover-foreground: 144 11% 91%;
 
-    --primary: 250 90% 70%;
-    --primary-foreground: 224 44% 10%;
-    --brand-2: 268 84% 72%;
+    --primary: 154 43% 49%;          /* #47b183  lifted pine — links, active nav */
+    --primary-foreground: 140 19% 6%;/* #0d130f  ink on a pine fill */
+    --brand-2: 152 42% 55%;          /* #5cbd90  hover/pressed pine (brighter, not darker) */
 
-    --secondary: 222 26% 17%;
-    --secondary-foreground: 216 28% 94%;
-    --muted: 222 26% 17%;
-    --muted-foreground: 218 16% 64%;
-    --accent: 222 30% 20%;
-    --accent-foreground: 216 28% 94%;
+    --secondary: 150 12% 13%;        /* #1c2420 */
+    --secondary-foreground: 144 11% 91%;
+    --muted: 150 12% 13%;
+    --muted-foreground: 145 8% 69%;  /* #a9b5ae  ink-2 */
+    --faint: 141 6% 57%;             /* #8a988f  ink-3 (the light palette's, reused) */
+    --ghost: 150 6% 38%;             /* #5c6862  disabled/placeholder only */
+    --accent: 151 33% 12%;           /* #152a20  pine surface */
+    --accent-foreground: 150 46% 70%;/* #8fd6b3 */
 
-    --destructive: 356 66% 55%;
-    --destructive-foreground: 216 28% 96%;
-    --success: 152 56% 48%;
-    --success-foreground: 224 44% 10%;
-    --warning: 34 92% 58%;
-    --warning-foreground: 28 60% 12%;
-    --info: 205 80% 60%;
-    --info-foreground: 224 44% 10%;
+    --success: 151 46% 54%;          /* #55c08c */
+    --success-foreground: 150 38% 10%;   /* #10241a */
+    --success-surface: 150 38% 10%;      /* #10241a */
+    --warning: 37 64% 58%;           /* #d9a450 */
+    --warning-foreground: 35 40% 12%;    /* #2a2012 */
+    --warning-surface: 35 40% 12%;       /* #2a2012 */
+    --destructive: 4 59% 70%;        /* #e08b85 */
+    --destructive-foreground: 3 33% 14%; /* #2e1817 */
+    --destructive-surface: 3 33% 14%;    /* #2e1817 */
+    --info: 260 49% 72%;             /* #ab93da  hold */
+    --info-foreground: 258 26% 15%;      /* #231d31 */
+    --info-surface: 258 26% 15%;         /* #231d31 */
 
-    --border: 222 24% 22%;
-    --border-strong: 222 20% 30%;
-    --input: 222 24% 24%;
-    --ring: 250 90% 70%;
+    --border: 140 9% 19%;            /* #2c352f */
+    --border-soft: 143 11% 14%;      /* #202823 */
+    --border-strong: 148 10% 29%;    /* #43524a */
+    --input: 148 10% 39%;            /* #5a6d63  3.37:1 on ground, 3.12:1 on card */
+    --ring: 154 43% 49%;
 
-    --shadow-card: 0 1px 2px 0 hsl(0 0% 0% / 0.4), 0 2px 6px -1px hsl(0 0% 0% / 0.5);
-    --shadow-elevated: 0 2px 4px -1px hsl(0 0% 0% / 0.5),
-      0 12px 28px -6px hsl(0 0% 0% / 0.6);
-    --shadow-overlay: 0 8px 10px -6px hsl(0 0% 0% / 0.5),
-      0 24px 48px -12px hsl(0 0% 0% / 0.7);
+    --shadow-card: none;
+    --shadow-elevated: 0 2px 8px -2px hsl(0 0% 0% / 0.5);
+    --shadow-overlay: 0 8px 32px -8px hsl(0 0% 0% / 0.7);
   }
 }

@@ -156,11 +156,12 @@ describe("CreateAgentPage — Describe it", () => {
     // The generated tool is pre-selected (flows into the summary).
     expect(screen.getByTestId("summary-tools")).toHaveTextContent(/get_order/);
 
-    // Advanced discloses the raw CRD (no hand-edit as the primary path).
+    // Advanced discloses the raw CRD in a READ-ONLY code well — never an
+    // editable field, because hand-editing is not the primary path (§6.1 A4).
     fireEvent.click(screen.getByTestId("advanced-toggle"));
-    const advanced = (await screen.findByTestId("advanced-yaml")) as HTMLTextAreaElement;
-    expect(advanced).toHaveAttribute("readonly");
-    expect(advanced.value).toContain("AgentDeployment");
+    const advanced = await screen.findByTestId("advanced-yaml");
+    expect(advanced.tagName).toBe("PRE");
+    expect(advanced).toHaveTextContent("AgentDeployment");
 
     // The GENERATE POST carried the description.
     const gen = calls.find((c) => c.url === "/api/agents/generate" && c.method === "POST");
@@ -194,12 +195,15 @@ describe("CreateAgentPage — Describe it", () => {
     expect(await screen.findByTestId("regenerate-state")).toBeInTheDocument();
     expect(screen.getByTestId("regenerate-reason")).toHaveTextContent(/unknown field 'frobnicate'/);
     expect(screen.getByTestId("regenerate-button")).toBeInTheDocument();
-    // The raw agentYAML is PRESERVED (nothing lost).
-    expect((screen.getByTestId("regenerate-raw-yaml") as HTMLTextAreaElement).value).toContain(
-      "frobnicate",
-    );
+    // The raw agentYAML is PRESERVED (nothing lost), in a read-only code well.
+    const raw = screen.getByTestId("regenerate-raw-yaml");
+    expect(raw.tagName).toBe("PRE");
+    expect(raw).toHaveTextContent("frobnicate");
     // A 422 is not a review — no shared review yet.
     expect(screen.queryByTestId("shared-review")).toBeNull();
+    // …and the description that produced it is still on screen to edit, rather
+    // than the step being swapped out from under the user.
+    expect(screen.getByLabelText("Agent description")).toHaveValue("x");
   });
 
   it("a 422 WITHOUT the regenerate flag (upstream key rejection, FUNC-9) shows the reason inline — no crash, no logout", async () => {
@@ -757,9 +761,9 @@ describe("CreateAgentPage — m72.1 smart defaults", () => {
     fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
     await screen.findByText("Cost budget");
     fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
-    await screen.findByText(/Ready to review/);
-    // The FriendlySummary won't show scaling, but the Advanced YAML will
-    // (we don't need to click Advanced to verify the form state is correct)
+    await screen.findByTestId("configure-review-step");
+    // The review's fact register won't show scaling, but the form state is what
+    // toAgentYAML serializes — assert that instead.
     expect((keepWarm as HTMLInputElement).checked).toBe(true);
   });
 });
@@ -992,5 +996,152 @@ describe("CreateAgentPage — m74 P1-2: ?recipe=<name> pre-fills the create flow
     renderWithRecipeParam("nonexistent-recipe");
     // Falls back to the entrance (recipe not found) — no crash, entrance is shown.
     expect(await screen.findByTestId("create-entrance")).toBeInTheDocument();
+  });
+});
+
+// ── M151 — the honesty rules the redesigned surface must hold ────────────────
+
+describe("CreateAgentPage — a generated config is a proposal, not a fact", () => {
+  it("marks generated config as proposed, names the model, and says nothing exists yet", async () => {
+    recordingFetch({
+      generate: () => ({
+        ok: true,
+        json: {
+          agentYAML: "name: support-agent\nruntime: managed\n",
+          expanded: "kind: AgentDeployment\n",
+          model: "claude-sonnet-4",
+        },
+      }),
+    });
+    renderPage();
+    await pickDescribe();
+    fireEvent.change(screen.getByLabelText("Agent description"), {
+      target: { value: "a support agent" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Generate/ }));
+
+    const review = await screen.findByTestId("generation-review");
+    expect(review).toHaveTextContent(/proposed/i);
+    expect(review).toHaveTextContent(/nothing exists in the cluster until you create it/i);
+    expect(screen.getByTestId("gen-model-tag")).toHaveTextContent("claude-sonnet-4");
+  });
+});
+
+describe("CreateAgentPage — a requirement that wasn't checked is not a satisfied one", () => {
+  async function reachSharedReview(checkReqs?: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+        const j = (json: unknown, ok = true, status = 200) =>
+          Promise.resolve({
+            ok,
+            status,
+            json: async () => json,
+            text: async () => JSON.stringify(json),
+          } as Response);
+
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
+        if (url === "/api/providers" && method === "GET")
+          return j({ providers: [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4"], secretName: "s", ready: true }] });
+        if (url === "/api/tools") return j({ tools: [] });
+        if (url === "/api/agents/generate" && method === "POST")
+          return j({ agentYAML: "name: req-agent\nruntime: managed\ntools:\n  - get_order\n", expanded: "kind: AgentDeployment\n", model: "m" });
+        if (url === "/api/agents/check-requirements" && method === "POST") {
+          // `undefined` ⇒ the endpoint is absent on this install (the 501/404 case).
+          if (checkReqs === undefined) return j({ error: "not implemented" }, false, 501);
+          return j(checkReqs);
+        }
+        return j({}, false, 404);
+      }),
+    );
+    renderPage();
+    await pickDescribe();
+    fireEvent.change(screen.getByLabelText("Agent description"), { target: { value: "x" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generate/ }));
+    await screen.findByTestId("refine-and-draft-surface");
+    fireEvent.click(screen.getByTestId("create-agent-direct"));
+    await screen.findByTestId("shared-review");
+  }
+
+  it("renders every requirement as NOT CHECKED — never ready — when the pre-flight can't answer", async () => {
+    await reachSharedReview(undefined);
+    const list = await screen.findByTestId("requirements-checklist");
+    // The requirement is still listed (we know it from the config)…
+    expect(list).toHaveTextContent("get_order");
+    // …and it is honestly unverified. A tick the platform never earned is the
+    // one thing this surface must not draw.
+    expect(list).toHaveTextContent(/not checked/i);
+    expect(list).not.toHaveTextContent(/\bready\b/i);
+    // And one calm note says why — not an error.
+    expect(screen.getByText(/pre-flight check hasn’t answered/i)).toBeInTheDocument();
+  });
+
+  it("keeps not-found, needs-consent and ready visibly different from one another", async () => {
+    await reachSharedReview({
+      model: { required: true, connected: false, route: "missing-route" },
+      tools: [
+        { name: "search_docs", status: "ready" },
+        { name: "post_message", status: "needs-consent" },
+        { name: "create_refund", status: "needs-approval" },
+        { name: "ledger_write", status: "not-found" },
+      ],
+    });
+    const list = await screen.findByTestId("requirements-checklist");
+    expect(list).toHaveTextContent(/not connected/i);
+    expect(list).toHaveTextContent(/needs consent/i);
+    expect(list).toHaveTextContent(/needs approval/i);
+    expect(list).toHaveTextContent(/not registered/i);
+    // Each unmet requirement offers the user's next act, not just a colour.
+    expect(screen.getByRole("link", { name: /Connect a provider/ })).toHaveAttribute(
+      "href",
+      "/providers/connect",
+    );
+    expect(screen.getByRole("link", { name: /Register the server/ })).toHaveAttribute(
+      "href",
+      "/tools/add-mcp",
+    );
+    // Advisory only — it never blocks the create.
+    expect(screen.getByTestId("create-button")).not.toBeDisabled();
+  });
+
+  it("an unrecognised status is not a pass", async () => {
+    await reachSharedReview({
+      model: { required: false, connected: true },
+      tools: [{ name: "mystery_tool", status: "some-future-state" }],
+    });
+    const list = await screen.findByTestId("requirements-checklist");
+    expect(list).toHaveTextContent("mystery_tool");
+    expect(list).toHaveTextContent(/not checked/i);
+  });
+});
+
+describe("CreateAgentPage — the wizard's discard guard is armed", () => {
+  it("Escape on a half-written agent asks before discarding", async () => {
+    recordingFetch({});
+    renderPage();
+    await pickConfigure();
+
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "half-written" } });
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    // The guard intercepts: the wizard is still mounted and the user is asked.
+    expect(await screen.findByText("Discard your changes?")).toBeInTheDocument();
+    expect(screen.getByTestId("configure-flow")).toBeInTheDocument();
+    expect(screen.queryByTestId("create-entrance")).toBeNull();
+  });
+
+  it("Escape on an untouched wizard just leaves — no dialog for nothing", async () => {
+    recordingFetch({});
+    renderPage();
+    await pickConfigure();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(await screen.findByTestId("create-entrance")).toBeInTheDocument();
+    expect(screen.queryByText("Discard your changes?")).toBeNull();
   });
 });

@@ -9,16 +9,19 @@ import {
   FlaskConical,
   GitBranch,
   GitFork,
+  House,
   KeyRound,
-  LayoutDashboard,
   Library,
   MessagesSquare,
   Network,
+  OctagonX,
   PlugZap,
   ScrollText,
   Share2,
   Shield,
+  ShieldCheck,
   SlidersHorizontal,
+  Tags,
   TestTube2,
   Users,
   Waypoints,
@@ -36,9 +39,8 @@ import type { LucideIcon } from "lucide-react";
 // can consume it without pulling the review-only wireframes into the main chunk.
 //
 // Milestone tags mark which arc milestone SHIPS each surface. Only surfaces that
-// exist TODAY (m13.5 re-housing scope) carry a `route`; the rest render a
-// PlaceholderPage ("arrives in M<n>") so the full IA is walkable without pulling
-// later features forward.
+// exist TODAY carry a `route`; the rest render a PlaceholderPage ("arrives in
+// M<n>") so the full IA is walkable without pulling later features forward.
 
 // Milestone is duplicated from design/scaffold to keep this module independent of
 // the design gallery (the wireframes' own tag type). It is display-only.
@@ -60,7 +62,8 @@ export type Milestone =
   | "M73"
   | "M74"
   | "M76"
-  | "M112";
+  | "M112"
+  | "M151";
 
 // The golden CRD resources the console probes capabilities for — the plural
 // names the BFF's SelfSubjectAccessReview uses (internal/bff/identity.go). A nav
@@ -93,6 +96,30 @@ export const RES_KNOWLEDGEBASES = "knowledgebases";
 // the API still enforces on the logs SSE endpoint. Verb is "get".
 export const RES_LOGS = "logs";
 
+/**
+ * A live signal the shell may render as a count beside a nav item.
+ *
+ * A count is DATA, not decoration, so the IA declares which backend answers it
+ * rather than letting the shell invent one. A source the install cannot answer
+ * renders NOTHING — never a `0` (M151 §7.1: zero and unknown must not share a
+ * glyph). `approvals` = GET /api/approvals (namespace-scoped, needs `list
+ * workflows`); `stops` = GET /api/kills (the active scoped stops, ADR 0126).
+ */
+export type NavCountSource = "approvals" | "stops";
+
+/**
+ * What the number MEANS, which is what fixes its colour (M151 §2, §4.2):
+ * `waiting` = items are sitting on a person (warn), `stopped` = work is halted
+ * right now (crit), `quiet` = a plain magnitude (faint). Pine is never a status,
+ * so a count is never rendered in the brand colour.
+ */
+export type NavCountTone = "quiet" | "waiting" | "stopped";
+
+export interface NavCount {
+  source: NavCountSource;
+  tone: NavCountTone;
+}
+
 export interface NavItem {
   id: string;
   label: string;
@@ -100,8 +127,8 @@ export interface NavItem {
   milestone: Milestone;
   /**
    * The router path this nav item routes to. Present only for surfaces that
-   * exist in the current build (re-housed M12 surfaces); absent items render a
-   * PlaceholderPage keyed on the milestone. `/` for the index (dashboard).
+   * exist in the current build; absent items render a PlaceholderPage keyed on
+   * the milestone. `/` for the index (Home).
    */
   route?: string;
   /**
@@ -116,6 +143,8 @@ export interface NavItem {
    * now also carries read-verb gates — the old name misled.
    */
   requiresCapability?: { resource: string; verb: string };
+  /** A live backend count the shell renders right-aligned beside the label. */
+  count?: NavCount;
 }
 
 export interface NavSection {
@@ -123,45 +152,51 @@ export interface NavSection {
   items: NavItem[];
 }
 
-// THE PROPOSED IA — one flat, grouped sidebar telling a first-run story:
-// Overview → Build → Observe → Platform → Settings (ui-foundation §6, the
-// approved shell/IA wireframes). The four re-housed M12 surfaces carry a route;
-// everything else is a milestone placeholder.
+// ── THE APPROVED IA (M151, spec §4.2) ───────────────────────────────────────
+//
+// Six sections — Home / Agents / Library / Govern / Activity / Admin — replacing
+// the seven-section Overview / Build / Tools / Observe / Platform / Advanced
+// arrangement, which had grown by accretion: "Build" mixed a provider
+// connection with a chat playground, "Platform" held four unrelated policy CRDs,
+// and "Advanced" was a shelf for anything object-shaped.
+//
+// The sections answer six different questions, and each destination belongs to
+// exactly the one it answers:
+//
+//   Home      — what needs me right now?
+//   Agents    — the things that run.
+//   Library   — the reusable material they draw on (tools, knowledge, prompts,
+//               workflows, templates). Nothing here runs by itself.
+//   Govern    — who is blocked, what is enforced, what was recorded. DELIBERATELY
+//               THE FATTEST SECTION: governance is the product's thesis, so it is
+//               not a footnote under "Platform".
+//   Activity  — what happened and what it cost.
+//   Admin     — the install: credentials, routing, tenancy.
+//
+// Two placements are worth their reasons. REGISTRIES sits in Govern, not with
+// the other CRDs: a registry is the allow-list of what an agent may pull, which
+// is a control, not plumbing. PROVIDERS sits in Admin because it is credential
+// handling; its first-run prominence is carried by the Home checklist
+// (FIRST_RUN_CHECKLIST below), which is where m49.2's onboarding-order fix
+// actually lives — the checklist links straight to /providers/connect.
 export const NAV_SECTIONS: NavSection[] = [
   {
-    heading: "Overview",
+    heading: "Home",
     items: [
       {
-        id: "dashboard",
-        label: "Dashboard",
-        icon: LayoutDashboard,
+        // The fleet sentence + the queues that need a person (spec §6.1 A11).
+        // Route "/" is unchanged; only the name is (it was "Dashboard").
+        id: "home",
+        label: "Home",
+        icon: House,
         milestone: "M13",
         route: "/",
-      },
-      {
-        id: "topology",
-        label: "Topology",
-        icon: Network,
-        milestone: "M15",
-        route: "/topology",
       },
     ],
   },
   {
-    heading: "Build",
+    heading: "Agents",
     items: [
-      {
-        // Connect a provider — the FIRST step of the journey (the dashboard checklist
-        // teaches "Connect a provider" first), so it LEADS "Build" rather than sitting
-        // low under "Platform" where the eye reaches it last (m49.2 — the onboarding-
-        // order fix, M46-close review P0). The connect wizard is the page's CTA; the
-        // write actions (Connect / Rotate / Disconnect) are gated in-page on secretbindings.
-        id: "providers",
-        label: "Providers",
-        icon: PlugZap,
-        milestone: "M14",
-        route: "/providers",
-      },
       {
         id: "agents",
         label: "Agents",
@@ -171,34 +206,17 @@ export const NAV_SECTIONS: NavSection[] = [
       },
       {
         // Agent Teams (M64, ADR 0057) — the orchestration rosters: a supervisor + summonable
-        // sub-agents + a spawn budget. Read-open (the API is the RBAC gate); a team is authored via
-        // YAML/kubectl for now (the conversational "describe → team" builder is M71).
+        // sub-agents + a spawn budget. Read-open (the API is the RBAC gate).
         id: "teams",
-        label: "Agent Teams",
+        label: "Teams",
         icon: Waypoints,
         milestone: "M64",
         route: "/teams",
       },
       {
-        // Template Gallery (m74.6) — the unified gallery for agent templates
-        // (recipes ∪ published agents) and the MCP catalog in two tabs. Fork
-        // an agent recipe or connect an MCP server from one surface.
-        // Read-open: any authenticated caller can browse; Fork/Connect are
-        // gated server-side by agent creation rights.
-        id: "gallery",
-        label: "Gallery",
-        icon: Library,
-        milestone: "M74",
-        route: "/gallery",
-      },
-      // "New agent" is NOT a nav item (m25 S8) — it lives as the primary action
-      // (top-right button) ON the Agents page, next to the list it creates into,
-      // rather than duplicating an agent-lifecycle entry in the sidebar. The
-      // /agents/new route still exists; the button navigates to it.
-      {
-        // The re-housed Playground — running an agent is a create/invoke-shaped
-        // op; a viewer's chrome hides it (they still get an honest 403 if they
-        // reach it directly). Gated on create agentdeployments (the run path).
+        // The Playground — running an agent is a create/invoke-shaped op; a
+        // viewer's chrome hides it (they still get an honest 403 if they reach
+        // it directly). Gated on create agentdeployments (the run path).
         id: "playground",
         label: "Playground",
         icon: FlaskConical,
@@ -206,9 +224,57 @@ export const NAV_SECTIONS: NavSection[] = [
         route: "/playground",
         requiresCapability: { resource: RES_AGENTS, verb: "create" },
       },
+      // "New agent" is NOT a nav item (m25 S8) — it lives as the primary action
+      // (top-right button) ON the Agents page, next to the list it creates into.
+    ],
+  },
+  {
+    // Library — the material agents draw on. Everything here is composed INTO an
+    // agent; nothing here runs on its own. The old "Tools" section collapses in
+    // here (m23.7's grouping survives, one level up).
+    heading: "Library",
+    items: [
       {
-        // Prompt version diff viewer (m17.12). Lists PromptVersions + side-by-side
-        // textual diff. Readable by any authenticated caller; create/delete gated.
+        // Template Gallery (m74.6) — agent templates (recipes ∪ published agents)
+        // and the MCP catalog in two tabs. Read-open; Fork/Connect are gated
+        // server-side by agent creation rights.
+        id: "gallery",
+        label: "Gallery",
+        icon: Library,
+        milestone: "M74",
+        route: "/gallery",
+      },
+      {
+        // MCP Servers LIST page (m25 S10) — every registered BYO MCP server, with
+        // "Add MCP server" as an in-page CTA rather than a second nav item.
+        id: "mcp-servers",
+        label: "MCP servers",
+        icon: Wrench,
+        milestone: "M14",
+        route: "/tools/mcp-servers",
+      },
+      {
+        // Tool catalog (m17.10) — the merged curated + user-added + pending
+        // catalog; the bind-time picker, not the discovery surface (m76.1).
+        id: "tool-catalog",
+        label: "Tool catalog",
+        icon: BookOpen,
+        milestone: "M17",
+        route: "/tools/catalog",
+      },
+      {
+        // KnowledgeBases (m68.13, ADR 0061) — managed RAG corpora. GATED on
+        // `list knowledgebases` (M99 C2) so a persona that can't list them never
+        // sees a nav item that 403s; the API still enforces.
+        id: "knowledgebases",
+        label: "Knowledge bases",
+        icon: Database,
+        milestone: "M68",
+        route: "/knowledgebases",
+        requiresCapability: { resource: RES_KNOWLEDGEBASES, verb: "list" },
+      },
+      {
+        // PromptVersion list + side-by-side diff (m17.12). Read-open.
         id: "prompts",
         label: "Prompts",
         icon: GitBranch,
@@ -216,63 +282,124 @@ export const NAV_SECTIONS: NavSection[] = [
         route: "/prompts",
       },
       {
-        // EvalSuite builder + results browser (m17.12). Lists EvalSuites + a
-        // wizard to create; results view is read-open; create gated.
+        // Workflows (m67.9, ADR 0060) — declarative graphs of agent invocations.
+        // Read-open (RBAC gate at the API server, ADR 0011).
+        id: "workflows",
+        label: "Workflows",
+        icon: GitFork,
+        milestone: "M67",
+        route: "/workflows",
+      },
+      {
+        // The config-builder — the raw agent.yaml → CRD-apply surface. It is a
+        // hand-authoring path, so it sits with the other material rather than in
+        // the agent-creation flow ("New agent" is the ONE primary create entry,
+        // m23.7 / audit B3). A WRITE surface, hidden from a viewer's nav.
+        id: "config",
+        label: "Config builder",
+        icon: SlidersHorizontal,
+        milestone: "M13",
+        route: "/config",
+        requiresCapability: { resource: RES_AGENTS, verb: "create" },
+      },
+    ],
+  },
+  {
+    // Govern — the fattest section on purpose (M151 approved direction). Ordered
+    // by urgency: the two human queues, then the kill switch, then the standing
+    // controls, then the record.
+    heading: "Govern",
+    items: [
+      {
+        // Approvals (V5/V15) — the namespace-scoped queue of runs paused on
+        // plan_approval OR a mid-run approval step. Gated on `list workflows`.
+        // Its count is the console's "someone is waiting on you" signal.
+        id: "approvals",
+        label: "Approvals",
+        icon: CheckSquare,
+        milestone: "M112",
+        route: "/approvals",
+        requiresCapability: { resource: "workflows", verb: "list" },
+        count: { source: "approvals", tone: "waiting" },
+      },
+      {
+        // MCP approval queue (m17.9). Operator-only: gated on update agentregistries.
+        id: "mcp-approvals",
+        label: "MCP approvals",
+        icon: ShieldCheck,
+        milestone: "M17",
+        route: "/tools/approvals",
+        requiresCapability: { resource: RES_REGISTRIES, verb: "update" },
+      },
+      {
+        // Stops (ADR 0126, spec §5.23/§6.2) — the scoped kill switch's landing
+        // surface: what is stopped, why, by whom, and how to lift it. The frame's
+        // StopControl creates them; this is where they are read. The PAGE shipped
+        // in m151.7 (spec §6.2 gap 2), so the item now walks to the real surface
+        // instead of /soon/stops — and the COUNT is live from GET /api/kills,
+        // because "a scope is halted right now" is the one fact the frame must
+        // not sit on.
+        id: "stops",
+        label: "Stops",
+        icon: OctagonX,
+        milestone: "M151",
+        route: "/stops",
+        count: { source: "stops", tone: "stopped" },
+      },
+      {
+        // GuardrailPolicies (m66.10, ADR 0059) — PII scanning, deny-lists, the
+        // optional LLM judge, per-user rate limits. Read-open.
+        id: "guardrails",
+        label: "Guardrails",
+        icon: Shield,
+        milestone: "M66",
+        route: "/guardrails",
+      },
+      {
+        // EvalSuite builder + results browser (m17.12).
         id: "evals",
         label: "Evals",
         icon: TestTube2,
         milestone: "M17",
         route: "/evals",
       },
-    ],
-  },
-  {
-    // Tools (m23.7) — the three MCP/tool surfaces grouped into ONE area, out of
-    // the "Build" agent-lifecycle flow they used to clutter (the audit B5): add a
-    // BYO MCP server, approve pending ones, and browse the merged catalog.
-    heading: "Tools",
-    items: [
       {
-        // MCP Servers LIST page (m25 S10) — lists every registered BYO MCP server
-        // with an "Add MCP server" button ON the page (the add wizard is reached via
-        // that CTA, not a separate add-only nav item). Read-open so a viewer sees the
-        // servers; the Add button in-page is gated on create agentregistries.
-        id: "mcp-servers",
-        label: "MCP Servers",
-        icon: Wrench,
-        milestone: "M14",
-        route: "/tools/mcp-servers",
+        // Datasets (M69) — human-labeled eval cases for the improvement loop
+        // (ADR 0062 Fork 5). Read-open.
+        id: "datasets",
+        label: "Datasets",
+        icon: Tags,
+        milestone: "M69",
+        route: "/datasets",
       },
       {
-        // MCP approval queue (m17.9). Operator-only: lists pending MCP servers
-        // and lets the operator approve/reject them. Hidden from a viewer's nav
-        // (non-operators can't approve). Gates on update agentregistries.
-        id: "mcp-approvals",
-        label: "MCP approvals",
-        icon: Wrench,
-        milestone: "M17",
-        route: "/tools/approvals",
-        requiresCapability: { resource: RES_REGISTRIES, verb: "update" },
+        // Registries (M15) — the allow-list of images/tools an agent may pull.
+        // It reads as plumbing but it is a CONTROL, which is why it moved out of
+        // the old "Advanced" shelf into Govern.
+        id: "registries",
+        label: "Registries",
+        icon: Users,
+        milestone: "M15",
+        route: "/registries",
       },
       {
-        // Tool catalog (m17.10). The merged catalog of curated + user-added +
-        // pending-approval tools. Readable by anyone; bind wizard is gated on
-        // create mcptoolbindings. Uses BookOpen (distinct from Wrench above).
-        id: "tool-catalog",
-        label: "Tool catalog",
-        icon: BookOpen,
-        milestone: "M17",
-        route: "/tools/catalog",
+        // Audit (M63, ADR 0056) — the compliance trail. OPERATOR-ONLY: the trail
+        // spans users and namespaces, so it is gated on `list auditlogs`.
+        id: "audit",
+        label: "Audit",
+        icon: ScrollText,
+        milestone: "M63",
+        route: "/audit",
+        requiresCapability: { resource: RES_AUDITLOGS, verb: "list" },
       },
     ],
   },
   {
-    heading: "Observe",
+    // Activity — what happened, what it cost, what it looks like. Runs IS the
+    // trace list: each row drills into the native trace explorer at /traces/:id
+    // (m16.7), so there is deliberately no standalone Traces destination.
+    heading: "Activity",
     items: [
-      // Runs IS the trace list — each run row drills into the native trace
-      // explorer at /traces/:id (m16.7), which embeds the inline feedback panel
-      // (m16.9). There is deliberately no standalone "Traces"/"Feedback" nav
-      // destination; both are reached by drilling into a run.
       {
         id: "runs",
         label: "Runs",
@@ -281,28 +408,15 @@ export const NAV_SECTIONS: NavSection[] = [
         route: "/runs",
       },
       {
-        // My Shares (V13) — the caller's share links across all runs. Lets
-        // the caller see + revoke their own live share links from one place.
-        // Read-open: listing is caller-scoped (the BFF gates on the caller's
-        // own identity); revoke is a per-run DELETE, caller-scoped by design.
-        id: "my-shares",
-        label: "My Shares",
-        icon: Share2,
-        milestone: "M112",
-        route: "/my-shares",
-      },
-      {
-        // Approvals (V5, M112; unified inbox M113) — the namespace-scoped queue of runs
-        // paused on plan_approval (workflow plan gate) OR approval (mid-run HITL step gate).
-        // A reviewer sees all pending approvals and deep-links each row to /runs/:id to
-        // approve/deny. Gated on `list workflows` in the namespace — a caller without that
-        // RBAC gets an honest 403, never an empty list.
-        id: "approvals",
-        label: "Approvals",
-        icon: CheckSquare,
-        milestone: "M112",
-        route: "/approvals",
-        requiresCapability: { resource: "workflows", verb: "list" },
+        // Alerts (M70, ADR 0063 D2) — fired AlertPolicy conditions. Gated on
+        // `list alertpolicies` so a caller without that RBAC sees an honest 403
+        // rather than an empty list.
+        id: "alerts",
+        label: "Alerts",
+        icon: Bell,
+        milestone: "M70",
+        route: "/alerts",
+        requiresCapability: { resource: RES_ALERTPOLICIES, verb: "list" },
       },
       {
         id: "cost",
@@ -312,117 +426,39 @@ export const NAV_SECTIONS: NavSection[] = [
         route: "/cost",
       },
       {
-        // Datasets (M69) — human-labeled eval datasets for the improvement loop
-        // (ADR 0062 Fork 5). Each dataset is a collection of redacted trace cases
-        // labeled pass/fail/flag. Read-open (the API is the RBAC gate); add-case is
-        // done from the trace view or via the from-run on-ramp.
-        id: "datasets",
-        label: "Datasets",
-        icon: Database,
-        milestone: "M69",
-        route: "/datasets",
+        // My Shares (V13) — the caller's own live share links, and where they are
+        // revoked. Caller-scoped by the BFF, so read-open.
+        id: "my-shares",
+        label: "My shares",
+        icon: Share2,
+        milestone: "M112",
+        route: "/my-shares",
       },
       {
-        // Audit (M63) — the compliance trail ("who connected/consented/invoked
-        // what", ADR 0056). OPERATOR-ONLY: the trail spans users/namespaces, so
-        // like MCP approvals it's gated (here on `list auditlogs`) and hidden from
-        // developer/viewer chrome. A non-operator who deep-links gets an honest 403.
-        id: "audit",
-        label: "Audit",
-        icon: ScrollText,
-        milestone: "M63",
-        route: "/audit",
-        requiresCapability: { resource: RES_AUDITLOGS, verb: "list" },
-      },
-      {
-        // Alerts (M70, ADR 0063 D2) — the fired-alert console feed: AlertPolicy
-        // conditions that crossed their threshold. Read-only; the controller
-        // auto-resolves on true→false transitions. Gated on `list alertpolicies`
-        // so a caller without that RBAC sees an honest 403 rather than an empty list.
-        id: "alerts",
-        label: "Alerts",
-        icon: Bell,
-        milestone: "M70",
-        route: "/alerts",
-        requiresCapability: { resource: RES_ALERTPOLICIES, verb: "list" },
-      },
-    ],
-  },
-  {
-    heading: "Platform",
-    items: [
-      {
-        // Tenants (M47) — cluster-scoped namespace groupings with compute + model
-        // quotas. Read-only for everyone (viewers/developers); operators manage
-        // them (the RBAC split is enforced at the API server, ADR 0011).
-        id: "tenants",
-        label: "Tenants",
-        icon: Building2,
-        milestone: "M47",
-        route: "/tenants",
-      },
-      {
-        // GuardrailPolicies (m66.10, ADR 0059) — namespace-scoped content-governance
-        // policies: PII scanning, pattern deny-lists, optional LLM-judge, per-user
-        // rate limits. Read-open (the API is the RBAC gate); authored via YAML/kubectl.
-        id: "guardrails",
-        label: "Guardrail Policies",
-        icon: Shield,
-        milestone: "M66",
-        route: "/guardrails",
-      },
-      {
-        // Workflows (m67.9, ADR 0060) — declarative graphs of agent invocations:
-        // conditional branching, map/loop control flow, deterministic execution.
-        // Read-open (RBAC gate at the API server, ADR 0011); authored via YAML/kubectl.
-        // Invoke affordance starts a workflow instance run from the console.
-        id: "workflows",
-        label: "Workflows",
-        icon: GitFork,
-        milestone: "M67",
-        route: "/workflows",
-      },
-      {
-        // KnowledgeBases (m68.13, ADR 0061) — managed RAG corpora: upload docs → ingest →
-        // watch phase → test-query with citations. GATED on `list knowledgebases` (M99 C2) so a
-        // persona that can't list them never sees a nav item that 403s; the API still enforces.
-        id: "knowledgebases",
-        label: "Knowledge Bases",
-        icon: BookOpen,
-        milestone: "M68",
-        route: "/knowledgebases",
-        requiresCapability: { resource: RES_KNOWLEDGEBASES, verb: "list" },
-      },
-    ],
-  },
-  {
-    // Advanced (m20.8) — the raw Kubernetes objects that back the intent surfaces.
-    // A user connects a provider and picks a model per agent; they never NEED these.
-    // They live here (bottom, under "Advanced") for operators who want to inspect or
-    // hand-author the AgentRegistry / ModelRoute / SecretBinding objects directly,
-    // rather than sitting in the primary nav next to Providers (the object-shaped IA
-    // the console used to expose). The pages are unchanged — only their placement.
-    heading: "Advanced",
-    items: [
-      {
-        // The config-builder — the raw agent.yaml → CRD-apply surface. Moved out
-        // of "Build" (m23.7 / audit B3): "New agent" is the ONE primary create
-        // entry; this hand-authoring path lives under Advanced for power users who
-        // want to edit the YAML directly. Unchanged page — placement only. A WRITE
-        // surface (applies CRDs), hidden from a viewer's nav.
-        id: "config",
-        label: "Config builder",
-        icon: SlidersHorizontal,
-        milestone: "M13",
-        route: "/config",
-        requiresCapability: { resource: RES_AGENTS, verb: "create" },
-      },
-      {
-        id: "registries",
-        label: "Registries",
-        icon: Users,
+        // Topology (m15.13) — the grouped/searchable live graph of what is
+        // wired to what. It is a VIEW of activity, not a thing you create.
+        id: "topology",
+        label: "Topology",
+        icon: Network,
         milestone: "M15",
-        route: "/registries",
+        route: "/topology",
+      },
+    ],
+  },
+  {
+    // Admin — the install itself. Credentials, model routing, tenancy: rarely
+    // touched, consequential when touched, and never in the way of daily work.
+    heading: "Admin",
+    items: [
+      {
+        // Providers — the model home and the first step of the journey. Its
+        // first-run prominence is carried by the Home checklist below (which
+        // links to /providers/connect), not by nav position.
+        id: "providers",
+        label: "Providers",
+        icon: PlugZap,
+        milestone: "M14",
+        route: "/providers",
       },
       {
         id: "routes",
@@ -437,6 +473,16 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: KeyRound,
         milestone: "M15",
         route: "/secrets",
+      },
+      {
+        // Tenants (M47) — cluster-scoped namespace groupings with compute + model
+        // quotas. Read-only for everyone; operators manage them (RBAC enforced at
+        // the API server, ADR 0011).
+        id: "tenants",
+        label: "Tenants",
+        icon: Building2,
+        milestone: "M47",
+        route: "/tenants",
       },
     ],
   },
@@ -457,8 +503,15 @@ export function navRoute(id: string): string {
   return item.route;
 }
 
-// FirstRunStep is one guided step in the dashboard's first-run checklist. `doneKey`
-// maps to the dashboard's live setup signals (provider/agent/run); `to` is derived
+// navSectionOf names the section a nav id belongs to — the breadcrumb trail's
+// middle crumb (M151 §4.2), resolved from the IA rather than re-declared in the
+// shell. Returns undefined for an id the IA does not carry.
+export function navSectionOf(id: string): string | undefined {
+  return NAV_SECTIONS.find((s) => s.items.some((i) => i.id === id))?.heading;
+}
+
+// FirstRunStep is one guided step in the Home first-run checklist. `doneKey`
+// maps to Home's live setup signals (provider/agent/run); `to` is derived
 // from the nav surface the step drives so the checklist can't drift from the IA.
 export interface FirstRunStep {
   label: string;
@@ -466,15 +519,90 @@ export interface FirstRunStep {
   doneKey: "provider" | "agent" | "run";
 }
 
-// FIRST_RUN_CHECKLIST — the dashboard's guided "get started" steps (m18.10),
-// co-located with NAV_SECTIONS (m54.4) so the steps + the IA are the ONE source of
-// truth reviewed together. Each `to` derives from the nav route it drives (the
+// FIRST_RUN_CHECKLIST — Home's guided "get started" steps (m18.10), co-located
+// with NAV_SECTIONS (m54.4) so the steps + the IA are the ONE source of truth
+// reviewed together. Each `to` derives from the nav route it drives (the
 // connect/new suffixes are the action affordances ON those surfaces) — a nav route
 // change follows automatically instead of leaving a stale hardcoded path.
 export const FIRST_RUN_CHECKLIST: FirstRunStep[] = [
   { label: "Connect a provider", to: `${navRoute("providers")}/connect`, doneKey: "provider" },
   { label: "Create an agent", to: `${navRoute("agents")}/new`, doneKey: "agent" },
-  // The Playground — the taught run surface (nav's Build step). Was /agents (a
-  // list, not a run affordance); m49.4 UX-review P1.
+  // The Playground — the taught run surface. Was /agents (a list, not a run
+  // affordance); m49.4 UX-review P1.
   { label: "Run your agent", to: navRoute("playground"), doneKey: "run" },
 ];
+
+// ── The breadcrumb trail (M151 §4.2) ────────────────────────────────────────
+
+export interface ShellCrumb {
+  label: string;
+  /** A router destination. The LAST crumb never has one — you are already there. */
+  to?: string;
+}
+
+/** Longest-prefix first, so /tools/mcp-servers wins over a hypothetical /tools. */
+const ROUTED_ITEMS: NavItem[] = NAV_ITEMS.filter(
+  (i): i is NavItem & { route: string } => Boolean(i.route) && i.route !== "/",
+).sort((a, b) => (b.route ?? "").length - (a.route ?? "").length);
+
+function humanizeSegment(seg: string): string {
+  const words = decodeURIComponent(seg).replace(/-/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * The trail for a pathname, resolved from the IA rather than hand-maintained:
+ * Home → the owning section → the destination → whatever the page added to the
+ * URL (a namespace/name pair, a run id).
+ *
+ * The section crumb is deliberately NOT a link: a section is a grouping, not a
+ * destination, and a breadcrumb that navigates nowhere is worse than one that
+ * plainly does not offer to.
+ */
+export function buildCrumbs(pathname: string): ShellCrumb[] {
+  const path = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
+  if (path === "/" || path === "") return [{ label: "Home" }];
+
+  const home: ShellCrumb = { label: "Home", to: "/" };
+
+  // A not-yet-built IA destination: /soon/<nav id>.
+  const soon = /^\/soon\/([^/]+)$/.exec(path);
+  if (soon) {
+    const item = NAV_ITEMS.find((i) => i.id === soon[1]);
+    if (item) {
+      const section = navSectionOf(item.id);
+      return [
+        home,
+        ...(section && section !== item.label ? [{ label: section }] : []),
+        { label: item.label },
+      ];
+    }
+    return [home, { label: humanizeSegment(soon[1]) }];
+  }
+
+  const match = ROUTED_ITEMS.find(
+    (i) => path === i.route || path.startsWith(`${i.route}/`),
+  );
+  if (!match || !match.route) {
+    // A route the IA does not name (a not-found, a deep link to a surface reached
+    // only from another page). Say what the URL says rather than inventing a home
+    // for it.
+    const segments = path.split("/").filter(Boolean);
+    return [home, { label: humanizeSegment(segments[0] ?? "") }];
+  }
+
+  const section = navSectionOf(match.id);
+  const tail = path.slice(match.route.length).split("/").filter(Boolean);
+  const crumbs: ShellCrumb[] = [home];
+  // "Agents › Agents" is not a trail, it is a stutter: when a section and its
+  // destination share a name, the section crumb is dropped and the destination
+  // (which is the one that navigates) is kept.
+  if (section && section !== match.label) crumbs.push({ label: section });
+  crumbs.push(
+    tail.length > 0 ? { label: match.label, to: match.route } : { label: match.label },
+  );
+  if (tail.length > 0) {
+    crumbs.push({ label: tail.map(decodeURIComponent).join("/") });
+  }
+  return crumbs;
+}

@@ -99,9 +99,14 @@ describe("AgentsPage (DataTable + list contract)", () => {
       agents: () => ({ ok: true, body: { agents: [], items: [agent("echo")], nextCursor: "" } }),
     });
     renderPage(<AgentsPage />);
+    // Identity (name over namespace), state, and the next step all come off the
+    // same `items` entry. The image left the table with the M151 column budget
+    // (spec §4.4 names Entity · Lifecycle · State · Runs · Spend · Next step and
+    // no Image) — dropped is not lost: it still renders on the detail page.
     expect(await screen.findByText("echo")).toBeInTheDocument();
     expect(screen.getByText("prod")).toBeInTheDocument();
-    expect(screen.getByText("echo:1")).toBeInTheDocument();
+    expect(screen.getByTestId("next-step-echo")).toBeInTheDocument();
+    expect(screen.queryByText("echo:1")).toBeNull();
   });
 
   // Page-level WCAG 2.1 AA structural gate (M100 UI99-7): the whole Agents page, with the RBAC-aware

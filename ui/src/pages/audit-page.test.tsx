@@ -94,11 +94,16 @@ describe("AuditPage — basic rendering (m63.5)", () => {
 
     expect(await screen.findByTestId("audit-page")).toBeInTheDocument();
     expect(screen.getByRole("table", { name: "Audit events" })).toBeInTheDocument();
-    expect(screen.getByText("alice")).toBeInTheDocument();
+    // The page root renders during loading, so awaiting it proves nothing about
+    // the rows — await the row data itself (the T4 flake fix runs-page documents).
+    expect(await screen.findByText("alice")).toBeInTheDocument();
     expect(screen.getByText("bob")).toBeInTheDocument();
-    // The outcome renders as a badge — both success and denied are shown.
-    expect(screen.getByText("success")).toBeInTheDocument();
-    expect(screen.getByText("denied")).toBeInTheDocument();
+    // The outcome renders as a badge — both success and denied are shown. Each
+    // is in the DOM twice and on screen once: the State column is hidden below
+    // 768 by the §4.4 budget, and the copy folded into the What line is hidden
+    // at 768 and up.
+    expect(screen.getAllByText("success").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("denied").length).toBeGreaterThan(0);
   });
 
   it("renders the filter bar with actor, action, kind inputs", async () => {
@@ -466,5 +471,97 @@ describe("AuditPage — P1-2 AUDIT_ACTIONS vocabulary (m76 close)", () => {
       Array.from((select as HTMLSelectElement).options).some((o) => o.value === "connect.denied"),
       'action "connect.denied" must NOT be in the dropdown — it never exists as an action value',
     ).toBe(false);
+  });
+});
+
+// ── M151: the editorial ACTIVITY-FEED conversion ──────────────────────────────
+
+describe("AuditPage — activity feed (M151, §4.4 / §7.1 / §7.2)", () => {
+  it("a refused act carries a verb-first next step; one that went through says Nothing needed", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        items: [
+          event({ id: 1, actor: "alice", outcome: "denied" }),
+          event({ id: 2, actor: "bob", outcome: "success" }),
+        ],
+        nextCursor: "",
+      },
+    }));
+
+    renderPage();
+
+    const step = await screen.findByTestId("next-step-1");
+    expect(step).toHaveTextContent("Review the denial");
+    // It opens the row's full record rather than navigating away from the trail.
+    fireEvent.click(step);
+    expect(await screen.findByTestId("audit-detail-drawer")).toBeInTheDocument();
+
+    const quiet = screen.getByTestId("next-step-2");
+    expect(quiet).toHaveTextContent("Nothing needed");
+    expect(quiet.tagName).not.toBe("A");
+    expect(quiet.tagName).not.toBe("BUTTON");
+  });
+
+  it("the Needs you chip narrows the loaded window to the acts that did not go through", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        items: [
+          event({ id: 1, actor: "refused-actor", outcome: "denied" }),
+          event({ id: 2, actor: "clean-actor", outcome: "success" }),
+        ],
+        nextCursor: "",
+      },
+    }));
+
+    renderPage();
+    await screen.findByText("refused-actor");
+
+    fireEvent.click(screen.getByRole("radio", { name: /Needs you/ }));
+    expect(screen.getByText("refused-actor")).toBeInTheDocument();
+    expect(screen.queryByText("clean-actor")).toBeNull();
+  });
+
+  it("Duration and Cost read — with one QuietNote, never a zero (§7 A1)", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        items: [
+          event({ id: 1, actor: "alice", traceId: "trace-1" }),
+          event({ id: 2, actor: "bob", traceId: undefined }),
+        ],
+        nextCursor: "",
+      },
+    }));
+
+    renderPage();
+    await screen.findByText("alice");
+
+    // One calm note above the table explains both columns, once.
+    expect(screen.getByRole("note")).toHaveTextContent(
+      "An audit row records an act, not a run.",
+    );
+    // The act inside a run: the figures exist, this endpoint does not send them.
+    expect(screen.getAllByTitle(/unknown, not zero/i).length).toBeGreaterThan(0);
+    // The act outside a run: there is nothing to measure at all. Different truth,
+    // different sentence — same honest glyph.
+    expect(screen.getAllByTitle(/absent, not zero/i).length).toBeGreaterThan(0);
+    // And never a fabricated money zero.
+    expect(screen.queryByText("$0.0000")).toBeNull();
+    expect(screen.queryByText("$0.00")).toBeNull();
+  });
+
+  it("501 is a calm note — not an error, not a retry", async () => {
+    installFetch(() => ({ ok: false, status: 501, body: { error: "audit not enabled" } }));
+
+    renderPage();
+
+    const wrapper = await screen.findByTestId("audit-unavailable");
+    // QuietNote's role is `note` — deliberately never `alert` or `status`.
+    expect(wrapper.querySelector('[role="note"]')).not.toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
+    expect(screen.queryByText("No audit events")).toBeNull();
   });
 });

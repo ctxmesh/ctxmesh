@@ -38,6 +38,18 @@ describe("ForbiddenInline", () => {
     ).toBeInTheDocument();
   });
 
+  // M151 §7 (A4): a denied WRITE must not read as a denied read — the user
+  // would go ask an admin for the wrong role.
+  it("names the missing permission on a write denial", () => {
+    render(<ForbiddenInline resource="teams" permission="create" />);
+    expect(
+      screen.getByText("You don't have permission to create teams"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Ask an admin for a role that can create teams."),
+    ).toBeInTheDocument();
+  });
+
   it("wires an optional next action", () => {
     const onClick = vi.fn();
     render(

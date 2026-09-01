@@ -27,7 +27,8 @@ export type Milestone =
   | "M73"
   | "M74"
   | "M76"
-  | "M112";
+  | "M112"
+  | "M151";
 
 export const MILESTONE_LABEL: Record<Milestone, string> = {
   M13: "Foundation",
@@ -48,6 +49,9 @@ export const MILESTONE_LABEL: Record<Milestone, string> = {
   M74: "Template gallery & fork",
   M76: "Catalog taxonomy",
   M112: "Collaboration console",
+  // M151 — the console redesign. The Stops surface (spec §6.2 gap 2) is the one
+  // IA destination it adds, so the gallery needs the tag to render the IA map.
+  M151: "Console redesign",
 };
 
 export function MilestoneTag({ m, className }: { m: Milestone; className?: string }) {

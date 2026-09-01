@@ -211,3 +211,139 @@ func TestSuspend_OperatorAndSpecStopsAreIndependent(t *testing.T) {
 	assert.Equal(t, operator.MarkerKey(), spec.MarkerKey(),
 		"the accelerator is the same halt whichever intent recorded it")
 }
+
+// ─── M151 hardening A1: GET /api/kills is caller-scoped ───────────────────────────────────────────
+//
+// The list used to run NO authorization at all. Proved live against the dev cluster with a
+// zero-RBAC ServiceAccount token: /api/agents answered 403 and /api/kills answered 200, same
+// token, same second — handing every authenticated caller the namespace, agent, tenant, the
+// operator's free-text reason and the principal for every stop in the cluster. M151 is what made
+// it reach: the frame polls this endpoint on every page and the Stops page lists it cluster-wide.
+//
+// The rule the tests below pin down is deliberately NOT "hide what you cannot read". A caller must
+// never be told "nothing is stopped" when something that halts THEIR work is in force. So a
+// tenant- or fleet-wide stop is always listed — with the reason and the principal stripped, since
+// those are the parts that needed cluster-wide authority to see.
+
+// nsAuthorizer allows `list agentdeployments` only in the named namespaces, and never cluster-wide
+// (an empty Namespace is the cluster-scoped probe). Anything else — the kill verb included — is
+// allowed, so these tests isolate the READ scoping rather than re-testing the kill gate.
+type nsAuthorizer struct{ allowed map[string]bool }
+
+func (a nsAuthorizer) Authorize(_ context.Context, _ client.Client, act authz.Action) error {
+	if act.Resource == resourceAgentDeployments && act.Verb == "list" && act.Subresource == "" {
+		if act.Namespace == "" || !a.allowed[act.Namespace] {
+			return authz.ErrForbidden
+		}
+	}
+	return nil
+}
+
+func listKills(t *testing.T, s *Server) (*httptest.ResponseRecorder, []activeKill) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/kills", nil)
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+	var out []activeKill
+	if rec.Code == http.StatusOK {
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out), rec.Body.String())
+	}
+	return rec, out
+}
+
+// seedStops records one stop at each level, through the store directly, so the list tests do not
+// depend on the kill gate.
+func seedStops(t *testing.T, ks killscope.Store) {
+	t.Helper()
+	ctx := context.Background()
+	for _, sc := range []killscope.Scope{
+		{Level: killscope.LevelNamespace, Namespace: "team-a"},
+		{Level: killscope.LevelNamespace, Namespace: "team-b"},
+		{Level: killscope.LevelAgent, Namespace: "team-b", Agent: "billing"},
+		{Level: killscope.LevelFleet},
+	} {
+		require.NoError(t, ks.Kill(ctx, killscope.Kill{
+			Scope: sc, Reason: "the incident narrative", Principal: "alice@example.com",
+		}))
+	}
+}
+
+// THE BAR: a caller who cannot read a namespace does not learn what is stopped inside it.
+func TestListKills_NamespaceStopsAreScopedToWhatTheCallerCanRead(t *testing.T) {
+	s, ks, _ := killAPIServer(t, nsAuthorizer{allowed: map[string]bool{"team-a": true}})
+	seedStops(t, ks)
+
+	rec, out := listKills(t, s)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	got := map[string]activeKill{}
+	for _, k := range out {
+		got[k.Scope] = k
+	}
+	assert.Contains(t, got, "namespace:team-a", "a namespace the caller CAN read stays visible")
+	assert.NotContains(t, got, "namespace:team-b", "a namespace the caller cannot read must not leak")
+	assert.NotContains(t, got, "agent:team-b/billing", "nor an agent stop inside that namespace")
+
+	// The visible one keeps its full detail: the caller is entitled to it.
+	assert.Equal(t, "the incident narrative", got["namespace:team-a"].Reason)
+	assert.Equal(t, "alice@example.com", got["namespace:team-a"].Principal)
+}
+
+// A stop that halts the caller's own work is ALWAYS disclosed — silence there would be a worse
+// failure than the leak. What is withheld is the free-text reason and who pressed it.
+func TestListKills_WiderStopsAreDisclosedButRedacted(t *testing.T) {
+	s, ks, _ := killAPIServer(t, nsAuthorizer{allowed: map[string]bool{"team-a": true}})
+	seedStops(t, ks)
+	require.NoError(t, ks.Kill(context.Background(), killscope.Kill{
+		Scope:     killscope.Scope{Level: killscope.LevelTenant, Tenant: "acme"},
+		Reason:    "acme is over budget",
+		Principal: "bob@example.com",
+	}))
+
+	_, out := listKills(t, s)
+	var fleet, tenant *activeKill
+	for i := range out {
+		switch out[i].Scope {
+		case "fleet":
+			fleet = &out[i]
+		case "tenant:acme":
+			tenant = &out[i]
+		}
+	}
+	require.NotNil(t, fleet, "a fleet stop halts everyone's work and must never be hidden")
+	require.NotNil(t, tenant, "nor a tenant stop")
+
+	for _, k := range []*activeKill{fleet, tenant} {
+		assert.Empty(t, k.Reason, "the operator's words needed cluster-wide authority to read")
+		assert.Empty(t, k.Principal, "and so did the name of who pressed it")
+		assert.NotEmpty(t, k.Level, "but the caller is still told THAT their work is halted")
+	}
+	assert.Equal(t, "acme", tenant.Tenant, "and how far the stop reaches")
+}
+
+// A cluster-wide reader — the operator this page was designed for — still sees everything, in full.
+func TestListKills_ClusterWideReaderSeesEverythingInFull(t *testing.T) {
+	s, ks, _ := killAPIServer(t, allowAuthorizer{})
+	seedStops(t, ks)
+
+	_, out := listKills(t, s)
+	assert.Len(t, out, 4, "nothing is filtered from a caller who can read the whole cluster")
+	for _, k := range out {
+		assert.Equal(t, "the incident narrative", k.Reason)
+		assert.Equal(t, "alice@example.com", k.Principal)
+	}
+}
+
+// A caller who can read NOTHING learns only that a fleet-wide stop exists — never a namespace one,
+// and never a word of why.
+func TestListKills_ZeroRBACCallerLearnsNothingBeyondTheFleetHalt(t *testing.T) {
+	s, ks, _ := killAPIServer(t, nsAuthorizer{allowed: map[string]bool{}})
+	seedStops(t, ks)
+
+	_, out := listKills(t, s)
+	require.Len(t, out, 1, "only the fleet stop, which halts this caller too")
+	assert.Equal(t, "fleet", out[0].Scope)
+	assert.Empty(t, out[0].Reason)
+	assert.Empty(t, out[0].Principal)
+}

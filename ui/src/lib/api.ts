@@ -1735,11 +1735,51 @@ export interface PromptDiffLine {
 }
 
 // PromptDiffResponse mirrors GET /api/promptversions/{ns}/{name}/diff?from=.
-// resolveMode is ALWAYS "textual" (the only supported resolver). lines is the
-// line-level diff. NEVER present when the endpoint errors.
+// resolveMode is ALWAYS "textual" (the only supported resolver). NEVER present
+// when the endpoint errors.
+//
+// M151: this type used to declare `lines: PromptDiffLine[]` — a field the BFF
+// has never sent. `internal/bff/promptversions.go` returns `diff`, a unified-diff
+// STRING, plus the two names and versions. Against a real cluster the diff
+// reader therefore threw on `diff.lines.length`; only the fixtures, which had
+// been written to the (wrong) type rather than to the wire, hid it. The wire
+// fields below are now the truth, and `lines` is DERIVED by the client — see
+// `parseUnifiedDiff`. A type that describes what we wished the server sent is
+// worse than no type at all.
 export interface PromptDiffResponse {
   resolveMode: "textual";
+  /** The unified-diff text. "" when the two versions resolve identically. */
+  diff?: string;
+  identical?: boolean;
+  fromName?: string;
+  toName?: string;
+  fromVersion?: string;
+  toVersion?: string;
+  /** Derived client-side from `diff`. A server that starts sending it wins. */
   lines: PromptDiffLine[];
+}
+
+// parseUnifiedDiff turns the BFF's unified-diff text into the line list the
+// reader renders. It drops the file headers (`---`, `+++`) and hunk markers
+// (`@@ … @@`), which carry no prompt content, and classifies everything else by
+// its first character. A line that is exactly "\ No newline at end of file" is
+// diff metadata, not content, and is dropped too.
+export function parseUnifiedDiff(diff: string): PromptDiffLine[] {
+  const out: PromptDiffLine[] = [];
+  for (const raw of diff.split("\n")) {
+    if (raw === "" && out.length === 0) continue;
+    if (raw.startsWith("--- ") || raw.startsWith("+++ ") || raw.startsWith("@@")) continue;
+    if (raw.startsWith("\\ ")) continue;
+    const head = raw.charAt(0);
+    if (head === "+" || head === "-") {
+      out.push({ op: head, content: raw.slice(1) });
+    } else {
+      // A context line is prefixed with a single space; a bare line (some
+      // resolvers omit it on empty context) is context too.
+      out.push({ op: " ", content: head === " " ? raw.slice(1) : raw });
+    }
+  }
+  return out;
 }
 
 export interface PromptVersionSummary {
@@ -2048,6 +2088,51 @@ export interface ApprovalQueueItem {
   rootRunId?: string;
   message?: string;
   waitingSince?: string; // RFC3339 — when the run entered requires_action
+}
+
+// ── The scoped kill switch (ADR 0126, spec §5.23) ────────────────────────────
+// The console's frame carries a Stop control on every page, so these three
+// shapes mirror internal/bff/kill_handler.go exactly.
+//
+// The wire LEVEL vocabulary is the backend's (agent | namespace | tenant |
+// fleet), not the UI's. The kit's StopControl speaks in what a person picks —
+// "this agent / this team / workspace / everything" — and the shell maps between
+// them. Do not rename these: they are the API.
+
+/** The scope levels a stop can be recorded at (killscope.Level). */
+export type StopLevel = "agent" | "namespace" | "tenant" | "fleet";
+
+/** POST /api/kill and POST /api/kill/lift take the same body. `reason` is
+ *  REQUIRED on a kill (the backend 400s without it) — it becomes the audit line
+ *  and the sentence everyone whose work stopped will read. */
+export interface StopScopeRequest {
+  level: StopLevel;
+  /** Required for agent/namespace levels, forbidden otherwise. */
+  namespace?: string;
+  /** Required for the agent level. */
+  agent?: string;
+  /** Required for the tenant level. */
+  tenant?: string;
+  reason?: string;
+}
+
+/** The outcome. `applied` false on a lift means the scope was not stopped — an
+ *  honest no-op rather than a success that did nothing. */
+export interface StopScopeResponse {
+  scope: string;
+  applied: boolean;
+}
+
+/** One live stop (GET /api/kills). An install with no kill store configured
+ *  answers `[]` — which is a real, known "nothing is stopped", not an unknown. */
+export interface ActiveStop {
+  scope: string;
+  level: StopLevel;
+  namespace?: string;
+  agent?: string;
+  tenant?: string;
+  reason: string;
+  principal: string;
 }
 
 // MySharesItem mirrors the BFF's MySharesItem DTO (internal/bff/shares.go).
@@ -5075,7 +5160,23 @@ export const api = {
         res.status,
       );
     }
-    return (await res.json()) as PromptDiffResponse;
+    const body = (await res.json()) as PromptDiffResponse;
+    // Derive `lines` when the server did not send them, which is every real
+    // server. Identical content is an empty list, NOT an unreadable diff — the
+    // reader must be able to tell "nothing changed" from "we could not read it".
+    if (!Array.isArray(body.lines)) {
+      if (body.identical === true) {
+        body.lines = [];
+      } else if (typeof body.diff === "string") {
+        // "" is a legitimately empty diff — identical content — and parses to [].
+        body.lines = parseUnifiedDiff(body.diff);
+      }
+      // Otherwise `lines` stays absent ON PURPOSE. A 200 that carries neither a
+      // diff nor an identical flag is malformed, and the reader must be able to
+      // say "we could not read this" rather than "nothing changed" — those are
+      // different claims and only one of them is true.
+    }
+    return body;
   },
 
   // --- Datasets labeling API (m69.3, ADR 0062 Fork 5) -------------------------
@@ -5484,6 +5585,82 @@ export const api = {
       );
     }
     return (await res.json()) as ApprovalQueueItem[];
+  },
+
+  // listStops reads the active scoped stops (GET /api/kills, ADR 0126). The frame
+  // renders their number beside the Govern → Stops nav item, so this is polled by
+  // the shell on every page. Reading is not privileged (knowing that work is halted
+  // is not a secret; RECORDING or lifting a stop needs the `kill` verb), and an
+  // install with no kill store answers an empty array rather than a 501 — so an
+  // empty result genuinely means "nothing is stopped", not "we could not tell".
+  listStops: async (signal?: AbortSignal): Promise<ActiveStop[]> => {
+    const res = await apiFetch("/api/kills", {
+      headers: { Accept: "application/json" },
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `listStops failed (${res.status})`),
+        res.status,
+      );
+    }
+    const data = (await res.json()) as ActiveStop[] | null;
+    return Array.isArray(data) ? data : [];
+  },
+
+  // stopScope records an emergency stop (POST /api/kill, ADR 0126). It is gated by
+  // its OWN RBAC verb — `kill` on the agentdeployments/kill subresource — which is
+  // bound to nobody by default, so a 403 here is the expected answer for most
+  // callers and MUST be surfaced verbatim rather than swallowed: the operator has
+  // to know the fleet did not stop.
+  stopScope: async (
+    req: StopScopeRequest,
+    signal?: AbortSignal,
+  ): Promise<StopScopeResponse> => {
+    const res = await apiFetch("/api/kill", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `the stop was not recorded (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as StopScopeResponse;
+  },
+
+  // liftStop un-kills a scope (POST /api/kill/lift, ADR 0126 §5). It takes the SAME body as the
+  // kill; the backend reads only the scope (a lift needs no reason — the un-kill is audited on its
+  // own row). It is gated by the same `kill` verb, so most callers get a 403 here.
+  //
+  // Three answers, and none of them may be swallowed:
+  //   • 403 — the caller lacks the verb. THE STOP IS STILL IN FORCE. Surfacing this is the whole
+  //     point: a dialog that closed as though it had worked would leave an operator believing the
+  //     fleet is running when it is not.
+  //   • 501 — this install has no kill store at all (killScopes == nil). Nothing can be stopped or
+  //     lifted here, and the surface says so as a calm note rather than as a failure.
+  //   • 200 with `applied: false` — the scope was not stopped, so nothing was lifted. An honest
+  //     no-op, and callers must render it as one rather than as a success.
+  liftStop: async (
+    req: StopScopeRequest,
+    signal?: AbortSignal,
+  ): Promise<StopScopeResponse> => {
+    const res = await apiFetch("/api/kill/lift", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `the stop was not lifted (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as StopScopeResponse;
   },
 
   // getSharedRun fetches the public shared-run view (GET /api/shared/runs/{token}).

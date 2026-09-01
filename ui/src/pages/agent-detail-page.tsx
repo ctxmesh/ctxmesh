@@ -4,11 +4,9 @@ import {
   Activity,
   AlertTriangle,
   Boxes,
-  Check,
   ChevronRight,
   ExternalLink,
   GitFork,
-  Minus,
   Pencil,
   Play,
   Plus,
@@ -16,28 +14,51 @@ import {
   Server,
   Share2,
   SlidersHorizontal,
-  Terminal,
   Trash2,
-  Wrench,
   X,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, PanelHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  ClosingNote,
   ConfirmDialog,
   DataTable,
-  type Column,
   DetailDrawer,
   EmptyState,
+  ErrorState,
   ForbiddenInline,
+  KeyValueList,
+  LifecycleStrip,
+  Meter,
+  NextStepLink,
+  PageHeader,
+  QuantityValue,
+  QuietNote,
+  SectionHeader,
+  Skeleton,
+  StatusBadge,
+  Timeline,
+  UNKNOWN,
   Wizard,
-  type WizardStep,
+  humanizeStatusReason,
+  lifecycleFactNumber,
+  resolveStatus,
+  truncateId,
   useFocusTrap,
   useToast,
+  type Column,
+  type KeyValueItem,
+  type LifecycleStage,
+  type LifecycleStageCell,
+  type PageHeaderAction,
+  type TimelineStep,
+  type TimelineTone,
+  type WizardStep,
 } from "@/components/kit";
 import { FormField } from "@/components/config/form-field";
 import { ChatPanel } from "@/components/agent-chat";
@@ -63,7 +84,6 @@ import {
   type OnlineScoreResponse,
   type OnlineScoreWindow,
   type PublishTemplateResponse,
-  type RunSummary,
 } from "@/lib/api";
 
 // Fork provenance labels (ADR 0068 §6) — forwarded from the AgentDeployment CR.
@@ -72,24 +92,83 @@ const LABEL_FORK_ORIGIN_NS = "agents.ctxmesh.ai/fork-origin-namespace";
 const LABEL_FORK_ORIGIN_NAME = "agents.ctxmesh.ai/fork-origin-name";
 const LABEL_FORK_ORIGIN_VERSION = "agents.ctxmesh.ai/fork-origin-version";
 import { useCapabilities } from "@/lib/capabilities";
+import { formatDateTime, formatLatency, formatUSD } from "@/lib/format";
 import { navRoute, RES_AGENTS, RES_LOGS, RES_MEMORY, RES_SCALING } from "@/lib/nav";
 
-// AgentDetailPage — the agent LANDING page (first-agent-flow.md §5, m14.11,
-// extended m15.11). It closes the aha loop: watch the agent come alive (status
-// timeline + live log tail) → run it (the Run panel) → see the trace with the
-// tool span (the native run inspector).
+// AgentDetailPage — the landing page for ONE agent, and the second-most-read
+// surface in the console (M151, spec §6.1 archetype A2 + the §6.2 row for this
+// file). Route: /agents/:ns/:name
 //
-// m15.11 additions:
-//   • drift / managedOutsideUI badges in the header.
-//   • Edit Wizard — full round-trip for console-managed; safe-field patch for
-//     managedOutsideUI. On drift, warns before submit (overwrite).
-//   • Typed-name Delete via ConfirmDialog: loads + shows agentReferences
-//     (GC vs orphan impact), then calls deleteAgent on confirm.
-//   • Per-agent Runs list (agentRuns): bounded, 501 → calm empty state.
-//   • All write affordances RBAC-aware (display-only, ADR 0011).
+// ── THE PAGE'S ONE IDEA: WHAT CAN IT REACH, AND IS THAT WORKING? ────────────
+// An agent is not interesting on its own; it is interesting because of what it
+// is wired to — a model route, a prompt, a guardrail policy, a set of tools, a
+// memory store. So the page leads with "What it can reach": every binding, one
+// per row, each wearing exactly what the platform can say about it.
+//
+// That panel is where the honesty rules bite hardest, and they cut BOTH ways:
+//
+//   • A tool that has never been called is NOT broken. It wears the dashed
+//     `open` Tag ("never called", §2.5 — declared but never exercised), never a
+//     failure hue. Dressing an unexercised binding as a fault teaches operators
+//     to ignore the real ones.
+//   • A binding that does not RESOLVE *is* broken, and the panel says so in
+//     crit and in words. It will not proceed without a change (§2.2), and the
+//     panel offers the next step rather than leaving the reader to hunt.
+//   • Whether a resolved tool has actually been CALLED is a span-level fact
+//     that lives in the trace backend, not on this endpoint. So `working` is
+//     defined as "the binding resolves and the agent is up" — and the panel's
+//     QuietNote says exactly that, rather than letting a green tag imply a
+//     measurement nobody made.
+//
+// ── WHAT THIS PAGE MAY NOT CLAIM (§7.1) ─────────────────────────────────────
+// `GET /api/agents/{ns}/{name}` returns identity, spec, status conditions,
+// bindings and the version list. It returns NO live replica count, NO per-tool
+// call counts, NO spend. Each of those renders the honest dash plus one note
+// saying which absence it is — never a zero, never an estimate.
+//
+// ── THE LIFECYCLE STRIP IS A POSITION CLAIM, SO IT IS DERIVED, NOT GUESSED ──
+// Build → Govern → Ship → Improve is read off `isDraft`, the eval-gate
+// projection, readiness and the RegressionDetected condition (see
+// `lifecycleStage`). When those cannot place the agent, NO stage is lit and a
+// QuietNote says so: a guessed position is the one thing §5.20 forbids.
+//
+// ── TABS (§6.2): Overview / Equipment / Runs / Quality / Versions ───────────
+// Five tabs, and the rail persists across all of them (§6.1 A2). Equipment is
+// everything you attach to an agent — tools, runtime policy, memory, scaling,
+// redaction. Runs is what it has done, including the live output tail (gated on
+// `get pods/log`). Quality is the improvement loop. Versions is the history and
+// the snapshot diff.
+//
+// m15.11 behaviour that survives verbatim: drift / managedOutsideUI provenance,
+// the Edit Wizard (full round-trip vs safe-field patch, drift-overwrite
+// warning), typed-name Delete with its references impact, the per-agent Runs
+// list with its 501-degrade, and RBAC-aware write affordances (display-only,
+// ADR 0011).
 
-const TABS = ["Overview", "Logs", "Runs", "Bindings", "Memory", "Scaling", "Redaction"] as const;
+const TABS = ["Overview", "Equipment", "Runs", "Quality", "Versions"] as const;
 type Tab = (typeof TABS)[number];
+
+/**
+ * Deep links minted before the M151 consolidation still exist in the wild — a
+ * trace's `?tab=Memory` back-link (m49.3), the m14 playbook's `?tab=Logs`. They
+ * resolve to the tab that now OWNS that surface instead of silently dumping the
+ * reader on Overview, so an old bookmark still lands on the thing it named.
+ */
+const TAB_ALIAS: Record<string, Tab> = {
+  bindings: "Equipment",
+  memory: "Equipment",
+  scaling: "Equipment",
+  redaction: "Equipment",
+  runtime: "Equipment",
+  logs: "Runs",
+  improve: "Quality",
+};
+
+function resolveTab(raw: string | null): Tab {
+  const t = (raw ?? "").trim().toLowerCase();
+  if (!t) return "Overview";
+  return TABS.find((x) => x.toLowerCase() === t) ?? TAB_ALIAS[t] ?? "Overview";
+}
 
 type Load =
   | { kind: "loading" }
@@ -101,22 +180,27 @@ export function AgentDetailPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [state, setState] = React.useState<Load>({ kind: "loading" });
-  // The initial tab is deep-linkable via ?tab=<Name> (m49.3) — a trace→memory
-  // back-link lands directly on the Memory tab. Unknown/absent ⇒ Overview.
-  const initialTab = ((): Tab => {
-    const t = searchParams.get("tab");
-    return (TABS as readonly string[]).includes(t ?? "") ? (t as Tab) : "Overview";
-  })();
-  const [tab, setTab] = React.useState<Tab>(initialTab);
-  // Gate the Logs tab (M100 UI99-logs): the live-log tail needs `get pods/log`, so a persona who
-  // can't read pod logs must not see a tab that then 403s. Display-only + fail-OPEN (can() defaults
-  // unknown → true): the tab hides ONLY on a definite deny, and the API still enforces. A deep-link
-  // to ?tab=Logs by a denied persona falls back to Overview (activeTab), never a blank tab.
+  const [tab, setTab] = React.useState<Tab>(() => resolveTab(searchParams.get("tab")));
+  // Gate the live log tail (M100 UI99-logs): tailing needs `get pods/log`, so a
+  // persona who can't read pod logs must not be shown a panel that then 403s.
+  // Display-only + fail-OPEN (an unknown probe reads as allowed; the API is the
+  // real gate). The one case that needs memory is a DEEP LINK to the old
+  // `?tab=Logs`: a denied persona must land on Overview rather than on a Runs
+  // tab whose log panel silently isn't there. The flag clears the moment the
+  // reader picks a tab themselves, so it can never strand them.
   const { can } = useCapabilities();
   const { toast } = useToast();
   const canLogs = can(RES_LOGS, "get");
-  const visibleTabs = TABS.filter((t) => t !== "Logs" || canLogs);
-  const activeTab: Tab = tab === "Logs" && !canLogs ? "Overview" : tab;
+  const [viaLogsLink, setViaLogsLink] = React.useState(
+    () => (searchParams.get("tab") ?? "").trim().toLowerCase() === "logs",
+  );
+  const activeTab: Tab = viaLogsLink && !canLogs ? "Overview" : tab;
+
+  function selectTab(next: Tab) {
+    setViaLogsLink(false);
+    setTab(next);
+  }
+
   // The trace to inspect — set when a run returns a traceId; opens the inspector
   // drawer over the page (list context preserved).
   const [inspectTrace, setInspectTrace] = React.useState<string | null>(null);
@@ -180,12 +264,33 @@ export function AgentDetailPage() {
 
   React.useEffect(() => load(), [load]);
 
+  // ── Loading (§7 A2: header band + a panel skeleton + rail kv bars) ─────────
   if (state.kind === "loading") {
     return (
-      <div className="mx-auto max-w-5xl">
-        <p className="text-sm text-muted-foreground" data-testid="agent-detail-loading">
-          Loading {name}…
-        </p>
+      <div className="min-w-0 space-y-6" data-testid="agent-detail-loading">
+        <PageHeader title={name || "Agent"} titleMono loading />
+        <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
+          <Card className="min-w-0">
+            <PanelHeader title="What it can reach" />
+            <CardContent>
+              <div role="status" aria-busy="true" aria-label={`Loading ${name}`}>
+                {[0, 1, 2, 3, 4].map((i) => (
+                  <Skeleton decorative key={i} className="mb-3 h-3.5 w-full" />
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+          <Card className="min-w-0">
+            <PanelHeader title="Who governs it" />
+            <CardContent>
+              <div role="status" aria-busy="true" aria-label="Loading the agent's record">
+                {[0, 1, 2, 3, 4, 5].map((i) => (
+                  <Skeleton decorative key={i} className="mb-3 h-3.5 w-full" />
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       </div>
     );
   }
@@ -193,7 +298,12 @@ export function AgentDetailPage() {
   if (state.kind === "error") {
     if (state.forbidden) {
       return (
-        <div className="mx-auto max-w-5xl">
+        <div className="min-w-0 space-y-6">
+          <PageHeader
+            breadcrumb={[{ label: "Agents", to: "/agents" }, { label: name }]}
+            title={name || "Agent"}
+            titleMono
+          />
           <ForbiddenInline
             title={`Not allowed to view ${name}`}
             description="Your account can't read this agent in this namespace."
@@ -204,41 +314,52 @@ export function AgentDetailPage() {
     }
     if (state.status === 404) {
       return (
-        <div className="mx-auto max-w-5xl" data-testid="agent-not-found">
+        <div className="min-w-0 space-y-6" data-testid="agent-not-found">
+          <PageHeader
+            breadcrumb={[{ label: "Agents", to: "/agents" }, { label: name }]}
+            title={name || "Agent"}
+            titleMono
+          />
           <EmptyState
             icon={Boxes}
             title="Agent not found"
             description={`No agent "${name}" in ${ns || "this namespace"}. It may have been deleted, or the name is wrong.`}
-            action={{ label: "Back to agents", onClick: () => history.back() }}
+            action={{ label: "Back to agents", onClick: () => navigate("/agents") }}
           />
         </div>
       );
     }
     return (
-      <div className="mx-auto max-w-5xl">
-        <div
-          className="rounded-lg border bg-card p-6 text-sm text-destructive shadow-card"
-          role="alert"
-          data-testid="agent-detail-error"
-        >
-          Couldn't load the agent: {state.message}
-        </div>
+      <div className="min-w-0 space-y-6" data-testid="agent-detail-error">
+        <PageHeader
+          breadcrumb={[{ label: "Agents", to: "/agents" }, { label: name }]}
+          title={name || "Agent"}
+          titleMono
+        />
+        <ErrorState
+          title="The agent didn't load."
+          description="Nothing has changed about the agent itself — only this page failed to read it."
+          detail={state.message}
+          onRetry={() => load()}
+        />
       </div>
     );
   }
 
   const detail = state.detail;
 
-  // m74.6 / U14: fork-needs-rebinding banner — driven by the explicit `needsRebinding` flag the BFF
+  // m74.6 / U14: fork-needs-rebinding notice — driven by the explicit `needsRebinding` flag the BFF
   // now sends (it previously keyed on a `labels` map the BFF never populated → the banner was dead in
   // production). `forkUnresolvedRefs` carries the SPECIFIC dangling refs to itemize.
   const needsRebinding = detail.needsRebinding === true;
   const unresolvedRefs = detail.forkUnresolvedRefs ?? [];
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6" data-testid="agent-detail-page">
-      <AgentHeader
+    <div className="min-w-0 space-y-6" data-testid="agent-detail-page">
+      <AgentBand
         detail={detail}
+        activeTab={activeTab}
+        onTab={selectTab}
         onEdit={openEdit}
         onDelete={openDelete}
         onPublish={() => setPublishOpen(true)}
@@ -263,156 +384,52 @@ export function AgentDetailPage() {
         }}
       />
 
-      {/* m74.6 / U5: needs-rebinding banner — shown when the agent was forked and has
-          dangling references. Renders actionable repair line-items with links. The label
-          "true" means at least one ref is unresolvable; we use the agent's own data
-          (modelRoute absence, bindings list) to surface specific CTAs. The banner clears
-          when the operator removes the label (i.e. the user has connected all resources
-          and the operator re-evaluates — or they edit the agent). */}
+      <ForkLineage labels={detail.labels} />
+
       {needsRebinding && (
-        <div
-          className="rounded-lg border border-amber-300 bg-amber-50 p-4 dark:border-amber-700 dark:bg-amber-950/30"
-          role="alert"
-          data-testid="needs-rebinding-banner"
-        >
-          <div className="flex items-start gap-3">
-            <Wrench className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
-            <div className="space-y-2 flex-1">
-              <p className="font-medium text-amber-900 dark:text-amber-200">
-                Needs attention — connect resources before running
-              </p>
-              <p className="text-sm text-amber-700 dark:text-amber-300">
-                This agent was forked from a template but has unresolved references.
-                Complete the steps below so it can run successfully.
-              </p>
-              {/* U5 + U14: itemize the ACTUAL dangling refs (when the BFF recorded them) with the
-                  right repair action per category — no more generic "review and bind tools" line
-                  that showed even when nothing tool-shaped dangled. */}
-              <ul className="space-y-1 text-sm" data-testid="rebind-ref-list">
-                {unresolvedRefs.length > 0 ? (
-                  unresolvedRefs.map((ref, i) => {
-                    const isRoute = ref.startsWith("model route:");
-                    const isPrompt = ref.startsWith("prompt:");
-                    const isEval = ref.startsWith("evalSuite:");
-                    const isTool = !isRoute && !isPrompt && !isEval;
-                    return (
-                      <li
-                        key={`${ref}-${i}`}
-                        className="flex items-center gap-2 text-amber-800 dark:text-amber-300"
-                        data-testid={`rebind-ref-${i}`}
-                      >
-                        <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-                        <span className="font-medium">{ref}</span>
-                        {isRoute && (
-                          <Link
-                            to="/routes"
-                            className="underline hover:text-amber-600 dark:hover:text-amber-200"
-                            data-testid="rebind-model-route-link"
-                          >
-                            — connect a model route
-                          </Link>
-                        )}
-                        {isTool && (
-                          <button
-                            onClick={() => setTab("Bindings")}
-                            className="underline hover:text-amber-600 dark:hover:text-amber-200"
-                            data-testid="rebind-bindings-tab-link"
-                          >
-                            — bind in the Bindings tab
-                          </button>
-                        )}
-                        {isPrompt && (
-                          <Link
-                            to="/prompts"
-                            className="underline hover:text-amber-600 dark:hover:text-amber-200"
-                          >
-                            — add the prompt
-                          </Link>
-                        )}
-                        {isEval && (
-                          <Link
-                            to="/evals"
-                            className="underline hover:text-amber-600 dark:hover:text-amber-200"
-                          >
-                            — add the eval suite
-                          </Link>
-                        )}
-                      </li>
-                    );
-                  })
-                ) : (
-                  // Fallback for an older fork (label present, no ref annotation): generic guidance.
-                  <>
-                    {!detail.modelRoute && (
-                      <li className="flex items-center gap-2 text-amber-800 dark:text-amber-300">
-                        <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-                        <Link
-                          to="/routes"
-                          className="underline hover:text-amber-600 dark:hover:text-amber-200"
-                          data-testid="rebind-model-route-link"
-                        >
-                          Connect a model route
-                        </Link>
-                        <span className="text-amber-600 dark:text-amber-400 text-xs">— required to run</span>
-                      </li>
-                    )}
-                    <li className="flex items-center gap-2 text-amber-800 dark:text-amber-300">
-                      <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-                      <button
-                        onClick={() => setTab("Bindings")}
-                        className="underline hover:text-amber-600 dark:hover:text-amber-200"
-                        data-testid="rebind-bindings-tab-link"
-                      >
-                        Review and bind tools in the Bindings tab
-                      </button>
-                    </li>
-                  </>
-                )}
-              </ul>
-              <p className="text-xs text-amber-600 dark:text-amber-400">
-                This banner clears once the operator confirms all references are resolved.
-              </p>
-            </div>
-          </div>
+        <RebindNotice
+          detail={detail}
+          refs={unresolvedRefs}
+          onGoEquipment={() => selectTab("Equipment")}
+        />
+      )}
+
+      <AgentLifecycle detail={detail} />
+
+      {/* §4.7 hub grid: the tab's panels on the left, the register that governs
+          the agent on the right. The rail persists across tabs (§6.1 A2) and
+          stacks under the main column below `lg`. */}
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
+        <div className="min-w-0 space-y-5">
+          {activeTab === "Overview" && (
+            <OverviewTab
+              detail={detail}
+              onTraced={(id) => setInspectTrace(id)}
+              onGoEquipment={() => selectTab("Equipment")}
+            />
+          )}
+          {activeTab === "Equipment" && <EquipmentTab detail={detail} />}
+          {activeTab === "Runs" && (
+            <RunsAndOutputTab
+              detail={detail}
+              canLogs={canLogs}
+              onInspect={(id) => setInspectTrace(id)}
+            />
+          )}
+          {activeTab === "Quality" && (
+            <ImprovementLoopSection
+              ns={detail.namespace}
+              name={detail.name}
+              conditions={detail.conditions}
+              gatePhase={detail.gate?.phase}
+              versions={detail.versions}
+            />
+          )}
+          {activeTab === "Versions" && <VersionsTab detail={detail} />}
         </div>
-      )}
 
-      <div className="flex flex-wrap gap-1 border-b" role="tablist" aria-label="Agent detail">
-        {visibleTabs.map((t) => (
-          <button
-            key={t}
-            role="tab"
-            aria-selected={activeTab === t}
-            onClick={() => setTab(t)}
-            data-testid={`tab-${t.toLowerCase()}`}
-            className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
-              activeTab === t
-                ? "border-primary text-foreground"
-                : "border-transparent text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {t}
-          </button>
-        ))}
+        <AgentRail detail={detail} />
       </div>
-
-      {activeTab === "Overview" && (
-        <OverviewTab detail={detail} onTraced={(id) => setInspectTrace(id)} />
-      )}
-      {activeTab === "Logs" && <LogsTab ns={detail.namespace} name={detail.name} ready={detail.ready} />}
-      {activeTab === "Runs" && (
-        <AgentRunsTab ns={detail.namespace} name={detail.name} onInspect={(id) => setInspectTrace(id)} />
-      )}
-      {activeTab === "Bindings" && <BindingsTab bindings={detail.bindings} />}
-      {activeTab === "Memory" && (
-        <MemoryPanel ns={detail.namespace} agentName={detail.name} />
-      )}
-      {activeTab === "Scaling" && (
-        <ScalingPanel ns={detail.namespace} agentName={detail.name} />
-      )}
-      {activeTab === "Redaction" && (
-        <RedactionPanel ns={detail.namespace} agentName={detail.name} />
-      )}
 
       {/* The run inspector opens over the page (drawer) so list/tab context is
           kept. It closes back to exactly where you were. */}
@@ -455,8 +472,8 @@ export function AgentDetailPage() {
         />
       )}
 
-      {/* Publish-as-template dialog (m74.6) — opened by the Publish button in
-          the header (RBAC-gated: update agentdeployments). */}
+      {/* Publish-as-template dialog (m74.6) — opened by the Share action in the
+          header band (RBAC-gated: update agentdeployments). */}
       {publishOpen && (
         <PublishTemplateDialog
           agentNamespace={detail.namespace}
@@ -474,9 +491,22 @@ export function AgentDetailPage() {
   );
 }
 
-// ── Header ──────────────────────────────────────────────────────────────────
-function AgentHeader({
+// ── The page band (§4.3 / §5.17) ────────────────────────────────────────────
+// One PageHeader, not a hand-rolled header: the h1 is the resource NAME, so it
+// is mono and it TRUNCATES on one line with the full value in `title` (§4.5) —
+// a 63-character Kubernetes name clips, it never wraps and it is never
+// `break-all`ed. Provenance and publication ride in the status group next to
+// the name because they describe WHAT this agent is; readiness and drift are
+// the only health signals there.
+//
+// The write affordances go through the STRUCTURED `actions` list rather than
+// `actionsSlot`, because four buttons do not fit a 360px band: the structured
+// list is what lets §4.3's collapse keep the primary (Edit) and the destructive
+// (Delete) and fold Share/Unpublish into the "⋯" menu below `lg`.
+function AgentBand({
   detail,
+  activeTab,
+  onTab,
   onEdit,
   onDelete,
   onPublish,
@@ -484,6 +514,8 @@ function AgentHeader({
   onUnpublish,
 }: {
   detail: AgentDetailResponse;
+  activeTab: Tab;
+  onTab: (t: Tab) => void;
   onEdit: () => void;
   onDelete: () => void;
   onPublish: () => void;
@@ -498,217 +530,680 @@ function AgentHeader({
   // the agent). Display-only — the API is the real RBAC gate (ADR 0011).
   const canPublish = can(RES_AGENTS, "update");
 
-  // U12: fork lineage — show "forked from ns/name @ version" when the provenance labels are set.
-  const forkOriginNs = detail.labels?.[LABEL_FORK_ORIGIN_NS];
-  const forkOriginName = detail.labels?.[LABEL_FORK_ORIGIN_NAME];
-  const forkOriginVersion = detail.labels?.[LABEL_FORK_ORIGIN_VERSION];
-  const hasForkLineage = !!(forkOriginNs && forkOriginName);
+  const actions: PageHeaderAction[] = [];
+  if (canPublish) {
+    actions.push({
+      id: "publish",
+      label: publishedState ? "Share new version" : "Share as template",
+      icon: Share2,
+      variant: "outline",
+      onClick: onPublish,
+    });
+    if (publishedState) {
+      actions.push({
+        id: "unpublish",
+        label: "Unpublish",
+        icon: X,
+        variant: "outline",
+        onClick: onUnpublish,
+      });
+    }
+  }
+  if (canEdit) {
+    // THE primary — the action that survives §4.3's collapse alongside Delete.
+    actions.push({ id: "edit", label: "Edit", icon: Pencil, variant: "outline", primary: true, onClick: onEdit });
+  }
+  if (canDelete) {
+    actions.push({ id: "delete", label: "Delete", icon: Trash2, variant: "destructive", onClick: onDelete });
+  }
+
+  const meta = [detail.namespace, detail.latestVersion, detail.executionModel]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <PageHeader
+      breadcrumb={[{ label: "Agents", to: "/agents" }, { label: detail.name }]}
+      title={detail.name}
+      titleMono
+      status={
+        <span className="flex flex-wrap items-center gap-1.5">
+          <StatusBadge
+            ready={detail.ready}
+            phase={detail.phase}
+            reason={readyReason(detail.conditions)}
+          />
+          {detail.drift && (
+            <Badge
+              variant="warn"
+              data-testid="drift-badge"
+              title="The live spec has diverged from the console config (ADR 0017)."
+            >
+              drift
+            </Badge>
+          )}
+          {detail.managedOutsideUI && (
+            <Badge
+              variant="muted"
+              data-testid="managed-outside-badge"
+              title="Created outside the console (e.g. kubectl) — edits are limited to safe fields."
+            >
+              external
+            </Badge>
+          )}
+          {publishedState && (
+            <Badge
+              variant="muted"
+              data-testid="published-badge"
+              title="This agent is published to the template gallery."
+            >
+              {`Published · ${publishedState.visibility} · v${publishedState.version}`}
+            </Badge>
+          )}
+        </span>
+      }
+      meta={meta || undefined}
+      actions={actions}
+      tabs={TABS.map((t) => ({ id: t, label: t, current: activeTab === t }))}
+      onTabChange={(id) => onTab(id as Tab)}
+    />
+  );
+}
+
+/** The Ready condition's reason, so the status chip speaks the controller's word. */
+function readyReason(conditions: AgentCondition[]): string | undefined {
+  return conditions.find((c) => c.type === "Ready")?.reason || undefined;
+}
+
+// U12: fork lineage — "forked from ns/name @ version", when the provenance
+// labels are set. Machine-owned coordinates, so mono (§4.8).
+function ForkLineage({ labels }: { labels?: Record<string, string> }) {
+  const originNs = labels?.[LABEL_FORK_ORIGIN_NS];
+  const originName = labels?.[LABEL_FORK_ORIGIN_NAME];
+  const originVersion = labels?.[LABEL_FORK_ORIGIN_VERSION];
+  if (!originNs || !originName) return null;
+  return (
+    <p
+      className="flex flex-wrap items-center gap-1.5 text-sm text-faint"
+      data-testid="fork-lineage"
+    >
+      <GitFork aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-ghost" />
+      Forked from{" "}
+      <span className="font-mono text-xs text-secondary-foreground">
+        {originNs}/{originName}
+      </span>
+      {originVersion && (
+        <span className="font-mono text-xs text-secondary-foreground">@ {originVersion}</span>
+      )}
+    </p>
+  );
+}
+
+// ── The lifecycle spine (§5.20) ─────────────────────────────────────────────
+//
+// The strip is a POSITION CLAIM, so every cell is read off something the
+// backend actually sent. Where it cannot be read, the cell renders §7.1's "not
+// yet known" (the component's own copy) rather than a plausible-sounding
+// placeholder — and when the agent's stage itself cannot be placed, NO stage is
+// lit and a QuietNote says why. A guessed position is the one thing §5.20 says
+// this component must never draw.
+
+/** Gate phases that mean a PERSON is between the agent and production. */
+const GATE_HUMAN = /(canary|await|promot|approv|hold|block)/i;
+/** Gate phases that mean the gate stopped it. */
+const GATE_STOPPED = /(fail|error|reject|denied)/i;
+
+/**
+ * Where this agent sits in its life, or `null` when the payload cannot place
+ * it. Read only from real fields: `isDraft`, the eval-gate projection, the
+ * readiness flags, and the RegressionDetected condition.
+ */
+export function lifecycleStage(detail: AgentDetailResponse): LifecycleStage | null {
+  if (detail.isDraft) return "Build";
+
+  const gatePhase = detail.gate?.phase ?? "";
+  // A human gate outranks everything else: a canary awaiting a promotion
+  // decision is being GOVERNED, however healthy the revision underneath is.
+  if (GATE_HUMAN.test(gatePhase) || GATE_STOPPED.test(gatePhase)) return "Govern";
+  if (resolveStatus(detail.ready, detail.phase, readyReason(detail.conditions)).tone === "waiting") {
+    return "Govern";
+  }
+
+  if (detail.ready) {
+    // Improve is claimed only when the improvement loop has actually reported —
+    // a RegressionDetected condition is the durable "the loop is watching this"
+    // fact in this payload. Serving with no such signal is Ship, not Improve.
+    return detail.conditions.some((c) => c.type === "RegressionDetected") ? "Improve" : "Ship";
+  }
+
+  // Not ready and not a draft. If it has a revision it is being rolled out;
+  // if it has nothing at all, the payload cannot place it and we say so.
+  if (detail.versions.length > 0 || detail.latestVersion) return "Ship";
+  if (!detail.phase && detail.conditions.length === 0) return null;
+  return "Build";
+}
+
+function AgentLifecycle({ detail }: { detail: AgentDetailResponse }) {
+  const stage = lifecycleStage(detail);
+  const gatePhase = detail.gate?.phase ?? "";
+  const versionCount = detail.versions.length;
+  const regression = detail.conditions.find((c) => c.type === "RegressionDetected");
+
+  const cells: LifecycleStageCell[] = [
+    {
+      name: "Build",
+      active: stage === "Build",
+      fact:
+        versionCount > 0 ? (
+          <>
+            <span className={lifecycleFactNumber}>{versionCount}</span>
+            {versionCount === 1 ? " version built" : " versions built"}
+          </>
+        ) : detail.isDraft ? (
+          "draft — not built yet"
+        ) : undefined,
+    },
+    {
+      name: "Govern",
+      active: stage === "Govern",
+      fact: detail.guardrailPolicyRef ? (
+        <>guardrails: {detail.guardrailPolicyRef}</>
+      ) : gatePhase ? (
+        <>gate: {gatePhase}</>
+      ) : detail.gate ? (
+        "gated, phase not reported"
+      ) : (
+        "no policy, no eval gate"
+      ),
+    },
+    {
+      name: "Ship",
+      active: stage === "Ship",
+      fact: detail.ready
+        ? detail.latestVersion
+          ? <>serving {detail.latestVersion}</>
+          : "serving"
+        : detail.phase
+          ? <>not serving — {detail.phase.toLowerCase()}</>
+          : undefined,
+    },
+    {
+      name: "Improve",
+      active: stage === "Improve",
+      // Only the condition can answer this one. No condition, no claim.
+      fact: regression
+        ? regression.status === "True"
+          ? "a regression was detected"
+          : "no regression detected"
+        : undefined,
+    },
+  ];
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-3">
-        <h2 className="text-2xl font-semibold tracking-tight">{detail.name}</h2>
-        <Badge variant={detail.ready ? "success" : "warning"}>
-          {detail.phase || (detail.ready ? "Ready" : "Pending")}
-        </Badge>
-        {/* m15.11: drift + managedOutsideUI badges */}
-        {detail.managedOutsideUI && (
-          <Badge variant="outline" data-testid="managed-outside-badge">
-            managed outside UI
-          </Badge>
-        )}
-        {detail.drift && (
-          <Badge variant="warning" data-testid="drift-badge">
-            <AlertTriangle className="mr-1 h-3 w-3" />
-            drift
-          </Badge>
-        )}
-        {/* U7: published badge — shown when this agent has been published as a template
-            this session. Includes an Unpublish action. */}
-        {publishedState && (
-          <div className="flex items-center gap-1" data-testid="published-badge-group">
-            <Badge variant="secondary" data-testid="published-badge">
-              <Share2 className="mr-1 h-3 w-3" />
-              Published · {publishedState.visibility} · v{publishedState.version}
-            </Badge>
-            {canPublish && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-6 px-1.5 text-xs text-muted-foreground hover:text-destructive"
-                onClick={onUnpublish}
-                data-testid="unpublish-agent-button"
-                title="Remove this template from the gallery"
-              >
-                <X className="h-3 w-3" />
-                Unpublish
-              </Button>
-            )}
-          </div>
-        )}
-        {/* The namespace links to the tenant that governs it (m49.4 UX-review P1 —
-            closes the observe→agent→…→tenant loop). The Tenants filter matches on
-            namespace; an unowned namespace lands on an honest empty list. */}
-        <Link
-          to={`/tenants?q=${encodeURIComponent(detail.namespace)}`}
-          data-testid="agent-namespace-link"
-          title={`View the tenant governing namespace "${detail.namespace}"`}
-          className="text-sm text-muted-foreground hover:text-foreground hover:underline"
-        >
-          {detail.namespace}
-        </Link>
-        {/* RBAC-aware write affordances — hidden for viewers */}
-        <div className="ml-auto flex items-center gap-2">
-          {canPublish && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onPublish}
-              data-testid="publish-agent-button"
-            >
-              <Share2 className="h-4 w-4" />
-              {publishedState ? "Share new version" : "Share as template"}
-            </Button>
-          )}
-          {canEdit && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onEdit}
-              data-testid="edit-agent-button"
-            >
-              <Pencil className="h-4 w-4" />
-              Edit
-            </Button>
-          )}
-          {canDelete && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onDelete}
-              className="text-destructive hover:text-destructive"
-              data-testid="delete-agent-button"
-            >
-              <Trash2 className="h-4 w-4" />
-              Delete
-            </Button>
-          )}
-        </div>
-      </div>
-      {/* U12: fork lineage — "forked from ns/name @ version" */}
-      {hasForkLineage && (
-        <p
-          className="flex items-center gap-1.5 text-xs text-muted-foreground"
-          data-testid="fork-lineage"
-        >
-          <GitFork className="h-3.5 w-3.5" />
-          Forked from{" "}
-          <span className="font-mono">
-            {forkOriginNs}/{forkOriginName}
-          </span>
-          {forkOriginVersion && (
-            <span>@ {forkOriginVersion}</span>
-          )}
-        </p>
+      <LifecycleStrip
+        stages={cells}
+        label={
+          stage
+            ? `Lifecycle: ${stage}`
+            : "Lifecycle — this agent's stage is not yet known"
+        }
+      />
+      {stage === null && (
+        <QuietNote title="No stage is lit, on purpose.">
+          This agent has reported no phase and no status conditions yet, so the
+          console cannot say where it sits in its life. The strip shows the four
+          stages with no position marked rather than guessing one — the facts
+          appear as the controller reports them.
+        </QuietNote>
       )}
-      <dl className="grid grid-cols-1 gap-x-8 gap-y-1.5 text-sm sm:grid-cols-2 lg:grid-cols-3">
-        {detail.url && (
-          <HeaderKV
-            k="Route"
-            v={
-              <a
-                href={detail.url}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 truncate font-mono text-xs text-primary hover:underline"
-                data-testid="agent-url"
-              >
-                {detail.url}
-                <ExternalLink className="h-3 w-3 shrink-0" />
-              </a>
-            }
-          />
-        )}
-        {detail.image && (
-          <HeaderKV k="Image" v={<span className="truncate font-mono text-xs">{detail.image}</span>} />
-        )}
-        {detail.executionModel && <HeaderKV k="Execution" v={detail.executionModel} />}
-        {detail.role && <HeaderKV k="Role" v={detail.role} />}
-        {detail.modelRoute && (
-          <HeaderKV
-            k="Model route"
-            v={
-              <Link
-                to={`/routes/${encodeURIComponent(detail.namespace)}/${encodeURIComponent(detail.modelRoute)}`}
-                className="truncate text-primary hover:underline"
-                data-testid="agent-modelroute-link"
-              >
-                {detail.modelRoute}
-              </Link>
-            }
-          />
-        )}
-        {detail.promptRef && (
-          <HeaderKV
-            k="Prompt"
-            v={
-              <Link
-                to={navRoute("prompts")}
-                className="truncate text-primary hover:underline"
-                data-testid="agent-promptref-link"
-              >
-                {detail.promptRef}
-              </Link>
-            }
-          />
-        )}
-        {detail.guardrailPolicyRef && (
-          <HeaderKV
-            k="Guardrail policy"
-            v={
-              <>
-                <Link
-                  to={navRoute("guardrails")}
-                  className="truncate text-primary hover:underline"
-                  data-testid="agent-guardrail-policy-link"
-                >
-                  {detail.guardrailPolicyRef}
-                </Link>
-                {/* When the agent is not ready due to a guardrail policy problem, surface the reason inline
-                    so the operator sees it next to the ref rather than having to scroll to the status timeline. */}
-                {(() => {
-                  const guardrailReasons = ["GuardrailPolicyNotFound", "GuardrailPolicyInvalid"];
-                  const reason = detail.conditions.find(
-                    (c) => c.type === "Ready" && c.status !== "True" && guardrailReasons.includes(c.reason),
-                  )?.reason;
-                  return reason ? (
-                    <Badge
-                      variant="destructive"
-                      className="ml-2 text-[10px]"
-                      data-testid="agent-guardrail-notready-reason"
-                    >
-                      {reason}
-                    </Badge>
-                  ) : null;
-                })()}
-              </>
-            }
-          />
-        )}
-        <HeaderKV k="Scaling" v={`${detail.scaling.min} – ${detail.scaling.max}`} />
-        {detail.latestVersion && (
-          <HeaderKV k="Latest version" v={<span className="font-mono text-xs">{detail.latestVersion}</span>} />
-        )}
-      </dl>
     </div>
   );
 }
 
-function HeaderKV({ k, v }: { k: string; v: React.ReactNode }) {
+// ── The rail: the register that governs this agent (§4.7 / §5.25) ───────────
+// A kv register and one meter — never a table (§4.7). Every row that the
+// backend did not answer states its absence in words; none is ever blank.
+function AgentRail({ detail }: { detail: AgentDetailResponse }) {
+  // A guardrail policy that stopped the agent coming up is surfaced NEXT TO the
+  // ref, so the reader does not have to correlate it with the conditions panel.
+  const guardrailReason = detail.conditions.find(
+    (c) =>
+      c.type === "Ready" &&
+      c.status !== "True" &&
+      ["GuardrailPolicyNotFound", "GuardrailPolicyInvalid"].includes(c.reason),
+  )?.reason;
+
+  const linkClass = "border-b border-accent text-primary hover:border-primary";
+
+  const governs: KeyValueItem[] = [
+    {
+      key: "Workspace",
+      // The namespace links to the tenant that governs it (m49.4) — the console
+      // rule is that a resource name is a link, never dead-end text.
+      value: (
+        <Link
+          to={`/tenants?q=${encodeURIComponent(detail.namespace)}`}
+          data-testid="agent-namespace-link"
+          title={`View the tenant governing namespace "${detail.namespace}"`}
+          className={linkClass}
+        >
+          {detail.namespace}
+        </Link>
+      ),
+      absent: "not recorded",
+    },
+    {
+      key: "Model route",
+      value: detail.modelRoute ? (
+        <Link
+          to={`/routes/${encodeURIComponent(detail.namespace)}/${encodeURIComponent(detail.modelRoute)}`}
+          className={linkClass}
+          data-testid="agent-modelroute-link"
+        >
+          {detail.modelRoute}
+        </Link>
+      ) : undefined,
+      absent: "no model route",
+      title: detail.modelRoute
+        ? undefined
+        : "No route is attached, so this agent has no model to run on.",
+    },
+    {
+      key: "Prompt",
+      value: detail.promptRef ? (
+        <Link to={navRoute("prompts")} className={linkClass} data-testid="agent-promptref-link">
+          {detail.promptRef}
+        </Link>
+      ) : undefined,
+      absent: "not attached",
+    },
+    {
+      key: "Guardrails",
+      value: detail.guardrailPolicyRef ? (
+        <span className="inline-flex flex-wrap items-center justify-end gap-1.5">
+          <Link
+            to={navRoute("guardrails")}
+            className={linkClass}
+            data-testid="agent-guardrail-policy-link"
+          >
+            {detail.guardrailPolicyRef}
+          </Link>
+          {guardrailReason && (
+            <Badge
+              variant="crit"
+              data-testid="agent-guardrail-notready-reason"
+              title={guardrailReason}
+            >
+              {humanizeStatusReason(guardrailReason)}
+            </Badge>
+          )}
+        </span>
+      ) : undefined,
+      absent: "not attached",
+    },
+    {
+      key: "Endpoint",
+      value: detail.url ? (
+        <a
+          href={detail.url}
+          target="_blank"
+          rel="noreferrer"
+          title={detail.url}
+          data-testid="agent-url"
+          className={`inline-flex max-w-full items-center gap-1 ${linkClass}`}
+        >
+          {/* One line, end-ellipsis, full value in `title` (§4.5) — a URL is
+              never allowed to set the rail's width. */}
+          <span className="truncate">{hostOf(detail.url)}</span>
+          <ExternalLink aria-hidden="true" className="h-3 w-3 shrink-0" />
+        </a>
+      ) : undefined,
+      absent: "not serving yet",
+    },
+    {
+      key: "Image",
+      value: detail.image ? <span className="block truncate">{detail.image}</span> : undefined,
+      title: detail.image || undefined,
+      absent: "not recorded",
+    },
+    { key: "Revision", value: detail.latestVersion, absent: "not yet built" },
+    { key: "Execution", value: detail.executionModel, mono: false, absent: "not recorded" },
+    { key: "Role", value: detail.role, mono: false, absent: "not set" },
+  ];
+
   return (
-    <div className="flex min-w-0 items-baseline gap-2">
-      <dt className="shrink-0 text-muted-foreground">{k}</dt>
-      <dd className="min-w-0 truncate">{v}</dd>
+    <div className="min-w-0 space-y-5">
+      <Card className="min-w-0">
+        <PanelHeader title="Who governs it" />
+        <CardContent>
+          <KeyValueList items={governs} />
+        </CardContent>
+      </Card>
+
+      <Card className="min-w-0">
+        <PanelHeader title="What bounds it" />
+        <CardContent className="space-y-3">
+          {/* No live replica count is on this endpoint, so the meter draws the
+              real bound with no fill: an empty track claims nothing, whereas a
+              zero-width fill labelled 0 would claim the agent is scaled down
+              (§5.24). The Meter emits the "unknown, not zero" note itself. */}
+          <Meter
+            label="replicas"
+            used={UNKNOWN}
+            cap={detail.scaling.max}
+            thing="agent"
+          />
+          <p className="text-sm text-faint">
+            {detail.scaling.min > 0 ? (
+              <>
+                <span className="font-mono tabular-nums text-secondary-foreground">
+                  {detail.scaling.min}
+                </span>{" "}
+                {detail.scaling.min === 1 ? "replica is" : "replicas are"} always kept
+                warm, so there is no cold start.
+              </>
+            ) : (
+              "The floor is zero: with no traffic it scales all the way down and cold-starts on the next request."
+            )}
+          </p>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+/** The host of a URL, for a rail cell too narrow to carry the whole thing. */
+function hostOf(url: string): string {
+  const stripped = url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
+  const slash = stripped.indexOf("/");
+  return slash > 0 ? stripped.slice(0, slash) : stripped;
+}
+
+// ── "What it can reach" (§6.2) — the page's flagship panel ──────────────────
+//
+// Three states, and the whole point is that they are three DIFFERENT things:
+//
+//   unresolved   crit    the controller could not resolve the reference. This
+//                        one is broken and the panel is not quiet about it.
+//   never called dashed  declared and resolved, but this agent has never come
+//                `open`  up, so nothing has exercised it. NOT a failure and it
+//                        must never wear a failure hue (§2.2 draft/idle).
+//   working      ok      the binding resolves and the agent is up, so the path
+//                        to it is live.
+//
+// What the payload does NOT carry is per-tool call counts — those are span-level
+// facts in the trace backend. So `working` is deliberately defined as "resolves
+// and is reachable", and the QuietNote says so out loud rather than letting a
+// green tag imply a measurement nobody made.
+type ReachState = "working" | "never-called" | "unresolved";
+
+const REACH_TAG: Record<
+  ReachState,
+  { variant: "ok" | "open" | "crit"; label: string; title: string }
+> = {
+  working: {
+    variant: "ok",
+    label: "working",
+    title:
+      "The controller resolved this binding and the agent is up, so the path to it is live. This is not a count of calls.",
+  },
+  "never-called": {
+    variant: "open",
+    label: "never called",
+    title:
+      "Declared and resolved, but this agent has never come up — so nothing has exercised it yet. This is not a failure.",
+  },
+  unresolved: {
+    variant: "crit",
+    label: "unresolved",
+    title:
+      "The controller could not resolve this reference. The agent cannot call it until that is fixed.",
+  },
+};
+
+function reachState(b: AgentBinding, agentIsUp: boolean): ReachState {
+  if (!b.ready) return "unresolved";
+  return agentIsUp ? "working" : "never-called";
+}
+
+/** How many bindings the summary shows before handing off to Equipment. */
+const REACH_PREVIEW = 8;
+
+function reachClosingLine(total: number, broken: number): string {
+  if (total === 0) return "";
+  if (broken === 0) {
+    return total === 1
+      ? "One binding, and it resolves."
+      : `All ${total} of them resolve. Nothing here is blocking the agent.`;
+  }
+  if (broken === total) {
+    return total === 1
+      ? "The one binding it has does not resolve."
+      : `None of the ${total} resolve — the agent can reach nothing it was wired to.`;
+  }
+  return `${broken} of the ${total} do not resolve. The other ${total - broken} are fine.`;
+}
+
+function ReachPanel({
+  detail,
+  onSeeAll,
+}: {
+  detail: AgentDetailResponse;
+  onSeeAll: () => void;
+}) {
+  const bindings = detail.bindings;
+  // "Up" is the strongest statement this payload supports about exercise: an
+  // agent that has never reached Ready cannot have called anything.
+  const agentIsUp = detail.ready && !detail.isDraft;
+  const broken = bindings.filter((b) => !b.ready).length;
+  const shown = bindings.slice(0, REACH_PREVIEW);
+  const hidden = bindings.length - shown.length;
+  // The controller's own words about the bindings, when it has any — better
+  // evidence than anything this page could infer per-row.
+  const bindingsCondition = detail.conditions.find(
+    (c) => c.type === "BindingsReady" && c.status !== "True",
+  );
+
+  const seen = new Set<string>();
+  const items: KeyValueItem[] = shown.map((b) => {
+    const tool = b.detail || b.name;
+    const via = b.server || b.kind;
+    let label = via ? `${via} / ${tool}` : tool;
+    if (seen.has(label)) label = `${label} · ${b.name}`;
+    seen.add(label);
+    const tag = REACH_TAG[reachState(b, agentIsUp)];
+    return {
+      key: label,
+      title: label,
+      value: (
+        <Badge variant={tag.variant} data-testid={`reach-${b.name}`} title={tag.title}>
+          {tag.label}
+        </Badge>
+      ),
+    };
+  });
+
+  return (
+    <Card className="min-w-0" data-testid="reach-panel">
+      <PanelHeader
+        title="What it can reach"
+        meta={
+          bindings.length === 0
+            ? undefined
+            : `${bindings.length} binding${bindings.length === 1 ? "" : "s"}`
+        }
+      />
+      <CardContent>
+        <p className="mb-4 max-w-[66ch] text-sm text-secondary-foreground">
+          Everything this agent is wired to. It holds no credentials of its own —
+          every tool is called through its egress sidecar, which attaches the
+          credential at call time, so nothing on this page is a secret and none is
+          stored on the agent.
+        </p>
+
+        {bindings.length === 0 ? (
+          <QuietNote title="Nothing is bound to this agent yet.">
+            It has no tools and no memory, so it can only answer from the model
+            and its prompt. Bind a tool from an MCP server to give it something
+            to reach.
+            <span className="mt-3 block">
+              <NextStepLink label="Bind a tool" onClick={onSeeAll} />
+            </span>
+          </QuietNote>
+        ) : (
+          <>
+            {broken > 0 && (
+              // A crit RULE, not a crit fill: §2.2 allows exactly two full-bleed
+              // semantic surfaces console-wide and this is not one of them.
+              <div
+                className="mb-4 border border-border border-l-2 border-l-destructive bg-surface-2 px-4 py-3"
+                data-testid="reach-unresolved-note"
+              >
+                <p className="text-sm text-secondary-foreground">
+                  <span className="font-mono tabular-nums font-semibold text-destructive">
+                    {broken}
+                  </span>{" "}
+                  of these {bindings.length === 1 ? "does" : "do"} not resolve. Until
+                  that is fixed the agent cannot call {broken === 1 ? "it" : "them"} —
+                  a call that reaches an unresolved binding fails at the sidecar.
+                </p>
+                {bindingsCondition?.message && (
+                  <p className="mt-2 font-mono text-xs text-faint">
+                    {bindingsCondition.message}
+                  </p>
+                )}
+                <span className="mt-3 block">
+                  <NextStepLink label="Fix the bindings" tone="crit" onClick={onSeeAll} />
+                </span>
+              </div>
+            )}
+
+            <KeyValueList items={items} />
+
+            {hidden > 0 && (
+              <p className="mt-3">
+                <NextStepLink label={`See all ${bindings.length}`} onClick={onSeeAll} />
+              </p>
+            )}
+
+            <ClosingNote>{reachClosingLine(bindings.length, broken)}</ClosingNote>
+
+            <QuietNote className="mt-4" title="Call counts aren’t on this endpoint.">
+              This panel reads what the agent DECLARES and whether the controller
+              resolved each reference. Whether a tool has actually been called is a
+              span-level fact that lives in the trace backend — so “working” means
+              the binding resolves and the agent is up, not that we counted a call.
+              Nothing here is estimated.
+            </QuietNote>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── The needs-rebinding notice (m74.6 / U5 / U14) ───────────────────────────
+// A forked agent whose references did not survive the fork. This is a real
+// problem with a real repair, so it is a warn RULE with itemized actions — not
+// a QuietNote (nothing is merely unconfigured) and not a filled amber banner
+// (§2.2: hues annotate, they do not flood).
+function RebindNotice({
+  detail,
+  refs,
+  onGoEquipment,
+}: {
+  detail: AgentDetailResponse;
+  refs: string[];
+  onGoEquipment: () => void;
+}) {
+  const linkClass = "border-b border-warning-surface text-warning hover:border-warning";
+  return (
+    <div
+      className="border border-border border-l-2 border-l-warning bg-surface-2 px-5 py-4"
+      role="alert"
+      data-testid="needs-rebinding-banner"
+    >
+      <p className="font-serif text-md font-medium">
+        This fork can’t run until its references are connected.
+      </p>
+      <p className="mt-1 max-w-[66ch] text-sm text-secondary-foreground">
+        It was forked from a template, and the resources the template pointed at
+        do not exist here. Connect the ones below and the controller clears this
+        notice on its next pass.
+      </p>
+      {/* U5 + U14: itemize the ACTUAL dangling refs (when the BFF recorded them) with the
+          right repair action per category — no more generic "review and bind tools" line
+          that showed even when nothing tool-shaped dangled. */}
+      <ul className="mt-3 space-y-1.5 text-sm" data-testid="rebind-ref-list">
+        {refs.length > 0 ? (
+          refs.map((ref, i) => {
+            const isRoute = ref.startsWith("model route:");
+            const isPrompt = ref.startsWith("prompt:");
+            const isEval = ref.startsWith("evalSuite:");
+            const isTool = !isRoute && !isPrompt && !isEval;
+            return (
+              <li
+                key={`${ref}-${i}`}
+                className="flex flex-wrap items-center gap-2"
+                data-testid={`rebind-ref-${i}`}
+              >
+                <ChevronRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-ghost" />
+                <span className="font-mono text-xs text-secondary-foreground">{ref}</span>
+                {isRoute && (
+                  <Link to="/routes" className={linkClass} data-testid="rebind-model-route-link">
+                    connect a model route
+                  </Link>
+                )}
+                {isTool && (
+                  <button
+                    type="button"
+                    onClick={onGoEquipment}
+                    className={linkClass}
+                    data-testid="rebind-bindings-tab-link"
+                  >
+                    bind it in the Bindings tab
+                  </button>
+                )}
+                {isPrompt && (
+                  <Link to={navRoute("prompts")} className={linkClass}>
+                    add the prompt
+                  </Link>
+                )}
+                {isEval && (
+                  <Link to="/evals" className={linkClass}>
+                    add the eval suite
+                  </Link>
+                )}
+              </li>
+            );
+          })
+        ) : (
+          // Fallback for an older fork (flag set, no ref annotation): generic guidance.
+          <>
+            {!detail.modelRoute && (
+              <li className="flex flex-wrap items-center gap-2">
+                <ChevronRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-ghost" />
+                <Link to="/routes" className={linkClass} data-testid="rebind-model-route-link">
+                  Connect a model route
+                </Link>
+                <span className="text-xs text-faint">— required to run</span>
+              </li>
+            )}
+            <li className="flex flex-wrap items-center gap-2">
+              <ChevronRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-ghost" />
+              <button
+                type="button"
+                onClick={onGoEquipment}
+                className={linkClass}
+                data-testid="rebind-bindings-tab-link"
+              >
+                Review and bind tools in the Bindings tab
+              </button>
+            </li>
+          </>
+        )}
+      </ul>
     </div>
   );
 }
@@ -898,7 +1393,7 @@ function EditWizard({
       <div className="space-y-4">
         {!isManaged && (
           <div
-            className="rounded-md border border-border bg-surface-2/40 px-3 py-2 text-xs text-muted-foreground"
+            className="rounded-md border border-border bg-surface-2 px-3 py-2 text-xs text-muted-foreground"
             data-testid="readonly-fields-note"
           >
             These fields are read-only because this agent is managed outside the
@@ -1130,8 +1625,7 @@ function DeleteDialog({
                 )}
               </span>
               <Badge
-                variant={r.disposition === "gc" ? "warning" : "secondary"}
-                className="text-[10px]"
+                variant={r.disposition === "gc" ? "warn" : "muted"}
               >
                 {r.disposition === "gc" ? "will be deleted" : "will be orphaned"}
               </Badge>
@@ -1186,81 +1680,27 @@ function DeleteDialog({
   );
 }
 
-// ── Overview tab (spec summary + status timeline + Run panel) ────────────────
+// ── Overview: what it reaches, how it came up, and a way to try it ──────────
+// The reach panel leads because it is the question the page exists to answer.
+// The condition story follows (why it is or is not serving), then the two ways
+// to actually exercise it — from here, or from code.
 function OverviewTab({
   detail,
   onTraced,
+  onGoEquipment,
 }: {
   detail: AgentDetailResponse;
   onTraced: (traceId: string) => void;
+  onGoEquipment: () => void;
 }) {
   return (
-    <div className="grid gap-6 lg:grid-cols-[1fr_20rem]">
-      <div className="space-y-6">
-        <div className="rounded-lg border bg-card p-5 shadow-card">
-          <p className="mb-3 text-sm font-medium">Spec</p>
-          <dl className="grid grid-cols-[8rem_1fr] gap-y-2 text-sm">
-            <SpecKV k="Execution" v={detail.executionModel || "—"} />
-            <SpecKV k="Image" v={<span className="font-mono text-xs">{detail.image || "—"}</span>} />
-            <SpecKV k="Role" v={detail.role || "—"} />
-            <SpecKV k="Scaling" v={`${detail.scaling.min} – ${detail.scaling.max}`} />
-          </dl>
-        </div>
+    <>
+      <ReachPanel detail={detail} onSeeAll={onGoEquipment} />
 
-        {/* Runtime sits adjacent to Spec — both are spec-level authoring concerns
-            (J6 m76.6: regrouped from below Bindings). */}
-        {detail.runtime && <RuntimeSection runtime={detail.runtime} />}
-
-        <StatusTimeline conditions={detail.conditions} ready={detail.ready} phase={detail.phase} />
-
-        {detail.versions.length > 0 && (
-          <div className="rounded-lg border bg-card p-5 shadow-card" data-testid="versions-list">
-            <p className="mb-3 text-sm font-medium">Versions</p>
-            <ul className="space-y-1.5">
-              {detail.versions.map((v) => (
-                <li key={v} className="flex items-center gap-2 text-sm">
-                  <span className="font-mono text-xs">{v}</span>
-                  {v === detail.latestVersion && (
-                    <Badge variant="secondary" className="text-[10px]">
-                      latest
-                    </Badge>
-                  )}
-                </li>
-              ))}
-            </ul>
-            {/* V3: read-only diff of two version snapshots (only useful with ≥2 versions). */}
-            {detail.versions.length >= 2 && (
-              <VersionDiffPanel
-                ns={detail.namespace}
-                name={detail.name}
-                versions={detail.versions}
-                latestVersion={detail.latestVersion}
-              />
-            )}
-          </div>
-        )}
-
-        <div className="rounded-lg border bg-card p-5 shadow-card">
-          <p className="mb-3 text-sm font-medium">Bindings</p>
-          <BindingsList bindings={detail.bindings} />
-        </div>
-
-        <PromotionPipeline detail={detail} />
-
-        <ImprovementLoopSection
-          ns={detail.namespace}
-          name={detail.name}
-          conditions={detail.conditions}
-          gatePhase={detail.gate?.phase}
-          versions={detail.versions}
-        />
-      </div>
-
-      <UseAgentPanel
-        name={detail.name}
-        executionModel={detail.executionModel}
-        url={detail.url}
-        ns={detail.namespace}
+      <ConditionsPanel
+        conditions={detail.conditions}
+        ready={detail.ready}
+        phase={detail.phase}
       />
 
       <ChatPanel
@@ -1270,16 +1710,149 @@ function OverviewTab({
         memoryBound={detail.bindings.some((b) => b.kind === "memory")}
         onTraced={onTraced}
       />
-    </div>
+
+      <UseAgentPanel
+        name={detail.name}
+        executionModel={detail.executionModel}
+        url={detail.url}
+        ns={detail.namespace}
+      />
+    </>
   );
 }
 
-function SpecKV({ k, v }: { k: string; v: React.ReactNode }) {
+// ── Equipment: everything you attach to an agent ────────────────────────────
+// Tools, the runtime policy that governs how they are called, memory, scaling,
+// and the redaction rules applied to what it records. These were five separate
+// tabs; they are one surface because they answer one question — what is this
+// agent fitted with?
+function EquipmentTab({ detail }: { detail: AgentDetailResponse }) {
   return (
     <>
-      <dt className="text-muted-foreground">{k}</dt>
-      <dd>{v}</dd>
+      <Card className="min-w-0" data-testid="bindings-tab">
+        <PanelHeader
+          title="Tools and bindings"
+          meta={
+            detail.bindings.length === 0
+              ? undefined
+              : `${detail.bindings.length} binding${detail.bindings.length === 1 ? "" : "s"}`
+          }
+        />
+        <CardContent>
+          <p className="mb-4 max-w-[66ch] text-sm text-secondary-foreground">
+            Every binding, grouped by the MCP server that serves it. Groups stay
+            closed until you open one: an agent can bind dozens of tools, and a
+            flat list of them is a wall rather than an answer.
+          </p>
+          <BindingsList
+            bindings={detail.bindings}
+            agentIsUp={detail.ready && !detail.isDraft}
+          />
+        </CardContent>
+      </Card>
+
+      {detail.runtime && <RuntimeSection runtime={detail.runtime} />}
+
+      <Card className="min-w-0">
+        <CardContent className="p-5">
+          <MemoryPanel ns={detail.namespace} agentName={detail.name} />
+        </CardContent>
+      </Card>
+
+      <Card className="min-w-0">
+        <CardContent className="p-5">
+          <ScalingPanel ns={detail.namespace} agentName={detail.name} />
+        </CardContent>
+      </Card>
+
+      <RedactionPanel ns={detail.namespace} agentName={detail.name} />
     </>
+  );
+}
+
+// ── Runs: what it has done, and what it printed while doing it ─────────────
+// The live tail is a SECTION here rather than a tab of its own (§6.2 budgets
+// this page to five). It is gated on `get pods/log` exactly as the tab was:
+// display-only and fail-open, with the API as the real gate (ADR 0011).
+function RunsAndOutputTab({
+  detail,
+  canLogs,
+  onInspect,
+}: {
+  detail: AgentDetailResponse;
+  canLogs: boolean;
+  onInspect: (traceId: string) => void;
+}) {
+  return (
+    <>
+      <div className="min-w-0">
+        <SectionHeader
+          title="Runs"
+          lede="Every traced run this agent has served. Open one to read its spans."
+        />
+        <AgentRunsTab ns={detail.namespace} name={detail.name} onInspect={onInspect} />
+      </div>
+
+      {canLogs && (
+        <div className="min-w-0">
+          <SectionHeader
+            title="Live output"
+            lede="What the agent's own process is printing, tailed from its pod. This is not the run record — it is stdout."
+          />
+          <LogsTab ns={detail.namespace} name={detail.name} ready={detail.ready} />
+        </div>
+      )}
+    </>
+  );
+}
+
+// ── Versions: the history, and what changed between two of them ────────────
+function VersionsTab({ detail }: { detail: AgentDetailResponse }) {
+  const versions = detail.versions;
+  const items: KeyValueItem[] = versions.map((v) => ({
+    key: v,
+    value:
+      v === detail.latestVersion ? (
+        <Badge variant="ok">latest</Badge>
+      ) : (
+        <span className="text-sm text-faint">superseded</span>
+      ),
+  }));
+
+  return (
+    <Card className="min-w-0" data-testid="versions-list">
+      <PanelHeader
+        title="Versions"
+        meta={
+          versions.length === 0
+            ? undefined
+            : `${versions.length} snapshot${versions.length === 1 ? "" : "s"}`
+        }
+      />
+      <CardContent>
+        {versions.length === 0 ? (
+          <QuietNote title="No version snapshot has been recorded yet.">
+            A snapshot is written each time the deployed spec changes. This agent
+            has not produced one — it may never have been applied, or the
+            controller has not reconciled it yet. Nothing is missing from this
+            page; there is simply no history to show.
+          </QuietNote>
+        ) : (
+          <>
+            <KeyValueList items={items} />
+            {/* V3: a read-only diff of two snapshots — only useful with ≥2. */}
+            {versions.length >= 2 && (
+              <VersionDiffPanel
+                ns={detail.namespace}
+                name={detail.name}
+                versions={versions}
+                latestVersion={detail.latestVersion}
+              />
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1296,19 +1869,15 @@ function RuntimeSection({ runtime }: { runtime: AgentRuntimeDetail }) {
   if (!hasContent) return null;
 
   return (
-    <div className="rounded-lg border bg-card p-5 shadow-card" data-testid="runtime-section">
-      <div className="mb-3 flex items-center gap-2">
-        <SlidersHorizontal className="h-4 w-4 text-muted-foreground" />
-        <p className="text-sm font-medium">Runtime</p>
-      </div>
-
-      <div className="space-y-4">
+    <Card className="min-w-0" data-testid="runtime-section">
+      <PanelHeader title="Runtime" />
+      <CardContent className="space-y-4">
         {/* --- Structured output --- */}
         {runtime.outputSchemaSet && (
           <div data-testid="runtime-output-schema">
             <div className="flex items-center gap-2">
               <span className="text-sm text-muted-foreground">Structured output</span>
-              <Badge variant="success" className="text-[10px]" data-testid="runtime-output-schema-badge">
+              <Badge variant="ok" data-testid="runtime-output-schema-badge">
                 ✓ set
               </Badge>
               {/* J6(a) m76.6: outputSchemaSet=true but no body returned — make it
@@ -1316,7 +1885,7 @@ function RuntimeSection({ runtime }: { runtime: AgentRuntimeDetail }) {
                   impression that "✓ set" with no expand = no schema). */}
               {!runtime.outputSchema && (
                 <span
-                  className="text-[10px] text-muted-foreground"
+                  className="text-2xs text-faint"
                   data-testid="runtime-output-schema-not-returned"
                 >
                   (content not returned)
@@ -1356,7 +1925,7 @@ function RuntimeSection({ runtime }: { runtime: AgentRuntimeDetail }) {
                   convention (the SDK enforces it inside the agent loop), not a hard
                   platform enforcement boundary at the network/proxy layer. */}
               <span
-                className="text-[10px] text-muted-foreground"
+                className="text-2xs text-faint"
                 title="Tool policy is enforced by the agent SDK at runtime, not by a platform proxy. It is an authoring convention, not a hard network-level boundary."
                 data-testid="runtime-tool-policy-note"
               >
@@ -1366,7 +1935,7 @@ function RuntimeSection({ runtime }: { runtime: AgentRuntimeDetail }) {
             <dl className="grid grid-cols-[8rem_1fr] gap-y-1 text-sm">
               <dt className="text-muted-foreground">Default rule</dt>
               <dd>
-                <Badge variant="secondary" className="text-[10px]">
+                <Badge variant="muted">
                   {runtime.toolPolicy.default || "allow"}
                 </Badge>
               </dd>
@@ -1381,7 +1950,7 @@ function RuntimeSection({ runtime }: { runtime: AgentRuntimeDetail }) {
                   <dt className="text-muted-foreground">Forced choice</dt>
                   <dd className="font-mono text-xs">
                     {runtime.toolPolicy.forcedChoice}
-                    <span className="ml-1 font-sans text-[10px] text-muted-foreground">
+                    <span className="ml-1 font-sans text-2xs text-faint">
                       {runtime.toolPolicy.forcedChoice === "auto"
                         ? "(model chooses)"
                         : runtime.toolPolicy.forcedChoice === "required"
@@ -1405,11 +1974,11 @@ function RuntimeSection({ runtime }: { runtime: AgentRuntimeDetail }) {
                       data-testid={`tool-override-${o.name}`}
                     >
                       <span className="font-mono text-xs">{o.name}</span>
-                      <Badge variant="secondary" className="text-[10px]">
+                      <Badge variant="muted">
                         {o.rule}
                       </Badge>
                       {o.retryable && (
-                        <Badge variant="outline" className="text-[10px]">
+                        <Badge variant="open">
                           retryable
                         </Badge>
                       )}
@@ -1474,15 +2043,84 @@ function RuntimeSection({ runtime }: { runtime: AgentRuntimeDetail }) {
             </dl>
           </div>
         )}
-      </div>
-    </div>
+      </CardContent>
+    </Card>
   );
 }
 
-// StatusTimeline renders the readiness progression from the status conditions —
-// the "watch it come alive" surface. Each condition is a dot (green True / red
-// False / muted Unknown) + its type/reason/message.
-function StatusTimeline({
+// ── "How it came up" — the status conditions, told as one story (§5.26) ─────
+//
+// The controller's conditions ARE the agent's story: the route was admitted,
+// the bindings resolved, the guardrail policy validated, it went ready. They
+// were a hand-rolled dot ladder; they are the kit Timeline now, so a condition
+// reads the same way a run's steps do.
+//
+// Two rules from §5.26 shape the copy. A step's title is a SENTENCE, never an
+// event enum — `BindingsReady` is vocabulary the reader should not have to
+// learn, so the machine words move to the detail line where they are evidence
+// rather than jargon. And the tone comes from the shared status vocabulary, not
+// from a local True/False → green/red map: a `Ready=False` whose reason is
+// `ToolApprovalRequired` is a HOLD — a person must decide — and §2.4 exists
+// because that is the state most often confused with a failure.
+
+/** Condition type → [satisfied sentence, unsatisfied sentence]. */
+const CONDITION_SENTENCE: Record<string, [string, string]> = {
+  Ready: ["The agent is ready and serving", "The agent is not ready yet"],
+  RouteReady: ["Its route was admitted", "Its route has not been admitted"],
+  BindingsReady: ["Every binding resolved", "Not every binding resolved"],
+  GuardrailsReady: [
+    "Its guardrail policy resolved",
+    "Its guardrail policy did not resolve",
+  ],
+  ScalingReady: ["Its scaling policy is in force", "Its scaling policy is not in force"],
+};
+
+/** `RevisionMissing` → `revision missing`, for the generic sentence. */
+function spacedType(type: string): string {
+  const spaced = type.replace(/([a-z0-9])([A-Z])/g, "$1 $2").trim();
+  return spaced.charAt(0).toLowerCase() + spaced.slice(1);
+}
+
+function conditionSentence(c: AgentCondition): string {
+  // RegressionDetected inverts — True is the bad news, and False is the ABSENCE
+  // of a regression rather than a check that failed. The old ladder got this
+  // right and the distinction survives verbatim.
+  if (c.type === "RegressionDetected") {
+    return c.status === "True"
+      ? "A regression was detected against the baseline"
+      : "No regression has been detected";
+  }
+  const pair = CONDITION_SENTENCE[c.type];
+  if (pair) return c.status === "True" ? pair[0] : pair[1];
+  return c.status === "True"
+    ? `Its ${spacedType(c.type)} check passed`
+    : `Its ${spacedType(c.type)} check has not passed`;
+}
+
+function conditionTone(c: AgentCondition): TimelineTone {
+  if (c.type === "RegressionDetected") return c.status === "True" ? "failed" : "step";
+  if (c.status === "True") return "done";
+  // "Unknown" is the controller saying it has not decided. That is not a
+  // failure and it is not a hold — it is a plain moment in the story.
+  if (c.status !== "False") return "step";
+  const { tone } = resolveStatus(false, c.type, c.reason);
+  if (tone === "waiting") return "hold";
+  if (tone === "failed") return "failed";
+  return "step";
+}
+
+/** Same-day → a clock; older → a date (§4.5). A moment we did not record has none. */
+function conditionClock(iso?: string): string | undefined {
+  if (!iso) return undefined;
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return undefined;
+  const d = new Date(t);
+  return d.toDateString() === new Date().toDateString()
+    ? d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+    : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function ConditionsPanel({
   conditions,
   ready,
   phase,
@@ -1491,56 +2129,55 @@ function StatusTimeline({
   ready: boolean;
   phase: string;
 }) {
+  const steps: TimelineStep[] = conditions.map((c, i) => ({
+    id: `${c.type}-${i}`,
+    time: conditionClock(c.lastTransitionTime),
+    title: <span data-testid={`condition-${c.type}`}>{conditionSentence(c)}</span>,
+    detail:
+      c.reason || c.message ? (
+        <>
+          {c.reason && (
+            // Machine words are EVIDENCE here, so they render inline-mono in the
+            // detail line rather than becoming the headline (§5.26).
+            <span className="font-mono text-xs text-faint">{c.reason}</span>
+          )}
+          {c.reason && c.message ? " — " : null}
+          {c.message}
+        </>
+      ) : undefined,
+    tone: conditionTone(c),
+  }));
+
+  const held = steps.filter((s) => s.tone === "hold").length;
+  const failed = steps.filter((s) => s.tone === "failed").length;
+
   return (
-    <div className="rounded-lg border bg-card p-5 shadow-card" data-testid="status-timeline">
-      <div className="mb-3 flex items-center gap-2">
-        <p className="text-sm font-medium">Status timeline</p>
-        <Badge variant={ready ? "success" : "warning"} className="text-[10px]">
-          {phase || (ready ? "Ready" : "Pending")}
-        </Badge>
-      </div>
-      {conditions.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No status conditions reported yet.</p>
-      ) : (
-        <ol className="space-y-3">
-          {conditions.map((c, i) => {
-            const tone =
-              c.status === "True"
-                ? "bg-success"
-                : c.status === "False"
-                  ? "bg-destructive"
-                  : "bg-border-strong";
-            return (
-              <li key={`${c.type}-${i}`} className="flex gap-3" data-testid={`condition-${c.type}`}>
-                <div className="flex flex-col items-center">
-                  <span className={`mt-1 h-2.5 w-2.5 rounded-full ${tone}`} />
-                  {i < conditions.length - 1 && <span className="mt-1 h-full w-px bg-border" />}
-                </div>
-                <div className="pb-1">
-                  <p className="text-sm font-medium">
-                    {/* `RegressionDetected` reads as an alarm, but with reason NoBaseline / not firing
-                        it is the ABSENCE of a regression — show a neutral label + suppress the raw
-                        camelCase reason (the real regression alarm is the regression-detected-badge). */}
-                    {c.type === "RegressionDetected"
-                      ? c.status === "True"
-                        ? "Regression detected"
-                        : "No baseline yet"
-                      : c.type}
-                    {c.reason && c.type !== "RegressionDetected" && (
-                      <span className="ml-2 font-normal text-muted-foreground">{c.reason}</span>
-                    )}
-                  </p>
-                  {c.message && <p className="text-xs text-muted-foreground">{c.message}</p>}
-                  {c.lastTransitionTime && (
-                    <p className="text-[10px] text-muted-foreground">{c.lastTransitionTime}</p>
-                  )}
-                </div>
-              </li>
-            );
-          })}
-        </ol>
-      )}
-    </div>
+    <Card className="min-w-0" data-testid="status-timeline">
+      <PanelHeader
+        title="How it came up"
+        meta={
+          steps.length === 0
+            ? undefined
+            : `${steps.length} condition${steps.length === 1 ? "" : "s"}${
+                held > 0 ? ` · ${held} held` : ""
+              }${failed > 0 ? ` · ${failed} failing` : ""}`
+        }
+      >
+        <StatusBadge ready={ready} phase={phase} reason={readyReason(conditions)} />
+      </PanelHeader>
+      <CardContent>
+        {steps.length === 0 ? (
+          <QuietNote title="The controller hasn’t reported on this agent yet.">
+            No status conditions have been written against it — not a readiness
+            verdict, not a route, not a binding check. They appear here in order
+            as the controller makes them. Nothing is missing; there is simply
+            nothing recorded yet.
+          </QuietNote>
+        ) : (
+          <Timeline steps={steps} label="How this agent came up" />
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1595,7 +2232,7 @@ function VersionDiffPanel({
   return (
     <div className="mt-4 border-t pt-4" data-testid="version-diff-panel">
       <p className="text-xs font-medium">Compare versions</p>
-      <p className="mb-2 text-[11px] text-muted-foreground">
+      <p className="mb-2 text-xs text-faint">
         Diff of the deployed spec snapshot.
       </p>
       <div className="flex flex-wrap items-center gap-2">
@@ -1742,15 +2379,23 @@ function LogsTab({ ns, name, ready }: { ns: string; name: string; ready: boolean
   }
 
   return (
-    <div className="overflow-hidden rounded-lg border bg-surface-3" data-testid="logs-tab">
-      <div className="flex items-center justify-between border-b bg-card/60 px-4 py-2">
-        <div className="flex items-center gap-2 text-sm">
-          <Terminal className="h-4 w-4" /> Live tail
+    // A code well (§4.5): log lines keep their own spacing and scroll inside
+    // their own frame — the page never widens to fit one.
+    <div className="min-w-0 overflow-hidden rounded-lg border bg-card" data-testid="logs-tab">
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border px-5 py-3">
+        <span className="font-mono text-2xs uppercase tracking-wide text-faint">
+          stdout · last 200 lines
+        </span>
+        <span
+          className="flex items-center gap-2 font-mono text-xs text-faint"
+          data-testid="logs-status"
+        >
           {phase === "streaming" && (
-            <span className="h-2 w-2 animate-pulse rounded-full bg-success" aria-label="streaming" />
+            <span
+              aria-hidden="true"
+              className="h-1.5 w-1.5 animate-pulse rounded-full bg-success"
+            />
           )}
-        </div>
-        <span className="text-xs text-muted-foreground" data-testid="logs-status">
           {phase === "connecting" && "connecting…"}
           {phase === "waiting" && "waiting for the agent to start"}
           {phase === "streaming" && `${lines.length} lines`}
@@ -1760,16 +2405,16 @@ function LogsTab({ ns, name, ready }: { ns: string; name: string; ready: boolean
       </div>
 
       {phase === "waiting" && lines.length === 0 ? (
-        <div
-          className="flex h-40 items-center justify-center text-sm text-muted-foreground"
+        <p
+          className="px-5 py-8 text-sm text-secondary-foreground"
           data-testid="logs-waiting"
         >
           {ready
             ? "Waiting for the agent to start — no running pod yet."
             : "The agent is still coming up — waiting for its first pod."}
-        </div>
+        </p>
       ) : (
-        <pre className="max-h-80 overflow-y-auto p-4 font-mono text-xs leading-relaxed">
+        <pre className="max-h-80 overflow-auto bg-surface-3 p-4 font-mono text-xs leading-relaxed">
           {lines.map((l) => (
             <div key={l.seq} data-testid="log-line">
               {l.text}
@@ -1781,7 +2426,7 @@ function LogsTab({ ns, name, ready }: { ns: string; name: string; ready: boolean
             </div>
           )}
           {phase === "ended" && lines.length === 0 && (
-            <div className="text-muted-foreground">No log output.</div>
+            <div className="text-faint">No log output.</div>
           )}
         </pre>
       )}
@@ -1789,9 +2434,10 @@ function LogsTab({ ns, name, ready }: { ns: string; name: string; ready: boolean
   );
 }
 
-// ── Per-agent Runs tab (m15.11) ───────────────────────────────────────────────
-// Uses the bounded GET /api/agents/{ns}/{name}/runs endpoint. On 501 (Langfuse
-// not configured) renders a calm "unavailable" empty state, never an error toast.
+// ── Per-agent Runs (m15.11) ──────────────────────────────────────────────────
+// Uses the bounded GET /api/agents/{ns}/{name}/runs endpoint. On 501 (no trace
+// backend) it renders a calm QuietNote, never an error — nothing is broken, the
+// platform is simply not wired to answer.
 function AgentRunsTab({
   ns,
   name,
@@ -1804,7 +2450,7 @@ function AgentRunsTab({
   const [state, setState] = React.useState<
     | { kind: "loading" }
     | { kind: "ready"; runs: AgentRunSummary[] }
-    | { kind: "unavailable" } // 501 — Langfuse not configured
+    | { kind: "unavailable" } // 501 — no trace backend configured
     | { kind: "error"; message: string; forbidden: boolean }
   >({ kind: "loading" });
 
@@ -1815,7 +2461,7 @@ function AgentRunsTab({
       .agentRuns(ns, name, 50, controller.signal)
       .then((res) => {
         if (controller.signal.aborted) return;
-        // null = 501 (Langfuse not wired) — degrade calmly.
+        // null = 501 (no trace backend wired) — degrade calmly.
         if (res === null) {
           setState({ kind: "unavailable" });
           return;
@@ -1833,43 +2479,87 @@ function AgentRunsTab({
     return () => controller.abort();
   }, [ns, name]);
 
+  // §4.4 activity-feed budget: identity and the next step never drop; the
+  // numerics go at 1024 and the timestamp at 768.
   const cols: Column<AgentRunSummary>[] = [
     {
       id: "traceId",
       header: "Run",
-      cell: (r) => <span className="font-mono text-xs">{r.traceId}</span>,
+      priority: 1,
+      cell: (r) => (
+        <span className="font-mono text-xs" title={r.traceId}>
+          {truncateId(r.traceId)}
+        </span>
+      ),
     },
-    { id: "name", header: "Name", hideOnMobile: true, cell: (r) => r.name },
-    { id: "timestamp", header: "When", hideOnMobile: true, cell: (r) => r.timestamp },
+    {
+      id: "timestamp",
+      header: "When",
+      priority: 2,
+      cell: (r) => (
+        <span className="whitespace-nowrap font-mono text-xs tabular-nums text-faint" title={r.timestamp}>
+          {formatDateTime(r.timestamp) || r.timestamp}
+        </span>
+      ),
+    },
     {
       id: "tokens",
       header: "Tokens",
-      className: "text-right",
-      cell: (r) => <span className="tabular-nums">{r.tokens.toLocaleString()}</span>,
+      priority: 3,
+      numeric: true,
+      // The traces-LIST API does not carry per-trace token usage, so a 0 here
+      // means "not captured", not "used no tokens". Unknown and zero never
+      // share a glyph (§7.1), so a 0 renders the dash with its reason.
+      cell: (r) => (
+        <QuantityValue
+          value={r.tokens > 0 ? r.tokens : UNKNOWN}
+          title="Per-trace token usage isn’t carried by the runs list — unknown, not zero."
+        />
+      ),
     },
     {
       id: "cost",
       header: "Cost",
-      className: "text-right",
-      cell: (r) => <span className="tabular-nums">${r.costUSD.toFixed(3)}</span>,
+      priority: 3,
+      numeric: true,
+      cell: (r) => <QuantityValue value={r.costUSD} format={formatUSD} />,
     },
     {
       id: "latency",
       header: "Latency",
-      className: "text-right",
-      hideOnMobile: true,
-      cell: (r) => <span className="tabular-nums">{Math.round(r.latencyMs)}ms</span>,
+      priority: 3,
+      numeric: true,
+      cell: (r) => (
+        <QuantityValue
+          value={r.latencyMs > 0 ? r.latencyMs : UNKNOWN}
+          format={formatLatency}
+        />
+      ),
+    },
+    {
+      id: "next",
+      header: "Next step",
+      priority: 1,
+      className: "w-[9rem]",
+      cell: (r) => (
+        <NextStepLink
+          label="Read the run"
+          onClick={() => onInspect(r.traceId)}
+          ariaLabel={`Read run ${r.traceId}`}
+        />
+      ),
     },
   ];
 
-  // 501-degrade: calm empty state, NOT an error toast or error state.
+  // 501-degrade: a calm note, NOT an error toast and NOT an error state.
   if (state.kind === "unavailable") {
     return (
-      <div
-        className="flex h-40 items-center justify-center rounded-lg border bg-card text-sm text-muted-foreground"
-        data-testid="runs-unavailable"
-      >
-        Runs unavailable — tracing not configured (Langfuse not wired).
+      <div data-testid="runs-unavailable">
+        <QuietNote title="This install records no runs.">
+          Runs are unavailable — tracing not configured. This agent may well have
+          served many; without a trace backend the console has nothing to read, so
+          the list is absent rather than empty. Nothing here is estimated.
+        </QuietNote>
       </div>
     );
   }
@@ -1885,7 +2575,7 @@ function AgentRunsTab({
   }
 
   return (
-    <div data-testid="runs-tab">
+    <div className="min-w-0" data-testid="runs-tab">
       <DataTable<AgentRunSummary>
         columns={cols}
         rows={state.kind === "ready" ? state.runs : []}
@@ -1901,28 +2591,32 @@ function AgentRunsTab({
         empty={{
           icon: Play,
           title: "No runs yet",
-          description: "Run this agent from the Overview tab to see its traced runs here.",
+          description:
+            "Nothing has been asked of this agent. Send it something from the Overview tab and its runs appear here.",
         }}
       />
     </div>
   );
 }
 
-// ── Bindings tab / list ──────────────────────────────────────────────────────
-function BindingsTab({ bindings }: { bindings: AgentBinding[] }) {
-  return (
-    <div data-testid="bindings-tab">
-      <BindingsList bindings={bindings} />
-    </div>
-  );
-}
+// ── Bindings list ────────────────────────────────────────────────────────────
+// The full, grouped view behind the Overview summary. It speaks the SAME three
+// words as "What it can reach" (working / never called / unresolved) — two
+// surfaces describing the same binding must not use two vocabularies, or the
+// reader has to work out which one to believe.
 
 const OTHER_TOOLS_GROUP = "Other tools";
 
-function BindingsList({ bindings }: { bindings: AgentBinding[] }) {
+function BindingsList({
+  bindings,
+  agentIsUp,
+}: {
+  bindings: AgentBinding[];
+  agentIsUp: boolean;
+}) {
   if (bindings.length === 0) {
     return (
-      <p className="text-sm text-muted-foreground" data-testid="bindings-empty">
+      <p className="text-sm text-secondary-foreground" data-testid="bindings-empty">
         No bindings reference this agent yet.
       </p>
     );
@@ -1947,6 +2641,15 @@ function BindingsList({ bindings }: { bindings: AgentBinding[] }) {
     return a[0].localeCompare(b[0]);
   });
 
+  const StateTag = ({ b }: { b: AgentBinding }) => {
+    const tag = REACH_TAG[reachState(b, agentIsUp)];
+    return (
+      <Badge variant={tag.variant} className="shrink-0" title={tag.title}>
+        {tag.label}
+      </Badge>
+    );
+  };
+
   return (
     <div className="space-y-2" data-testid="bindings-list">
       {serverGroups.map(([server, group]) => {
@@ -1955,41 +2658,39 @@ function BindingsList({ bindings }: { bindings: AgentBinding[] }) {
         return (
           <details
             key={server}
-            className="group rounded-md border bg-surface-2/40"
+            className="group min-w-0 rounded-md border border-border bg-surface-2"
             data-testid={`binding-group-${server}`}
           >
             <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm [&::-webkit-details-marker]:hidden">
-              <div className="flex min-w-0 items-center gap-2">
-                <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
-                <Server className="h-4 w-4 shrink-0 text-primary" />
-                <span className="truncate font-medium">{server}</span>
-                <Badge variant="secondary" className="text-[10px]">
+              <span className="flex min-w-0 items-center gap-2">
+                <ChevronRight
+                  aria-hidden="true"
+                  className="h-4 w-4 shrink-0 text-ghost transition-transform group-open:rotate-90"
+                />
+                <Server aria-hidden="true" className="h-4 w-4 shrink-0 text-faint" />
+                <span className="truncate font-mono text-sm font-semibold">{server}</span>
+                <span className="shrink-0 font-mono text-2xs uppercase tracking-wide text-faint">
                   {group.length} tool{group.length === 1 ? "" : "s"}
-                </Badge>
-              </div>
-              <Badge
-                variant={allReady ? "success" : "warning"}
-                className="shrink-0 text-[10px]"
-              >
+                </span>
+              </span>
+              {/* The rollup is a RESOLUTION count, so it wears the resolution
+                  hues: all resolved is ok, a shortfall is crit — never amber,
+                  which means "a bound is near or crossed" (§2.2). */}
+              <Badge variant={allReady ? "ok" : "crit"} className="shrink-0">
                 {allReady ? "all ready" : `${readyCount}/${group.length} ready`}
               </Badge>
             </summary>
-            <div className="space-y-1 border-t px-3 py-2">
+            <div className="space-y-1 border-t border-border-soft px-3 py-2">
               {group.map((b) => (
                 <div
                   key={`${b.kind}/${b.name}`}
-                  className="flex items-center justify-between gap-3 rounded px-2 py-1.5 text-sm hover:bg-accent/40"
+                  className="flex items-center justify-between gap-3 rounded-sm px-2 py-1.5 text-sm hover:bg-surface-3"
                   data-testid={`binding-${b.name}`}
                 >
-                  <span className="truncate font-mono text-xs">
+                  <span className="truncate font-mono text-xs" title={b.detail || b.name}>
                     {b.detail || b.name}
                   </span>
-                  <Badge
-                    variant={b.ready ? "success" : "warning"}
-                    className="shrink-0 text-[10px]"
-                  >
-                    {b.ready ? "ready" : "pending"}
-                  </Badge>
+                  <StateTag b={b} />
                 </div>
               ))}
             </div>
@@ -2000,18 +2701,16 @@ function BindingsList({ bindings }: { bindings: AgentBinding[] }) {
       {others.map((b) => (
         <div
           key={`${b.kind}/${b.name}`}
-          className="flex items-center justify-between gap-3 rounded-md border bg-surface-2/40 px-4 py-3 text-sm"
+          className="flex min-w-0 items-center justify-between gap-3 rounded-md border border-border bg-surface-2 px-4 py-3 text-sm"
           data-testid={`binding-${b.name}`}
         >
-          <div className="flex min-w-0 items-center gap-2">
-            <Badge variant="secondary" className="text-[10px]">
+          <span className="flex min-w-0 items-center gap-2">
+            <span className="shrink-0 font-mono text-2xs uppercase tracking-wide text-faint">
               {b.kind}
-            </Badge>
+            </span>
             <span className="truncate">{b.detail || b.name}</span>
-          </div>
-          <Badge variant={b.ready ? "success" : "warning"} className="text-[10px]">
-            {b.ready ? "ready" : "pending"}
-          </Badge>
+          </span>
+          <StateTag b={b} />
         </div>
       ))}
     </div>
@@ -2160,25 +2859,23 @@ function MemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
 
   return (
     <div data-testid="memory-panel">
-      <div className="mb-4 flex items-center justify-between">
-        <div>
-          <p className="text-sm font-medium">Memory bindings</p>
-          <p className="text-xs text-muted-foreground">
-            The session &amp; shared memory backends wired to this agent (configuration).
-          </p>
-        </div>
-        {canCreate && (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={openAttach}
-            data-testid="memory-attach"
-          >
-            <Plus className="h-4 w-4" />
-            Attach
-          </Button>
-        )}
-      </div>
+      <SectionHeader
+        title="Memory"
+        lede="The session and shared memory backends wired to this agent. This is its configuration, not its contents."
+        actions={
+          canCreate ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={openAttach}
+              data-testid="memory-attach"
+            >
+              <Plus className="h-4 w-4" />
+              Attach
+            </Button>
+          ) : undefined
+        }
+      />
 
       {load.kind === "loading" && (
         <p className="text-sm text-muted-foreground" data-testid="memory-loading">Loading…</p>
@@ -2207,18 +2904,18 @@ function MemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
           {load.bindings.map((b) => (
             <li
               key={b.name}
-              className="flex items-center justify-between gap-3 rounded-md border bg-surface-2/40 px-4 py-3 text-sm"
+              className="flex items-center justify-between gap-3 rounded-md border bg-surface-2 px-4 py-3 text-sm"
               data-testid={`memory-binding-${b.name}`}
             >
               <div className="flex min-w-0 items-center gap-3">
-                <Badge variant="secondary" className="text-[10px]">scope</Badge>
+                <Badge variant="muted">scope</Badge>
                 <span className="font-medium">{b.scope}</span>
                 {b.backend && (
                   <span className="text-xs text-muted-foreground">via {b.backend}</span>
                 )}
               </div>
               <div className="flex items-center gap-2">
-                <Badge variant={b.ready ? "success" : "warning"} className="text-[10px]">
+                <Badge variant={b.ready ? "ok" : "progressing"}>
                   {b.ready ? "ready" : "pending"}
                 </Badge>
                 {canUpdate && (
@@ -2245,7 +2942,7 @@ function MemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
 
       {/* Attach / edit form inline */}
       {(isAttachOpen || isEditOpen) && (
-        <div className="mt-4 rounded-lg border bg-card p-4 shadow-card">
+        <div className="mt-4 rounded-lg border bg-card p-4">
           <p className="mb-3 text-sm font-medium">{isAttachOpen ? "Attach memory binding" : "Edit memory binding"}</p>
           <div className="space-y-3">
             <FormField id="memory-scope" label="Scope">
@@ -2378,7 +3075,7 @@ function SessionMemoryConfigPanel({ ns, agentName }: { ns: string; agentName: st
         Per-user isolation for this agent&rsquo;s conversation memory (ADR 0080).
       </p>
       <div className="flex items-center gap-2 text-sm">
-        <Badge variant={config.perUser ? "success" : "secondary"} data-testid="sessionmem-state">
+        <Badge variant={config.perUser ? "ok" : "muted"} data-testid="sessionmem-state">
           {config.perUser ? "per-user" : "agent-wide"}
         </Badge>
         <span className="text-xs text-muted-foreground">scope {config.scope}</span>
@@ -2471,7 +3168,7 @@ function LongTermMemoryConfigPanel({ ns, agentName }: { ns: string; agentName: s
         Let this agent remember facts across conversations and recall them by meaning (ADR 0045).
       </p>
       <div className="flex items-center gap-2 text-sm">
-        <Badge variant={config.enabled ? "success" : "secondary"} data-testid="longterm-state">
+        <Badge variant={config.enabled ? "ok" : "muted"} data-testid="longterm-state">
           {config.enabled ? "Enabled" : "Disabled"}
         </Badge>
         {config.enabled && (
@@ -2589,14 +3286,14 @@ function LongTermMemoryPanel({ ns, agentName }: { ns: string; agentName: string 
           {load.items.map((m, i) => (
             <li
               key={`${m.createdAt}-${i}`}
-              className="rounded-md border bg-card p-3 text-sm shadow-card"
+              className="rounded-md border bg-card p-3 text-sm"
               data-testid="longterm-item"
             >
               <p className="whitespace-pre-wrap">{m.content}</p>
               {m.tags && Object.keys(m.tags).length > 0 && (
                 <div className="mt-2 flex flex-wrap gap-1" data-testid="longterm-tags">
                   {Object.entries(m.tags).map(([k, v]) => (
-                    <Badge key={k} variant="secondary" className="text-[10px]">
+                    <Badge key={k} variant="muted">
                       {k}: {v}
                     </Badge>
                   ))}
@@ -2836,20 +3533,23 @@ function ScalingPanel({ ns, agentName }: { ns: string; agentName: string }) {
 
   return (
     <div data-testid="scaling-panel">
-      <div className="mb-4 flex items-center justify-between">
-        <p className="text-sm font-medium">Scaling policies</p>
-        {canCreate && (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={openAttach}
-            data-testid="scaling-attach"
-          >
-            <Plus className="h-4 w-4" />
-            Attach
-          </Button>
-        )}
-      </div>
+      <SectionHeader
+        title="Scaling"
+        lede="How many copies of this agent run, and when. A policy with a floor above zero keeps it warm."
+        actions={
+          canCreate ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={openAttach}
+              data-testid="scaling-attach"
+            >
+              <Plus className="h-4 w-4" />
+              Attach
+            </Button>
+          ) : undefined
+        }
+      />
 
       {load.kind === "ready" && (canCreate || canUpdate) && (
         <div
@@ -2903,18 +3603,18 @@ function ScalingPanel({ ns, agentName }: { ns: string; agentName: string }) {
           {load.policies.map((p) => (
             <li
               key={p.name}
-              className="flex items-center justify-between gap-3 rounded-md border bg-surface-2/40 px-4 py-3 text-sm"
+              className="flex items-center justify-between gap-3 rounded-md border bg-surface-2 px-4 py-3 text-sm"
               data-testid={`scaling-policy-${p.name}`}
             >
               <div className="flex min-w-0 items-center gap-3">
-                <Badge variant="secondary" className="text-[10px]">{p.mode ?? "static"}</Badge>
+                <Badge variant="muted">{p.mode ?? "static"}</Badge>
                 <span className="font-medium">{p.minReplicas}–{p.maxReplicas} replicas</span>
                 {p.schedule && (
                   <span className="font-mono text-xs text-muted-foreground">{p.schedule}</span>
                 )}
               </div>
               <div className="flex items-center gap-2">
-                <Badge variant={p.ready ? "success" : "warning"} className="text-[10px]">
+                <Badge variant={p.ready ? "ok" : "progressing"}>
                   {p.ready ? "ready" : "pending"}
                 </Badge>
                 {canUpdate && (
@@ -2941,7 +3641,7 @@ function ScalingPanel({ ns, agentName }: { ns: string; agentName: string }) {
 
       {/* Attach / edit form inline */}
       {(isAttachOpen || isEditOpen) && (
-        <div className="mt-4 rounded-lg border bg-card p-4 shadow-card">
+        <div className="mt-4 rounded-lg border bg-card p-4">
           <p className="mb-3 text-sm font-medium">{isAttachOpen ? "Attach scaling policy" : "Edit scaling policy"}</p>
           <div className="space-y-3">
             <div className="grid grid-cols-2 gap-3">
@@ -3039,106 +3739,6 @@ function truncate(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}…` : s;
 }
 
-// Keep the old RunsTab export for backward compatibility with existing tests
-// that import RunSummary-based runs from the global /api/runs endpoint.
-// This is ONLY used by old tests; the new AgentRunsTab uses the per-agent endpoint.
-function RunsTab({
-  agentName,
-  onInspect,
-}: {
-  agentName: string;
-  onInspect: (traceId: string) => void;
-}) {
-  const [state, setState] = React.useState<
-    | { kind: "loading" }
-    | { kind: "ready"; runs: RunSummary[] }
-    | { kind: "error"; message: string; forbidden: boolean }
-  >({ kind: "loading" });
-
-  React.useEffect(() => {
-    const controller = new AbortController();
-    setState({ kind: "loading" });
-    api
-      .runs(controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        const mine = res.runs.filter((r) => r.name === agentName);
-        setState({ kind: "ready", runs: mine });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load runs",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-    return () => controller.abort();
-  }, [agentName]);
-
-  const cols: Column<RunSummary>[] = [
-    {
-      id: "traceId",
-      header: "Run",
-      cell: (r) => <span className="font-mono text-xs">{r.traceId}</span>,
-    },
-    { id: "timestamp", header: "When", hideOnMobile: true, cell: (r) => r.timestamp },
-    {
-      id: "tokens",
-      header: "Tokens",
-      className: "text-right",
-      cell: (r) => <span className="tabular-nums">{r.tokens.toLocaleString()}</span>,
-    },
-    {
-      id: "cost",
-      header: "Cost",
-      className: "text-right",
-      cell: (r) => <span className="tabular-nums">${r.costUSD.toFixed(3)}</span>,
-    },
-    {
-      id: "latency",
-      header: "Latency",
-      className: "text-right",
-      hideOnMobile: true,
-      cell: (r) => <span className="tabular-nums">{Math.round(r.latencyMs)}ms</span>,
-    },
-  ];
-
-  if (state.kind === "error" && state.forbidden) {
-    return (
-      <ForbiddenInline
-        title="Not allowed to read runs"
-        description="Your account can't read run history in this cluster."
-        detail={state.message}
-      />
-    );
-  }
-
-  return (
-    <DataTable<RunSummary>
-      columns={cols}
-      rows={state.kind === "ready" ? state.runs : []}
-      rowKey={(r) => r.traceId}
-      loading={state.kind === "loading"}
-      error={
-        state.kind === "error"
-          ? { message: state.message, forbidden: false, onRetry: undefined }
-          : null
-      }
-      onRowClick={(r) => onInspect(r.traceId)}
-      ariaLabel="Recent runs"
-      empty={{
-        icon: Play,
-        title: "No runs yet",
-        description: "Run this agent from the Overview tab to see its traced runs here.",
-      }}
-    />
-  );
-}
-
-// Keep exported for any backward-compat consumers that import it directly.
-export { RunsTab };
-
 // ── Redaction policy editor (m18.14, ADR 0019) ────────────────────────────────
 // The per-agent custom redaction detectors (name + RE2 pattern), on top of the
 // always-on built-in redaction. Editing gates on agentdeployments update; a bad
@@ -3203,14 +3803,14 @@ function RedactionPanel({ ns, agentName }: { ns: string; agentName: string }) {
 
   if (load.kind === "loading") {
     return (
-      <div className="rounded-lg border bg-card p-6 text-sm text-muted-foreground shadow-card">
+      <div className="rounded-lg border border-border bg-card p-5 text-sm text-faint">
         Loading the redaction policy…
       </div>
     );
   }
   if (load.kind === "error") {
     return (
-      <div className="rounded-lg border bg-card p-6 text-sm text-destructive shadow-card" role="alert">
+      <div className="rounded-lg border border-border bg-card p-5 text-sm text-destructive" role="alert">
         {load.forbidden
           ? "Not allowed to read this agent's redaction policy."
           : load.message}
@@ -3219,15 +3819,14 @@ function RedactionPanel({ ns, agentName }: { ns: string; agentName: string }) {
   }
 
   return (
-    <div className="space-y-4 rounded-lg border bg-card p-6 shadow-card" data-testid="redaction-panel">
-      <div>
-        <p className="text-sm font-medium">Custom redaction detectors</p>
-        <p className="mt-1 text-xs text-muted-foreground">
+    <Card className="min-w-0" data-testid="redaction-panel">
+      <PanelHeader title="Redaction" />
+      <CardContent className="space-y-4">
+        <p className="max-w-[66ch] text-sm text-secondary-foreground">
           Extra named regex rules applied to trace payloads before they are stored —
           on top of the always-on built-in detectors (emails, keys, SSNs). Each match
-          becomes <span className="font-mono">[REDACTED:name]</span>.
+          becomes <span className="font-mono text-xs">[REDACTED:name]</span>.
         </p>
-      </div>
 
       {rows.length === 0 && (
         <p className="text-sm text-muted-foreground">
@@ -3298,7 +3897,8 @@ function RedactionPanel({ ns, agentName }: { ns: string; agentName: string }) {
           </Button>
         </div>
       )}
-    </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -3317,136 +3917,6 @@ type OnlineScoreLoad =
   | { kind: "ready"; data: OnlineScoreResponse }
   | { kind: "unavailable" }  // 501 — store not configured
   | { kind: "error"; message: string };
-
-// ── Promotion pipeline (M144.7) ──────────────────────────────────────────────
-// An at-a-glance lifecycle strip: Draft → Evaluated → Approved → Serving, derived
-// from the agent's REAL spec-vs-status (isDraft, gate projection, ready, url) —
-// never fabricated. When no EvalSuite is wired the Evaluated/Approved stages read
-// honestly as "not gated" (skipped), so a simple agent shows Draft → Serving.
-type StageState = "done" | "current" | "pending" | "skipped" | "failed";
-
-function promotionStages(
-  detail: AgentDetailResponse,
-): { label: string; state: StageState; note?: string }[] {
-  const gate = detail.gate;
-  const gated = gate != null;
-  const gp = (gate?.phase ?? "").toLowerCase();
-  // "scored" = the gate has a scored revision or has moved past scoring.
-  const scored =
-    Boolean(gate?.scoredRevision) || ["promoted", "canary", "passed", "scored"].includes(gp);
-
-  const draft: StageState = detail.isDraft ? "current" : "done";
-
-  let evaluated: StageState;
-  let evalNote: string | undefined;
-  if (detail.isDraft) evaluated = "pending";
-  else if (!gated) {
-    evaluated = "skipped";
-    evalNote = "no eval suite";
-  } else if (gp === "failed") evaluated = "failed";
-  else if (scored) evaluated = "done";
-  else {
-    evaluated = "current";
-    evalNote = "scoring";
-  }
-
-  let approved: StageState;
-  let apprNote: string | undefined;
-  if (detail.isDraft) approved = "pending";
-  else if (!gated) {
-    approved = "skipped";
-    apprNote = "no gate";
-  } else if (gp === "promoted") approved = "done";
-  else if (gp === "canary") {
-    approved = "current";
-    apprNote = "canary";
-  } else if (evaluated === "done") {
-    approved = "current";
-    apprNote = "awaiting promotion";
-  } else approved = "pending";
-
-  let serving: StageState;
-  if (detail.ready && detail.url) serving = "done";
-  else if (detail.isDraft) serving = "pending";
-  else serving = "current";
-
-  return [
-    { label: "Draft", state: draft },
-    { label: "Evaluated", state: evaluated, note: evalNote },
-    { label: "Approved", state: approved, note: apprNote },
-    { label: "Serving", state: serving },
-  ];
-}
-
-function StageDot({ state }: { state: StageState }) {
-  const base = "flex h-6 w-6 items-center justify-center rounded-full border text-[10px]";
-  if (state === "done")
-    return (
-      <span className={`${base} border-transparent bg-success text-success-foreground`}>
-        <Check className="h-3.5 w-3.5" />
-      </span>
-    );
-  if (state === "current")
-    return (
-      <span className={`${base} border-info bg-info/15 text-info`}>
-        <span className="h-2 w-2 rounded-full bg-info" />
-      </span>
-    );
-  if (state === "failed")
-    return (
-      <span className={`${base} border-transparent bg-destructive text-destructive-foreground`}>
-        <X className="h-3.5 w-3.5" />
-      </span>
-    );
-  if (state === "skipped")
-    return (
-      <span className={`${base} border-dashed border-border text-muted-foreground`}>
-        <Minus className="h-3 w-3" />
-      </span>
-    );
-  return <span className={`${base} border-border text-muted-foreground`}>•</span>;
-}
-
-function PromotionPipeline({ detail }: { detail: AgentDetailResponse }) {
-  const stages = promotionStages(detail);
-  const labelClass = (s: StageState) =>
-    s === "done"
-      ? "text-foreground"
-      : s === "current"
-        ? "text-info"
-        : s === "failed"
-          ? "text-destructive"
-          : "text-muted-foreground";
-  return (
-    <div className="rounded-lg border bg-card p-5 shadow-card" data-testid="promotion-pipeline">
-      <div className="mb-4 flex items-center gap-2">
-        <Server className="h-4 w-4 text-muted-foreground" />
-        <p className="text-sm font-medium">Promotion</p>
-      </div>
-      <ol className="flex items-start">
-        {stages.map((s, i) => (
-          <React.Fragment key={s.label}>
-            {i > 0 && (
-              <div
-                className={`mt-3 h-px flex-1 ${
-                  stages[i - 1].state === "done" ? "bg-success" : "bg-border"
-                }`}
-              />
-            )}
-            <li
-              className="flex flex-col items-center gap-1 px-2 text-center"
-              data-testid={`promotion-stage-${s.label.toLowerCase()}`}
-            >
-              <StageDot state={s.state} />
-              <span className={`text-xs font-medium ${labelClass(s.state)}`}>{s.label}</span>
-              {s.note && <span className="text-[10px] text-muted-foreground">{s.note}</span>}
-            </li>
-          </React.Fragment>
-        ))}
-      </ol>
-    </div>
-  );
-}
 
 function ImprovementLoopSection({
   ns,
@@ -3529,100 +3999,130 @@ function ImprovementLoopSection({
     }
   }
 
-  // If the store is unavailable AND no RegressionDetected AND no canary AND no versions,
-  // render nothing (no noise for simple agents with no eval suite).
+  // Nothing to score, nothing gated, nothing to roll back to. This is now a
+  // whole TAB, so it may not render nothing — an empty tab reads as a bug. It
+  // says what the loop is and what wiring it would take instead (§7.1).
   if (
     scoreLoad.kind === "unavailable" &&
     !regressionDetected &&
     !isCanary &&
     versions.length === 0
   ) {
-    return null;
+    return (
+      <Card className="min-w-0" data-testid="improvement-loop-section">
+        <PanelHeader title="Online score" />
+        <CardContent>
+          <QuietNote title="The improvement loop isn’t configured.">
+            Online scoring reads production runs back into a control-plane store
+            and compares each version against its baseline. No store is wired up
+            here, and this agent has no version history to compare, so there is
+            nothing to show. Nothing on this tab is estimated — the scores are
+            simply absent.
+          </QuietNote>
+        </CardContent>
+      </Card>
+    );
   }
 
   return (
-    <div
-      className="rounded-lg border bg-card p-5 shadow-card space-y-4"
-      data-testid="improvement-loop-section"
-    >
-      <div className="flex items-center gap-2">
-        <Activity className="h-4 w-4 text-muted-foreground" />
-        <p className="text-sm font-medium">Online score</p>
+    <Card className="min-w-0" data-testid="improvement-loop-section">
+      <PanelHeader title="Online score">
         {regressionDetected && (
-          <Badge variant="destructive" className="text-[10px]" data-testid="regression-detected-badge">
-            <AlertTriangle className="mr-1 h-3 w-3" />
+          <Badge variant="crit" data-testid="regression-detected-badge">
             Regression detected
           </Badge>
         )}
         {regressionCond && !regressionDetected && regressionCond.status === "False" && (
-          <Badge variant="success" className="text-[10px]" data-testid="regression-ok-badge">
+          <Badge variant="ok" data-testid="regression-ok-badge">
             Healthy
           </Badge>
         )}
-      </div>
-
-      {/* Online score content */}
-      {scoreLoad.kind === "loading" && (
-        <p className="text-sm text-muted-foreground" data-testid="online-score-loading">
-          Loading online score…
+      </PanelHeader>
+      <CardContent className="space-y-4">
+        <p className="max-w-[66ch] text-sm text-secondary-foreground">
+          How the serving version is actually doing in production, across the
+          three signals the platform records: what the runtime measured, what
+          people said, and what the judge scored.
         </p>
-      )}
-      {scoreLoad.kind === "unavailable" && (
-        <p className="text-sm text-muted-foreground" data-testid="online-score-unavailable">
-          Online score not available — control-plane store not configured.
-        </p>
-      )}
-      {scoreLoad.kind === "error" && (
-        <p className="text-sm text-destructive" data-testid="online-score-error">
-          {scoreLoad.message}
-        </p>
-      )}
 
-      {scoreLoad.kind === "ready" && (
-        <>
-          {scoreLoad.data.windows.length === 0 ? (
-            <p className="text-sm text-muted-foreground" data-testid="online-score-empty">
-              No score data yet — no production runs recorded for this agent.
-            </p>
-          ) : isCanary ? (
-            /* Canary arms: two versions side-by-side */
-            <CanaryArms latestByVersion={latestByVersion} />
-          ) : (
-            /* Serving version: most-recent window */
-            <OnlineScoreCard window={scoreLoad.data.windows[0]} />
-          )}
-        </>
-      )}
+        {/* Online score content */}
+        {scoreLoad.kind === "loading" && (
+          <div role="status" aria-busy="true" aria-label="Loading the online score" data-testid="online-score-loading">
+            <Skeleton decorative className="mb-3 h-3.5 w-full" />
+            <Skeleton decorative className="h-3.5 w-2/3" />
+          </div>
+        )}
+        {scoreLoad.kind === "unavailable" && (
+          <div data-testid="online-score-unavailable">
+            <QuietNote title="Online score not available.">
+              The control-plane score store is not configured, so production runs
+              are never read back and no version has a score. Wiring one up is
+              what fills this panel. Nothing here is estimated — the figures are
+              simply absent.
+            </QuietNote>
+          </div>
+        )}
+        {scoreLoad.kind === "error" && (
+          <p className="text-sm text-destructive" data-testid="online-score-error">
+            {scoreLoad.message}
+          </p>
+        )}
 
-      {/* Rollback button — shown when versions available (RBAC-permissive: server enforces) */}
-      {versions.length > 1 && (
-        <div className="flex items-center gap-3 pt-2 border-t" data-testid="rollback-section">
-          <RotateCcw className="h-4 w-4 text-muted-foreground shrink-0" />
-          <p className="text-sm text-muted-foreground shrink-0">Rollback to</p>
-          <select
-            value={rollbackTarget}
-            onChange={(e) => setRollbackTarget(e.target.value)}
-            className="flex-1 rounded-md border bg-background px-3 py-1.5 text-sm"
-            data-testid="rollback-version-select"
+        {scoreLoad.kind === "ready" && (
+          <>
+            {scoreLoad.data.windows.length === 0 ? (
+              <div data-testid="online-score-empty">
+                <QuietNote title="No score data yet.">
+                  The store is wired up, but no production runs have been
+                  recorded against this agent — so there is nothing to score.
+                  Figures appear here once it starts serving.
+                </QuietNote>
+              </div>
+            ) : isCanary ? (
+              /* Canary arms: two versions side-by-side */
+              <CanaryArms latestByVersion={latestByVersion} />
+            ) : (
+              /* Serving version: most-recent window */
+              <OnlineScoreCard window={scoreLoad.data.windows[0]} />
+            )}
+          </>
+        )}
+
+        {/* Rollback — shown when there is a version to go back to (RBAC-permissive:
+            the server enforces). It is guarded by a confirm because it changes what
+            production serves. */}
+        {versions.length > 1 && (
+          <div
+            className="flex flex-wrap items-center gap-3 border-t border-border-soft pt-4"
+            data-testid="rollback-section"
           >
-            <option value="">— choose a version —</option>
-            {versions.map((v) => (
-              <option key={v} value={v}>
-                {v}
-              </option>
-            ))}
-          </select>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={!rollbackTarget}
-            onClick={() => setConfirmOpen(true)}
-            data-testid="rollback-button"
-          >
-            Rollback
-          </Button>
-        </div>
-      )}
+            <RotateCcw aria-hidden="true" className="h-4 w-4 shrink-0 text-faint" />
+            <p className="shrink-0 text-sm text-secondary-foreground">Roll back to</p>
+            <select
+              value={rollbackTarget}
+              onChange={(e) => setRollbackTarget(e.target.value)}
+              className="h-8 min-w-0 flex-1 rounded-md border border-border-strong bg-card px-3 font-mono text-xs"
+              aria-label="Version to roll back to"
+              data-testid="rollback-version-select"
+            >
+              <option value="">— choose a version —</option>
+              {versions.map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </select>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!rollbackTarget}
+              onClick={() => setConfirmOpen(true)}
+              data-testid="rollback-button"
+            >
+              Rollback
+            </Button>
+          </div>
+        )}
 
       {/* Confirm dialog — guards the destructive annotation write */}
       <ConfirmDialog
@@ -3635,83 +4135,120 @@ function ImprovementLoopSection({
         busy={rolling}
         destructive
       />
-    </div>
+      </CardContent>
+    </Card>
   );
 }
 
 // OnlineScoreCard renders the most-recent window for the serving version —
 // all 3 components with clear labels so the operator sees the full picture.
 function OnlineScoreCard({ window: w }: { window: OnlineScoreWindow }) {
-  const errorRate = w.operational.total > 0
-    ? ((w.operational.errorCount / w.operational.total) * 100).toFixed(1)
-    : "—";
-  const toolFailRate = w.operational.total > 0
-    ? ((w.operational.toolFailCount / w.operational.total) * 100).toFixed(1)
-    : "—";
-  const feedbackAvg = w.feedback.count > 0
-    ? (w.feedback.sumVal / w.feedback.count).toFixed(2)
-    : "—";
-  const judgeAvg = w.judge.count > 0
-    ? (w.judge.sumVal / w.judge.count).toFixed(2)
-    : "—";
+  // A rate over zero requests is not zero — it is unmeasurable, and the two
+  // must never share a glyph (§7.1). `UNKNOWN` is the honest branch and the
+  // compiler will not let it be formatted as a number.
+  const pct = (n: number) => `${n.toFixed(1)}%`;
+  const avg = (n: number) => n.toFixed(2);
+  const errorRate =
+    w.operational.total > 0
+      ? (w.operational.errorCount / w.operational.total) * 100
+      : UNKNOWN;
+  const toolFailRate =
+    w.operational.total > 0
+      ? (w.operational.toolFailCount / w.operational.total) * 100
+      : UNKNOWN;
+  const feedbackAvg =
+    w.feedback.count > 0 ? w.feedback.sumVal / w.feedback.count : UNKNOWN;
+  const judgeAvg = w.judge.count > 0 ? w.judge.sumVal / w.judge.count : UNKNOWN;
+
+  const Component = ({
+    title,
+    testId,
+    items,
+  }: {
+    title: string;
+    testId: string;
+    items: KeyValueItem[];
+  }) => (
+    <div className="min-w-0 rounded-md border border-border bg-surface-2 p-4" data-testid={testId}>
+      <p className="mb-2 font-mono text-2xs uppercase tracking-wide text-faint">{title}</p>
+      <KeyValueList items={items} />
+    </div>
+  );
 
   return (
-    <div
-      className="grid grid-cols-3 gap-3 text-sm"
-      data-testid="online-score-card"
-    >
-      {/* Operational */}
-      <div className="rounded-md border bg-surface-2/40 p-3" data-testid="operational-component">
-        <p className="text-xs font-medium text-muted-foreground mb-2">Operational</p>
-        <dl className="space-y-1">
-          <div className="flex justify-between">
-            <dt className="text-xs text-muted-foreground">Requests</dt>
-            <dd className="tabular-nums">{w.operational.total.toLocaleString()}</dd>
-          </div>
-          <div className="flex justify-between">
-            <dt className="text-xs text-muted-foreground">Error rate</dt>
-            <dd className="tabular-nums">{errorRate}%</dd>
-          </div>
-          <div className="flex justify-between">
-            <dt className="text-xs text-muted-foreground">Tool fail</dt>
-            <dd className="tabular-nums">{toolFailRate}%</dd>
-          </div>
-          <div className="flex justify-between">
-            <dt className="text-xs text-muted-foreground">p95 latency</dt>
-            <dd className="tabular-nums">{w.operational.latencyP95Ms.toFixed(0)}ms</dd>
-          </div>
-        </dl>
-      </div>
-
-      {/* Feedback */}
-      <div className="rounded-md border bg-surface-2/40 p-3" data-testid="feedback-component">
-        <p className="text-xs font-medium text-muted-foreground mb-2">Feedback</p>
-        <dl className="space-y-1">
-          <div className="flex justify-between">
-            <dt className="text-xs text-muted-foreground">Count</dt>
-            <dd className="tabular-nums">{w.feedback.count}</dd>
-          </div>
-          <div className="flex justify-between">
-            <dt className="text-xs text-muted-foreground">Avg score</dt>
-            <dd className="tabular-nums">{feedbackAvg}</dd>
-          </div>
-        </dl>
-      </div>
-
-      {/* Judge */}
-      <div className="rounded-md border bg-surface-2/40 p-3" data-testid="judge-component">
-        <p className="text-xs font-medium text-muted-foreground mb-2">Judge</p>
-        <dl className="space-y-1">
-          <div className="flex justify-between">
-            <dt className="text-xs text-muted-foreground">Count</dt>
-            <dd className="tabular-nums">{w.judge.count}</dd>
-          </div>
-          <div className="flex justify-between">
-            <dt className="text-xs text-muted-foreground">Avg score</dt>
-            <dd className="tabular-nums">{judgeAvg}</dd>
-          </div>
-        </dl>
-      </div>
+    // Three across only where three fit; stacked below `md`, where a 90px
+    // column would make every figure wrap.
+    <div className="grid grid-cols-1 gap-3 md:grid-cols-3" data-testid="online-score-card">
+      <Component
+        title="Operational"
+        testId="operational-component"
+        items={[
+          { key: "Requests", value: <QuantityValue value={w.operational.total} /> },
+          {
+            key: "Error rate",
+            value: (
+              <QuantityValue
+                value={errorRate}
+                format={pct}
+                title="No requests in this window — the rate is unmeasurable, not zero."
+              />
+            ),
+          },
+          {
+            key: "Tool fail",
+            value: (
+              <QuantityValue
+                value={toolFailRate}
+                format={pct}
+                title="No requests in this window — the rate is unmeasurable, not zero."
+              />
+            ),
+          },
+          {
+            key: "p95 latency",
+            value: (
+              <QuantityValue
+                value={w.operational.latencyP95Ms > 0 ? w.operational.latencyP95Ms : UNKNOWN}
+                format={formatLatency}
+              />
+            ),
+          },
+        ]}
+      />
+      <Component
+        title="Feedback"
+        testId="feedback-component"
+        items={[
+          { key: "Count", value: <QuantityValue value={w.feedback.count} /> },
+          {
+            key: "Avg score",
+            value: (
+              <QuantityValue
+                value={feedbackAvg}
+                format={avg}
+                title="Nobody has rated a run in this window — unknown, not zero."
+              />
+            ),
+          },
+        ]}
+      />
+      <Component
+        title="Judge"
+        testId="judge-component"
+        items={[
+          { key: "Count", value: <QuantityValue value={w.judge.count} /> },
+          {
+            key: "Avg score",
+            value: (
+              <QuantityValue
+                value={judgeAvg}
+                format={avg}
+                title="The judge has scored nothing in this window — unknown, not zero."
+              />
+            ),
+          },
+        ]}
+      />
     </div>
   );
 }
@@ -3757,17 +4294,16 @@ function CanaryArms({
           return (
             <div
               key={v}
-              className="rounded-md border bg-surface-2/40 p-3 space-y-2"
+              className="rounded-md border bg-surface-2 p-3 space-y-2"
               data-testid={`canary-arm-${i === 0 ? "old" : "candidate"}`}
             >
               <div className="flex items-center gap-2">
                 <Badge
-                  variant={sorted.length === 2 && i === 1 ? "secondary" : "outline"}
-                  className="text-[10px]"
+                  variant={sorted.length === 2 && i === 1 ? "muted" : "open"}
                 >
                   {label}
                 </Badge>
-                <span className="font-mono text-[10px] text-muted-foreground truncate">{v}</span>
+                <span className="font-mono text-2xs text-faint truncate">{v}</span>
               </div>
               <OnlineScoreCard window={w} />
             </div>
@@ -3882,7 +4418,7 @@ function PublishTemplateDialog({
         {/* U7: warn if already published */}
         {alreadyPublished && (
           <p
-            className="mt-2 text-sm text-amber-600 dark:text-amber-400"
+            className="mt-2 text-sm text-warning"
             data-testid="publish-template-already-published-warning"
           >
             This agent is already published. Sharing again creates a new version at the
@@ -3893,7 +4429,7 @@ function PublishTemplateDialog({
           {(["team", "org", "public"] as PublishVisibility[]).map((v) => (
             <label
               key={v}
-              className="flex cursor-pointer items-center gap-3 rounded-md border p-3 hover:bg-accent/40"
+              className="flex cursor-pointer items-center gap-3 rounded-md border p-3 hover:bg-surface-2"
               data-testid={`publish-template-option-${v}`}
             >
               <input
@@ -3919,7 +4455,7 @@ function PublishTemplateDialog({
         </div>
         {selected === "public" && (
           <div className="mt-3 space-y-2">
-            <p className="text-sm text-amber-600 dark:text-amber-400" data-testid="publish-template-public-warning">
+            <p className="text-sm text-warning" data-testid="publish-template-public-warning">
               Public means every tenant on this cluster can discover and fork this template.
             </p>
             <label className="flex cursor-pointer items-center gap-2 text-sm">
