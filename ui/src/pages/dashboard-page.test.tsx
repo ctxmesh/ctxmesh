@@ -327,8 +327,24 @@ describe("fleetSentence", () => {
     expect(
       fleetSentence({ waiting: 0, stopped: 0, near: 0, attention: 0, serving: 12 }),
     ).toBe(
-      "Nothing is waiting on a person, nothing is stopped, and nothing is failing. All 12 agents are serving.",
+      "Nothing is waiting on a person, nothing is stopped and nothing is failing. All 12 agents are serving.",
     );
+  });
+
+  // M151 hardening B1: the all-clear used to be a fixed sentence naming all
+  // three categories, so a console REFUSED the stop list still reassured the
+  // operator that nothing was stopped.
+  it("drops the stops clause from the all-clear when the stop list never answered", () => {
+    expect(fleetSentence({ waiting: 0, attention: 0, serving: 12 })).toBe(
+      "Nothing is waiting on a person and nothing is failing. All 12 agents are serving.",
+    );
+  });
+
+  it("never claims an all-clear over a category no backend answered for", () => {
+    // Only budgets answered, and budgets are not an all-clear category — so
+    // there is no all-clear to give, only the serving count.
+    expect(fleetSentence({ near: 0, serving: 4 })).toBe("All 4 agents are serving.");
+    expect(fleetSentence({ near: 0 })).toBeNull();
   });
 
   it("renders nothing at all before any backend has answered", () => {
@@ -520,7 +536,7 @@ describe("Home (render proof)", () => {
 
     expect(
       await screen.findByText(
-        /Nothing is waiting on a person, nothing is stopped, and nothing is failing/,
+        /Nothing is waiting on a person, nothing is stopped and nothing is failing/,
       ),
     ).toBeInTheDocument();
     // No "needs looking at" frame at all — an empty card is not an answer.

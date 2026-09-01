@@ -228,7 +228,7 @@ describe("ApprovalsPage — waitingSince column (M113)", () => {
     // the closing line now says the same thing about the oldest row, and an
     // unscoped query would match both.
     const table = screen.getByRole("table", { name: "Approvals" });
-    expect(within(table).getByText(/\dh ago/)).toBeInTheDocument();
+    expect(within(table).getAllByText(/\dh ago/)[0]).toBeInTheDocument();
   });
 });
 
@@ -435,6 +435,11 @@ describe("ApprovalsPage — inline decide (§4.4 queue budget)", () => {
     renderPage();
 
     fireEvent.click(await screen.findByTestId("approvals-approve-run-step"));
+    // Approving now confirms: it authorises the call the run stopped to ask
+    // about, and until M151's UX review the guard sat on Deny instead.
+    fireEvent.click(
+      within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Approve" }),
+    );
 
     await waitFor(() =>
       expect(
@@ -510,6 +515,11 @@ describe("ApprovalsPage — inline decide (§4.4 queue budget)", () => {
     renderPage();
 
     fireEvent.click(await screen.findByTestId("approvals-approve-run-step"));
+    // Approving now confirms: it authorises the call the run stopped to ask
+    // about, and until M151's UX review the guard sat on Deny instead.
+    fireEvent.click(
+      within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Approve" }),
+    );
 
     const alert = await screen.findByTestId("approvals-action-error");
     expect(alert).toHaveTextContent(/still waiting/);
