@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { TenantsPage } from "@/pages/tenants-page";
@@ -246,9 +246,26 @@ describe("TenantsPage", () => {
     const row = await screen.findByText("alpha");
     fireEvent.click(row.closest("tr") ?? row);
     const usage = await screen.findByTestId("tenant-usage", {}, { timeout: 3000 });
-    expect(usage).toHaveTextContent(/\$42\.50 \/ \$100\.00 spent/);
-    expect(usage).toHaveTextContent(/120 \/ 600 req\/min/);
-    expect(usage).toHaveTextContent(/3 \/ 20 in-flight/);
+    // Each live figure is now drawn against its cap by the kit Meter (M151
+    // §5.24) instead of a prose line, so the same three facts are asserted on
+    // the meters themselves — used, cap, and the label they belong to. This is
+    // the original assertion made stronger: it now also proves the bound is
+    // real (aria-valuemax) rather than merely mentioned in a sentence.
+    expect(usage).toHaveTextContent(/\$42\.50 \/ \$100\.00/);
+    expect(usage).toHaveTextContent(/120 \/ 600/);
+    expect(usage).toHaveTextContent(/3 \/ 20/);
+
+    const spend = within(usage).getByRole("meter", { name: "spend" });
+    expect(spend).toHaveAttribute("aria-valuenow", "42.5");
+    expect(spend).toHaveAttribute("aria-valuemax", "100");
+
+    const rpm = within(usage).getByRole("meter", { name: "req/min" });
+    expect(rpm).toHaveAttribute("aria-valuenow", "120");
+    expect(rpm).toHaveAttribute("aria-valuemax", "600");
+
+    const inFlight = within(usage).getByRole("meter", { name: "in-flight" });
+    expect(inFlight).toHaveAttribute("aria-valuenow", "3");
+    expect(inFlight).toHaveAttribute("aria-valuemax", "20");
   });
 
   it("hides the live-usage line when no state-layer is configured (501)", async () => {

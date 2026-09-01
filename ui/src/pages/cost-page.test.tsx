@@ -197,8 +197,10 @@ describe("CostPage — basic rendering (m16.10)", () => {
     // handle captured before the last one lands is a DETACHED node by assertion time (m52.G8).
     await waitFor(() => {
       const card = screen.getByTestId("cost-summary-card");
-      // Total cost is displayed (formatUSD: $3.250)
-      expect(card.textContent).toContain("$3.250");
+      // Total cost is displayed. M151 §4.5 money register: `≥ $1` renders 2
+      // decimals (`< $1` would render 4), so 3.25 reads "$3.25" — the same
+      // assertion, in the register the design system now mandates.
+      expect(card.textContent).toContain("$3.25");
       // Total tokens are shown in compact form — exact format is locale-dependent;
       // assert the card contains a non-zero token display rather than hardcoding "120K".
       expect(card.textContent).toMatch(/\d/); // has numeric content
@@ -222,12 +224,20 @@ describe("CostPage — basic rendering (m16.10)", () => {
 
     renderPage();
 
-    // Both agent rows appear
-    await screen.findByText("prod/billing-agent");
-    expect(screen.getByText("staging/support-agent")).toBeInTheDocument();
+    // Both agent rows appear. M151 §4.5: a namespace never shares the name's
+    // line, so the entity cell is two lines (name over namespace) rather than
+    // the old "ns/name" string — both halves must still be on the row.
+    const billing = await screen.findByTestId("cost-row-prod-billing-agent");
+    expect(billing).toHaveTextContent("billing-agent");
+    expect(billing).toHaveTextContent("prod");
+    const support = screen.getByTestId("cost-row-staging-support-agent");
+    expect(support).toHaveTextContent("support-agent");
+    expect(support).toHaveTextContent("staging");
 
-    // cost / tokens / runCount values
-    expect(screen.getByText("$1.500")).toBeInTheDocument();
+    // cost / tokens / runCount values (money in the §4.5 register: 1.5 ≥ $1 → 2 decimals)
+    expect(screen.getByText("$1.50")).toBeInTheDocument();
+    // …and a sub-dollar amount keeps 4 decimals so it cannot round away to nothing.
+    expect(screen.getByText("$0.7500")).toBeInTheDocument();
     expect(screen.getByText("50,000")).toBeInTheDocument();
     expect(screen.getByText("12")).toBeInTheDocument();
   });
@@ -247,6 +257,42 @@ describe("CostPage — basic rendering (m16.10)", () => {
     renderPage();
 
     await screen.findByTestId("cost-row-prod-billing-agent");
+  });
+});
+
+// ── The money rule (M151 §4.5 / §7.1) ────────────────────────────────────────
+// The page's whole premise: a cost we measured and a cost we never measured
+// must not look the same. This is the assertion that keeps it true.
+
+describe("CostPage — measured zero vs unknown (M151 §4.5)", () => {
+  it("an unmeasured cost renders the dash — never $0.0000 — while a measured zero renders $0.00", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        agents: [
+          // The BFF sent no cost figure at all for this row.
+          { agentNs: "prod", agentName: "unmeasured-agent", totalTokens: 10, runCount: 2 },
+          // …and a real, measured zero for this one.
+          item({ agentNs: "prod", agentName: "free-agent", totalCostUSD: 0, totalTokens: 0, runCount: 4 }),
+        ],
+        total: summary(),
+        nextCursor: "",
+      },
+    }));
+
+    renderPage();
+
+    const unmeasured = (
+      await screen.findByTestId("cost-row-prod-unmeasured-agent")
+    ).closest("tr")!;
+    expect(unmeasured).toHaveTextContent("—");
+    // Not a formatted zero of any width — that is the one glyph §7.1 forbids
+    // for an absent figure.
+    expect(unmeasured).not.toHaveTextContent("$");
+
+    const zero = screen.getByTestId("cost-row-prod-free-agent").closest("tr")!;
+    expect(zero).toHaveTextContent("$0.00");
+    expect(zero).not.toHaveTextContent("$0.0000");
   });
 });
 
@@ -306,8 +352,8 @@ describe("CostPage — (untagged) bucket (m16.10)", () => {
 
     renderPage();
 
-    await screen.findByText("prod/billing-agent");
-    fireEvent.click(screen.getByText("prod/billing-agent").closest("tr")!);
+    const row = await screen.findByTestId("cost-row-prod-billing-agent");
+    fireEvent.click(row.closest("tr")!);
 
     await waitFor(() =>
       expect(screen.getByTestId("agent-detail-stub")).toBeInTheDocument(),
@@ -327,10 +373,14 @@ describe("CostPage — recent-window caveat (m16.10)", () => {
     renderPage();
 
     await screen.findByTestId("cost-page");
-    // The caveat must be present somewhere on the page
-    expect(
-      screen.getByText(/recent window of activity, not all-time spend/i),
-    ).toBeInTheDocument();
+    // The caveat must be present somewhere on the page. M151 §7.1 gives the
+    // windowed-data caveat a fixed shape ("These figures cover {the window} —
+    // not all time.") and a QuietNote to live in; the intent — a reader can
+    // never mistake this page for all-time spend — is unchanged.
+    const note = await screen.findByTestId("cost-window-note");
+    expect(note).toHaveTextContent(/cover a recent window — not all time/i);
+    // …and it names the actual window the BFF reads, rather than hand-waving.
+    expect(note).toHaveTextContent(/last 100 traces/i);
   });
 });
 
@@ -362,7 +412,9 @@ describe("CostPage — cursor pagination (m16.10)", () => {
 
     renderPage();
 
-    await screen.findByText("prod/page-zero-agent");
+    // The entity cell is two lines now (§4.5), so rows are found by their
+    // stable testid rather than a "ns/name" string.
+    await screen.findByTestId("cost-row-prod-page-zero-agent");
 
     const next = screen.getByRole("button", { name: /Next page/ });
     const prev = screen.getByRole("button", { name: /Previous page/ });
@@ -370,7 +422,7 @@ describe("CostPage — cursor pagination (m16.10)", () => {
     expect(prev).toBeDisabled();
 
     fireEvent.click(next);
-    await screen.findByText("prod/page-one-agent");
+    await screen.findByTestId("cost-row-prod-page-one-agent");
 
     // The second fetch should include cursor=cursor1
     expect(captured.some((u) => u.includes("cursor=cursor1"))).toBe(true);
@@ -381,7 +433,7 @@ describe("CostPage — cursor pagination (m16.10)", () => {
 
     // Prev walks back to page 0
     fireEvent.click(screen.getByRole("button", { name: /Previous page/ }));
-    await screen.findByText("prod/page-zero-agent");
+    await screen.findByTestId("cost-row-prod-page-zero-agent");
   });
 
   it("hasNext is determined by nextCursor (not row count)", async () => {
@@ -486,6 +538,35 @@ describe("CostPage — query params sent to API (m16.10)", () => {
     await screen.findByTestId("cost-breakdown-table");
     expect(captured.some((u) => u.includes("/api/cost/breakdown"))).toBe(true);
     expect(screen.queryByTestId("cost-no-tenant")).toBeNull();
+  });
+
+  it("says WHY the page is blank when the tenant list can't be read — never 'no spend'", async () => {
+    // The breakdown is 400 without ?tenant=, so a caller who cannot list
+    // tenants has nothing to scope by. That is a permission boundary, and the
+    // page must say so: an empty table here would read as "this tenant spent
+    // nothing", which is a claim nobody made.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const forbidden = url.includes("/api/tenants");
+        return Promise.resolve({
+          ok: !forbidden,
+          status: forbidden ? 403 : 200,
+          json: async () => (forbidden ? { error: "forbidden" } : { agents: [], total: summary(), nextCursor: "" }),
+          text: async () => JSON.stringify({ error: "forbidden" }),
+        } as Response);
+      }),
+    );
+
+    renderPage(""); // no ?tenant=
+
+    const note = await screen.findByTestId("cost-no-tenant");
+    expect(note).toHaveTextContent(/permission/i);
+    expect(note).toHaveTextContent(/grouped by tenant/i);
+    // No table, and above all no empty one that could be read as zero spend.
+    expect(screen.queryByTestId("cost-breakdown-table")).toBeNull();
+    expect(screen.queryByText("No cost data yet")).toBeNull();
   });
 });
 
@@ -627,9 +708,11 @@ describe("CostPage — forecast card (M70 ADR 0063 D3)", () => {
     await waitFor(() => {
       const card = screen.getByTestId("cost-forecast-card");
       // Month-to-date amount is displayed.
-      expect(card.textContent).toContain("$42.500");
+      // §4.5 money register: `>= $1` renders 2 decimals. Month-to-date is now
+      // the left figure of the budget Meter's `used / cap` row.
+      expect(card.textContent).toContain("$42.50");
       // Projected month-end amount is displayed.
-      expect(card.textContent).toContain("$155.000");
+      expect(card.textContent).toContain("$155.00");
       // Card header says "Month forecast"
       expect(card.textContent).toContain("Month forecast");
     });

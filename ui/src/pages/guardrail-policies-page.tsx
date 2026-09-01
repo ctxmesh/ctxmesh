@@ -239,14 +239,14 @@ export function GuardrailPoliciesPage() {
     {
       id: "name",
       header: "Policy",
-      className: "max-w-[18rem]",
+      className: "max-w-[11rem] lg:max-w-[14rem] xl:max-w-[18rem]",
       cell: (p) => <CellEntity name={p.name} namespace={p.namespace} />,
     },
     {
       id: "detectors",
       header: "Detectors",
       priority: 4,
-      className: "max-w-[16rem]",
+      className: "max-w-[10rem] lg:max-w-[13rem] xl:max-w-[16rem]",
       cell: (p) => {
         const parts = detectorParts(p);
         return parts.length > 0 ? (
@@ -299,7 +299,7 @@ export function GuardrailPoliciesPage() {
       id: "agents",
       header: "Agents",
       priority: 3,
-      className: "max-w-[12rem]",
+      className: "max-w-[8rem] lg:max-w-[10rem] xl:max-w-[12rem]",
       cell: (p) =>
         p.referencingAgents.length === 0 ? (
           // Declared but never exercised (§2.5) — a policy nothing references.

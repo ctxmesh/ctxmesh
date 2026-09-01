@@ -281,16 +281,16 @@ describe("DataTable — column budget + fit", () => {
     // p1 never drops.
     expect(headClass("Name")).not.toContain("hidden");
     // p2 below md (768), p3 below lg (1024), p4 below xl (1280).
-    expect(headClass("P2")).toContain("hidden md:table-cell");
-    expect(headClass("P3")).toContain("hidden lg:table-cell");
-    expect(headClass("P4")).toContain("hidden xl:table-cell");
+    expect(headClass("P2")).toContain("hidden lg:table-cell");
+    expect(headClass("P3")).toContain("hidden xl:table-cell");
+    expect(headClass("P4")).toContain("hidden 2xl:table-cell");
     // Cells carry the SAME class as their head — a column drops as one piece.
     const row = screen.getAllByRole("row")[1];
     const cells = within(row).getAllByRole("cell");
     expect(cells[0].className).not.toContain("hidden");
-    expect(cells[1].className).toContain("hidden md:table-cell");
-    expect(cells[2].className).toContain("hidden lg:table-cell");
-    expect(cells[3].className).toContain("hidden xl:table-cell");
+    expect(cells[1].className).toContain("hidden lg:table-cell");
+    expect(cells[2].className).toContain("hidden xl:table-cell");
+    expect(cells[3].className).toContain("hidden 2xl:table-cell");
   });
 
   it("bridges the deprecated hideOnMobile to priority 2 (pages migrate later)", () => {
@@ -305,7 +305,7 @@ describe("DataTable — column budget + fit", () => {
       />,
     );
     // Identical rendering to the old binary flag: hidden below md.
-    expect(headClass("Legacy")).toContain("hidden md:table-cell");
+    expect(headClass("Legacy")).toContain("hidden lg:table-cell");
     expect(headClass("Name")).not.toContain("hidden");
   });
 
@@ -325,7 +325,7 @@ describe("DataTable — column budget + fit", () => {
         rowKey={(r) => r.id}
       />,
     );
-    expect(headClass("Both")).toContain("hidden xl:table-cell");
+    expect(headClass("Both")).toContain("hidden 2xl:table-cell");
     expect(headClass("Both")).not.toContain("md:table-cell");
   });
 

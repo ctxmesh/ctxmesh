@@ -102,7 +102,7 @@ afterEach(() => {
 });
 
 describe("TracePage (m16.7)", () => {
-  it("renders the header with agent name, timestamp, tokens, and cost", async () => {
+  it("renders the header with agent name and timestamp", async () => {
     installFetch();
     renderPage();
 
@@ -110,10 +110,37 @@ describe("TracePage (m16.7)", () => {
     expect(header).toHaveTextContent("billing-agent");
     // Timestamp rendered (exact format depends on locale — just check it's present)
     expect(header).toHaveTextContent("2026");
+  });
+
+  // The rollup totals still have to be on the page — under A5 (M151 §6.1) they
+  // live in the right-hand "What it cost" panel rather than in the header band.
+  // Same intent as the old header assertion, asserted where the figures now are.
+  it("renders the rollup tokens and cost in the cost panel", async () => {
+    installFetch();
+    renderPage();
+
+    const cost = await screen.findByTestId("trace-cost");
     // Tokens from rollup.tokens = 860
-    expect(header).toHaveTextContent("860");
+    expect(cost).toHaveTextContent("860");
     // Cost from rollup.costUSD = 0.003
-    expect(header).toHaveTextContent("$0.003");
+    expect(cost).toHaveTextContent("$0.003");
+  });
+
+  // §7.1: an unattributed figure is NEVER a formatted zero. A rollup that
+  // reports 0 cost across real spans was not free — it was not attributed.
+  it("renders an unattributed cost as the stated absence, never $0.0000", async () => {
+    installFetch({ rollup: { ...ROLLUP, costUSD: 0, tokens: 0 } });
+    renderPage();
+
+    const cost = await screen.findByTestId("trace-cost");
+    expect(cost).toHaveTextContent("not yet known");
+    // Asserted on the VALUES, not on the panel's prose: the QuietNote beside
+    // them quotes "$0.0000" on purpose, to name the thing it refuses to print.
+    const values = Array.from(cost.querySelectorAll("dd")).map(
+      (d) => d.textContent ?? "",
+    );
+    expect(values.some((v) => v.includes("$"))).toBe(false);
+    expect(values.filter((v) => v === "not yet known")).toHaveLength(2);
   });
 
   it("renders TraceExplorer with span rows", async () => {
@@ -168,7 +195,9 @@ describe("TracePage (m16.7)", () => {
     renderPage();
 
     await waitFor(() =>
-      expect(screen.getByText("Not allowed to read this trace")).toBeInTheDocument(),
+      expect(
+        screen.getByText(/permission to view this trace/i),
+      ).toBeInTheDocument(),
     );
     expect(screen.queryByTestId("trace-page")).toBeNull();
   });

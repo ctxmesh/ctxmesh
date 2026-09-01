@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { AlertsPage } from "@/pages/alerts-page";
@@ -93,7 +93,9 @@ describe("AlertsPage — basic rendering (m70.6)", () => {
 
     expect(await screen.findByTestId("alerts-page")).toBeInTheDocument();
     expect(screen.getByRole("table", { name: "Fired alerts" })).toBeInTheDocument();
-    expect(screen.getByText("budget-policy")).toBeInTheDocument();
+    // The page root renders during loading, so awaiting it proves nothing about
+    // the rows — await the row data itself.
+    expect(await screen.findByText("budget-policy")).toBeInTheDocument();
     expect(screen.getByText("regression-policy")).toBeInTheDocument();
   });
 
@@ -110,7 +112,7 @@ describe("AlertsPage — basic rendering (m70.6)", () => {
 
     renderPage();
 
-    await screen.findByTestId("alerts-page");
+    await screen.findAllByText("Firing");
     // The status-column badges render inside <td> elements (not as column headers).
     // Use getAllByText and check that at least one is a badge (not a th).
     const firingBadges = screen.getAllByText("Firing");
@@ -184,5 +186,135 @@ describe("AlertsPage — 501 / 403 / 500 states (m70.6)", () => {
     );
     expect(screen.getByRole("button", { name: /Retry/ })).toBeInTheDocument();
     expect(screen.queryByTestId("alerts-unavailable")).toBeNull();
+  });
+});
+
+// ── M151: the editorial ACTIVITY-FEED conversion ──────────────────────────────
+
+describe("AlertsPage — activity feed (M151, §2.2 / §4.4 / §7.2)", () => {
+  it("a firing alert carries a verb-first next step; a cleared one says Nothing needed", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        items: [
+          alert_({ id: 1, agent: "team-a/billing", firing: true, resolvedAt: null }),
+          alert_({ id: 2, firing: false, resolvedAt: "2026-08-08T13:00:00Z" }),
+        ],
+      },
+    }));
+
+    renderPage();
+
+    const step = await screen.findByTestId("next-step-1");
+    expect(step).toHaveTextContent("Open the agent");
+    expect(step).toHaveAttribute("href", "/agents/team-a/billing");
+
+    const quiet = screen.getByTestId("next-step-2");
+    expect(quiet).toHaveTextContent("Nothing needed");
+    expect(quiet.tagName).not.toBe("A");
+    expect(quiet.tagName).not.toBe("BUTTON");
+  });
+
+  it("a bound crossed while still serving reads warn (§2.2)", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        items: [
+          alert_({
+            id: 1,
+            type: "budgetSoft",
+            message: "82% of the monthly model budget is spent.",
+            firing: true,
+          }),
+        ],
+      },
+    }));
+
+    renderPage();
+    const badge = (await screen.findAllByText("Firing"))[0];
+    expect(badge.className).toContain("bg-warning-surface");
+  });
+
+  it("a firing alert whose words say work is being refused reads crit (§2.2)", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        items: [
+          alert_({
+            id: 1,
+            type: "budgetHard",
+            message: "Hard budget reached — new runs are being rejected.",
+            firing: true,
+          }),
+        ],
+      },
+    }));
+
+    renderPage();
+    const badge = (await screen.findAllByText("Firing"))[0];
+    expect(badge.className).toContain("bg-destructive-surface");
+  });
+
+  it("sorts newest-first — a feed is chronological, not triaged", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        items: [
+          alert_({ id: 1, firedAt: "2026-08-08T10:00:00Z", firing: true, resolvedAt: null }),
+          alert_({
+            id: 2,
+            firedAt: "2026-08-08T12:00:00Z",
+            firing: false,
+            resolvedAt: "2026-08-08T12:30:00Z",
+          }),
+        ],
+      },
+    }));
+
+    renderPage();
+    await screen.findByTestId("next-step-2");
+
+    const order = screen
+      .getAllByTestId(/^next-step-/)
+      .map((el) => el.getAttribute("data-testid"));
+    // The newer, already-cleared alert leads the older one that is still firing.
+    expect(order).toEqual(["next-step-2", "next-step-1"]);
+  });
+
+  it("the Needs you chip narrows the window to the alerts still firing", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        items: [
+          alert_({ id: 1, policy: "still-firing", firing: true, resolvedAt: null }),
+          alert_({
+            id: 2,
+            policy: "already-cleared",
+            firing: false,
+            resolvedAt: "2026-08-08T13:00:00Z",
+          }),
+        ],
+      },
+    }));
+
+    renderPage();
+    await screen.findByText("still-firing");
+
+    fireEvent.click(screen.getByRole("radio", { name: /Needs you/ }));
+    expect(screen.getByText("still-firing")).toBeInTheDocument();
+    expect(screen.queryByText("already-cleared")).toBeNull();
+  });
+
+  it("501 is a calm note — not an error, not a retry", async () => {
+    installFetch(() => ({ ok: false, status: 501, body: { error: "alert store not enabled" } }));
+
+    renderPage();
+
+    const wrapper = await screen.findByTestId("alerts-unavailable");
+    // QuietNote's role is `note` — deliberately never `alert` or `status`.
+    expect(wrapper.querySelector('[role="note"]')).not.toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
+    expect(screen.queryByText("No alerts")).toBeNull();
   });
 });

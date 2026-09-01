@@ -14,7 +14,7 @@ export interface Offender {
   /** A short CSS-ish path, enough to find the element in the source. */
   selector: string;
   /** Why it was flagged. */
-  reason: "self-overflow" | "past-viewport";
+  reason: "self-overflow" | "past-viewport" | "hidden-in-scroller";
   /** How far past, in px. */
   overflowPx: number;
   /** First ~60 chars of text content, to identify it in a screenshot. */
@@ -106,6 +106,47 @@ export function collectFitResult(): FitResult {
           reason: "past-viewport",
           overflowPx: Math.round(rect.right - window.innerWidth),
           text,
+        },
+      });
+    }
+  }
+
+  // ── The never-dropped column must actually be VISIBLE ────────────────────
+  //
+  // The blind spot this closes: a table inside `overflow-x-auto` is doing
+  // exactly what §4.6 asks, so every check above correctly ignores its
+  // contents. But a `max-width` on a `white-space: nowrap` cell is the
+  // column's FLOOR as well as its ceiling, so four never-droppable columns can
+  // pin the table wider than its frame and push the last one — "Next step",
+  // the column the whole design says is the page's point — off the right edge,
+  // out of sight, at rest. The gate said PASS while the promise was broken.
+  //
+  // A priority-1 cell is contractually never dropped. If it starts beyond the
+  // visible right edge of its own scroller, it has been dropped in every sense
+  // that matters to a person looking at the page.
+  for (const el of Array.from(document.querySelectorAll("[data-col-priority='1']"))) {
+    const scroller = (() => {
+      let n = el.parentElement;
+      while (n && n !== doc) {
+        const ox = getComputedStyle(n).overflowX;
+        if (ox === "auto" || ox === "scroll") return n;
+        n = n.parentElement;
+      }
+      return null;
+    })();
+    if (!scroller) continue;
+    const cell = el.getBoundingClientRect();
+    const box = scroller.getBoundingClientRect();
+    if (cell.width === 0) continue;
+    const past = Math.round(cell.right - box.right);
+    if (past > SLOP) {
+      found.push({
+        el,
+        offender: {
+          selector: describe(el),
+          reason: "hidden-in-scroller",
+          overflowPx: past,
+          text: (el.textContent ?? "").trim().slice(0, 60),
         },
       });
     }

@@ -79,11 +79,64 @@ export type ColumnPriority = 1 | 2 | 3 | 4;
  * budget: two tables that drop columns at different widths would be two design
  * systems wearing one name, and the duplication was already drifting.
  */
+/**
+ * The last never-dropped column stays PINNED to the right edge when the table
+ * has to scroll.
+ *
+ * By convention in this design that column is "Next step" — the one the spec
+ * says is never dropped and never truncated, "the page's point". Without this,
+ * a table wide enough to scroll pushes it out of sight at rest, and the fit
+ * gate happily passes because the table is scrolling exactly as §4.6 asks. The
+ * promise was being kept by the layout and broken by the reader's eyes.
+ *
+ * `bg-inherit` picks up the row's own background, so a hovered or halted row
+ * stays one continuous colour under the pinned cell.
+ */
+const PINNED_CELL = "sticky right-0 z-10 bg-inherit border-l border-border-soft";
+const PINNED_HEAD = "sticky right-0 z-20 bg-card border-l border-border-soft";
+
+/**
+ * A column is pinned when it is the LAST one and never-dropped (priority 1).
+ * That is the action column by construction in this design; anything else in
+ * the last slot is droppable and does not need pinning.
+ */
+function isPinned<T>(col: Column<T>, index: number, total: number): boolean {
+  return index === total - 1 && columnPriority(col) === 1;
+}
+
+// The actions cell is a FIXED width so the never-dropped column beside it can
+// pin at a known offset. Deriving the offset at runtime would mean measuring in
+// a layout effect and reflowing every row; a fixed 4.5rem slot holds the two
+// icon buttons these tables actually carry, and the two constants are kept
+// adjacent here so they cannot drift apart.
+const ACTIONS_W = "w-[4.5rem]";
+const PINNED_NEXT_TO_ACTIONS = "right-[4.5rem]";
+
+// When a table also carries row actions, THAT trailing cell is what sits at the
+// right edge, so it is the one that pins; the never-dropped column beside it
+// pins against its width. Without this, a table with actions pushed "Next step"
+// out of sight exactly as before — the guardrails and mcp-servers pages found
+// it.
+const PINNED_ACTIONS_CELL = "sticky right-0 z-10 bg-inherit border-l border-border-soft";
+const PINNED_ACTIONS_HEAD = "sticky right-0 z-20 bg-card border-l border-border-soft";
+
 export const PRIORITY_CLASS: Record<ColumnPriority, string> = {
-  1: "", //                        always visible
-  2: "hidden md:table-cell", //    hidden below 768
-  3: "hidden lg:table-cell", //    hidden below 1024
-  4: "hidden xl:table-cell", //    hidden below 1280
+  // Breakpoints are shifted one step UP from the spec's viewport figures, and
+  // the reason is measured rather than argued: the shell costs 304px (a 240px
+  // sidebar plus 2×32 gutters), so a 1280 VIEWPORT gives a table only 974px of
+  // content. Written against viewport width, the budget dropped nothing at
+  // exactly 1280 and asked 974px to hold 1225px of columns — the never-dropped
+  // State and Next step columns then sat off the right edge, at rest, on nine
+  // pages. A column budget has to describe the space the table actually gets.
+  //
+  //   p4 → visible ≥1536 viewport (~1232px of table)
+  //   p3 → visible ≥1280 viewport (~976px)
+  //   p2 → visible ≥1024 viewport (~720px)
+  //   p1 → always
+  1: "",
+  2: "hidden lg:table-cell",
+  3: "hidden xl:table-cell",
+  4: "hidden 2xl:table-cell",
 };
 
 /**
@@ -156,7 +209,18 @@ export function CellEntity({
   const nameTitle = title ?? (typeof name === "string" ? name : undefined);
   const nsTitle = typeof namespace === "string" ? namespace : undefined;
   return (
-    <div className={cn("min-w-0", className)}>
+    // The responsive cap is the DEFAULT, not a suggestion. A `truncate`d line is
+    // `white-space: nowrap`, so without a max-width its min-content contribution
+    // is the whole 63-character name — which sets the column width, pins the
+    // table wider than its frame, and pushes the never-dropped columns out of
+    // sight at rest. Capping the entity cell is what lets every other column fit.
+    // A page may still override by passing its own `max-w-*` in `className`.
+    <div
+      className={cn(
+        "min-w-0 max-w-[12rem] md:max-w-[14rem] lg:max-w-[18rem] xl:max-w-[24rem]",
+        className,
+      )}
+    >
       <div className="truncate text-sm font-semibold" title={nameTitle}>
         {name}
       </div>
@@ -421,11 +485,17 @@ export function DataTable<T>({
                 : "hover:bg-surface-2/50 focus-visible:bg-surface-2"),
           )}
         >
-          {columns.map((col) => (
+          {columns.map((col, i) => (
             <td
               key={col.id}
+              // Read by the M151 fit gate: a priority-1 column is contractually
+              // NEVER dropped, so the gate asserts it is actually visible —
+              // scrolled out of sight inside the table's own scroller is a
+              // broken promise that `overflow-x-auto` would otherwise excuse.
+              data-col-priority={columnPriority(col)}
               className={cn(
                 "px-4 py-3 align-middle text-sm",
+                isPinned(col, i, columns.length) && cn(PINNED_CELL, rowActions && PINNED_NEXT_TO_ACTIONS),
                 PRIORITY_CLASS[columnPriority(col)],
                 col.numeric && cellNum,
                 col.className,
@@ -436,7 +506,7 @@ export function DataTable<T>({
           ))}
           {rowActions && (
             <td
-              className="px-4 py-3 text-right"
+              className={cn("px-4 py-3 text-right", ACTIONS_W, PINNED_ACTIONS_CELL)}
               onClick={(e) => e.stopPropagation()}
             >
               {rowActions(row)}
@@ -509,7 +579,7 @@ export function DataTable<T>({
             {/* Header sits on the card, separated by the frame rule — no fill
                 band (§5.10). */}
             <tr className="border-b border-border bg-card">
-              {columns.map((col) => {
+              {columns.map((col, i) => {
                 const active = sort?.columnId === col.id;
                 return (
                   <th
@@ -524,7 +594,9 @@ export function DataTable<T>({
                           : "none"
                         : undefined
                     }
+                    data-col-priority={columnPriority(col)}
                     className={cn(
+                      isPinned(col, i, columns.length) && cn(PINNED_HEAD, rowActions && PINNED_NEXT_TO_ACTIONS),
                       // The uppercase-mono register (§3.2): 10px, tracked open,
                       // faint — a label, not a heading competing with the data.
                       "whitespace-nowrap px-4 py-2.5 font-mono text-2xs font-medium uppercase tracking-wide text-faint",
@@ -559,7 +631,7 @@ export function DataTable<T>({
                 );
               })}
               {rowActions && (
-                <th className="w-10 px-4 py-2.5">
+                <th className={cn("px-4 py-2.5", ACTIONS_W, PINNED_ACTIONS_HEAD)}>
                   <span className="sr-only">Actions</span>
                 </th>
               )}
