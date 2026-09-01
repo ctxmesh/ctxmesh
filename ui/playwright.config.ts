@@ -15,6 +15,7 @@ const PORT = Number(process.env.VISUAL_PORT ?? 4173);
 export default defineConfig({
   testDir: "./visual",
   globalSetup: "./visual/global-setup.ts",
+  globalTeardown: "./visual/global-teardown.ts",
   testMatch: /.*\.spec\.ts$/,
   outputDir: "./visual/.artifacts",
   fullyParallel: true,

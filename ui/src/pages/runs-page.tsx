@@ -1,49 +1,213 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Boxes, Check, Copy, MessagesSquare } from "lucide-react";
+import { Filter, MessagesSquare } from "lucide-react";
 
-import { DataTable, type Column, type DataTableError } from "@/components/kit";
+import {
+  CellEntity,
+  CellId,
+  ClosingNote,
+  DataTable,
+  ErrorState,
+  FilterChipRow,
+  NextStepLink,
+  PageHeader,
+  QuantityValue,
+  QuietNote,
+  UnknownValue,
+  isKnown,
+  nextStepRank,
+  truncateId,
+  type Column,
+  type DataTableError,
+  type EmptyStateProps,
+  type FilterChip,
+  type NextStepTone,
+} from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api, ApiError, type RunSummary, type RunsFilteredParams } from "@/lib/api";
-import { formatTokens } from "@/lib/format";
+import { formatDateTime, formatLatency, formatRelativeTime } from "@/lib/format";
 
-// RunsPage — the global paginated + filterable runs browser (m16.8).
+// RunsPage — the global run feed, on the editorial ACTIVITY-FEED archetype
+// (M151 §6.1 A1 composition, §4.4 activity-feed column budget:
+// Time(1) · Agent(1) · What(1) · Duration(3) · Cost(3) · State(2) · Next step(1)).
 //
-// Backend: GET /api/runs?agent=&from=&to=&q=&limit=&cursor=
-//   • agent (ns/name), from (ISO8601), to (ISO8601): SERVER-SIDE filters
+// ── A FEED IS CHRONOLOGICAL, NOT TRIAGED ────────────────────────────────────
+// The eleven resource lists sort by what is blocking. A feed may not: "what
+// happened, most recent first" IS the thing a run feed is for, and re-ordering
+// it by attention would make the same page mean two different things depending
+// on the row's outcome. So the sort is `timestamp desc`, with `nextStepRank` as
+// the tie-break (identical timestamps put "Nothing needed" last), and the
+// attention view is reachable in one click through the "Needs you" chip. The
+// Next step column still rides on every row that needs a person.
+//
+// ── WHAT THIS PAGE MAY NOT CLAIM (§7.1) ─────────────────────────────────────
+// A run's outcome reaches this list ONLY through the opt-in per-trace
+// enrichment (ADR 0081). An unenriched row has no status at all, and that is
+// NOT a pass: it renders the readable `—` with a reason, never a green chip and
+// never a fabricated "ok". Same for a duration the trace store did not record.
+//
+// Backend: GET /api/runs?agent=&from=&to=&q=&limit=&cursor=&enrich=1
+//   • agent (ns/name), from, to: SERVER-SIDE filters (the bar above the chips)
 //   • q: page-windowed CLIENT-SIDE substring filter (the BFF filters the loaded
 //     page window, NOT the whole cluster — K8s has no server-side substring
-//     search). Because q is page-windowed, a page can return SHORT and nextCursor
-//     is derived from the unfiltered count, so:
-//       – Never infer "no results" from a short page when q is set + nextCursor present.
-//       – The DataTable already handles this: it shows "No matches in this page —
-//         more pages exist. Load next page or clear filter." and keeps Next live.
-//   • NO status filter — status was rejected server-side in m16.3 (the Langfuse
-//     trace list has no per-trace status). Do NOT add one.
-//   • cursor: opaque pagination token from the prior page's nextCursor.
+//     search). Because q is page-windowed, a page can return SHORT while
+//     nextCursor is present, so "more pages" keys off the CURSOR, never off
+//     runs.length. The DataTable renders that honest state for free.
+//   • NO status filter — rejected server-side in m16.3. Do NOT add one.
 //
 // 501-calm / 502-error discipline (mirrors agentRuns + feedback):
-//   • 501 (Langfuse not configured): runsFiltered() returns null → calm
-//     "unavailable" empty state, NEVER an error toast or error state.
-//   • 502 (Langfuse configured, upstream fetch FAILED): runsFiltered() throws
-//     ApiError → surfaced as a visible error state (retryable), never hidden.
+//   • 501 (Langfuse not configured): runsFiltered() returns null → a calm
+//     QuietNote saying the capability is absent. NEVER an error state, never a
+//     zero, never a toast.
+//   • 200 + notice (the trace store is transiently down): a real, retryable
+//     ErrorState — distinct from "no runs", so a reader knows to retry.
+//   • 502 (Langfuse configured, upstream fetch FAILED): ApiError → error state.
 //
-// RBAC: the page is READ-only (viewer can read runs). There are no write
-// affordances — no actions column, no edit/delete. The API is the real gate
-// (ADR 0011); the page simply shows what the caller's token can reach.
-//
-// Row-click: navigates to /traces/:traceId — the full single-trace view
-// (TracePage, m16.7).
+// RBAC: READ-only (ADR 0011 — the API is the real gate). No write affordances.
 //
 // data-testid contract:
-//   runs-page           — root container
-//   runs-table          — the DataTable (via aria-label="Runs")
-//   runs-filter-bar     — the filter inputs container
-//   run-row-{traceId}   — each table row (via rowKey)
+//   runs-page             — root container
+//   runs-filter-bar       — the server-side filter inputs
+//   runs-unavailable      — the 501 "not configured" QuietNote
+//   runs-degraded         — the transient trace-store failure
+//   run-agent-link-{id}   — the row's link to its originating agent
+//   next-step-{id}        — the row's Next step cell
 
 const PAGE_LIMIT = 50;
+
+// ── The honest-unknown vocabulary (§7.1) ────────────────────────────────────
+
+const OUTCOME_UNKNOWN_TITLE =
+  "This run's outcome was not recorded — unknown, not a pass. The trace list carries no per-trace status; only the enriched path can fill it.";
+
+const DURATION_UNKNOWN_TITLE =
+  "No duration was recorded for this run — unknown, not zero.";
+
+const AGENT_UNKNOWN_TITLE =
+  "This run carries no agent tag, so the agent that launched it is unknown — it was not launched by a named agent, or the tag was never written.";
+
+const WHEN_UNKNOWN_TITLE = "This run carries no timestamp — unknown, not never.";
+
+/**
+ * Money, §4.5: `< $1` renders 4 decimals, `≥ $1` renders 2, and the column is
+ * NEVER truncated, wrapped, or elided (the `numeric` column register keeps it
+ * `whitespace-nowrap`). One precision rule down the whole column, so `$0.0003`
+ * and `$0.0421` line up on their decimal instead of one collapsing to `$0.00`.
+ */
+export function formatMoney(usd: number): string {
+  return usd >= 1 ? `$${usd.toFixed(2)}` : `$${usd.toFixed(4)}`;
+}
+
+// ── Triage: what the page renders and sorts by, decided once ────────────────
+
+interface NextStep {
+  /** Verb-first, ≤22 chars, no trailing arrow (§7.2). Absent when tone is "none". */
+  label?: string;
+  tone: NextStepTone;
+  to?: string;
+}
+
+interface Row {
+  run: RunSummary;
+  next: NextStep;
+}
+
+/**
+ * One run → its next step. Only a FAILED run asks anything of a person: a run
+ * that succeeded is finished, and a run whose outcome was never recorded is not
+ * a failure — inventing an errand for either would make the column noise.
+ */
+function triage(r: RunSummary): Row {
+  const to = `/traces/${encodeURIComponent(r.traceId)}`;
+  const next: NextStep =
+    r.status === "error"
+      ? // Crit is the one action hue allowed here (§2.3): the target genuinely
+        // is a failure.
+        { label: "Open the failure", tone: "crit", to }
+      : { tone: "none" };
+  return { run: r, next };
+}
+
+// ── The chip views (§5.28): one question, one answer at a time ──────────────
+
+type ViewId = "needs-you" | "succeeded" | "all";
+
+const VIEWS: { id: ViewId; label: string; match: (r: Row) => boolean }[] = [
+  { id: "needs-you", label: "Needs you", match: (r) => r.next.tone !== "none" },
+  { id: "succeeded", label: "Succeeded", match: (r) => r.run.status === "ok" },
+  { id: "all", label: "Everything", match: () => true },
+];
+
+const VIEW_EMPTY: Record<Exclude<ViewId, "all">, { title: string; description: string }> = {
+  "needs-you": {
+    title: "Nothing needs a person",
+    description:
+      "No run in this page window came back failed. Show everything to read the feed.",
+  },
+  succeeded: {
+    title: "Nothing succeeded here",
+    description:
+      "No run in this page window carries a recorded success. Show everything — an unenriched run has no outcome at all, which is not the same as a failure.",
+  },
+};
+
+/**
+ * The §5.18 closing line: the honest ratio, in words, restating what the table
+ * already showed. Every number is counted from the rows in hand, the sentence
+ * says so whenever the rows in hand are not the whole feed, and it never claims
+ * an unrecorded outcome was a clean one.
+ */
+export function closingLine(rows: Row[], complete: boolean): string | null {
+  const total = rows.length;
+  if (total === 0) return null;
+  const failed = rows.filter((r) => r.run.status === "error").length;
+  const unrecorded = rows.filter((r) => !r.run.status).length;
+  const where = complete ? "" : " on this page";
+  const more = complete ? "" : " More pages follow.";
+
+  if (total === 1) {
+    const one =
+      failed === 1
+        ? "The one run here failed, and opening it is the only thing waiting on you."
+        : unrecorded === 1
+          ? "The one run here came back with no recorded outcome — unknown, not clean."
+          : "The one run here finished without an error.";
+    return `${one}${more}`;
+  }
+
+  const failedClause =
+    failed === 0
+      ? `None of the ${total} runs${where} failed.`
+      : failed === total
+        ? `Every one of the ${total} runs${where} failed.`
+        : `${failed} of the ${total} runs${where} failed.`;
+
+  // Counted in WORDS at one, so the sentence never reads "1 came back".
+  const unrecordedClause =
+    unrecorded === 0
+      ? ""
+      : unrecorded === 1
+        ? " One came back with no recorded outcome — unknown, not clean."
+        : ` ${unrecorded} came back with no recorded outcome — unknown, not clean.`;
+
+  return `${failedClause}${unrecordedClause}${more}`;
+}
+
+// ── Cells ───────────────────────────────────────────────────────────────────
+
+/**
+ * The run's outcome as a tag. Uppercase mono on a tint, never interactive
+ * (§2.1's form rule) — the action lives next door in the Next step link. An
+ * ABSENT status is not a state: it renders the readable dash with its reason,
+ * because "we did not record it" and "it passed" are different facts (§7.1).
+ */
+function StateTag({ status }: { status?: string }) {
+  if (status === "ok") return <Badge variant="ok">OK</Badge>;
+  if (status === "error") return <Badge variant="crit">Error</Badge>;
+  return <UnknownValue title={OUTCOME_UNKNOWN_TITLE} />;
+}
 
 // RunsFilterBar holds the three server-side filter inputs: agent (ns/name),
 // date-from, date-to. The q (free-text) filter is owned by the DataTable
@@ -64,14 +228,11 @@ function RunsFilterBar({
   onTo: (v: string) => void;
 }) {
   return (
-    <div
-      className="flex flex-wrap items-end gap-3"
-      data-testid="runs-filter-bar"
-    >
+    <div className="flex min-w-0 flex-wrap items-end gap-3" data-testid="runs-filter-bar">
       <div className="flex flex-col gap-1">
         <label
           htmlFor="runs-filter-agent"
-          className="text-xs font-medium text-muted-foreground"
+          className="font-mono text-2xs font-medium uppercase tracking-wide text-faint"
         >
           Agent (ns/name)
         </label>
@@ -85,7 +246,9 @@ function RunsFilterBar({
         />
       </div>
       <div className="flex flex-col gap-1">
-        <span className="text-xs font-medium text-muted-foreground">Range</span>
+        <span className="font-mono text-2xs font-medium uppercase tracking-wide text-faint">
+          Range
+        </span>
         <div className="flex gap-1" data-testid="runs-range-presets">
           {RANGE_PRESETS.map((p) => (
             <Button
@@ -108,7 +271,7 @@ function RunsFilterBar({
       <div className="flex flex-col gap-1">
         <label
           htmlFor="runs-filter-from"
-          className="text-xs font-medium text-muted-foreground"
+          className="font-mono text-2xs font-medium uppercase tracking-wide text-faint"
         >
           From
         </label>
@@ -124,7 +287,7 @@ function RunsFilterBar({
       <div className="flex flex-col gap-1">
         <label
           htmlFor="runs-filter-to"
-          className="text-xs font-medium text-muted-foreground"
+          className="font-mono text-2xs font-medium uppercase tracking-wide text-faint"
         >
           To
         </label>
@@ -141,82 +304,12 @@ function RunsFilterBar({
   );
 }
 
-// TraceIdCell shows a SHORT trace id (32-char hex is unreadable in a column) with a copy button for the
-// full id (M99 B3). stopPropagation so copying doesn't also trigger the row's navigate-to-trace.
-function TraceIdCell({ traceId }: { traceId: string }) {
-  const [copied, setCopied] = useState(false);
-  const short =
-    traceId.length > 12 ? `${traceId.slice(0, 8)}…${traceId.slice(-4)}` : traceId;
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <span className="font-mono text-xs text-muted-foreground" title={traceId}>
-        {short}
-      </span>
-      <button
-        type="button"
-        aria-label="Copy trace ID"
-        data-testid={`copy-trace-${traceId}`}
-        onClick={(e) => {
-          e.stopPropagation();
-          navigator.clipboard?.writeText(traceId).then(
-            () => {
-              setCopied(true);
-              setTimeout(() => setCopied(false), 1500);
-            },
-            () => {},
-          );
-        }}
-        className="text-muted-foreground/70 transition-colors hover:text-foreground"
-      >
-        {copied ? (
-          <Check className="h-3 w-3 text-success" />
-        ) : (
-          <Copy className="h-3 w-3" />
-        )}
-      </button>
-    </span>
-  );
-}
-
-// fmtCost keeps ONE consistent precision down the column (M99 B3): a true zero is "$0.00", a non-zero
-// amount too small to show at 3 decimals collapses to "<$0.001" (rather than a jarring "$0.00037" next
-// to "$0.008"), and everything else is 3 decimals. No mixed 3-vs-5-decimal rows.
-function fmtCost(usd: number): string {
-  if (usd === 0) return "$0.00";
-  if (usd < 0.001) return "<$0.001";
-  return `$${usd.toFixed(3)}`;
-}
-
-function fmtTimestamp(ts: string): string {
-  if (!ts) return "—";
-  try {
-    return new Date(ts).toLocaleString();
-  } catch {
-    return ts;
-  }
-}
-
-// RunStatusCell renders the enriched run outcome (ADR 0081): "ok" → a calm success chip, "error" →
-// a destructive chip, and an ABSENT status (an unenriched row, or a trace whose /detail we couldn't
-// fetch) → a muted "—" — an honest "unknown", never a fabricated pass/fail.
-function RunStatusCell({ status }: { status?: string }) {
-  if (status === "ok")
-    return (
-      <Badge variant="success" className="capitalize">
-        OK
-      </Badge>
-    );
-  if (status === "error")
-    return <Badge variant="destructive">Error</Badge>;
-  return <span className="text-sm text-muted-foreground">—</span>;
-}
-
 // runNameDistinctFromAgent returns the run's own name ONLY when it adds information beyond the Agent
 // column — i.e. it is NOT just the agent-identity display ("ns/name" or bare "name") the launcher
 // stamps as the default trace name (M100 UI99-runstable, the NAME≈AGENT dedup). When the name is
-// merely the agent identity (the common case), it returns "" so the Name column collapses to "—"
-// and the eye goes to the single Agent column instead of reading the same text twice.
-function runNameDistinctFromAgent(r: RunSummary): string {
+// merely the agent identity (the common case), it returns "" and the What cell falls back to the
+// run's id, so the eye never reads the same text twice in one row.
+export function runNameDistinctFromAgent(r: RunSummary): string {
   const name = (r.name ?? "").trim();
   if (!name) return "";
   if (!r.agentName) return name; // ambient/untagged run — the name is all we have
@@ -255,9 +348,12 @@ function toRFC3339(dtLocal: string): string {
 type LoadState =
   | { kind: "loading" }
   | { kind: "ready"; runs: RunSummary[]; nextCursor: string }
-  | { kind: "unavailable" } // 501 — Langfuse not configured
+  | { kind: "unavailable" } // 501 — the trace backend is not configured
   | { kind: "degraded"; message: string } // 200 + notice — trace store transiently down
   | { kind: "error"; message: string; forbidden: boolean };
+
+const LEDE =
+  "Every run across your agents, newest first. A run that failed carries what to do about it; everything else is history.";
 
 export function RunsPage() {
   const navigate = useNavigate();
@@ -269,6 +365,10 @@ export function RunsPage() {
 
   // Client-side q filter (page-windowed substring)
   const [query, setQuery] = useState("");
+
+  // The chip row is a set of VIEWS over the loaded window — one question with
+  // one answer at a time (§5.28), never an AND of checkboxes.
+  const [view, setView] = useState<ViewId>("all");
 
   // Cursor pagination: stack of cursors, one per page. [""] = page 0.
   const [pageStack, setPageStack] = useState<string[]>([""]);
@@ -306,7 +406,7 @@ export function RunsPage() {
       .runsFiltered(params, controller.signal)
       .then((res) => {
         if (controller.signal.aborted) return;
-        // null = 501 (Langfuse not configured) — calm degrade, NOT an error.
+        // null = 501 (trace backend not configured) — calm degrade, NOT an error.
         if (res === null) {
           setLoadState({ kind: "unavailable" });
           return;
@@ -358,8 +458,17 @@ export function RunsPage() {
     setQuery(q);
     resetPaging();
   }
+  function clearServerFilters() {
+    setAgentFilter("");
+    setFromFilter("");
+    setToFilter("");
+    resetPaging();
+  }
 
-  const runs = loadState.kind === "ready" ? loadState.runs : [];
+  const runs = useMemo(
+    () => (loadState.kind === "ready" ? loadState.runs : []),
+    [loadState],
+  );
   const nextCursor = loadState.kind === "ready" ? loadState.nextCursor : "";
 
   // hasNext keys off the CURSOR (BFF), NEVER off runs.length — a page-windowed
@@ -367,6 +476,38 @@ export function RunsPage() {
   const hasNext = nextCursor !== "";
   const hasPrev = pageStack.length > 1;
   const pageNumber = pageStack.length;
+  // The loaded window IS the whole feed only when no cursor precedes or follows
+  // it — the one condition under which counting the rows in hand is a FACT
+  // rather than a windowed guess (kit FilterChipRow contract).
+  const feedComplete = loadState.kind === "ready" && !hasNext && !hasPrev;
+
+  // Newest first — a feed is chronological. `nextStepRank` breaks a timestamp
+  // tie so "Nothing needed" still sinks below a row that needs a person, which
+  // is the same column contract every other list obeys; the trace id breaks
+  // that, so the order is stable across refetches.
+  const sorted = useMemo(() => {
+    const rows = runs.map(triage);
+    rows.sort(
+      (a, b) =>
+        b.run.timestamp.localeCompare(a.run.timestamp) ||
+        nextStepRank(a.next.tone) - nextStepRank(b.next.tone) ||
+        a.run.traceId.localeCompare(b.run.traceId),
+    );
+    return rows;
+  }, [runs]);
+
+  const activeView = VIEWS.find((v) => v.id === view) ?? VIEWS[VIEWS.length - 1];
+  const visible = useMemo(() => sorted.filter(activeView.match), [sorted, activeView]);
+
+  // Chips are built FROM the view union, so a chip whose id is not a view stops
+  // compiling. Counts appear only when the loaded window provably IS the whole
+  // feed — a count that describes one page while looking like a total is the
+  // failure mode that hides work.
+  const chips: FilterChip[] = VIEWS.map((v) => ({
+    id: v.id,
+    label: v.label,
+    count: feedComplete ? sorted.filter(v.match).length : undefined,
+  }));
 
   function onNext() {
     if (!hasNext) return;
@@ -382,155 +523,281 @@ export function RunsPage() {
       ? {
           message: loadState.message,
           forbidden: loadState.forbidden,
+          resource: "runs",
           onRetry: loadState.forbidden ? undefined : load,
         }
       : null;
 
-  const columns: Column<RunSummary>[] = [
+  // The §4.4 ACTIVITY-FEED budget, in visual order. Priorities are the whole
+  // responsive story: 4 leaves below 1280, 3 below 1024, 2 below 768, 1 never.
+  // Time, Agent, What and Next step survive every width — when, who, what, and
+  // what to do about it.
+  const columns: Column<Row>[] = [
     {
-      id: "name",
-      header: "Name",
-      // Deduped against the Agent column (M100): show the run's own name only when it differs from
-      // the agent identity the Agent column already renders; otherwise "—" (no repeated text).
-      cell: (r) => {
-        const name = runNameDistinctFromAgent(r);
-        return name ? (
-          <span className="font-medium">{name}</span>
+      id: "when",
+      header: "When",
+      priority: 1,
+      className: "w-[6.5rem]",
+      cell: ({ run: r }) =>
+        r.timestamp ? (
+          // Relative time is sanctioned in feeds (§4.5) — always with the
+          // absolute in `title`, never instead of it.
+          <span
+            className="whitespace-nowrap font-mono text-xs tabular-nums"
+            title={formatDateTime(r.timestamp)}
+          >
+            {formatRelativeTime(r.timestamp)}
+          </span>
         ) : (
-          <span className="text-sm text-muted-foreground">—</span>
-        );
-      },
+          <UnknownValue title={WHEN_UNKNOWN_TITLE} />
+        ),
     },
     {
       id: "agent",
       header: "Agent",
-      hideOnMobile: true,
-      // Per-row link straight to the originating agent (m54.2, M49 UX review A1) —
-      // no trace→agent hop. stopPropagation so the link doesn't also trigger the
-      // row-click's navigate-to-trace. "—" when the run carries no agent identity.
-      cell: (r) =>
+      priority: 1,
+      // The cap is what makes `truncate` bite, and it is the column's FLOOR as
+      // well as its ceiling: a `white-space: nowrap` cell contributes its whole
+      // text as min-content, clamped by this max-width — so the cap is exactly
+      // how wide this column will be. It steps with the viewport so the four
+      // columns that may never be dropped (§4.4) all stay on screen at 768,
+      // 1024, 1280 and 1440 without the frame having to scroll to reach them.
+      className:
+        "max-w-[9rem] lg:max-w-[9.5rem] xl:max-w-[11rem] min-[1440px]:max-w-[15rem]",
+      cell: ({ run: r }) =>
         r.agentNs && r.agentName ? (
-          <Link
-            to={`/agents/${encodeURIComponent(r.agentNs)}/${encodeURIComponent(r.agentName)}`}
-            data-testid={`run-agent-link-${r.traceId}`}
-            onClick={(e) => e.stopPropagation()}
-            className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline"
-          >
-            <Boxes className="h-3.5 w-3.5" />
-            {r.agentNs}/{r.agentName}
-          </Link>
+          <CellEntity
+            title={`${r.agentNs}/${r.agentName}`}
+            name={
+              // Per-row link straight to the originating agent (m54.2, M49 UX
+              // review A1) — no trace→agent hop. stopPropagation so the link
+              // doesn't also trigger the row-click's navigate-to-trace.
+              <Link
+                to={`/agents/${encodeURIComponent(r.agentNs)}/${encodeURIComponent(r.agentName)}`}
+                data-testid={`run-agent-link-${r.traceId}`}
+                onClick={(e) => e.stopPropagation()}
+                className="border-b border-accent text-primary hover:border-primary"
+              >
+                {r.agentName}
+              </Link>
+            }
+            namespace={r.agentNs}
+          />
         ) : (
-          <span className="text-sm text-muted-foreground">—</span>
+          <UnknownValue title={AGENT_UNKNOWN_TITLE} />
         ),
     },
     {
-      id: "traceId",
-      header: "Trace ID",
-      hideOnMobile: true,
-      cell: (r) => <TraceIdCell traceId={r.traceId} />,
+      id: "what",
+      header: "What",
+      priority: 1,
+      // Steps with the viewport for the same reason the Agent cap does.
+      className:
+        "max-w-[13.5rem] lg:max-w-[15.5rem] xl:max-w-[18rem] min-[1440px]:max-w-[24rem]",
+      cell: ({ run: r }) => {
+        const subject = runNameDistinctFromAgent(r);
+        return (
+          <div className="min-w-0">
+            {subject ? (
+              <>
+                {/* One line, end-ellipsis, full value in `title` — never
+                    `break-all`, which turns a subject line into a paragraph. */}
+                <div className="truncate text-sm font-semibold" title={subject}>
+                  {subject}
+                </div>
+                {/* Ids middle-truncate: the tail is what disambiguates two ids
+                    that share a prefix (§4.5). */}
+                <div
+                  className="truncate font-mono text-xs text-faint"
+                  title={r.traceId}
+                >
+                  {truncateId(r.traceId)}
+                </div>
+              </>
+            ) : (
+              // The run's name was only the agent identity, which the Agent
+              // column already renders — so the id IS the row's subject here.
+              <CellId id={r.traceId} className="text-sm" />
+            )}
+            {/* §4.4: below 768 the State column folds into the What line as a
+                tag. Exactly one of the two copies is ever displayed, so the
+                accessibility tree never carries the state twice. */}
+            <div className="mt-1 md:hidden">
+              <StateTag status={r.status} />
+            </div>
+          </div>
+        );
+      },
     },
     {
-      id: "timestamp",
-      header: "When",
-      hideOnMobile: true,
-      cell: (r) => (
-        <span className="text-sm text-muted-foreground">
-          {fmtTimestamp(r.timestamp)}
-        </span>
-      ),
-    },
-    {
-      id: "status",
-      header: "Status",
-      cell: (r) => <RunStatusCell status={r.status} />,
-    },
-    {
-      id: "tokens",
-      header: "Tokens",
-      className: "text-right",
-      cell: (r) => (
-        <span className="tabular-nums">{formatTokens(r.tokens)}</span>
-      ),
+      id: "duration",
+      header: "Duration",
+      priority: 3,
+      numeric: true,
+      cell: ({ run: r }) =>
+        isKnown(r.latencyMs) && r.latencyMs > 0 ? (
+          <QuantityValue value={r.latencyMs} format={formatLatency} />
+        ) : (
+          // `text-faint`, not the QuantityValue ghost: an unrecorded duration is
+          // meta a reader has to READ, and 0ms is not a duration a run can have.
+          <UnknownValue title={DURATION_UNKNOWN_TITLE} />
+        ),
     },
     {
       id: "cost",
       header: "Cost",
-      className: "text-right",
-      cell: (r) => (
-        <span className="tabular-nums">{fmtCost(r.costUSD)}</span>
-      ),
+      priority: 3,
+      numeric: true,
+      // Money is never truncated, wrapped, or elided (§4.5); the `numeric`
+      // register supplies mono tabular right-aligned + whitespace-nowrap.
+      cell: ({ run: r }) => <QuantityValue value={r.costUSD} format={formatMoney} />,
     },
     {
-      id: "latency",
-      header: "Latency",
-      className: "text-right",
-      hideOnMobile: true,
-      cell: (r) => (
-        <span className="tabular-nums">{Math.round(r.latencyMs)}ms</span>
+      id: "state",
+      header: "State",
+      priority: 2,
+      className: "w-[6rem]",
+      cell: ({ run: r }) => <StateTag status={r.status} />,
+    },
+    {
+      id: "next",
+      header: "Next step",
+      // Never dropped and never truncated (§4.4) — it is the page's point.
+      priority: 1,
+      className: "w-[10.5rem]",
+      cell: (row) => (
+        <NextStepLink
+          label={row.next.label}
+          to={row.next.to}
+          tone={row.next.tone}
+          ariaLabel={
+            row.next.label ? `${row.next.label} — run ${truncateId(row.run.traceId)}` : undefined
+          }
+          testId={`next-step-${row.run.traceId}`}
+        />
       ),
     },
-    // NOTE: NO actions column — runs are READ-only. A viewer can read runs;
-    // there are no write affordances here (RBAC enforced at the API, ADR 0011).
   ];
 
-  // 501 calm state — Langfuse not configured.
+  const serverFiltered = !!(agentFilter || fromFilter || toFilter);
+  // The chip views filter the LOADED window, so an emptied view is the
+  // "empty-filtered" truth (§7), not the first-run one: it offers a way back
+  // out instead of teaching a user with 50 runs how to make their first.
+  const chipEmptied = sorted.length > 0 && visible.length === 0;
+  const empty: EmptyStateProps = chipEmptied
+    ? {
+        intent: "filtered",
+        icon: Filter,
+        title: VIEW_EMPTY[activeView.id as Exclude<ViewId, "all">].title,
+        description: VIEW_EMPTY[activeView.id as Exclude<ViewId, "all">].description,
+        action: {
+          label: "Show everything",
+          variant: "outline",
+          onClick: () => setView("all"),
+        },
+        totalCount: feedComplete ? sorted.length : undefined,
+        countNoun: "runs",
+      }
+    : serverFiltered
+      ? {
+          intent: "filtered",
+          icon: Filter,
+          title: "No runs match these filters",
+          description: agentFilter
+            ? `Nothing ran under "${agentFilter}" in the selected range. Widen the range, or clear the filters to read the whole feed.`
+            : "Nothing ran in the selected range. Widen it, or clear the filters to read the whole feed.",
+          action: {
+            label: "Clear filters",
+            variant: "outline",
+            onClick: clearServerFilters,
+          },
+        }
+      : {
+          icon: MessagesSquare,
+          title: "No runs yet",
+          description:
+            "A run is one traced conversation with an agent — what it was asked, what it did, what it cost. Send an agent something from the Playground and it appears here.",
+        };
+
+  // 501 — the trace backend is not configured. This is the calm
+  // backend-cannot-answer state (§7.1), NOT an error: nothing broke, the
+  // platform is simply not wired to answer. No table, no zeroes, no retry.
   if (loadState.kind === "unavailable") {
     return (
-      <div className="mx-auto max-w-5xl space-y-6" data-testid="runs-page">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight">Runs</h2>
-          <p className="text-sm text-muted-foreground">
-            Global run history — all traces across all agents.
-          </p>
-        </div>
-        <div
-          className="flex h-40 items-center justify-center rounded-lg border bg-card text-sm text-muted-foreground"
-          data-testid="runs-unavailable"
-        >
-          Runs unavailable — tracing not configured (Langfuse not wired).
+      <div className="min-w-0 space-y-6" data-testid="runs-page">
+        <PageHeader title="Runs" lede={LEDE} />
+        <div data-testid="runs-unavailable">
+          <QuietNote title="Run history isn’t configured on this install.">
+            Runs are read from the trace backend, and this install has none wired
+            up — so there is no feed to show, and no per-run duration or cost to
+            report either. Configuring it needs a tracing backend the control
+            plane can read. Nothing here is estimated; the history is simply
+            absent.
+          </QuietNote>
         </div>
       </div>
     );
   }
 
-  // 200 + notice — the trace store is transiently unavailable (slow/circuit-broken).
-  // Honest degrade: distinct from "No runs yet" so the user knows to retry, not that
-  // there is zero activity (m24 — the notice was previously dropped).
+  // 200 + notice — the trace store answered, but is transiently unavailable
+  // (slow / circuit-broken). That IS a failure, and an honest one: distinct
+  // from "No runs yet" so the reader knows to retry rather than concluding
+  // there was no activity (m24 — the notice was previously dropped).
   if (loadState.kind === "degraded") {
     return (
-      <div className="mx-auto max-w-5xl space-y-6" data-testid="runs-page">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight">Runs</h2>
-          <p className="text-sm text-muted-foreground">
-            Global run history — all traces across all agents.
-          </p>
-        </div>
-        <div
-          className="flex h-40 flex-col items-center justify-center gap-3 rounded-lg border bg-card px-6 text-center text-sm text-muted-foreground"
-          data-testid="runs-degraded"
-        >
-          <span>{loadState.message}</span>
-          <Button variant="outline" size="sm" onClick={load}>
-            Retry
-          </Button>
+      <div className="min-w-0 space-y-6" data-testid="runs-page">
+        <PageHeader title="Runs" lede={LEDE} />
+        <div data-testid="runs-degraded">
+          <ErrorState
+            title="The trace store didn’t answer."
+            description="The feed is temporarily unreadable. Nothing has been lost — the runs are still recorded."
+            detail={loadState.message}
+            onRetry={load}
+          />
         </div>
       </div>
     );
   }
 
-  return (
-    <div className="mx-auto max-w-5xl space-y-6" data-testid="runs-page">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Runs</h2>
-        <p className="text-sm text-muted-foreground">
-          Every run across your agents — click one to open its trace.
-        </p>
-      </div>
+  const closing = closingLine(sorted, feedComplete);
+  const showChips = loadState.kind !== "error";
+  const metaLine =
+    loadState.kind === "ready"
+      ? feedComplete
+        ? `${runs.length} run${runs.length === 1 ? "" : "s"}`
+        : `${runs.length} on this page`
+      : undefined;
 
-      <DataTable<RunSummary>
+  return (
+    <div className="min-w-0 space-y-6" data-testid="runs-page">
+      <PageHeader title="Runs" meta={metaLine} lede={LEDE} />
+
+      {/* The server-side filters sit ABOVE the views: they narrow what the
+          backend sends, the chips narrow what you are looking at within it.
+          Two different questions, so two different rows. */}
+      <RunsFilterBar
+        agent={agentFilter}
+        from={fromFilter}
+        to={toFilter}
+        onAgent={onAgentChange}
+        onFrom={onFromChange}
+        onTo={onToChange}
+      />
+
+      {showChips && (
+        <FilterChipRow
+          chips={chips}
+          value={view}
+          onChange={(id) => setView(id as ViewId)}
+          label="Filter runs"
+          className="min-w-0"
+        />
+      )}
+
+      <DataTable<Row>
         columns={columns}
-        rows={runs}
-        rowKey={(r) => r.traceId}
+        rows={visible}
+        rowKey={(row) => row.run.traceId}
         loading={loadState.kind === "loading"}
         error={error}
         query={query}
@@ -542,28 +809,13 @@ export function RunsPage() {
         onNext={onNext}
         rangeLabel={`Page ${pageNumber}`}
         ariaLabel="Runs"
-        // Row-click → the native trace page (m16.7).
-        onRowClick={(r) => navigate(`/traces/${encodeURIComponent(r.traceId)}`)}
-        // The filter bar (agent + from + to) is the DataTable's toolbar slot so
-        // it renders flush with the table (not above the q input).
-        toolbar={
-          <RunsFilterBar
-            agent={agentFilter}
-            from={fromFilter}
-            to={toFilter}
-            onAgent={onAgentChange}
-            onFrom={onFromChange}
-            onTo={onToChange}
-          />
-        }
-        empty={{
-          icon: MessagesSquare,
-          title: "No runs yet",
-          description: agentFilter
-            ? `No runs found for agent "${agentFilter}". Try a different agent filter or date range.`
-            : "No runs visible. Run an agent from the Playground to see its traced runs here.",
-        }}
+        // Row-click → the native trace page (m16.7): the run's full timeline,
+        // where every column this table drops at a narrow width still renders.
+        onRowClick={(row) => navigate(`/traces/${encodeURIComponent(row.run.traceId)}`)}
+        empty={empty}
       />
+
+      {closing && <ClosingNote>{closing}</ClosingNote>}
     </div>
   );
 }

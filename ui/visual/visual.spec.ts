@@ -45,29 +45,18 @@ test.beforeAll(() => {
 });
 
 test.afterAll(() => {
-  // Merge rather than overwrite: workers run in separate processes, so each
-  // appends its own slice and the summary is assembled from the union.
-  const file = path.join(REPORT_DIR, `${LABEL}.json`);
-  const prior: Row[] = fs.existsSync(file)
-    ? (JSON.parse(fs.readFileSync(file, "utf8")).rows ?? [])
-    : [];
-  const all = [...prior, ...rows];
-  const failing = all.filter((r) => r.documentScrollsX || r.offenders.length > 0);
-  fs.writeFileSync(
-    file,
-    JSON.stringify(
-      {
-        label: LABEL,
-        mode: MODE,
-        generated: new Date().toISOString(),
-        totals: { renders: all.length, clean: all.length - failing.length, failing: failing.length },
-        rows: all,
-      },
-      null,
-      2,
-    ),
-  );
+  // Each worker writes its OWN shard; global-teardown merges them.
+  //
+  // This used to read-modify-write one shared file, which is a lost update
+  // across processes: with four workers a sweep silently reported 18 of 24
+  // renders while 24 screenshots sat on disk. A gate that under-reports is
+  // worse than one that fails — it says PASS for work it never looked at.
+  const dir = path.join(REPORT_DIR, ".shards");
+  fs.mkdirSync(dir, { recursive: true });
+  const worker = process.env.TEST_WORKER_INDEX ?? "0";
+  fs.writeFileSync(path.join(dir, `${LABEL}.${worker}.json`), JSON.stringify(rows));
 });
+
 
 for (const route of ROUTES) {
   for (const width of WIDTHS) {

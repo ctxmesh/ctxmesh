@@ -12,6 +12,7 @@ export default function globalSetup(): void {
   const label = process.env.VISUAL_LABEL ?? process.env.VISUAL_MODE ?? "populated";
   for (const p of [
     path.resolve("visual/report", `${label}.json`),
+    path.resolve("visual/report/.shards"),
     path.resolve("visual/shots", label),
   ]) {
     fs.rmSync(p, { recursive: true, force: true });

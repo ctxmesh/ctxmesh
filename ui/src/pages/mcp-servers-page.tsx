@@ -257,7 +257,7 @@ export function McpServersPage() {
     {
       id: "name",
       header: "Server",
-      className: "max-w-[18rem]",
+      className: "max-w-[10rem] lg:max-w-[13rem] xl:max-w-[18rem]",
       cell: (s) => (
         <div
           data-testid={`mcp-server-${s.name}`}
@@ -276,7 +276,7 @@ export function McpServersPage() {
       id: "url",
       header: "Endpoint",
       priority: 4,
-      className: "max-w-[16rem]",
+      className: "max-w-[9rem] lg:max-w-[12rem] xl:max-w-[16rem]",
       cell: (s) => (
         <span className="block truncate font-mono text-xs text-faint" title={s.url}>
           {s.url}
@@ -286,7 +286,11 @@ export function McpServersPage() {
     {
       id: "auth",
       header: "Auth",
-      priority: 3,
+      // 4, not 3: with Auth showing, this table needs 1009px and the content
+      // column at a 1280 viewport is 974. How a server authenticates is a
+      // property you check on one server, not a column you scan down — it
+      // stays in the row's detail below xl.
+      priority: 4,
       cell: (s) => (
         <div className="flex flex-wrap items-center gap-1.5">
           <AuthBadge server={s} />

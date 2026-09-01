@@ -14,6 +14,9 @@ import { ToastProvider } from "@/components/kit";
 //   4. Non-operator (no update on agentregistries) sees NO approve/reject buttons.
 //   5. A forced 403 on approve surfaces honestly (action-error testid).
 //   6. Empty queue shows the empty state (not an error).
+//   7. M151: the §4.4 queue budget on the kit DataTable, the §2.4 hue fix
+//      (pending = hold, never warn), the endpoint moved into the row's drawer
+//      per §4.5, and the four §7 states kept visibly distinct.
 
 type FetchSetup = {
   caps?: Record<string, Record<string, boolean>>;
@@ -132,8 +135,15 @@ describe("McpApprovalsPage", () => {
     // Row content is visible
     expect(screen.getByText("acme-mcp")).toBeInTheDocument();
     expect(screen.getByText("beta-mcp")).toBeInTheDocument();
-    expect(screen.getByText("https://mcp.acme.dev/sse")).toBeInTheDocument();
     expect(screen.getByText(/alice/)).toBeInTheDocument();
+
+    // The endpoint moved OUT of the bare table cell (§4.5 — a URL belongs in a
+    // code well, and the 63-char name + URL is what overflowed this row at 768)
+    // and into the row's record. Same assertion, one click further in.
+    fireEvent.click(screen.getByTestId("mcp-review-default-acme-mcp"));
+    expect(
+      await within(screen.getByRole("dialog")).findByText("https://mcp.acme.dev/sse"),
+    ).toBeInTheDocument();
   });
 
   it("approve button calls approveMcp", async () => {
@@ -236,6 +246,12 @@ describe("McpApprovalsPage", () => {
     expect(screen.queryByTestId("mcp-reject-default-acme-mcp")).not.toBeInTheDocument();
     expect(screen.queryByTestId("mcp-approve-staging-beta-mcp")).not.toBeInTheDocument();
     expect(screen.queryByTestId("mcp-reject-staging-beta-mcp")).not.toBeInTheDocument();
+
+    // The Decide cell is never blank: a viewer gets the read-only next step
+    // rather than two controls that would 403.
+    expect(screen.getByTestId("mcp-review-default-acme-mcp")).toHaveTextContent(
+      "Review the ask",
+    );
   });
 
   it("a forced 403 on approve surfaces honestly via action-error", async () => {
@@ -248,16 +264,68 @@ describe("McpApprovalsPage", () => {
     expect(screen.getByTestId("action-error")).toHaveTextContent(/Not allowed/);
   });
 
-  it("shows empty state when there are no pending approvals", async () => {
+  it("an empty queue reads as good news, not as a bare 'no results'", async () => {
     renderPage(OPERATOR_CAPS, { approvals: [] });
 
+    expect(await screen.findByText("Nothing is waiting on you.")).toBeInTheDocument();
+  });
+
+  it("shows the absent-backend state on 501 (feature not enabled)", async () => {
+    renderPage(OPERATOR_CAPS, { approvalsStatus: 501 });
+    expect(await screen.findByText(/enabled on this install/i)).toBeInTheDocument();
+    // Distinct from good news: an install without the queue is not an empty queue.
+    expect(screen.queryByText("Nothing is waiting on you.")).toBeNull();
+  });
+});
+
+// ── M151: colour doctrine + the queue archetype ───────────────────────────────
+
+describe("McpApprovalsPage — colour doctrine (§2.2 / §2.4)", () => {
+  it("a person-must-decide row wears HOLD, never warn", async () => {
+    renderPage(OPERATOR_CAPS);
+
+    const tags = await screen.findAllByText("Awaiting review");
+    // hold = bg-hold-surface / text-hold. Amber now means only "a bound is near
+    // or crossed", which a queued submission is not.
+    expect(tags[0].className).toContain("bg-hold-surface");
+    expect(tags[0].className).not.toContain("bg-warning-surface");
+    // The old word is gone with the old hue: "pending" reads as "the machine is
+    // working on it", which is the pine-tint `progressing` meaning.
+    expect(screen.queryByText("pending")).toBeNull();
+  });
+
+  it("the hold hue is spent once more, on the page's own count", async () => {
+    renderPage(OPERATOR_CAPS);
+
+    const chip = await screen.findByTestId("mcp-approvals-waiting-count");
+    expect(chip).toHaveTextContent("2 awaiting a person");
+  });
+});
+
+describe("McpApprovalsPage — the closing line (§5.18)", () => {
+  it("states what approving would actually grant, counted from the rows", async () => {
+    renderPage(OPERATOR_CAPS);
+
+    // 3 + 1 tools across the two fixture rows.
     expect(
-      await screen.findByText(/No pending approvals/),
+      await screen.findByText(
+        /2 MCP servers are waiting on an operator\. Approving them all would add 4 tools to the catalog\./,
+      ),
     ).toBeInTheDocument();
   });
 
-  it("shows disabled state on 501 (feature not enabled)", async () => {
-    renderPage(OPERATOR_CAPS, { approvalsStatus: 501 });
-    expect(await screen.findByText(/not enabled/i)).toBeInTheDocument();
+  it("never counts a submission that did not report its tools", async () => {
+    renderPage(OPERATOR_CAPS, {
+      approvals: [
+        { namespace: "default", name: "acme-mcp", toolCount: 3 },
+        { namespace: "staging", name: "beta-mcp" }, // no toolCount — unknown, not zero
+      ],
+    });
+
+    expect(
+      await screen.findByText(/Approving the 1 that reported their tools would add 3 tools/),
+    ).toBeInTheDocument();
+    // An unreported count renders the dash, never a 0 (§7.1).
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
   });
 });

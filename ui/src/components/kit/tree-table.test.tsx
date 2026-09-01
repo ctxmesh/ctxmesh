@@ -620,11 +620,11 @@ describe("fit — the §4.4 budget and the §4.6 scroll container", () => {
       Array.from(container.querySelectorAll("th")).find((th) =>
         th.textContent?.trim().toLowerCase().startsWith(id),
       )!;
-    expect(head("kind").className).toContain("hidden xl:table-cell");
-    expect(head("median").className).toContain("hidden xl:table-cell");
-    expect(head("failed").className).toContain("hidden lg:table-cell");
-    expect(head("delegations").className).toContain("hidden md:table-cell");
-    expect(head("held").className).toContain("hidden md:table-cell");
+    expect(head("kind").className).toContain("hidden 2xl:table-cell");
+    expect(head("median").className).toContain("hidden 2xl:table-cell");
+    expect(head("failed").className).toContain("hidden xl:table-cell");
+    expect(head("delegations").className).toContain("hidden lg:table-cell");
+    expect(head("held").className).toContain("hidden lg:table-cell");
     // Never dropped.
     expect(head("state").className).not.toContain("hidden");
     expect(head("next step").className).not.toContain("hidden");
@@ -638,7 +638,7 @@ describe("fit — the §4.4 budget and the §4.6 scroll container", () => {
     // The merged cell is the mirror image of the two it replaces: present only
     // where they are absent, so no width is ever counted twice.
     expect(flowHead.className).toContain("md:hidden");
-    expect(flowHead.className).not.toContain("hidden md:table-cell");
+    expect(flowHead.className).not.toContain("hidden lg:table-cell");
     expect(screen.getAllByText(/38,?120 · 4 held|38120 · 4 held/).length).toBeGreaterThan(0);
   });
 
