@@ -21,6 +21,17 @@ export interface RouteCase {
   chrome: Chrome;
   /** Archetype the design spec assigns this page (M151 m151.2). */
   archetype: string;
+  /**
+   * Whether to seed a session before visiting.
+   *
+   * Defaults to signed IN. The auth routes must be visited signed OUT or they
+   * are not the pages they claim to be: `/login` bounces an authenticated
+   * visitor straight to the console, so for the whole of M151 the sweep was
+   * screenshotting the dashboard and filing it under `login__1440__light.png`.
+   * A gate that photographs the wrong page and calls it clean is worse than no
+   * gate.
+   */
+  signedOut?: boolean;
 }
 
 export const ROUTES: RouteCase[] = [
@@ -83,8 +94,15 @@ export const ROUTES: RouteCase[] = [
   // ── Shells and edges ────────────────────────────────────────────────────
   { id: "soon", path: "/soon/settings", label: "Placeholder (not yet built)", chrome: "shell", archetype: "placeholder" },
   { id: "notfound", path: "/no-such-page", label: "Not found", chrome: "shell", archetype: "placeholder" },
-  { id: "login", path: "/login", label: "Login", chrome: "bare", archetype: "auth" },
-  { id: "auth-callback", path: "/auth/callback", label: "OIDC callback", chrome: "bare", archetype: "auth" },
+  { id: "login", path: "/login", label: "Login", chrome: "bare", archetype: "auth", signedOut: true },
+  {
+    id: "auth-callback",
+    path: "/auth/callback?code=probe&state=probe",
+    label: "OIDC callback",
+    chrome: "bare",
+    archetype: "auth",
+    signedOut: true,
+  },
   { id: "shared-run", path: "/shared/runs/share-tok-1", label: "Shared run (public)", chrome: "bare", archetype: "timeline" },
   { id: "chat", path: "/chat/default/demo-assistant", label: "Agent chatbox", chrome: "bare", archetype: "chat" },
 ];

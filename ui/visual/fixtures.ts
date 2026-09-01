@@ -1855,38 +1855,36 @@ const ROUTES: FixtureRoute[] = [
   { match: /^\/api\/topology$/, populated: topology },
 
   // ── Stops (M146 kill switch, M151 Stops page) ─────────────────────────────
-  // Deliberately mixed: a namespace stop that DOES report its impact, and a
-  // fleet stop that does NOT. The second one is the interesting fixture — the
-  // page must render "not reported" rather than a zero, and a screenshot is how
-  // we find out whether it does.
+  //
+  // A BARE ARRAY of activeKill, exactly as internal/bff/kill_handler.go writes
+  // it — and carrying ONLY the fields it sends. The first version of this
+  // fixture wrapped the list in `{stops: […]}` and invented `at` and three
+  // impact counts, so no stop rendered anywhere in the sweep and every page
+  // screenshotted its never-stopped state. That is the same failure as the
+  // prompt-diff fixture: written to what the UI wished for instead of to the
+  // wire. The impact counts genuinely do not exist server-side, which is why
+  // StopNotice renders "Impact —" rather than a number.
   {
     match: /^\/api\/kills$/,
     methods: GET,
-    populated: () => ({
-      stops: [
-        {
-          scope: "ns:team-b",
-          level: "namespace",
-          namespace: NS_B,
-          reason: "runaway delegation loop",
-          principal: "oncall@acme.example",
-          at: "2026-09-01T16:35:02Z",
-          agentsRefusing: 6,
-          runsHeld: 12,
-          runsInFlight: 1,
-        },
-        {
-          scope: "agent:team-d/ingest-coordinator",
-          level: "agent",
-          namespace: NS_D,
-          agent: "ingest-coordinator",
-          reason: "spawn budget exhausted — holding while we raise the ceiling",
-          principal: "platform-oncall@acme.example",
-          at: "2026-09-01T15:58:40Z",
-        },
-      ],
-    }),
-    empty: () => ({ stops: [] }),
+    populated: () => [
+      {
+        scope: "ns:team-b",
+        level: "namespace",
+        namespace: NS_B,
+        reason: "runaway delegation loop",
+        principal: "oncall@acme.example",
+      },
+      {
+        scope: "agent:team-d/ingest-coordinator",
+        level: "agent",
+        namespace: NS_D,
+        agent: "ingest-coordinator",
+        reason: "spawn budget exhausted — holding while we raise the ceiling",
+        principal: "platform-oncall@acme.example",
+      },
+    ],
+    empty: () => [],
   },
   { match: /^\/api\/kill$/, methods: POST, populated: () => ({ scope: "ns:team-b", level: "namespace", applied: true }) },
   { match: /^\/api\/kill\/lift$/, methods: POST, populated: () => ({ scope: "ns:team-b", level: "namespace", applied: true }) },

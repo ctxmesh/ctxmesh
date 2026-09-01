@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   BookOpen,
   Check,
@@ -16,14 +16,20 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  ClosingNote,
   CredentialSourceBadge,
   EmptyState,
   ErrorState,
+  FilterChipRow,
   ForbiddenInline,
+  NextStepLink,
+  PageHeader,
+  QuantityValue,
   SkeletonCard,
   useFocusTrap,
   useToast,
   VisibilityBadge,
+  type FilterChip,
 } from "@/components/kit";
 import {
   api,
@@ -35,20 +41,144 @@ import {
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_AGENTS } from "@/lib/nav";
 
-// TemplateGalleryPage (m74.6) — the unified gallery surface: two tabs covering
-// agent templates (recipes ∪ published agents, GET /api/templates) and MCP
-// servers (GET /api/catalog). Templates carry a Fork CTA; MCP servers carry a
-// Connect CTA. Client-side composition — no server union.
+// TemplateGalleryPage — archetype A9, the gallery (M151 spec §6.1/§6.2). Two
+// tabs of discoverable things: agent templates (recipes ∪ published agents,
+// GET /api/templates) and shared MCP servers (GET /api/catalog). Templates
+// carry a Fork/Install CTA; servers carry a Connect CTA. Client-side
+// composition — no server union. Discovery-only: no secret is ever rendered.
 //
-// Fork flow:
-//   - recipe → pre-fill create-agent with the recipe spec (existing m72 path).
-//   - published agent → POST /api/agents/{ns}/{name}/fork → toast (with
-//     needs-rebinding warning if needsRebinding/unresolvedRefs non-empty)
-//     + navigate to the new agent detail page.
+// ── WHY A GALLERY IS NOT A TABLE, AND WHAT THAT COSTS ───────────────────────
+// A table gives every value a column, and a column is a WIDTH: it bounds the
+// longest name in the set for free. A card has no column, so nothing bounds it
+// — which is exactly how this page became the last route failing the fit sweep.
+// A published agent named `unbreakablesingletokenagentnamewithnohyphens…` (63
+// characters, no hyphen, no space) has a min-content width of ~600px, and the
+// origin line carrying it pushed 272px past the card's edge at 1440 and 288px
+// at 1280, in both themes, on every render.
 //
-// Discovery-only: no secret or credential is ever rendered.
+// The fix is the §4.5 rule applied at the CARD: every line that can carry a
+// resource name is a single truncating line with the full value in `title`,
+// and every ancestor between the grid cell and that line carries `min-w-0`.
+// `truncate` sets `overflow:hidden`, which is what lets a flex/grid child
+// shrink below its min-content size at all — without the `min-w-0` chain above
+// it, the property has nothing to bite on. A name is NEVER `break-all`-ed
+// (§4.5): that turns an identifier into a five-line grey paragraph and makes
+// the card taller than the thing it is describing.
+//
+// ── EQUAL-HEIGHT CARDS, BOUNDED CONTENT (§6.1 A9) ───────────────────────────
+// `auto-rows-fr` + `flex flex-col` + a `mt-auto` footer: a card no longer grows
+// to fit its longest field, and the CTA sits on the same baseline across the
+// row. The description is `line-clamp-2` with the full text in `title`, so the
+// 400-word fixture description occupies two lines like every other card.
+//
+// ── ONE PINE AFFORDANCE PER CARD (§6.1 A9) ──────────────────────────────────
+// The CTA is the only interactive pine element on a card. The one card with two
+// affordances is the already-forked one (U16), and it still holds the rule: the
+// pine element is the "open your fork" link and the Fork button demotes to
+// `outline`. Re-forking under a new name stays available — it is just no longer
+// the loudest thing on the card.
 
 type ActiveTab = "templates" | "mcp";
+
+// ── The card shell, shared by both tabs ──────────────────────────────────────
+// One geometry for every card on the page: the §6.1 A9 anatomy (serif title →
+// mono provenance line → 2-line description → Tag row → right-aligned CTA
+// footer). It is a local component rather than a kit one because the kit is
+// frozen for this task; if a third gallery appears, this is what gets promoted.
+
+/** The A9 grid: `gap-5`, 2-up at `sm`, 3-up at `xl`, equal-height rows. */
+const GALLERY_GRID = "grid auto-rows-fr gap-5 sm:grid-cols-2 xl:grid-cols-3";
+
+interface GalleryCardProps {
+  testId: string;
+  /** The item's name. One line, end-ellipsis, full value in `title` (§4.5). */
+  title: string;
+  titleTestId?: string;
+  /** Machine-owned provenance (origin ref, namespace) — mono, truncated. */
+  meta?: React.ReactNode;
+  description?: string;
+  /** The Tag row: what this thing is and where it came from. Never a hue. */
+  tags?: React.ReactNode;
+  /** Right-aligned footer — the card's single CTA. */
+  footer: React.ReactNode;
+}
+
+function GalleryCard({
+  testId,
+  title,
+  titleTestId,
+  meta,
+  description,
+  tags,
+  footer,
+}: GalleryCardProps) {
+  return (
+    <li
+      data-testid={testId}
+      // Elevation is drawn with rules, not shadows (§2.7).
+      className="flex min-w-0 flex-col rounded-lg border border-border bg-card p-5"
+    >
+      <div className="min-w-0">
+        <h3
+          className="truncate font-serif text-lg font-medium"
+          title={title}
+          data-testid={titleTestId}
+        >
+          {title}
+        </h3>
+        {meta}
+      </div>
+      {description && (
+        // Prose wraps to two lines and stops; the whole thing rides in `title`
+        // (§4.5 prose rule). `line-clamp` also sets overflow:hidden, so a
+        // description containing one enormous token cannot widen the card.
+        <p
+          className="mt-2 line-clamp-2 text-sm text-secondary-foreground"
+          title={description}
+        >
+          {description}
+        </p>
+      )}
+      {tags && <div className="mt-3 flex flex-wrap items-center gap-1.5">{tags}</div>}
+      {/* `mt-auto` is what makes the CTA line up across a row of unequal cards. */}
+      <div className="mt-auto flex flex-wrap items-center justify-end gap-3 pt-4">
+        {footer}
+      </div>
+    </li>
+  );
+}
+
+/** The provenance line: machine-owned, mono, one line, full value in `title`. */
+function CardMeta({
+  children,
+  full,
+  testId,
+}: {
+  children: React.ReactNode;
+  full: string;
+  testId?: string;
+}) {
+  return (
+    <p
+      className="mt-1 truncate font-mono text-xs text-faint"
+      title={full}
+      data-testid={testId}
+    >
+      {children}
+    </p>
+  );
+}
+
+/** The A9 loading state: six card skeletons in the grid the cards will fill. */
+function GallerySkeleton({ label }: { label: string }) {
+  return (
+    <div className={GALLERY_GRID} aria-label={label}>
+      {[0, 1, 2, 3, 4, 5].map((i) => (
+        <SkeletonCard key={i} />
+      ))}
+    </div>
+  );
+}
 
 // authTypeLabel humanizes an MCP server's auth type for display (H5) — the gallery previously showed
 // the raw "oauth" while the owned list showed "OAuth". One place, used on both.
@@ -65,23 +195,59 @@ function authTypeLabel(authType: string): string {
   }
 }
 
-// ── Card skeleton for the catalog (T12 — not SkeletonTable for a card list) ──
-function CatalogSkeleton() {
-  return (
-    <div className="space-y-3" role="status" aria-busy="true" aria-label="Loading servers">
-      {[0, 1, 2].map((i) => (
-        <SkeletonCard key={i} />
-      ))}
-    </div>
-  );
-}
-
 // ── Template tab ─────────────────────────────────────────────────────────────
 type TemplateState =
   | { kind: "loading" }
   | { kind: "ready"; entries: TemplateEntry[] }
   | { kind: "forbidden"; message: string }
   | { kind: "error"; message: string };
+
+type TemplateView = "all" | "recipe" | "published";
+
+const TEMPLATE_VIEWS: {
+  id: TemplateView;
+  label: string;
+  match: (e: TemplateEntry) => boolean;
+}[] = [
+  { id: "all", label: "Everything", match: () => true },
+  { id: "recipe", label: "Built-in recipes", match: (e) => e.source === "recipe" },
+  { id: "published", label: "Published", match: (e) => e.source === "published" },
+];
+
+/**
+ * The origin of a template, as the two claims it can actually make: a built-in
+ * recipe ships with the platform, and a published agent came from a namespace
+ * someone runs. Both are returned untruncated — the card truncates, the `title`
+ * carries the whole thing.
+ */
+function originOf(entry: TemplateEntry): string {
+  const provenance = entry.provenance;
+  if (provenance === "builtin" || provenance === undefined) return "built-in";
+  const base = provenance.originNamespace
+    ? `${provenance.originNamespace}/${provenance.originName ?? entry.name}`
+    : (provenance.originName ?? entry.name);
+  return provenance.version ? `${base} @ ${provenance.version}` : base;
+}
+
+/**
+ * The §5.18 closing line for the templates tab: the honest split between the
+ * two provenance claims, counted from the entries in hand. `/api/templates`
+ * returns the whole set in one response, so these counts are FACTS, not a
+ * window (which is also why the chips above may carry numbers).
+ */
+export function templatesClosingLine(entries: TemplateEntry[]): string | null {
+  const total = entries.length;
+  if (total === 0) return null;
+  const recipes = entries.filter((e) => e.source === "recipe").length;
+  const published = total - recipes;
+  if (recipes === 0) {
+    return `All ${total} of these were published from a namespace someone runs — nothing here ships with the platform.`;
+  }
+  if (published === 0) {
+    return `All ${total} of these ship with the platform. Nobody in your org has published an agent yet.`;
+  }
+  return `${total} templates here: ${recipes} ship with the platform, ${published} were published from a namespace someone runs.`;
+}
 
 interface TemplateCardProps {
   entry: TemplateEntry;
@@ -95,17 +261,7 @@ interface TemplateCardProps {
 
 function TemplateCard({ entry, onFork, forkingKey, canFork }: TemplateCardProps) {
   const provenance = entry.provenance;
-  const originLabel =
-    provenance === "builtin" || provenance === undefined
-      ? "built-in"
-      : provenance.originNamespace
-      ? `${provenance.originNamespace}/${provenance.originName ?? entry.name}`
-      : provenance.originName ?? entry.name;
-
-  const versionLabel =
-    provenance && provenance !== "builtin" && provenance.version
-      ? provenance.version
-      : null;
+  const origin = originOf(entry);
 
   // U12: compute the unique key for this entry to check per-entry spinner state.
   const entryKey =
@@ -120,68 +276,65 @@ function TemplateCard({ entry, onFork, forkingKey, canFork }: TemplateCardProps)
   const isRecipe = entry.source === "recipe";
   const ActionIcon = isRecipe ? Download : GitFork;
   const actionLabel = isRecipe ? "Install" : "Fork";
+  const forked = entry.alreadyForkedAs;
 
   return (
-    <li
-      className="rounded-lg border bg-card p-4 shadow-card"
-      data-testid={`template-card-${entry.name}`}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 space-y-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <p
-              className="truncate font-medium"
-              data-testid={`template-name-${entry.name}`}
-            >
-              {entry.name}
-            </p>
-            <Badge variant="outline" className="text-[10px]">
-              {entry.kind}
-            </Badge>
-            <Badge
-              variant={isRecipe ? "secondary" : "outline"}
-              className="text-[10px]"
-              data-testid={`template-source-${entry.name}`}
-            >
-              {isRecipe ? "built-in" : "published"}
-            </Badge>
-            <VisibilityBadge visibility={entry.visibility} />
-            {/* U16: pre-mark an entry the caller already forked — a badge that LINKS to their fork,
-                so they don't have to attempt a fork to discover it. Fork stays enabled (re-forking
-                under a new name is a supported flow); it is just visually demoted below. */}
-            {entry.alreadyForkedAs && (
-              <Link
-                to={`/agents/${encodeURIComponent(entry.alreadyForkedAs.namespace)}/${encodeURIComponent(entry.alreadyForkedAs.name)}`}
-                data-testid={`template-already-forked-${entry.name}`}
-                className="inline-flex items-center rounded-full bg-success/15 px-2 py-0.5 text-[10px] font-medium text-success hover:underline"
-                title={`You already forked this as ${entry.alreadyForkedAs.namespace}/${entry.alreadyForkedAs.name}`}
-              >
-                Already forked ✓
-              </Link>
-            )}
-          </div>
-          <p className="text-xs text-muted-foreground" data-testid={`template-origin-${entry.name}`}>
-            origin: <span className="font-mono">{originLabel}</span>
-            {versionLabel && (
-              <span className="ml-1 text-muted-foreground">@ {versionLabel}</span>
-            )}
-          </p>
-          {entry.description && (
-            <p className="text-sm text-muted-foreground">{entry.description}</p>
+    <GalleryCard
+      testId={`template-card-${entry.name}`}
+      title={entry.name}
+      titleTestId={`template-name-${entry.name}`}
+      meta={
+        <CardMeta full={`origin: ${origin}`} testId={`template-origin-${entry.name}`}>
+          origin: {origin}
+        </CardMeta>
+      }
+      description={entry.description}
+      tags={
+        <>
+          {/* Where it came from, which is the whole question a gallery answers.
+              Two claims, two Tag treatments (§5.6): the platform's own recipe is
+              a known, declared class (`muted`); a published agent came from
+              outside this install's shipped set (`open`, the dashed chip). */}
+          <Badge
+            variant={isRecipe ? "muted" : "open"}
+            data-testid={`template-source-${entry.name}`}
+          >
+            {isRecipe ? "built-in" : "published"}
+          </Badge>
+          <VisibilityBadge visibility={entry.visibility} />
+          {/* The kind Tag earns its place only when it distinguishes something.
+              Every entry in this gallery is an AgentDeployment today, and a Tag
+              that reads the same on all 10 cards is decoration, not
+              information — so it renders only for anything else. */}
+          {entry.kind && entry.kind !== "AgentDeployment" && (
+            <Badge variant="muted">{entry.kind}</Badge>
           )}
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
+        </>
+      }
+      footer={
+        <>
+          {/* U16: an entry the caller ALREADY forked is pre-marked with a link to
+              their fork, so they don't have to attempt a fork to discover it.
+              This is the one card with two affordances, and the A9 rule still
+              holds: the pine element is this link, and the button below demotes
+              to `outline`. */}
+          {forked && (
+            <NextStepLink
+              label="Already forked — open it"
+              to={`/agents/${encodeURIComponent(forked.namespace)}/${encodeURIComponent(forked.name)}`}
+              ariaLabel={`Open your fork ${forked.namespace}/${forked.name}`}
+              testId={`template-already-forked-${entry.name}`}
+            />
+          )}
           {/* U10: display-gate the Fork button for viewers without create rights */}
           {canFork ? (
             <Button
               size="sm"
-              // U16: demote to secondary when already forked — re-forking (under a new name) is still
-              // allowed, but the primary action is now "open your fork" (the linked badge above).
-              variant={entry.alreadyForkedAs ? "outline" : "default"}
+              variant={forked ? "outline" : "default"}
               onClick={() => onFork(entry)}
               disabled={isAnyForking}
               title={
-                entry.alreadyForkedAs
+                forked
                   ? "You already forked this — forking again creates another copy under a new name"
                   : isAnyForking && !isThisEntryForking
                     ? "Another fork is in progress"
@@ -213,9 +366,9 @@ function TemplateCard({ entry, onFork, forkingKey, canFork }: TemplateCardProps)
               {actionLabel}
             </Button>
           )}
-        </div>
-      </div>
-    </li>
+        </>
+      }
+    />
   );
 }
 
@@ -246,11 +399,11 @@ function RenameOnForkDialog({ defaultName, onConfirm, onCancel }: RenamePromptPr
       <div
         ref={panelRef}
         tabIndex={-1}
-        className="relative w-full max-w-sm rounded-lg border bg-card p-6 shadow-overlay outline-none"
+        className="relative w-full max-w-sm rounded-xl border border-border bg-card p-6 shadow-overlay outline-none"
         data-testid="rename-fork-dialog"
       >
-        <h2 className="text-base font-semibold">Name already taken</h2>
-        <p className="mt-1 text-sm text-muted-foreground">
+        <h2 className="font-serif text-lg font-medium">Name already taken</h2>
+        <p className="mt-1 text-sm text-secondary-foreground">
           An agent named &ldquo;{defaultName}&rdquo; already exists in your namespace with a
           different origin. Choose a different name for your fork.
         </p>
@@ -285,6 +438,7 @@ function TemplatesTab() {
   // U10: display-gate the Fork button for viewers lacking agent-create rights.
   const canFork = can(RES_AGENTS, "create");
   const [state, setState] = React.useState<TemplateState>({ kind: "loading" });
+  const [view, setView] = React.useState<TemplateView>("all");
   // U12: forkingEntry tracks the unique key of the entry currently in flight for per-entry spinner.
   const [forkingEntry, setForkingEntry] = React.useState<string | null>(null);
   // U11: rename-on-fork dialog state — shown when a 409 collision is detected.
@@ -424,24 +578,42 @@ function TemplatesTab() {
     await doFork(entry);
   }
 
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">
-          Built-in recipes to install and published agents to fork into your namespace.
-        </p>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => load()}
-          aria-label="Refresh templates"
-          data-testid="templates-refresh"
-        >
-          <RefreshCw className="h-4 w-4" />
-        </Button>
-      </div>
+  const entries = state.kind === "ready" ? state.entries : [];
+  const activeView =
+    TEMPLATE_VIEWS.find((v) => v.id === view) ?? TEMPLATE_VIEWS[0];
+  const visible = entries.filter(activeView.match);
+  // The whole set arrives in one response, so a count of it is a fact rather
+  // than a window (the FilterChipRow contract's one condition for a number).
+  const chips: FilterChip[] = TEMPLATE_VIEWS.map((v) => ({
+    id: v.id,
+    label: v.label,
+    count: entries.filter(v.match).length,
+  }));
 
-      {state.kind === "loading" && <CatalogSkeleton />}
+  return (
+    <div className="min-w-0 space-y-4">
+      {state.kind === "ready" && entries.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3">
+          <FilterChipRow
+            chips={chips}
+            value={view}
+            onChange={(id) => setView(id as TemplateView)}
+            label="Filter templates"
+            className="min-w-0 flex-1"
+          />
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => load()}
+            aria-label="Refresh templates"
+            data-testid="templates-refresh"
+          >
+            <RefreshCw className="h-4 w-4" />
+          </Button>
+        </div>
+      )}
+
+      {state.kind === "loading" && <GallerySkeleton label="Loading templates" />}
 
       {state.kind === "forbidden" && (
         <ForbiddenInline
@@ -459,20 +631,37 @@ function TemplatesTab() {
         />
       )}
 
-      {state.kind === "ready" && state.entries.length === 0 && (
+      {state.kind === "ready" && entries.length === 0 && (
         <EmptyState
           icon={BookOpen}
           title="No templates yet"
-          description="When agents are published as templates, they appear here for you to fork."
+          description="The gallery is empty. Publish an agent from its detail page to seed it — published agents appear here for anyone in scope to fork."
         />
       )}
 
-      {state.kind === "ready" && state.entries.length > 0 && (
-        <ul
-          className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"
-          data-testid="template-list"
-        >
-          {state.entries.map((e) => {
+      {state.kind === "ready" && entries.length > 0 && visible.length === 0 && (
+        <EmptyState
+          icon={BookOpen}
+          intent="filtered"
+          title="Nothing matches"
+          description={
+            view === "recipe"
+              ? "No template here ships with the platform. Show everything to see what your org has published."
+              : "Nobody in your org has published an agent yet. Show everything to see the built-in recipes."
+          }
+          totalCount={entries.length}
+          countNoun="templates"
+          action={{
+            label: "Show everything",
+            variant: "outline",
+            onClick: () => setView("all"),
+          }}
+        />
+      )}
+
+      {state.kind === "ready" && visible.length > 0 && (
+        <ul className={GALLERY_GRID} data-testid="template-list">
+          {visible.map((e) => {
             // U12: include origin namespace in the key to avoid React key collision for
             // same-named templates published from different namespaces.
             const prov = e.provenance;
@@ -492,6 +681,10 @@ function TemplatesTab() {
             );
           })}
         </ul>
+      )}
+
+      {state.kind === "ready" && entries.length > 0 && (
+        <ClosingNote>{templatesClosingLine(entries)}</ClosingNote>
       )}
 
       {/* U11: rename-on-fork dialog — shown on 409 collision */}
@@ -515,8 +708,8 @@ function TemplatesTab() {
 // "Connected ✓" disabled state for entries already in the caller's namespace.
 // T11: after a successful Connect, navigates with location.state.highlight so
 // McpServersPage can briefly flash the new row.
-// T12: SkeletonCard (not SkeletonTable), "Connecting…" label, catalog search/filter,
-// consistent "org" vocabulary.
+// T12: card skeletons (not a table skeleton), "Connecting…" label, catalog
+// search/filter, consistent "org" vocabulary.
 
 type CatalogState =
   | { kind: "loading" }
@@ -524,11 +717,46 @@ type CatalogState =
   | { kind: "forbidden"; message: string }
   | { kind: "error"; message: string };
 
+/** Frozen empties, so a not-yet-loaded catalog doesn't churn the memos below. */
+const NO_ENTRIES: CatalogEntry[] = [];
+const NO_KEYS: ReadonlySet<string> = new Set<string>();
+
+type CatalogView = "all" | "new" | "connected";
+
+const CATALOG_VIEWS: { id: CatalogView; label: string }[] = [
+  { id: "all", label: "Everything" },
+  { id: "new", label: "Not yet connected" },
+  { id: "connected", label: "Already connected" },
+];
+
+/**
+ * The §5.18 closing line for the catalog tab. Every number in it is summed from
+ * per-server counts the BFF actually sent — never an estimate.
+ */
+export function catalogClosingLine(
+  entries: CatalogEntry[],
+  connected: number,
+): string | null {
+  const total = entries.length;
+  if (total === 0) return null;
+  const tools = entries.reduce((n, e) => n + e.toolCount, 0);
+  const servers = `${total} server${total === 1 ? "" : "s"}`;
+  const toolsPhrase = `${tools} ${tools === 1 ? "tool" : "tools"}`;
+  if (connected === 0) {
+    return `${servers} discoverable here, exposing ${toolsPhrase} between them. None of them is connected to your namespace yet.`;
+  }
+  if (connected === total) {
+    return `${servers} discoverable here, exposing ${toolsPhrase} between them — and you are already connected to every one.`;
+  }
+  return `${servers} discoverable here, exposing ${toolsPhrase} between them. ${connected} of them ${connected === 1 ? "is" : "are"} already connected to your namespace.`;
+}
+
 function McpCatalogTab() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const [state, setState] = React.useState<CatalogState>({ kind: "loading" });
   const [connectingEntry, setConnectingEntry] = React.useState<string | null>(null);
+  const [view, setView] = React.useState<CatalogView>("all");
   // T12 catalog search filter
   const [search, setSearch] = React.useState("");
 
@@ -605,52 +833,85 @@ function McpCatalogTab() {
     }
   }
 
-  // T12: client-side filter over name/namespace/description
+  // Referentially stable while the load state is unchanged, so the memo below
+  // is not rebuilt on every render (and eslint can see that it isn't).
+  const { entries, ownedKeys } = React.useMemo(
+    () =>
+      state.kind === "ready"
+        ? { entries: state.entries, ownedKeys: state.ownedKeys }
+        : { entries: NO_ENTRIES, ownedKeys: NO_KEYS },
+    [state],
+  );
+  const connectedCount = entries.filter((e) =>
+    ownedKeys.has(`${e.namespace}/${e.name}`),
+  ).length;
+
+  // T12: client-side filter over name/namespace/description, on top of the view.
   const filteredEntries = React.useMemo(() => {
-    if (state.kind !== "ready") return [];
-    if (!search.trim()) return state.entries;
+    const inView = entries.filter((e) => {
+      if (view === "new") return !ownedKeys.has(`${e.namespace}/${e.name}`);
+      if (view === "connected") return ownedKeys.has(`${e.namespace}/${e.name}`);
+      return true;
+    });
+    if (!search.trim()) return inView;
     const q = search.toLowerCase();
-    return state.entries.filter(
+    return inView.filter(
       (e) =>
         e.name.toLowerCase().includes(q) ||
         e.namespace.toLowerCase().includes(q) ||
         (e.description ?? "").toLowerCase().includes(q),
     );
-  }, [state, search]);
+  }, [entries, ownedKeys, view, search]);
+
+  const chips: FilterChip[] = CATALOG_VIEWS.map((v) => ({
+    id: v.id,
+    label: v.label,
+    // The catalog arrives whole, so these counts describe the whole catalog.
+    count:
+      v.id === "all"
+        ? entries.length
+        : v.id === "connected"
+          ? connectedCount
+          : entries.length - connectedCount,
+  }));
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">
-          Discoverable MCP servers across your org. Connect one to make it available in your namespace.
-        </p>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => load()}
-          aria-label="Refresh shared servers"
-          data-testid="mcp-catalog-tab-refresh"
-        >
-          <RefreshCw className="h-4 w-4" />
-        </Button>
-      </div>
-
-      {/* T12: catalog search input */}
-      {state.kind === "ready" && state.entries.length > 0 && (
-        <div className="relative">
-          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Search servers…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="pl-8"
-            data-testid="mcp-catalog-search"
-          />
-        </div>
+    <div className="min-w-0 space-y-4">
+      {state.kind === "ready" && entries.length > 0 && (
+        <>
+          <div className="flex flex-wrap items-center gap-3">
+            <FilterChipRow
+              chips={chips}
+              value={view}
+              onChange={(id) => setView(id as CatalogView)}
+              label="Filter shared servers"
+              className="min-w-0 flex-1"
+            />
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => load()}
+              aria-label="Refresh shared servers"
+              data-testid="mcp-catalog-tab-refresh"
+            >
+              <RefreshCw className="h-4 w-4" />
+            </Button>
+          </div>
+          {/* T12: catalog search input */}
+          <div className="relative max-w-sm">
+            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-faint" />
+            <Input
+              placeholder="Search servers…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="pl-8"
+              data-testid="mcp-catalog-search"
+            />
+          </div>
+        </>
       )}
 
-      {/* T12: SkeletonCard instead of SkeletonTable */}
-      {state.kind === "loading" && <CatalogSkeleton />}
+      {state.kind === "loading" && <GallerySkeleton label="Loading shared servers" />}
 
       {state.kind === "forbidden" && (
         <ForbiddenInline
@@ -668,7 +929,7 @@ function McpCatalogTab() {
         />
       )}
 
-      {state.kind === "ready" && state.entries.length === 0 && (
+      {state.kind === "ready" && entries.length === 0 && (
         <EmptyState
           icon={Store}
           title="No discoverable servers yet"
@@ -676,58 +937,78 @@ function McpCatalogTab() {
         />
       )}
 
-      {state.kind === "ready" && state.entries.length > 0 && filteredEntries.length === 0 && (
-        <p className="text-sm text-muted-foreground" data-testid="mcp-catalog-no-results">
-          No servers match &ldquo;{search}&rdquo;.
-        </p>
+      {state.kind === "ready" && entries.length > 0 && filteredEntries.length === 0 && (
+        <div data-testid="mcp-catalog-no-results">
+          <EmptyState
+            icon={Store}
+            intent="filtered"
+            title="Nothing matches"
+            description={
+              search.trim()
+                ? `No shared server matches “${search.trim()}”. Clear the search to see the rest.`
+                : view === "connected"
+                  ? "You haven't connected any of these servers yet. Show everything to see what is on offer."
+                  : "You are already connected to every server here. Show everything to see them."
+            }
+            totalCount={entries.length}
+            countNoun="servers"
+            action={{
+              label: search.trim() ? "Clear the search" : "Show everything",
+              variant: "outline",
+              onClick: () => {
+                setSearch("");
+                setView("all");
+              },
+            }}
+          />
+        </div>
       )}
 
       {state.kind === "ready" && filteredEntries.length > 0 && (
-        <ul className="space-y-2" data-testid="mcp-catalog-tab-list">
+        <ul className={GALLERY_GRID} data-testid="mcp-catalog-tab-list">
           {filteredEntries.map((e) => {
             const entryKey = `${e.namespace}/${e.name}`;
             // T10: cross-check against the caller's owned list by ns+name
-            const isConnected = state.ownedKeys.has(entryKey);
+            const isConnected = ownedKeys.has(entryKey);
             const isConnecting = connectingEntry === entryKey;
             return (
-              <li
+              <GalleryCard
                 key={entryKey}
-                className="rounded-lg border bg-card p-4 shadow-card"
-                data-testid={`mcp-catalog-entry-${e.name}`}
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 space-y-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="truncate font-medium">{e.name}</p>
-                      <VisibilityBadge visibility={e.visibility} />
-                      {e.authType && (
-                        <Badge variant="secondary">{authTypeLabel(e.authType)}</Badge>
-                      )}
-                      {/* T8: human-label credentialSource badge */}
-                      <CredentialSourceBadge credentialSource={e.credentialSource} name={e.name} />
-                      {/* T10: "Connected ✓" badge for already-owned entries */}
-                      {isConnected && (
-                        <Badge
-                          variant="success"
-                          className="gap-1"
-                          data-testid={`mcp-catalog-connected-${e.name}`}
-                        >
-                          <Check className="h-3 w-3" />
-                          Connected
-                        </Badge>
-                      )}
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      namespace: <span className="font-mono">{e.namespace}</span>
-                    </p>
-                    {e.description && (
-                      <p className="text-sm text-muted-foreground">{e.description}</p>
+                testId={`mcp-catalog-entry-${e.name}`}
+                title={e.name}
+                meta={
+                  <CardMeta full={`namespace: ${e.namespace}`}>
+                    namespace: {e.namespace}
+                  </CardMeta>
+                }
+                description={e.description}
+                tags={
+                  <>
+                    <VisibilityBadge visibility={e.visibility} />
+                    {e.authType && <Badge variant="muted">{authTypeLabel(e.authType)}</Badge>}
+                    {/* T8: human-label credentialSource badge */}
+                    <CredentialSourceBadge credentialSource={e.credentialSource} name={e.name} />
+                    {/* T10: "Connected ✓" Tag for already-owned entries */}
+                    {isConnected && (
+                      <Badge
+                        variant="ok"
+                        className="gap-1"
+                        data-testid={`mcp-catalog-connected-${e.name}`}
+                      >
+                        <Check className="h-3 w-3" />
+                        Connected
+                      </Badge>
                     )}
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <Badge variant="secondary">
-                      {e.toolCount} {e.toolCount === 1 ? "tool" : "tools"}
-                    </Badge>
+                  </>
+                }
+                footer={
+                  <>
+                    {/* A known count, so it prints as a real figure (§7.1) — a
+                        server exposing nothing reads `0`, never a dash. */}
+                    <span className="mr-auto text-xs text-faint">
+                      <QuantityValue value={e.toolCount} className="text-xs" />{" "}
+                      {e.toolCount === 1 ? "tool" : "tools"}
+                    </span>
                     {/* T10: disabled state for already-connected; T12: "Connecting…" */}
                     <Button
                       size="sm"
@@ -747,61 +1028,50 @@ function McpCatalogTab() {
                         </>
                       )}
                     </Button>
-                  </div>
-                </div>
-              </li>
+                  </>
+                }
+              />
             );
           })}
         </ul>
+      )}
+
+      {state.kind === "ready" && entries.length > 0 && (
+        <ClosingNote>{catalogClosingLine(entries, connectedCount)}</ClosingNote>
       )}
     </div>
   );
 }
 
 // ── Page ─────────────────────────────────────────────────────────────────────
+
+/** The lede is tab-aware: it says what THIS tab offers, in an operator's words. */
+const TAB_LEDE: Record<ActiveTab, string> = {
+  templates:
+    "Built-in recipes you can install, and agents your org has published for you to fork into your own namespace.",
+  mcp: "MCP servers shared across your org. Connect one to make its tools available in your namespace — its credentials stay with whoever published it.",
+};
+
 export function TemplateGalleryPage() {
   const [searchParams] = useSearchParams();
   const initialTab: ActiveTab = searchParams.get("tab") === "mcp" ? "mcp" : "templates";
   const [activeTab, setActiveTab] = React.useState<ActiveTab>(initialTab);
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Gallery</h2>
-        <p className="text-sm text-muted-foreground">
-          Start from a template — install a recipe, fork a published agent, or connect an MCP server.
-        </p>
-      </div>
-
-      {/* Tab bar */}
-      <div className="flex gap-1 border-b" role="tablist" aria-label="Gallery sections">
-        <button
-          role="tab"
-          aria-selected={activeTab === "templates"}
-          onClick={() => setActiveTab("templates")}
-          data-testid="gallery-tab-templates"
-          className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
-            activeTab === "templates"
-              ? "border-primary text-foreground"
-              : "border-transparent text-muted-foreground hover:text-foreground"
-          }`}
-        >
-          Agent Templates
-        </button>
-        <button
-          role="tab"
-          aria-selected={activeTab === "mcp"}
-          onClick={() => setActiveTab("mcp")}
-          data-testid="gallery-tab-mcp"
-          className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
-            activeTab === "mcp"
-              ? "border-primary text-foreground"
-              : "border-transparent text-muted-foreground hover:text-foreground"
-          }`}
-        >
-          Shared servers
-        </button>
-      </div>
+    <div className="min-w-0 space-y-6">
+      <PageHeader
+        title="Gallery"
+        lede={TAB_LEDE[activeTab]}
+        // The tab strip is the kit's (§5.17): APG roving tabindex, the 2px pine
+        // underline for the current tab, and its own overflow scroller. The
+        // second tab keeps the m76.1 taxonomy label — "Shared servers", never
+        // "MCP servers", which is the OWNED list one nav item away.
+        tabs={[
+          { id: "templates", label: "Templates", current: activeTab === "templates" },
+          { id: "mcp", label: "Shared servers", current: activeTab === "mcp" },
+        ]}
+        onTabChange={(id) => setActiveTab(id as ActiveTab)}
+      />
 
       {activeTab === "templates" && <TemplatesTab />}
       {activeTab === "mcp" && <McpCatalogTab />}
