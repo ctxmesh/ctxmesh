@@ -15,6 +15,10 @@ describe("resourcePath", () => {
     expect(resourcePath("secretbinding", "default", "anthropic")).toBe(
       "/secrets/default/anthropic",
     );
+    // M151: a team is a destination now — the outline page at /teams/:ns/:name.
+    expect(resourcePath("team", "team-a", "support-pod")).toBe(
+      "/teams/team-a/support-pod",
+    );
   });
 });
 

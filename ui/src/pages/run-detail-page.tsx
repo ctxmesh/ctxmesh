@@ -139,7 +139,10 @@ const STATUS_WORD: Record<string, string> = {
   cancelled: "Cancelled",
 };
 
-function fmtStatus(status: string): string {
+// Exported so the team page can render a run's status with the SAME words. A
+// second copy of this map is how one console ends up with two lexicons for the
+// same five states (the exact drift M144.1 was written to end).
+export function fmtStatus(status: string): string {
   if (!status) return "Unknown";
   return (
     STATUS_WORD[status] ??

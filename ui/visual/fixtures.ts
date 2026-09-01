@@ -86,6 +86,7 @@ import type {
   RunListResponse,
   RunShare,
   RunTree,
+  RunTreeNode,
   SecretBindingDetail,
   SecretBindingListResponse,
   SessionMemoryConfig,
@@ -237,6 +238,12 @@ const NAME_63 = "customer-onboarding-document-verification-assistant-canary-v273
 const NAME_UNBREAKABLE = "unbreakablesingletokenagentnamewithnohyphensorwhitespaceatallxy";
 
 const RUN_ID = "run-9f2a41c8-0d17-4b6e-9a55-3c1e77b42d90";
+/**
+ * The root of the 1,025-node delegation tree (see `bigRunTree`). It is the
+ * size-blind proof case: the team page must read identically at six roster rows
+ * and at a thousand-run tree, and only a genuinely large tree can show that.
+ */
+const BIG_RUN_ID = "run-1f0c8ae2-6b4d-4f19-9c07-5ad3e81b6642";
 const TRACE_ID = "trace-1";
 const BIG_TOKENS = 115644;
 
@@ -355,13 +362,76 @@ const AGENTS: AgentSummary[] = [
     phase: "Ready",
     ready: true,
   },
+  // ── The two starring teams' rosters ───────────────────────────────────────
+  // An AgentTeam's roster entries reference AgentDeployments in the TEAM'S OWN
+  // namespace (api/v1beta1/agentteam_types.go: "agentRef is the name of a
+  // standing AgentDeployment (same namespace)"). The team fixtures below used
+  // to point across namespaces, which no real cluster could produce; these
+  // agents exist so `support-pod` (default) and `acme-ingest` (NS_DEEP) have
+  // rosters that resolve the way a real one does — with exactly one deliberate
+  // gap each so the broken-member row is actually exercised.
+  {
+    name: "support-researcher",
+    namespace: NS_DEFAULT,
+    image: "ghcr.io/acme/support-researcher:1.4.0",
+    phase: "Ready",
+    ready: true,
+  },
+  {
+    name: "support-writer",
+    namespace: NS_DEFAULT,
+    image: "ghcr.io/acme/support-writer:1.1.2",
+    phase: "Pending",
+    ready: false,
+    reason: "RevisionMissing",
+    message: "Knative revision support-writer-00004 is still rolling out.",
+  },
+  {
+    name: "packet-fetcher",
+    namespace: NS_DEEP,
+    image: "ghcr.io/acme/packet-fetcher:2.1.0",
+    phase: "Ready",
+    ready: true,
+  },
+  {
+    name: "packet-parser",
+    namespace: NS_DEEP,
+    image: "ghcr.io/acme/packet-parser:2.1.0",
+    phase: "Ready",
+    ready: true,
+  },
+  {
+    name: "packet-validator",
+    namespace: NS_DEEP,
+    image: "ghcr.io/acme/packet-validator:2.0.9",
+    phase: "AwaitingHumanPromotion",
+    ready: false,
+    reason: "GatePassedAwaitingApproval",
+    message: "Canary scored 0.88 against eu-ingest-golden-set; waiting on an operator to promote.",
+  },
 ];
 
-const AGENT_LIST: AgentListResponse = {
-  agents: AGENTS,
-  items: AGENTS,
-  nextCursor: "eyJwYWdlIjoyLCJyZXNvdXJjZVZlcnNpb24iOiI4ODE0MiJ9",
-};
+/**
+ * `GET /api/agents` — namespace-scoped, exactly as `handleListAgents` is
+ * (`client.InNamespace(ns)` when `?namespace=` is present, cluster-wide
+ * otherwise).
+ *
+ * The fixture used to ignore the parameter and hand every caller the whole
+ * fleet. That is a lie with teeth for any surface that JOINS on the result: the
+ * team page resolves a roster's members inside the team's namespace, and an
+ * unfiltered list makes an agent in a different namespace look like the match.
+ * The unfiltered call keeps its continue token (the fleet list is genuinely
+ * paged); a namespace-scoped call is exhausted in one page, which is also what
+ * a small namespace really returns.
+ */
+const AGENT_NEXT_CURSOR = "eyJwYWdlIjoyLCJyZXNvdXJjZVZlcnNpb24iOiI4ODE0MiJ9";
+
+function agentList(ctx: FixtureContext): AgentListResponse {
+  const ns = ctx.query.get("namespace")?.trim();
+  if (!ns) return { agents: AGENTS, items: AGENTS, nextCursor: AGENT_NEXT_CURSOR };
+  const scoped = AGENTS.filter((a) => a.namespace === ns);
+  return { agents: scoped, items: scoped, nextCursor: "" };
+}
 
 function agentDetail(ctx: FixtureContext): AgentDetailResponse {
   const namespace = param(ctx, 0, NS_DEFAULT);
@@ -604,6 +674,20 @@ const RUNS: RunListResponse = {
       status: "error",
     },
     {
+      // The root of the big delegation tree. The team page reads the
+      // SUPERVISOR's most recent run and asks for its tree, so this row is what
+      // makes /teams/<deep-ns>/acme-ingest resolve to bigRunTree below.
+      traceId: BIG_RUN_ID,
+      name: "Ingest the EU invoice packet batch for 2026-08-31",
+      timestamp: "2026-08-31T06:12:04Z",
+      costUSD: 4.8812,
+      tokens: 2_940_118,
+      latencyMs: 1_842_000,
+      agentNs: NS_DEEP,
+      agentName: "ingest-coordinator",
+      status: "ok",
+    },
+    {
       traceId: "trace-11",
       name: "Ambient scheduled sweep (no agent tag)",
       timestamp: "2026-08-30T09:00:00Z",
@@ -791,21 +875,63 @@ const CAPABILITIES: CapabilitiesResponse = {
   ),
 };
 
+/**
+ * `GET /api/teams` — internal/bff/teams.go, `AgentTeamSummary`. DECLARED
+ * STRUCTURE ONLY: name, namespace, registry, supervisor, roster[], members[],
+ * ready, reason, budget. There is deliberately nothing here about traffic,
+ * because the endpoint sends nothing about traffic.
+ *
+ * Two invariants these fixtures obey that the previous version did not, both
+ * from `api/v1beta1/agentteam_types.go`:
+ *
+ *   1. EVERY `agentRef` (supervisor and roster) names an AgentDeployment in the
+ *      TEAM'S OWN NAMESPACE. The CRD says so in the field doc and the admission
+ *      webhook enforces it, so a cross-namespace roster is a shape no cluster
+ *      can produce — and the team page joins on exactly that assumption.
+ *   2. `members` is the CONTROLLER's resolved list: the supervisor plus the
+ *      roster members that resolved AND are Ready. It is therefore a SUBSET of
+ *      the refs, and a not-ready member is legitimately absent from it.
+ *
+ * The two starring rows are the size pair the team page is designed against:
+ * `support-pod` (three roles, one of them a roster gap) and `acme-ingest`
+ * (six roles, whose supervisor's recent run is a 1,025-node delegation tree).
+ */
 const TEAMS: AgentTeamListResponse = {
   items: [
     {
       name: "support-pod",
       namespace: NS_DEFAULT,
       registry: "core-registry",
-      supervisor: "demo-supervisor",
+      supervisor: "demo-assistant",
       roster: [
-        { name: "researcher", agentRef: "demo-researcher", description: "Finds the policy that applies." },
-        { name: "writer", agentRef: "demo-writer", description: "Drafts the customer-facing reply." },
-        { name: "triage", agentRef: "support-triage", description: "Decides whether a human is needed." },
+        { name: "researcher", agentRef: "support-researcher", description: "Finds the policy that applies." },
+        { name: "writer", agentRef: "support-writer", description: "Drafts the customer-facing reply." },
+        // The roster gap the design must never hide: an entry naming an agent
+        // that does not exist in `default`.
+        { name: "escalation", agentRef: "escalation-agent", description: "Hands the case to a human owner." },
       ],
-      members: ["demo-researcher", "demo-writer", "support-triage"],
-      ready: true,
-      budget: { maxFanOut: 4, maxSpawnDepth: 3, maxTotalSpawns: 24 },
+      members: ["demo-assistant", "support-researcher"],
+      ready: false,
+      reason: "MemberNotFound: escalation-agent is not an AgentDeployment in default",
+      budget: { maxFanOut: 4, maxSpawnDepth: 3, maxTotalSpawns: 12 },
+    },
+    {
+      name: "acme-ingest",
+      namespace: NS_DEEP,
+      registry: "acme-platform-eu-west-1-shared-ingest-registry",
+      supervisor: "ingest-coordinator",
+      roster: [
+        { name: "fetcher", agentRef: "packet-fetcher", description: "Pulls each packet from the intake bucket." },
+        { name: "parser", agentRef: "packet-parser", description: "Splits a packet into its documents." },
+        { name: "validator", agentRef: "packet-validator", description: "Checks each document against the KYC policy." },
+        { name: "classifier", agentRef: "eu-invoice-classifier", description: LONG_TEXT },
+        // The one roster gap: a role naming an agent that does not exist.
+        { name: "writer", agentRef: "packet-writer", description: "Files the structured summary." },
+      ],
+      members: ["packet-fetcher", "packet-parser", "eu-invoice-classifier"],
+      ready: false,
+      reason: "MemberNotFound: packet-writer is not an AgentDeployment in this namespace",
+      budget: { maxFanOut: 64, maxSpawnDepth: 14, maxTotalSpawns: 1024 },
     },
     {
       name: "onboarding-pod",
@@ -814,11 +940,11 @@ const TEAMS: AgentTeamListResponse = {
       supervisor: "onboarding-bot",
       roster: [
         { name: "verifier", agentRef: NAME_63, description: LONG_TEXT },
-        { name: "classifier", agentRef: "eu-invoice-classifier" },
+        { name: "triage", agentRef: "support-triage", description: "Decides whether a human is needed." },
       ],
-      members: [NAME_63, "eu-invoice-classifier"],
+      members: [NAME_63, "support-triage"],
       ready: false,
-      reason: "MemberNotReady: eu-invoice-classifier has no admitted revision",
+      reason: "SupervisorNotReady",
       budget: { maxFanOut: 2, maxSpawnDepth: 2, maxTotalSpawns: 8 },
     },
     {
@@ -826,26 +952,11 @@ const TEAMS: AgentTeamListResponse = {
       namespace: NS_B,
       registry: "core-registry",
       supervisor: "billing-agent",
-      roster: [{ name: "reconciler", agentRef: "nightly-reconciliation-sweeper" }],
-      members: ["nightly-reconciliation-sweeper"],
+      roster: [{ name: "reconciler", agentRef: "demo-supervisor" }],
+      members: ["demo-supervisor"],
       ready: false,
       reason: "SupervisorNotReady",
       budget: { maxFanOut: 1, maxSpawnDepth: 1, maxTotalSpawns: 4 },
-    },
-    {
-      name: "eu-ingest-swarm",
-      namespace: NS_DEEP,
-      registry: "acme-platform-eu-west-1-shared-ingest-registry",
-      supervisor: "ingest-coordinator",
-      roster: [
-        { name: "classifier", agentRef: "eu-invoice-classifier", description: "Classifies each packet." },
-        { name: "verifier", agentRef: NAME_63 },
-        { name: "writer", agentRef: "demo-writer" },
-        { name: "researcher", agentRef: "demo-researcher" },
-      ],
-      members: ["eu-invoice-classifier", NAME_63, "demo-writer", "demo-researcher"],
-      ready: true,
-      budget: { maxFanOut: 8, maxSpawnDepth: 4, maxTotalSpawns: 120 },
     },
     {
       name: "research-duo",
@@ -853,7 +964,10 @@ const TEAMS: AgentTeamListResponse = {
       registry: "core-registry",
       supervisor: "demo-researcher",
       roster: [{ name: "writer", agentRef: "demo-writer", description: "Turns findings into prose." }],
-      members: ["demo-writer"],
+      // demo-writer resolves but is Pending, so the controller leaves it out of
+      // `members` while Ready stays true — resolution and readiness are two
+      // different questions and the wire keeps them apart.
+      members: ["demo-researcher"],
       ready: true,
       budget: { maxFanOut: 2, maxSpawnDepth: 2, maxTotalSpawns: 10 },
     },
@@ -1541,18 +1655,146 @@ function emptyRunDetail(ctx: FixtureContext): RunDetail {
   };
 }
 
-function runTree(ctx: FixtureContext): RunTree {
-  const rootId = param(ctx, 0, RUN_ID);
+/**
+ * The SMALL delegation tree — five sub-runs under one supervisor. It is the
+ * "two agents" half of the size-blind pair: every node visible, nothing behind
+ * a chevron.
+ */
+function smallRunTree(rootId: string): RunTree {
   return {
     rootId,
     nodes: [
-      { id: rootId, agent: `${NS_B}/demo-supervisor`, status: "running", rootRunId: rootId, input: "Resolve the duplicate charge on INV-2026-08-4471.", createdAt: "2026-08-31T09:41:12Z", updatedAt: "2026-08-31T09:41:44Z" },
-      { id: "run-aa01", agent: `${NS_D}/support-triage`, status: "succeeded", parentRunId: rootId, rootRunId: rootId, input: "Is this a tier-1 or tier-2 ticket?", output: "Tier 1 — duplicate charge, standard refund path.", createdAt: "2026-08-31T09:41:14Z", updatedAt: "2026-08-31T09:41:19Z" },
-      { id: "run-aa02", agent: `${NS_DEEP}/eu-invoice-classifier`, status: "succeeded", parentRunId: rootId, rootRunId: rootId, input: "Classify invoice INV-2026-08-4471.", output: "software-subscription · EU · VAT NL8123", createdAt: "2026-08-31T09:41:20Z", updatedAt: "2026-08-31T09:41:28Z" },
-      { id: "run-aa03", agent: `${NS_D}/${NAME_63}`, status: "succeeded", parentRunId: "run-aa02", rootRunId: rootId, input: LONG_TEXT, output: "Both documents verified (confidence 0.94).", createdAt: "2026-08-31T09:41:29Z", updatedAt: "2026-08-31T09:41:40Z" },
-      { id: "run-aa04", agent: `${NS_DEFAULT}/demo-assistant`, status: "requires_action", parentRunId: rootId, rootRunId: rootId, input: "Refund charge ch_2.", createdAt: "2026-08-31T09:41:41Z", updatedAt: "2026-08-31T09:41:44Z" },
-      { id: "run-aa05", agent: `${NS_A}/demo-writer`, status: "pending", parentRunId: rootId, rootRunId: rootId, input: "Draft the reply once the refund clears.", createdAt: "2026-08-31T09:41:44Z", updatedAt: "2026-08-31T09:41:44Z" },
+      { id: rootId, agent: `${NS_DEFAULT}/demo-assistant`, status: "running", rootRunId: rootId, input: "Resolve the duplicate charge on INV-2026-08-4471.", createdAt: "2026-08-31T09:41:12Z", updatedAt: "2026-08-31T09:41:44Z" },
+      { id: "run-aa01", agent: `${NS_DEFAULT}/support-researcher`, status: "succeeded", parentRunId: rootId, rootRunId: rootId, input: "Which refund policy applies to a duplicate charge?", output: "Tier 1 — duplicate charge, standard refund path.", createdAt: "2026-08-31T09:41:14Z", updatedAt: "2026-08-31T09:41:19Z" },
+      { id: "run-aa02", agent: `${NS_DEFAULT}/support-writer`, status: "succeeded", parentRunId: rootId, rootRunId: rootId, input: "Classify invoice INV-2026-08-4471.", output: "software-subscription · EU · VAT NL8123", createdAt: "2026-08-31T09:41:20Z", updatedAt: "2026-08-31T09:41:28Z" },
+      // The unbreakable 63-character name and the 400-character task, one level
+      // deeper: the two layout-hostile cases the tree column has to survive.
+      { id: "run-aa03", agent: `${NS_DEFAULT}/${NAME_UNBREAKABLE}`, status: "succeeded", parentRunId: "run-aa02", rootRunId: rootId, input: LONG_TEXT, output: "Both documents verified (confidence 0.94).", createdAt: "2026-08-31T09:41:29Z", updatedAt: "2026-08-31T09:41:40Z" },
+      { id: "run-aa04", agent: `${NS_DEFAULT}/support-writer`, status: "requires_action", parentRunId: rootId, rootRunId: rootId, input: "Refund charge ch_2.", createdAt: "2026-08-31T09:41:41Z", updatedAt: "2026-08-31T09:41:44Z" },
+      { id: "run-aa05", agent: `${NS_DEFAULT}/support-researcher`, status: "pending", parentRunId: rootId, rootRunId: rootId, input: "Draft the reply once the refund clears.", createdAt: "2026-08-31T09:41:44Z", updatedAt: "2026-08-31T09:41:44Z" },
     ],
+  };
+}
+
+/**
+ * The BIG delegation tree — 1,025 runs: one root plus EXACTLY the 1,024
+ * sub-runs `acme-ingest`'s budget allows, so its "spawns in one run" meter sits
+ * on its ceiling rather than at some arbitrary fraction of it.
+ *
+ * Its shape is chosen to break the outline in all three directions at once:
+ *
+ *   • WIDE  — the root fans out to 64 siblings, so the collapsed-role/summary
+ *             contract ("59 more, none need you" + Show all) is exercised.
+ *   • DEEP  — one branch descends twelve further levels, past TreeTable's
+ *             8-level gutter cap, so the `d9 ·` depth chips render for real.
+ *   • BUSY  — three runs (a failed fetch, a held validation, a held deep split)
+ *             need a person, spread across the tree, so the page's
+ *             open-on-what-is-stuck default has something to find.
+ *
+ * Every node carries only the fields `RunTreeNodeDTO` actually sends
+ * (internal/bff/runs_handler.go): id, agent, status, parentRunId, rootRunId,
+ * input, output, createdAt, updatedAt. Nothing here is a field the UI wishes for.
+ */
+function bigRunTree(rootId: string): RunTree {
+  /** Root + maxTotalSpawns (1,024) — the budget in `TEAMS.acme-ingest`. */
+  const TOTAL = 1025;
+  const T0 = Date.parse("2026-08-31T06:12:04Z");
+  const nodes: RunTreeNode[] = [];
+  const at = (n: number) => new Date(T0 + n * 1_500).toISOString();
+  const push = (
+    id: string,
+    agent: string,
+    status: string,
+    parentRunId: string | undefined,
+    input: string,
+    output?: string,
+  ) => {
+    const i = nodes.length;
+    nodes.push({
+      id,
+      agent,
+      status,
+      ...(parentRunId ? { parentRunId } : {}),
+      rootRunId: rootId,
+      input,
+      ...(output ? { output } : {}),
+      createdAt: at(i),
+      updatedAt: at(i + 1),
+    });
+  };
+
+  push(rootId, `${NS_DEEP}/ingest-coordinator`, "running", undefined,
+    "Ingest the EU invoice packet batch for 2026-08-31.");
+
+  // The wide tier.
+  const tier1: string[] = [];
+  for (let i = 0; i < 64; i++) {
+    const id = `run-fetch-${String(i).padStart(4, "0")}`;
+    const failed = i === 3;
+    push(
+      id,
+      `${NS_DEEP}/packet-fetcher`,
+      failed ? "failed" : "succeeded",
+      rootId,
+      `Fetch packet shard ${i} from the intake bucket.`,
+      failed ? undefined : `Shard ${i}: 61 documents staged.`,
+    );
+    tier1.push(id);
+  }
+
+  // The deep branch — twelve levels below tier 1, ending on a held decision.
+  let parent = tier1[0];
+  for (let d = 2; d <= 13; d++) {
+    const id = `run-deep-${String(d).padStart(2, "0")}`;
+    const held = d === 13;
+    push(
+      id,
+      `${NS_DEEP}/packet-parser`,
+      held ? "requires_action" : "succeeded",
+      parent,
+      `Split the nested attachment at level ${d}.`,
+      held ? undefined : `Level ${d}: 2 parts.`,
+    );
+    parent = id;
+  }
+
+  // Fill the remainder breadth-first across the rest of the wide tier.
+  let i = 0;
+  while (nodes.length < TOTAL) {
+    const held = i === 17;
+    push(
+      `run-doc-${String(i).padStart(4, "0")}`,
+      `${NS_DEEP}/packet-validator`,
+      held ? "requires_action" : "succeeded",
+      tier1[1 + (i % (tier1.length - 1))],
+      `Validate document ${i} against the tenant KYC policy.`,
+      held ? undefined : "Passed the KYC policy.",
+    );
+    i += 1;
+  }
+
+  return { rootId, nodes };
+}
+
+/** GET /api/runs/{id}/tree — the big tree for the big run, the small one otherwise. */
+function runTree(ctx: FixtureContext): RunTree {
+  const rootId = param(ctx, 0, RUN_ID);
+  return rootId === BIG_RUN_ID ? bigRunTree(rootId) : smallRunTree(rootId);
+}
+
+/**
+ * `GET /api/runs` — with the SERVER-SIDE `?agent=ns/name` filter the BFF really
+ * applies (`RunFilter.Agent` → the Langfuse `tags=` query). Without it, every
+ * caller that asks "the recent runs of THIS agent" gets the whole feed back and
+ * silently reads someone else's run as its own — which is exactly how the team
+ * page would end up drawing another team's delegation tree.
+ */
+function runsList(ctx: FixtureContext): RunListResponse {
+  const agent = ctx.query.get("agent")?.trim();
+  if (!agent) return RUNS;
+  return {
+    runs: RUNS.runs.filter((r) => `${r.agentNs ?? ""}/${r.agentName ?? ""}` === agent),
+    nextCursor: "",
   };
 }
 
@@ -1907,7 +2149,7 @@ const ROUTES: FixtureRoute[] = [
   // The log tail is Server-Sent Events, not JSON; an empty body closes it cleanly.
   { match: /^\/api\/agents\/([^/]+)\/([^/]+)\/logs$/, populated: () => "" },
   { match: /^\/api\/agents\/([^/]+)\/([^/]+)$/, populated: agentDetail, empty: emptyAgentDetail },
-  { match: /^\/api\/agents$/, methods: GET, populated: () => AGENT_LIST },
+  { match: /^\/api\/agents$/, methods: GET, populated: agentList },
   { match: /^\/api\/agents$/, populated: (): CreateAgentResponse => ({ created: [{ kind: "AgentDeployment", name: "support-assistant", namespace: NS_DEFAULT }, { kind: "MCPToolBinding", name: "support-assistant-docs-search", namespace: NS_DEFAULT }, { kind: "MemoryBinding", name: "support-assistant-session", namespace: NS_DEFAULT }] }) },
   { match: /^\/api\/expand$/, populated: () => "apiVersion: agents.ctxmesh.ai/v1alpha1\nkind: AgentDeployment\nmetadata:\n  name: support-assistant\n  namespace: default\nspec:\n  image: ghcr.io/acme/support-assistant:1.0.0\n  modelRoute: anthropic-primary\n" },
 
@@ -1998,7 +2240,7 @@ const ROUTES: FixtureRoute[] = [
   // Run events are Server-Sent Events; an empty body closes the stream cleanly.
   { match: /^\/api\/runs\/([^/]+)\/events$/, populated: () => "" },
   { match: /^\/api\/runs\/([^/]+)$/, methods: GET, populated: runDetail, empty: emptyRunDetail },
-  { match: /^\/api\/runs$/, methods: GET, populated: () => RUNS },
+  { match: /^\/api\/runs$/, methods: GET, populated: runsList },
   { match: /^\/api\/runs$/, populated: (): RunHandle => ({ id: RUN_ID, status: "queued" }) },
   { match: /^\/api\/my\/shares$/, populated: () => MY_SHARES },
   { match: /^\/api\/approvals$/, populated: () => APPROVALS },
