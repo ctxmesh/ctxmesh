@@ -52,7 +52,6 @@ import type {
   DatasetCasesResponse,
   DatasetListResponse,
   DevModeResponse,
-  EndUserAuthConfigResponse,
   EvalGatedMetricResponse,
   EvalSuiteDetail,
   EvalSuiteListResponse,
@@ -127,6 +126,9 @@ interface FixtureRoute {
   methods?: readonly string[];
   /** Answer 200 in every mode — auth and boot chrome only (see header). */
   always?: boolean;
+  /** Status for an `always` entry whose honest answer is not 200 (e.g. a
+   *  host-derived endpoint that 404s at this origin). */
+  status?: number;
   populated: (ctx: FixtureContext) => unknown;
   /** Explicit empty-mode body. Absent = the populated body, hollowed. */
   empty?: (ctx: FixtureContext) => unknown;
@@ -150,7 +152,7 @@ export function resolveFixture(
     if (route.methods && !route.methods.includes(verb)) continue;
 
     const ctx: FixtureContext = { params: m.slice(1).map(decode), query, method: verb };
-    if (route.always) return { status: 200, body: route.populated(ctx) };
+    if (route.always) return { status: route.status ?? 200, body: route.populated(ctx) };
 
     switch (mode) {
       case "forbidden":
@@ -2083,7 +2085,14 @@ const ROUTES: FixtureRoute[] = [
   // ── Auth + boot: 200 in every mode, or the sweep screenshots the login wall ──
   { match: /^\/api\/whoami$/, always: true, populated: (): WhoAmI => ({ username: "anuj@ctxmesh.ai", groups: ["system:authenticated", "acme:platform-operators", "acme:team-d"] }) },
   { match: /^\/api\/authconfig$/, always: true, populated: (): AuthConfigResponse => ({ oidcEnabled: true, issuer: "https://dex.acme.example.com/dex", clientId: "ctxmesh-console" }) },
-  { match: /^\/api\/end-user-auth-config$/, always: true, populated: (): EndUserAuthConfigResponse => ({ issuer: "https://login.acme.example.com", clientId: "acme-agent-chat", scopes: ["openid", "profile", "email"] }) },
+  // 404 on purpose. This endpoint is HOST-DERIVED: it answers only at an
+  // agent's own hostname and 404s at the console origin, which is where every
+  // route in this sweep is served from. Answering it unconditionally made
+  // /login render the END-USER door on the operator's own sign-in route — a
+  // nameless "Sign in to continue" card with no way to paste a token. A fixture
+  // that answers an endpoint the real server would not is the same failure as
+  // one that answers with the wrong shape.
+  { match: /^\/api\/end-user-auth-config$/, always: true, status: 404, populated: () => ({ error: "not an agent origin" }) },
   { match: /^\/api\/health$/, always: true, populated: (): HealthResponse => ({ status: "ok", version: "v0.1.0+m151" }) },
   // devmode is boot chrome too: a failure here would only add noise to the shot.
   { match: /^\/api\/devmode$/, always: true, populated: (): DevModeResponse => ({ devMode: false }) },

@@ -1,10 +1,10 @@
 {
   "label": "populated",
   "mode": "populated",
-  "generated": "2026-09-01T04:38:52.081Z",
+  "generated": "2026-09-01T06:04:24.559Z",
   "totals": {
-    "renders": 400,
-    "clean": 400,
+    "renders": 416,
+    "clean": 416,
     "failing": 0
   },
   "rows": [
@@ -1891,7 +1891,9 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/login__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [
+        "Failed to load resource: the server responded with a status of 404 (Not Found)"
+      ]
     },
     {
       "documentScrollsX": false,
@@ -1904,7 +1906,9 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/login__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [
+        "Failed to load resource: the server responded with a status of 404 (Not Found)"
+      ]
     },
     {
       "documentScrollsX": false,
@@ -1917,7 +1921,9 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/login__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [
+        "Failed to load resource: the server responded with a status of 404 (Not Found)"
+      ]
     },
     {
       "documentScrollsX": false,
@@ -1930,7 +1936,9 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/login__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [
+        "Failed to load resource: the server responded with a status of 404 (Not Found)"
+      ]
     },
     {
       "documentScrollsX": false,
@@ -1943,7 +1951,9 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/login__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [
+        "Failed to load resource: the server responded with a status of 404 (Not Found)"
+      ]
     },
     {
       "documentScrollsX": false,
@@ -1956,7 +1966,9 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/login__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [
+        "Failed to load resource: the server responded with a status of 404 (Not Found)"
+      ]
     },
     {
       "documentScrollsX": false,
@@ -1969,7 +1981,9 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/login__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [
+        "Failed to load resource: the server responded with a status of 404 (Not Found)"
+      ]
     },
     {
       "documentScrollsX": false,
@@ -1982,7 +1996,9 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/login__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [
+        "Failed to load resource: the server responded with a status of 404 (Not Found)"
+      ]
     },
     {
       "documentScrollsX": false,
@@ -4374,6 +4390,214 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/stops__1440__light.png",
+      "consoleErrors": []
+    },
+    {
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
+      "offenders": [],
+      "route": "/teams/acme-platform-eu-west-1-team-d-shared-ingest/acme-ingest",
+      "id": "team-detail-large",
+      "label": "Team outline (1,025-run tree)",
+      "archetype": "tree",
+      "width": 768,
+      "theme": "dark",
+      "shot": "visual/shots/populated/team-detail-large__768__dark.png",
+      "consoleErrors": []
+    },
+    {
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
+      "offenders": [],
+      "route": "/teams/acme-platform-eu-west-1-team-d-shared-ingest/acme-ingest",
+      "id": "team-detail-large",
+      "label": "Team outline (1,025-run tree)",
+      "archetype": "tree",
+      "width": 768,
+      "theme": "light",
+      "shot": "visual/shots/populated/team-detail-large__768__light.png",
+      "consoleErrors": []
+    },
+    {
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
+      "offenders": [],
+      "route": "/teams/acme-platform-eu-west-1-team-d-shared-ingest/acme-ingest",
+      "id": "team-detail-large",
+      "label": "Team outline (1,025-run tree)",
+      "archetype": "tree",
+      "width": 1024,
+      "theme": "dark",
+      "shot": "visual/shots/populated/team-detail-large__1024__dark.png",
+      "consoleErrors": []
+    },
+    {
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
+      "offenders": [],
+      "route": "/teams/acme-platform-eu-west-1-team-d-shared-ingest/acme-ingest",
+      "id": "team-detail-large",
+      "label": "Team outline (1,025-run tree)",
+      "archetype": "tree",
+      "width": 1024,
+      "theme": "light",
+      "shot": "visual/shots/populated/team-detail-large__1024__light.png",
+      "consoleErrors": []
+    },
+    {
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
+      "offenders": [],
+      "route": "/teams/acme-platform-eu-west-1-team-d-shared-ingest/acme-ingest",
+      "id": "team-detail-large",
+      "label": "Team outline (1,025-run tree)",
+      "archetype": "tree",
+      "width": 1280,
+      "theme": "dark",
+      "shot": "visual/shots/populated/team-detail-large__1280__dark.png",
+      "consoleErrors": []
+    },
+    {
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
+      "offenders": [],
+      "route": "/teams/acme-platform-eu-west-1-team-d-shared-ingest/acme-ingest",
+      "id": "team-detail-large",
+      "label": "Team outline (1,025-run tree)",
+      "archetype": "tree",
+      "width": 1280,
+      "theme": "light",
+      "shot": "visual/shots/populated/team-detail-large__1280__light.png",
+      "consoleErrors": []
+    },
+    {
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
+      "offenders": [],
+      "route": "/teams/acme-platform-eu-west-1-team-d-shared-ingest/acme-ingest",
+      "id": "team-detail-large",
+      "label": "Team outline (1,025-run tree)",
+      "archetype": "tree",
+      "width": 1440,
+      "theme": "dark",
+      "shot": "visual/shots/populated/team-detail-large__1440__dark.png",
+      "consoleErrors": []
+    },
+    {
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
+      "offenders": [],
+      "route": "/teams/acme-platform-eu-west-1-team-d-shared-ingest/acme-ingest",
+      "id": "team-detail-large",
+      "label": "Team outline (1,025-run tree)",
+      "archetype": "tree",
+      "width": 1440,
+      "theme": "light",
+      "shot": "visual/shots/populated/team-detail-large__1440__light.png",
+      "consoleErrors": []
+    },
+    {
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
+      "offenders": [],
+      "route": "/teams/default/support-pod",
+      "id": "team-detail-small",
+      "label": "Team outline (3 roles)",
+      "archetype": "tree",
+      "width": 768,
+      "theme": "dark",
+      "shot": "visual/shots/populated/team-detail-small__768__dark.png",
+      "consoleErrors": []
+    },
+    {
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
+      "offenders": [],
+      "route": "/teams/default/support-pod",
+      "id": "team-detail-small",
+      "label": "Team outline (3 roles)",
+      "archetype": "tree",
+      "width": 768,
+      "theme": "light",
+      "shot": "visual/shots/populated/team-detail-small__768__light.png",
+      "consoleErrors": []
+    },
+    {
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
+      "offenders": [],
+      "route": "/teams/default/support-pod",
+      "id": "team-detail-small",
+      "label": "Team outline (3 roles)",
+      "archetype": "tree",
+      "width": 1024,
+      "theme": "dark",
+      "shot": "visual/shots/populated/team-detail-small__1024__dark.png",
+      "consoleErrors": []
+    },
+    {
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
+      "offenders": [],
+      "route": "/teams/default/support-pod",
+      "id": "team-detail-small",
+      "label": "Team outline (3 roles)",
+      "archetype": "tree",
+      "width": 1024,
+      "theme": "light",
+      "shot": "visual/shots/populated/team-detail-small__1024__light.png",
+      "consoleErrors": []
+    },
+    {
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
+      "offenders": [],
+      "route": "/teams/default/support-pod",
+      "id": "team-detail-small",
+      "label": "Team outline (3 roles)",
+      "archetype": "tree",
+      "width": 1280,
+      "theme": "dark",
+      "shot": "visual/shots/populated/team-detail-small__1280__dark.png",
+      "consoleErrors": []
+    },
+    {
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
+      "offenders": [],
+      "route": "/teams/default/support-pod",
+      "id": "team-detail-small",
+      "label": "Team outline (3 roles)",
+      "archetype": "tree",
+      "width": 1280,
+      "theme": "light",
+      "shot": "visual/shots/populated/team-detail-small__1280__light.png",
+      "consoleErrors": []
+    },
+    {
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
+      "offenders": [],
+      "route": "/teams/default/support-pod",
+      "id": "team-detail-small",
+      "label": "Team outline (3 roles)",
+      "archetype": "tree",
+      "width": 1440,
+      "theme": "dark",
+      "shot": "visual/shots/populated/team-detail-small__1440__dark.png",
+      "consoleErrors": []
+    },
+    {
+      "documentScrollsX": false,
+      "documentOverflowPx": 0,
+      "offenders": [],
+      "route": "/teams/default/support-pod",
+      "id": "team-detail-small",
+      "label": "Team outline (3 roles)",
+      "archetype": "tree",
+      "width": 1440,
+      "theme": "light",
+      "shot": "visual/shots/populated/team-detail-small__1440__light.png",
       "consoleErrors": []
     },
     {

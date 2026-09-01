@@ -67,6 +67,36 @@ export const UNKNOWN_GLYPH = "—";
 export const UNKNOWN_TITLE =
   "Not recorded for this install — unknown, not zero.";
 
+/**
+ * The console's ONE money register (§4.5).
+ *
+ * Below a dollar, four decimals — a model call costs $0.0003 and two decimals
+ * would round real spend to nothing. At a dollar and above, two, because the
+ * fourth decimal of $2,044.19 is noise nobody acts on.
+ *
+ * A measured zero renders `$0.00`, deliberately NOT `$0.0000`: the four decimals
+ * exist to preserve significant digits a sub-dollar amount would lose, a zero
+ * has none, and `$0.0000` is the exact string §7.1 reserves for "must never be
+ * confused with an unknown". An UNMEASURED cost never comes here at all — it
+ * goes through `QuantityValue` and renders the dash.
+ *
+ * This replaces three registers that disagreed: two page-local copies of this
+ * rule and `lib/format.ts`'s older 3-then-6-decimal `formatUSD`. Money is the
+ * value this console is least allowed to be casual about, and it was being
+ * formatted three ways.
+ */
+export function formatMoney(usd: number): string {
+  if (!Number.isFinite(usd)) return UNKNOWN_GLYPH;
+  if (usd === 0) return "$0.00";
+  const abs = Math.abs(usd);
+  // A real cost that four decimals would round to `$0.0000` says so instead.
+  // `$0.0000` is the one string §7.1 reserves as indistinguishable from an
+  // unknown, and a model call really can cost less than a hundredth of a cent —
+  // rounding it into that string would turn measured spend into "we don't know".
+  if (abs < 0.00005) return usd < 0 ? "> -$0.0001" : "<$0.0001";
+  return abs < 1 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+}
+
 /** Locale-grouped mono count: `1,024`. Known input only — see the contract above. */
 export function formatCount(n: number): string {
   return n.toLocaleString();

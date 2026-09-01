@@ -91,6 +91,7 @@ export {
   ZERO_CLASS,
   isKnown,
   formatCount,
+  formatMoney,
   speakQuantity,
   QuantityValue,
   UnknownValue,

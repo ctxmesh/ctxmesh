@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  formatMoney,
   CellEntity,
   ClosingNote,
   DataTable,
@@ -118,10 +119,7 @@ function capOf(budgetUSD?: string): number | null {
  * module's `formatUSD` is the older 3/6-decimal register still used by surfaces
  * outside this page, and converging them is its own change.
  */
-function formatMoney(usd: number): string {
-  if (usd === 0) return "$0.00";
-  return Math.abs(usd) < 1 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
-}
+
 
 type Load =
   | { kind: "loading" }

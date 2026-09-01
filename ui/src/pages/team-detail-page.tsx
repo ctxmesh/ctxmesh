@@ -825,7 +825,8 @@ export function TeamDetailPage() {
           // any width by pinning it sticky; TreeTable does not, so a min-width
           // wide enough to force a scroll at 768 would push "Next step" — the
           // one column §4.4 says is never dropped — off the frame at rest.
-          tableClassName="min-w-[32rem]"
+          treeColumnClassName="min-w-[13rem] max-w-[20rem]"
+          tableClassName="min-w-[28rem]"
           loading={loading || agentsState.kind === "loading"}
           name={(r) => (
             <span
@@ -923,6 +924,7 @@ export function TeamDetailPage() {
             ariaLabel="Delegation tree"
             // See the roster table above: narrow enough that the three columns
             // that survive 768 fit without scrolling the frame.
+            treeColumnClassName="min-w-[14rem] max-w-[22rem]"
             tableClassName="min-w-[36rem]"
             loading={runState.kind === "loading"}
             name={(r) => splitAgentKey(r.row.node?.agent ?? "").name}
@@ -1041,13 +1043,20 @@ const rosterColumns: TreeColumn<RosterRow>[] = [
     id: "state",
     header: "State",
     priority: 1,
-    className: "w-[10rem]",
+    // Narrow enough that State and Next step — the two the design never drops —
+    // both fit inside the frame at 768 without the table scrolling. Measured:
+    // at 10rem the pinned Next step pushed State 59px past the visible edge.
+    className: "w-[8.5rem]",
     cell: (r) => <RosterState row={r.row} />,
   },
   {
     id: "delegations",
     header: "Delegations",
-    priority: 2,
+    // 3, not 2: this column is a permanent stated absence, and the QuietNote
+    // above the table already says why. When space is short it is the first
+    // thing that should go — a dash nobody can act on must not crowd out the
+    // State and Next step columns, which the design says are never dropped.
+    priority: 3,
     numeric: true,
     cell: () => <UnknownValue title={DELEGATIONS_UNKNOWN_TITLE} />,
   },
