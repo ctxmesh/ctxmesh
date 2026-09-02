@@ -1,0 +1,141 @@
+# The bundled control-plane / run-store Postgres — the database the platform
+# cannot start without, and which until M148 nothing deployed at all.
+#
+# WHY THIS EXISTS (m148.2). ADR 0044 retired ToolRegistry and PromptVersion to
+# Postgres, so both `cmd/main.go` and `cmd/bff/main.go` os.Exit(1) when
+# CONTROLPLANE_DSN is empty. The run store, cost rollups and knowledge chunks
+# need it too. Yet the chart shipped Valkey and MinIO — the two stores NOT on the
+# critical path — and omitted this one, so a stranger following the README got a
+# CrashLoopBackOff on the two most important pods in the product. See ADR 0130.
+#
+# WHY pgvector, NOT plain postgres. Knowledge chunks are searched by vector
+# similarity (M140/ADR 0084). Plain postgres:17 would install cleanly, pass every
+# startup probe, and then fail the first KB query with `type "vector" does not
+# exist` — a failure that surfaces milestones away from its cause. The image is
+# pinned by digest; the tag is kept alongside for human readability.
+#
+# WHY A PVC, unlike the dev MinIO's emptyDir. An offloaded async blob lives for
+# one delivery window and losing it on restart is accepted. Run history, prompt
+# versions, tool registrations and cost rollups are REAL STATE — losing them on a
+# pod reschedule is data loss, and CLAUDE.md's hardening gate names emptyDir-for-
+# real-state explicitly. Same reasoning as the persistent state layer (ADR 0047),
+# including its caveat: a ReadWriteOnce local volume pins the pod to one node, so
+# a reschedule can stick Pending. That is the right trade for a dev/trial tier;
+# production sets postgres.externalDsn and renders none of this.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: system
+  labels:
+    control-plane: postgres
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  strategy:
+    # A single pod holding a ReadWriteOnce volume cannot have two replicas alive
+    # at once — a rolling update would deadlock waiting for a volume the old pod
+    # still holds.
+    type: Recreate
+  selector:
+    matchLabels:
+      control-plane: postgres
+      app.kubernetes.io/name: ctxmesh
+  template:
+    metadata:
+      labels:
+        control-plane: postgres
+        app.kubernetes.io/name: ctxmesh
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-dev
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-dev
+                  key: password
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-dev
+                  key: database
+            # The image's default PGDATA is the mount root itself, and a PVC
+            # arrives with a lost+found directory that initdb refuses to write
+            # into. A subdirectory is the documented fix.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          # pg_isready against the real user/db, not a bare TCP check: the port
+          # accepts connections while initdb is still running, so a TCP probe
+          # would report Ready before the database can answer a query.
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "ctxmesh", "-d", "ctxmesh"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "ctxmesh", "-d", "ctxmesh"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 3
+          # A first-boot initdb on a slow laptop can exceed the liveness budget;
+          # the startup probe gives it room without loosening liveness afterwards.
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-U", "ctxmesh", "-d", "ctxmesh"]
+            periodSeconds: 5
+            failureThreshold: 60
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              # Bounded per the leak policy: a runaway query OOMs the pod, not
+              # the node.
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: system
+  labels:
+    control-plane: postgres
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 8Gi

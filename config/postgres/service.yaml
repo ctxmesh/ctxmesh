@@ -1,0 +1,22 @@
+# ClusterIP Service for the bundled control-plane Postgres. The controller and
+# the BFF reach it at ctxmesh-postgres.ctxmesh.svc:5432 — the host in the
+# CONTROLPLANE_DSN / RUN_STORE_DSN the chart composes (config/bff, config/manager).
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: system
+  labels:
+    control-plane: postgres
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  selector:
+    control-plane: postgres
+    app.kubernetes.io/name: ctxmesh
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      protocol: TCP

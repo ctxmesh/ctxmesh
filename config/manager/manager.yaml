@@ -144,6 +144,15 @@ spec:
         # literal here. optional:true so the manifest builds before the Secret exists — but
         # a real install MUST provision it, else the operator CrashLoops (audit FUNC-1).
         envFrom:
+          # The chart-owned DSN Secret FIRST (M148/ADR 0130): it carries the
+          # CONTROLPLANE_DSN this process hard-requires, so a stock install no
+          # longer CrashLoops on the audit FUNC-1 gap described above.
+          - secretRef:
+              name: postgres-dsn
+              optional: true
+          # bff-adapters SECOND and still optional — it is the OPERATOR's Secret.
+          # Later envFrom entries win, so an operator's own CONTROLPLANE_DSN in
+          # bff-adapters overrides the chart default rather than being shadowed.
           - secretRef:
               name: bff-adapters
               optional: true

@@ -901,6 +901,20 @@ apiVersion: v1
 kind: Secret
 metadata:
   labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: controlplane-dsn
+  name: ctxmesh-postgres-dsn
+  namespace: {{ .Values.namespace }}
+stringData:
+  CONTROLPLANE_DSN: {{ .Values.postgres.externalDsn | default (printf "postgres://ctxmesh:ctxmesh-dev-secret@ctxmesh-postgres.%s.svc:5432/ctxmesh?sslmode=disable" .Values.namespace) }}
+  RUN_STORE_DSN: {{ .Values.postgres.externalDsn | default (printf "postgres://ctxmesh:ctxmesh-dev-secret@ctxmesh-postgres.%s.svc:5432/ctxmesh?sslmode=disable" .Values.namespace) }}
+type: Opaque
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
     app.kubernetes.io/component: webhook-cert
     app.kubernetes.io/name: ctxmesh
   name: ctxmesh-webhook-server-cert
@@ -1065,6 +1079,9 @@ spec:
         - name: ENABLE_TENANT_LABEL_WEBHOOK
           value: {{ ternary "true" "false" .Values.security.tenantLabelWebhook.enabled | quote }}
         envFrom:
+        - secretRef:
+            name: ctxmesh-postgres-dsn
+            optional: true
         - secretRef:
             name: bff-adapters
             optional: true

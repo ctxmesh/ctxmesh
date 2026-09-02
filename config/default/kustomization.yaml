@@ -21,6 +21,13 @@ resources:
 - ../gateway
 - ../statelayer
 - ../objectstore
+# The bundled control-plane / run-store Postgres (M148, ADR 0130). ADR 0044 made
+# CONTROLPLANE_DSN a hard requirement — the controller and the BFF both os.Exit(1)
+# without it — yet nothing deployed the database, so a stranger following the README
+# got a CrashLoopBackOff. Dev/trial tier only: gated behind `devDataPlane.enabled` in
+# the generated chart, exactly like the Valkey and MinIO above; production sets
+# `postgres.externalDsn` and renders none of it.
+- ../postgres
 # The Go BFF (UI server-side layer) + its least-privilege SA/RBAC. Flows into
 # both `make deploy` and the generated Helm chart (no-drift). ADR 0011: the BFF
 # SA holds no agent-CRD access — user ops run on the caller's token.

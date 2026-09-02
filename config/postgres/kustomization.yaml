@@ -1,0 +1,5 @@
+resources:
+- secret.yaml
+- dsn-secret.yaml
+- deployment.yaml
+- service.yaml

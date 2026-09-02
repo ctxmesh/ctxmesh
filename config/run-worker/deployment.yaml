@@ -57,11 +57,16 @@ spec:
           env:
             # RUN_STORE_DSN points at the durable Postgres run store (operator-provided Secret).
             # The KEDA postgresql scaler reads the SAME env (connectionFromEnv) — one source of truth.
+            # M148/ADR 0130: sourced from the chart-owned postgres-dsn Secret.
+            # It used to name a `run-store` Secret that no chart path created, so
+            # the worker could not start on a stock install either. The KEDA
+            # postgresql scaler reads the SAME env (connectionFromEnv) — one
+            # source of truth, now with an actual source.
             - name: RUN_STORE_DSN
               valueFrom:
                 secretKeyRef:
-                  name: run-store
-                  key: dsn
+                  name: postgres-dsn
+                  key: RUN_STORE_DSN
             # Start N concurrent claim loops. Dispatch is OFF here — workers EXECUTE runs; the
             # front-end BFF is what dispatches (RUN_WORKER_DISPATCH=true on the bff Deployment).
             - name: RUN_WORKER_CONCURRENCY
@@ -73,6 +78,11 @@ spec:
           # worker re-mints a run capability on the caller's behalf. Optional so the manifest
           # builds before the Secrets exist.
           envFrom:
+            # Chart-owned DSN first (M148/ADR 0130); m55.5 found this pod
+            # CrashLooping on a missing CONTROLPLANE_DSN for exactly this reason.
+            - secretRef:
+                name: postgres-dsn
+                optional: true
             - secretRef:
                 name: bff-adapters
                 optional: true
