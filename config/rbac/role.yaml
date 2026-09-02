@@ -33,19 +33,10 @@ rules:
   - ""
   resources:
   - pods
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
   - secrets
   verbs:
-  - create
   - get
   - list
-  - update
   - watch
 - apiGroups:
   - admissionregistration.k8s.io

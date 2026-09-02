@@ -216,6 +216,15 @@ jobs:
       # minutes exhausted once (m52.G3). Carded for M150.
       - name: Install-truth gate (the chart provisions what it consumes)
         run: ./hack/install-truth.sh
+      # M149 m149.3 — least privilege, asserted on what we SHIP.
+      #
+      # M146's acceptance found ctxmesh-operator holding verbs:["*"] on agentdeployments,
+      # silently implying the `kill` permission that milestone was building — and recorded
+      # why no behavioural test could have caught it: a handler test injects a fake
+      # authorizer, so it proves the handler ASKS, never that RBAC answers as intended.
+      # This gate reads the manifests, so it needs no cluster and costs milliseconds.
+      - name: RBAC least-privilege gate (no verb wildcards, no cluster-scoped Secret writes)
+        run: ./hack/rbac-least-privilege.sh config/rbac
 
   envtest:
     name: envtest
