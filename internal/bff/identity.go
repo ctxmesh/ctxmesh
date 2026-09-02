@@ -113,7 +113,7 @@ var (
 		resAuditLogs,
 		resKnowledgeBases,
 	}
-	goldenVerbs = []string{verbGet, verbList, "create", "update", "delete"}
+	goldenVerbs = []string{verbGet, verbList, verbCreate, "update", "delete"}
 )
 
 // handleWhoAmI serves GET /api/whoami — the caller's identity (username +
