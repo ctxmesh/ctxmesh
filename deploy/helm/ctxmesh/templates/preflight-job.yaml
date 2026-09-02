@@ -31,6 +31,17 @@ spec:
       labels:
         app.kubernetes.io/name: ctxmesh
         app.kubernetes.io/component: preflight
+        # control-plane is what the datastore NetworkPolicies admit
+        # (`control-plane: Exists`), and this Job's whole purpose is to reach the
+        # datastores. Without the label the policy denied it, so a stock `helm install`
+        # failed its OWN preflight on any cluster that enforces NetworkPolicy — every
+        # time, with an i/o timeout that reads like the database is down.
+        #
+        # Nothing in the repo could see it: this Job is a chart-only helm hook, so the
+        # kustomize dev path never runs it, and every other test installs from
+        # config/. M154's install-from-artifacts slice ran it on a fresh cluster and
+        # it failed on the first try.
+        control-plane: preflight
     spec:
       restartPolicy: Never
       serviceAccountName: ctxmesh-bff

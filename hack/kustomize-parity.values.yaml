@@ -1,0 +1,37 @@
+# The image overrides that make `helm template` reproduce `kustomize build config/default`.
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# config/ is the DEV path: it installs images built locally and loaded into kind, named
+# by bare tags (`controller:latest`). The chart is the RELEASE path: it installs images a
+# stranger pulls from a registry, named by a published reference at a real version.
+#
+# Those two are *supposed* to differ, and only in the images. The no-drift gate exists to
+# prove everything ELSE matches — RBAC, env, probes, volumes, policies, 82 resources of
+# it. Rendering the chart with its release defaults and diffing against the dev render
+# would report the intended difference as drift, and the obvious way to silence that is
+# to give the chart dev defaults: bare `controller`, `bff`, tag "", appVersion "latest".
+#
+# Which is exactly what had happened. The chart's defaults were shaped to satisfy this
+# comparison, and the cost was that a stock `helm install` pulled
+# docker.io/library/controller:latest — someone else's image, or nothing. The gate was
+# asserting the wrong invariant for the one field that must differ.
+#
+# So the images move here, the chart keeps release defaults, and the diff still covers
+# everything else byte for byte.
+controllerManager:
+  image:
+    repository: controller
+    tag: latest
+bff:
+  image:
+    repository: bff
+    tag: latest
+tokenService:
+  image:
+    repository: token-service
+    tag: latest
+statelayerProxy:
+  image:
+    repository: statelayer-proxy
+    tag: latest

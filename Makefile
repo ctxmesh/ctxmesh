@@ -434,6 +434,10 @@ crd-version-parity: manifests ## Guard: multi-version CRDs keep matching top-lev
 rbac-least-privilege: manifests ## Assert the SHIPPED roles grant no verb wildcards and no cluster-scoped Secret writes (M149).
 	./hack/rbac-least-privilege.sh config/rbac
 
+.PHONY: release-truth
+release-truth: ## Assert the release publishes every artifact an install needs, at a version (M154). Static, no cluster.
+	./hack/release-truth.sh
+
 .PHONY: provider-parity
 provider-parity: ## Assert the console offers exactly the providers the BFF supports (M153). Static, no cluster.
 	./hack/provider-parity.sh
@@ -453,9 +457,9 @@ helm-verify: manifests kustomize ## Prove the Helm chart does not drift from `ku
 	  diff -u "$(HELM_CHART)/templates/$$f" "$$tmp/gen/$$f" \
 	    || { echo "DRIFT: $(HELM_CHART)/templates/$$f is stale — run 'make helm-generate'"; exit 1; }; \
 	done; \
-	echo ">> checking helm template (default values) == kustomize build config/default"; \
+	echo ">> checking helm template (+ hack/kustomize-parity.values.yaml) == kustomize build config/default"; \
 	"$(KUSTOMIZE)" build config/default > "$$tmp/kustomize.yaml"; \
-	"$(HELM)" template ctxmesh "$(HELM_CHART)" > "$$tmp/helm.yaml"; \
+	"$(HELM)" template ctxmesh "$(HELM_CHART)" -f hack/kustomize-parity.values.yaml > "$$tmp/helm.yaml"; \
 	python3 ./hack/helm_nodrift_diff.py "$$tmp/kustomize.yaml" "$$tmp/helm.yaml"
 
 .PHONY: helm-lint
