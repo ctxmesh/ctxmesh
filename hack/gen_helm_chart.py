@@ -166,6 +166,17 @@ MODEL_SERVICE_ENV_HELM = (
 
 # The optional model-service / async vars: one values key each, all defaulting to "" so the
 # default render is byte-identical to kustomize. Listed as (env name, values path).
+# Durability knobs (M148/m148.9, m52 Theme M143-knobs). config/manager hardcodes ""
+# for all three so the in-code defaults apply and the render is unchanged; the chart
+# templates them so an operator can actually turn the dials. The two egress timeouts
+# ride through to the sidecar and are folded into egressDigest (M146.7), so a change
+# rolls a new revision instead of being silently dropped.
+DURABILITY_KNOB_ENV = [
+    ("EGRESS_RESPONSE_HEADER_TIMEOUT", "controllerManager.egress.responseHeaderTimeout"),
+    ("EGRESS_STREAM_IDLE_TIMEOUT", "controllerManager.egress.streamIdleTimeout"),
+    ("KNOWLEDGE_SETTLE_WINDOW", "knowledgeSettleWindow"),
+]
+
 OPTIONAL_MODEL_ENV = [
     ("INGEST_OCR_URL", "bff.ingestOcrURL"),
     ("KNOWLEDGE_RERANK_URL", "bff.knowledgeRerankURL"),
@@ -439,6 +450,13 @@ def substitute(doc: str) -> str:
     )
     # M148/m148.5 — the model-service + async block.
     doc = doc.replace(MODEL_SERVICE_ENV_KUSTOMIZE, MODEL_SERVICE_ENV_HELM)
+    # M148/m148.9 — the durability knobs (manager env; same empty-default shape).
+    for env_name, val_path in DURABILITY_KNOB_ENV:
+        doc = doc.replace(
+            f'        - name: {env_name}\n          value: ""',
+            "        - name: %s\n          value: {{ .Values.%s | default \"\" | quote }}"
+            % (env_name, val_path),
+        )
     for env_name, val_path in OPTIONAL_MODEL_ENV:
         doc = doc.replace(
             f'        - name: {env_name}\n          value: ""',
