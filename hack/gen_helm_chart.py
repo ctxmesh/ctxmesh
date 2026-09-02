@@ -299,7 +299,7 @@ ENABLE_TENANT_LABEL_WEBHOOK_ENV_HELM = (
 # Resources whose `control-plane:` label marks them as the bundled DEV data
 # plane (in-cluster Valkey/MinIO). Production supplies its own — PRD §23 — so
 # these are gated behind .Values.devDataPlane.enabled.
-DEV_DATA_PLANE_LABELS = {"statelayer", "objectstore"}
+DEV_DATA_PLANE_LABELS = {"statelayer", "objectstore", "postgres"}
 
 # Resources whose `control-plane:` label marks them as the Go BFF (the UI's
 # server-side layer) + its least-privilege SA/RBAC. Gated behind
@@ -385,6 +385,23 @@ def substitute(doc: str) -> str:
         f"ctxmesh-statelayer.{NS_KUSTOMIZE}.svc:6379",
         "{{ .Values.statelayer.externalAddr | "
         'default (printf "ctxmesh-statelayer.%s.svc:6379" .Values.namespace) }}',
+    )
+    # Control-plane / run-store DSN (M148, ADR 0130). Same treatment as
+    # statelayer.externalAddr above and for the same reason: the kustomize literal
+    # names the bundled in-cluster Postgres at a FIXED namespace, which (a) does not
+    # resolve for a non-default-namespace install and (b) does not EXIST at all in a
+    # production render, where devDataPlane.enabled=false. Templating it lets
+    # `postgres.externalDsn` repoint the control plane at an operator-managed
+    # database while the default renders byte-identical to kustomize (no drift).
+    #
+    # The literal appears twice (CONTROLPLANE_DSN and RUN_STORE_DSN in the same
+    # Secret) and the replace hits both, which is intended — they are the same
+    # database and splitting them would let an install point half of itself
+    # somewhere else.
+    doc = doc.replace(
+        f"postgres://ctxmesh:ctxmesh-dev-secret@ctxmesh-postgres.{NS_KUSTOMIZE}.svc:5432/ctxmesh?sslmode=disable",
+        "{{ .Values.postgres.externalDsn | "
+        'default (printf "postgres://ctxmesh:ctxmesh-dev-secret@ctxmesh-postgres.%s.svc:5432/ctxmesh?sslmode=disable" .Values.namespace) }}',
     )
     # BFF connect-a-provider kill-switch -> Helm value (ADR 0015). Only the BFF
     # deployment carries this exact env block; the default keeps the render at

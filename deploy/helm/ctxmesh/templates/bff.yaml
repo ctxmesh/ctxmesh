@@ -148,6 +148,9 @@ spec:
               optional: true
         envFrom:
         - secretRef:
+            name: ctxmesh-postgres-dsn
+            optional: true
+        - secretRef:
             name: bff-adapters
             optional: true
         - secretRef:

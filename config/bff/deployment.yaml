@@ -178,6 +178,12 @@ spec:
           # Optional adapter creds (Langfuse/Prometheus). Absent → adapters nil →
           # their routes 501; the UI + /api/health still serve. No literals here.
           envFrom:
+            # Chart-owned DSN first (M148/ADR 0130) — CONTROLPLANE_DSN is
+            # required at startup (ADR 0044) and nothing used to provide it.
+            - secretRef:
+                name: postgres-dsn
+                optional: true
+            # Operator adapter creds second, so they override the chart default.
             - secretRef:
                 name: bff-adapters
                 optional: true

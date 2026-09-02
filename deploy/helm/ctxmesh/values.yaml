@@ -185,6 +185,33 @@ crds:
 devDataPlane:
   enabled: true
 
+# --- Control-plane / run-store PostgreSQL (M148, ADR 0130) -------------------
+# The database the platform cannot start without. ADR 0044 retired ToolRegistry
+# and PromptVersion to Postgres, so the controller-manager and the BFF both exit
+# at startup when CONTROLPLANE_DSN is empty. Before M148 the chart consumed that
+# value from a `bff-adapters` Secret it never created, so a stock install
+# CrashLooped — the gap was even documented in config/manager as audit FUNC-1 and
+# carried as a comment instead of a fix.
+#
+# DEV/TRIAL (default): a single-node pgvector Deployment + PVC is rendered under
+# `devDataPlane.enabled`, with deterministic dev credentials (PRD §23) — the same
+# posture as the bundled Valkey and MinIO.
+#
+# PRODUCTION: set `devDataPlane.enabled=false` and point `externalDsn` at an
+# operator-managed PostgreSQL. `profile: production` REQUIRES externalDsn and
+# fails the render without it, rather than installing something that cannot start.
+#
+# pgvector is REQUIRED, not a nice-to-have: knowledge chunks are searched by
+# vector similarity (ADR 0084). A plain postgres image installs cleanly, passes
+# every probe, and then fails the first knowledge query with `type "vector" does
+# not exist` — a failure that surfaces a long way from its cause.
+postgres:
+  # BYO-external DSN for the control plane AND the run store (they are the same
+  # database; splitting them would let half an install point elsewhere). Empty ⇒
+  # the bundled in-cluster Postgres Service in the install namespace.
+  #   postgres://user:password@host:5432/dbname?sslmode=require
+  externalDsn: ""
+
 # --- In-cluster PERSISTENT state layer (M48, ADR 0047) — OPT-IN --------------
 # For a self-hosted install that wants DURABLE in-cluster memory without running
 # an external Valkey: a StatefulSet + PVC + AOF Valkey (memory survives a pod
