@@ -901,6 +901,20 @@ apiVersion: v1
 kind: Secret
 metadata:
   labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: controlplane-dsn
+  name: ctxmesh-postgres-dsn
+  namespace: {{ .Values.namespace }}
+stringData:
+  CONTROLPLANE_DSN: {{ if .Values.postgres.externalDsn }}{{ .Values.postgres.externalDsn | quote }}{{ else }}{{ printf "postgres://ctxmesh:ctxmesh-dev-secret@ctxmesh-postgres.%s.svc:5432/ctxmesh?sslmode=disable" .Values.namespace }}{{ end }}
+  RUN_STORE_DSN: {{ if .Values.postgres.externalDsn }}{{ .Values.postgres.externalDsn | quote }}{{ else }}{{ printf "postgres://ctxmesh:ctxmesh-dev-secret@ctxmesh-postgres.%s.svc:5432/ctxmesh?sslmode=disable" .Values.namespace }}{{ end }}
+type: Opaque
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
     app.kubernetes.io/component: webhook-cert
     app.kubernetes.io/name: ctxmesh
   name: ctxmesh-webhook-server-cert
@@ -1032,6 +1046,12 @@ spec:
         command:
         - /manager
         env:
+        - name: CONTAINER_MEMORY_LIMIT_BYTES
+          valueFrom:
+            resourceFieldRef:
+              containerName: manager
+              divisor: "1"
+              resource: limits.memory
         - name: POD_NAMESPACE
           valueFrom:
             fieldRef:
@@ -1064,7 +1084,16 @@ spec:
           value: {{ .Values.devDataPlane.enabled | quote }}
         - name: ENABLE_TENANT_LABEL_WEBHOOK
           value: {{ ternary "true" "false" .Values.security.tenantLabelWebhook.enabled | quote }}
+        - name: EGRESS_RESPONSE_HEADER_TIMEOUT
+          value: {{ .Values.controllerManager.egress.responseHeaderTimeout | default "" | quote }}
+        - name: EGRESS_STREAM_IDLE_TIMEOUT
+          value: {{ .Values.controllerManager.egress.streamIdleTimeout | default "" | quote }}
+        - name: KNOWLEDGE_SETTLE_WINDOW
+          value: {{ .Values.knowledgeSettleWindow | default "" | quote }}
         envFrom:
+        - secretRef:
+            name: ctxmesh-postgres-dsn
+            optional: true
         - secretRef:
             name: bff-adapters
             optional: true
@@ -1209,6 +1238,12 @@ spec:
     spec:
       containers:
       - env:
+        - name: CONTAINER_MEMORY_LIMIT_BYTES
+          valueFrom:
+            resourceFieldRef:
+              containerName: statelayer-proxy
+              divisor: "1"
+              resource: limits.memory
         - name: STATELAYER_ADDR
           value: {{ .Values.statelayer.externalAddr | default (printf "ctxmesh-statelayer.%s.svc:6379" .Values.namespace) }}
         - name: STATELAYER_USERNAME
@@ -1279,8 +1314,18 @@ spec:
     spec:
       containers:
       - env:
+        - name: CONTAINER_MEMORY_LIMIT_BYTES
+          valueFrom:
+            resourceFieldRef:
+              containerName: token-service
+              divisor: "1"
+              resource: limits.memory
         - name: MCP_CREDENTIAL_NAMESPACE
           value: {{ .Values.bff.mcp.credentialNamespace | default .Values.namespace }}
+        - name: MODEL_GATEWAY_URL
+          value: {{ .Values.tokenService.modelGatewayURL | default (printf "http://ctxmesh-gateway.%s.svc:4000" .Values.namespace) }}
+        - name: KNOWLEDGE_RERANK_URL
+          value: {{ .Values.bff.knowledgeRerankURL | default "" | quote }}
         - name: TOKEN_SERVICE_TLS_CERT_FILE
           value: /etc/token-service/tls/tls.crt
         - name: TOKEN_SERVICE_TLS_KEY_FILE
@@ -1290,6 +1335,9 @@ spec:
         - name: TOKEN_SERVICE_TLS_REQUIRED
           value: {{ .Values.tokenService.tls.required | quote }}
         envFrom:
+        - secretRef:
+            name: ctxmesh-postgres-dsn
+            optional: true
         - secretRef:
             name: bff-adapters
             optional: true

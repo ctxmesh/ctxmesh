@@ -453,6 +453,24 @@ func (s *Server) handleIngestKB(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An ingest that resolves NO documents is refused, not accepted (M148/m148.11).
+	//
+	// It used to return 202 with documentCount:0 and the run then SUCCEEDED having done
+	// nothing — so the console showed an ingested KB, and retrieval's later emptiness
+	// looked like a model or embedding problem rather than a corpus that was never read.
+	// Found live: an ingest issued in the same second as the last upload resolved zero
+	// documents, reported success, and wrote no chunks.
+	//
+	// Ingesting nothing is never what the caller meant. 422 says so while the caller is
+	// still watching, which is the whole difference.
+	if len(infos) == 0 {
+		writeError(w, http.StatusUnprocessableEntity,
+			fmt.Sprintf("KnowledgeBase %q has no documents to ingest. Upload documents first; "+
+				"if you just uploaded, retry — a document is ingestible only once the object "+
+				"store lists it.", kbName))
+		return
+	}
+
 	// Pin the ingestion spec: the resolved doc keys + content types + the corpus's embedding route + chunking.
 	// For a PER-USER KB (ADR 0061 Fork 3) recover each document's owner subject from its object key (the subject
 	// is nested as a path segment at upload — KnowledgeKeyForSubject) and pin it per-document, so the off-request

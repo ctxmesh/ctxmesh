@@ -67,6 +67,20 @@ spec:
         imagePullPolicy: IfNotPresent
         name: manager
         env:
+          # CONTAINER_MEMORY_LIMIT_BYTES — the container's own memory limit, via the
+          # downward API. internal/runtimelimit reads it at startup and sets GOMEMLIMIT
+          # to 80% of it.
+          #
+          # Without this the Go GC sizes the heap from GOGC alone, knows nothing about
+          # the cgroup, and grows straight through the limit — so the kernel kills the
+          # process rather than the collector working harder. M148 watched the BFF do
+          # exactly that at 512Mi AND again at 1Gi: the ceiling was never the problem.
+          - name: CONTAINER_MEMORY_LIMIT_BYTES
+            valueFrom:
+              resourceFieldRef:
+                containerName: manager
+                resource: limits.memory
+                divisor: "1"
           # POD_NAMESPACE (downward API): the manager's install namespace — the platform
           # cert-controller (M128/Gate E, ADR 0102) puts its CA + serving-cert Secret here and
           # derives the webhook Service SAN from it. Inert when the tenant-label webhook is off.
@@ -138,12 +152,46 @@ spec:
           # (matchConditions-scoped, system-ns-exempt).
           - name: ENABLE_TENANT_LABEL_WEBHOOK
             value: "true"
+          # --- Durability knobs (M148/m148.9, m52 Theme M143-knobs) --------------
+          # Three values that code has READ since M126/M143 and that NOTHING set.
+          # They shipped with sensible in-code fallbacks, so nothing was broken —
+          # but an operator who hit the failure they exist for had no way to turn
+          # the dial. That is the same "read by code, set by nothing" shape as
+          # MODEL_GATEWAY_URL (m148.5).
+          #
+          # The two egress timeouts are passed through to the agent's egress
+          # SIDECAR, and they are already folded into egressDigest (M146.7) — which
+          # is the load-bearing part. Sidecar env that does not move the revision
+          # name is silently dropped by the CreateOrUpdate guard (the M4 landmine),
+          # so an operator would change the value and watch nothing happen.
+          #
+          # Empty ⇒ the in-code defaults (120s header, 300s idle, and the
+          # knowledge settle window's own default), so the render is unchanged.
+          - name: EGRESS_RESPONSE_HEADER_TIMEOUT
+            value: ""
+          - name: EGRESS_STREAM_IDLE_TIMEOUT
+            value: ""
+          # KNOWLEDGE_SETTLE_WINDOW (M143): how long an unresolved KnowledgeBase
+          # ref HOLDS a revision rather than publishing a KB-less one that answers
+          # with retrieval silently off. values.yaml has carried a
+          # `knowledgeSettleWindow` key since M143 that reached no container.
+          - name: KNOWLEDGE_SETTLE_WINDOW
+            value: ""
         # CONTROLPLANE_DSN (ADR 0044) — the manager REQUIRES it at startup (ToolRegistry
         # retired to Postgres; cmd/main.go hard-exits without it). Sourced from the shared
         # bff-adapters Secret (same one the BFF/run-worker/token-service read), never a
         # literal here. optional:true so the manifest builds before the Secret exists — but
         # a real install MUST provision it, else the operator CrashLoops (audit FUNC-1).
         envFrom:
+          # The chart-owned DSN Secret FIRST (M148/ADR 0130): it carries the
+          # CONTROLPLANE_DSN this process hard-requires, so a stock install no
+          # longer CrashLoops on the audit FUNC-1 gap described above.
+          - secretRef:
+              name: postgres-dsn
+              optional: true
+          # bff-adapters SECOND and still optional — it is the OPERATOR's Secret.
+          # Later envFrom entries win, so an operator's own CONTROLPLANE_DSN in
+          # bff-adapters overrides the chart default rather than being shadowed.
           - secretRef:
               name: bff-adapters
               optional: true

@@ -1,0 +1,113 @@
+# The bundled dev NATS JetStream — the async A2A broker (M148/m148.7, ADR 0121).
+#
+# WHY IT EXISTS. The async backend is BYO by design, and that posture stands: a
+# production install runs its own NATS (or points at a managed one) exactly as it
+# runs its own Valkey (ADR 0053). But BYO with NO dev manifest meant the async
+# hop's LIVE proof could not run on a real cluster at all — only its hermetic
+# proof against an embedded broker did. A durability guarantee that has never
+# been exercised over a network is an argument, not a property (the M143 lesson).
+#
+# WHY A DEPLOYMENT + PVC AND NOT A STATEFULSET. JetStream's durability here is
+# per-node file storage for ONE replica; a StatefulSet buys ordered identity for
+# a cluster we deliberately do not run in dev. Recreate strategy for the same
+# reason as the bundled Postgres: one pod, one ReadWriteOnce volume, so a rolling
+# update would deadlock waiting for a volume the old pod still holds.
+#
+# The PVC is the point. An emptyDir here would give a JetStream that reports
+# itself durable and loses every un-acked message on a restart — the exact shape
+# of a guarantee that is true in the steady state and false at the cold start
+# (learning/architecture.md, M141).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nats
+  namespace: system
+  labels:
+    control-plane: nats
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      control-plane: nats
+      app.kubernetes.io/name: ctxmesh
+  template:
+    metadata:
+      labels:
+        control-plane: nats
+        app.kubernetes.io/name: ctxmesh
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: nats
+          image: nats:2.11-alpine@sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00
+          args: ["--config", "/etc/nats/nats.conf"]
+          ports:
+            - name: client
+              containerPort: 4222
+              protocol: TCP
+            - name: monitor
+              containerPort: 8222
+              protocol: TCP
+          # /healthz on the monitoring port reports JetStream readiness, not just
+          # that the process is listening — the distinction that matters here,
+          # since a server without JetStream accepts connections and then fails
+          # every stream operation.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8222
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8222
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nats
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: config
+          configMap:
+            name: nats-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: nats-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nats-data
+  namespace: system
+  labels:
+    control-plane: nats
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 4Gi
