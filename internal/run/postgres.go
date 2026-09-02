@@ -197,6 +197,32 @@ func NewPostgresStore(ctx context.Context, db *sql.DB) (Store, error) {
 // Postgres side of the optional DurableStore capability the BFF type-asserts.
 func (p *pgStore) Durable() bool { return true }
 
+// ActiveIngestion returns a queued-or-running ingestion run for the KB, or "" (M152 m152.3).
+//
+// The query is the guard: concurrent ingests are mutually destructive because SweepOrphans
+// deletes chunks whose ingestion_run_id differs from the current run, so each of two runs
+// removes the other's rows and both still report success.
+//
+// NOTE this narrows a race rather than closing it absolutely — two callers can both read
+// "none in flight" before either inserts. Closing it fully wants a unique partial index on
+// (namespace, ingestion_ref) WHERE status IN ('queued','running'), which is a schema
+// migration; the check here removes the case that actually happens (a scheduled re-ingest
+// firing while a manual one runs, and a user clicking twice) and the residue is carded.
+func (p *pgStore) ActiveIngestion(namespace, knowledgeBase string) (string, error) {
+	var id string
+	err := p.db.QueryRow(
+		`SELECT id FROM runs
+		  WHERE namespace = $1 AND ingestion_ref = $2 AND status IN ('queued','running')
+		  LIMIT 1`, namespace, knowledgeBase).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("run: active-ingestion lookup: %w", err)
+	}
+	return id, nil
+}
+
 func (p *pgStore) Create(r *Run) error {
 	inserted, err := insertRunTx(context.Background(), p.db, r)
 	if err != nil {
