@@ -76,6 +76,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/preflight"
 	"github.com/ctxmesh/ctxmesh/internal/prompt"
 	runstore "github.com/ctxmesh/ctxmesh/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 	"github.com/ctxmesh/ctxmesh/internal/runtimelimit"
 )
 
@@ -508,6 +509,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		// state-layer Valkey so "already bound" is the same answer on every replica; without an addr
 		// there is no exchange edge, and capabilities stay bearer.
 		RuncapBind:   runcapBindStore(log),
+		ProofSpender: proofSpender(log),
 		SpawnBudgets: spawnbudget.NewPostgresStore(cpDB),
 		// The scoped kill switch (M146, ADR 0126). This is the FAIL-CLOSED half: the worker reads it
 		// before claiming and the run-create edge reads it before accepting, and neither consults the
@@ -815,6 +817,26 @@ func runcapBindStore(log logr.Logger) bff.RuncapBindStore {
 	}
 	log.Info("run-capability binding enabled (ADR 0124): single-use exchange over the state layer")
 	return bff.NewRedisRuncapBindStore(addr,
+		strings.TrimSpace(os.Getenv("STATELAYER_USERNAME")), os.Getenv("STATELAYER_PASSWORD"))
+}
+
+// proofSpender builds the CROSS-REPLICA proof-replay set over the same state-layer Valkey
+// (M149 m149.4). It must be shared for the same reason the bind store must: the verifier's
+// default seen-set is per-process, so a proof spent on one replica stays unseen by the
+// others for its whole freshness window and replays cleanly against whichever replica the
+// load balancer picks. ADR 0124 accepted that at replicas=1; M148 made multi-replica the
+// production posture, which is what turns the residual into a real one.
+//
+// No STATELAYER_ADDR ⇒ nil ⇒ the in-process map, which is correct for the single-pod dev
+// install that has no state layer to share through.
+func proofSpender(log logr.Logger) runcap.ProofSpender {
+	addr := strings.TrimSpace(os.Getenv("STATELAYER_ADDR"))
+	if addr == "" {
+		log.Info("proof-replay set is PER-PROCESS: STATELAYER_ADDR unset — correct at one replica, permissive at several")
+		return nil
+	}
+	log.Info("proof-replay set shared across replicas (M149): single-use proofs over the state layer")
+	return bff.NewRedisProofSpender(addr,
 		strings.TrimSpace(os.Getenv("STATELAYER_USERNAME")), os.Getenv("STATELAYER_PASSWORD"))
 }
 

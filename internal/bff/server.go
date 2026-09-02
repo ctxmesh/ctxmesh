@@ -205,10 +205,14 @@ type Server struct {
 	killScopes killscope.Store
 	// killFilter memoises the expanded claim exclusion for killFilterTTL — the claim loop runs
 	// continuously and the kill set is normally empty.
-	killFilter               killFilterCache
-	runcapBind               RuncapBindStore
-	proofOnce                sync.Once
-	popVerifier              *runcap.ProofVerifier
+	killFilter  killFilterCache
+	runcapBind  RuncapBindStore
+	proofOnce   sync.Once
+	popVerifier *runcap.ProofVerifier
+	// proofSpender shares the proof-replay set across replicas (M149 m149.4). Nil ⇒ the
+	// verifier's in-process map, which is correct at one replica and silently permissive
+	// at several.
+	proofSpender             runcap.ProofSpender
 	requireProofOfPossession bool
 	// agentURL resolves an agent's in-cluster address for async delivery. nil ⇒ the cluster-DNS default;
 	// set only by tests, which point it at an httptest server.
@@ -638,6 +642,10 @@ type Options struct {
 	// nil ⇒ POST /api/internal/runcap/bind is not registered, so no exchange is offered that could not
 	// be made single-use. Constructed in cmd/bff/main.go over the state-layer Valkey.
 	RuncapBind RuncapBindStore
+	// ProofSpender shares the proof-replay set across BFF replicas (M149 m149.4). Nil ⇒
+	// the verifier's in-process map, which is correct at one replica and silently
+	// permissive at several.
+	ProofSpender runcap.ProofSpender
 	// SpawnBudgets is the controller-mirrored declared per-team spawn budget (M142.6, m52.C19b).
 	// Optional — nil ⇒ the gate falls back to the clamped relayed budget. Constructed in
 	// cmd/bff/main.go from cpDB; the CONTROLLER writes it, the BFF only reads (ADR 0011 — no new RBAC).
@@ -706,6 +714,7 @@ func NewServer(opts Options) *Server {
 		asyncPublisher:           opts.AsyncPublisher,
 		requireProofOfPossession: opts.RequireProofOfPossession,
 		runcapBind:               opts.RuncapBind,
+		proofSpender:             opts.ProofSpender,
 		spawnBudgets:             opts.SpawnBudgets,
 		killScopes:               opts.KillScopes,
 		ocr:                      opts.OCR,
