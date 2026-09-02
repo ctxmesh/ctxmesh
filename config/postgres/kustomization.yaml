@@ -3,3 +3,4 @@ resources:
 - dsn-secret.yaml
 - deployment.yaml
 - service.yaml
+- networkpolicy.yaml
