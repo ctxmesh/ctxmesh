@@ -164,6 +164,13 @@ preflight:
 gateway:
   replicas: 1
 tokenService:
+  # The token-service is the SOLE holder of the pgvector knowledge + long-term-memory
+  # stores and embeds the QUERY through the gateway. Both WithMemory and WithKnowledge
+  # hang off a single "is the gateway set" condition, so leaving this empty does not
+  # degrade retrieval — it never wires it, and every KB search returns nothing with no
+  # error. Defaults to the in-cluster gateway this chart ships (M148, m148.11).
+  modelGatewayURL: ""
+
   replicas: 1
   image:
     # The token-service (credential plane) image. Empty tag → Chart.appVersion ("latest"),

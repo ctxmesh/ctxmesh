@@ -53,6 +53,24 @@ spec:
             # valid. The Helm chart templates it from mcp.credentialNamespace (no drift).
             - name: MCP_CREDENTIAL_NAMESPACE
               value: ctxmesh
+            # MODEL_GATEWAY_URL — the token-service is the SOLE holder of the pgvector
+            # knowledge + long-term-memory stores, and it embeds the QUERY through the
+            # gateway. cmd/token-service/main.go hangs BOTH WithMemory and WithKnowledge
+            # off a single `gwURL != ""` condition, so with this unset managed-RAG
+            # retrieval is not merely degraded — it is never wired at all, and every KB
+            # search returns an empty result set with no error anywhere.
+            #
+            # M148/m148.11 found this the hard way: ingestion wrote chunks correctly and
+            # search still returned nothing, because the READ half lives here and this
+            # variable had no chart home. It is the same gap as m148.5 (the BFF's own
+            # gateway URL) in the component that actually serves retrieval, which is why
+            # RAG had never worked on a stock install.
+            - name: MODEL_GATEWAY_URL
+              value: http://ctxmesh-gateway.ctxmesh.svc:4000
+            # The cross-encoder rerank stage (ADR 0117) is optional and deployed
+            # separately; empty keeps it off without disabling retrieval.
+            - name: KNOWLEDGE_RERANK_URL
+              value: ""
             # TLS files live on the OPTIONAL token-service-tls mount. Present ⇒ mTLS; absent ⇒
             # plain HTTP (dev). No literal secret material here.
             - name: TOKEN_SERVICE_TLS_CERT_FILE
@@ -72,6 +90,16 @@ spec:
           # bff-adapters Secret, never a literal here. optional:true so the manifest builds
           # before the Secret exists — a real install MUST provision it (audit FUNC-1).
           envFrom:
+            # Chart-owned DSN first (M148/ADR 0130). cmd/token-service/main.go:91
+            # os.Exit(1)s on an empty CONTROLPLANE_DSN exactly as the manager and the
+            # BFF do — it is the FOURTH consumer of that Secret, and the one m148.3
+            # missed. Found by redeploying and watching it CrashLoop, not by reading
+            # the diff: the running pod only survived because a past session had set
+            # the env by hand, which is the same illusion that hid the original bug.
+            - secretRef:
+                name: postgres-dsn
+                optional: true
+            # Operator adapter creds second, so they override the chart default.
             - secretRef:
                 name: bff-adapters
                 optional: true

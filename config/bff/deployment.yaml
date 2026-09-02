@@ -275,10 +275,21 @@ spec:
               # rounded up to the 512Mi power-of-two ceiling. Because the executor no longer
               # buffers a whole document's (or the corpus's) vectors, this ceiling does not have
               # to grow with corpus size — it is bounded by the 25Mi per-document upload cap.
+              #
+              # M148/m148.11 — MEASURED, and the analysis above was optimistic. The parenthetical
+              # below was the tell: the live re-verify had never been done, because the BFF could
+              # not ingest at all (no MODEL_GATEWAY_URL, m148.5) — so the first time this path
+              # ever ran in a cluster, it OOMKilled at 512Mi (exit 137) on THREE ~1.2KiB markdown
+              # documents. Sampled working set during that ingestion: 13Mi idle, 582Mi peak.
+              #
+              # The base estimate was 8x too high (13Mi, not ~100Mi) and the ingestion transient
+              # far larger than modelled, so the two errors cancelled into a number that looked
+              # right and was not. 1Gi is the measured peak plus ~1.75x headroom, and is now a
+              # figure taken from a running process rather than from arithmetic about one.
               # (Live in-cluster re-verify under the shipped limit is BFF-OIDC-auth-gated =
               # user-only; the code-level proof is the m80.2 bounded-buffering heap test +
               # this bounded-peak analysis.)
-              memory: 512Mi
+              memory: 1Gi
           volumeMounts:
             # Operator recipe overlay (S1): a read-only ConfigMap of custom recipes merged over the
             # Go-embedded gallery in GET /api/recipes. Mount the DIRECTORY (no subPath — a subPath copies

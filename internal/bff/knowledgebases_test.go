@@ -502,6 +502,28 @@ func TestIngestKB_HappyPath_CreatesRun(t *testing.T) {
 	assert.Equal(t, key, spec.Documents[0].Key)
 }
 
+// M148/m148.11: an ingest that resolves NO documents is refused rather than accepted.
+//
+// It used to answer 202 with documentCount:0 and the run then SUCCEEDED having done
+// nothing — the console showed an ingested KB and retrieval's later emptiness looked
+// like a model problem rather than a corpus that was never read. Found live: an ingest
+// issued in the same second as the last upload resolved zero documents and reported
+// success. Ingesting nothing is never what the caller meant.
+func TestIngestKB_EmptyCorpus_Refuses(t *testing.T) {
+	kb := mockKnowledgeBase("my-kb", kbNS)
+	kb.Spec.EmbeddingRoute = "embed-v1"
+	s, _ := newIngestEndpointServer(t, kb) // KB exists; NO documents uploaded
+
+	code, body := postIngest(t, s, "my-kb", kbNS)
+	require.Equal(t, http.StatusUnprocessableEntity, code,
+		"an empty corpus must be refused while the caller is watching, not accepted and silently succeeded; body: %s", string(body))
+	assert.Contains(t, string(body), "no documents to ingest")
+
+	// And nothing was queued — a refused ingest must not leave a run behind that
+	// reports success for work that never existed.
+	assert.Empty(t, s.runStore.List(), "a refused ingest must create no run")
+}
+
 func TestIngestKB_UnknownKB_Returns404(t *testing.T) {
 	s, _ := newIngestEndpointServer(t, nil) // no KB
 	code, body := postIngest(t, s, "ghost-kb", kbNS)
