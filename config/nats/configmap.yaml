@@ -1,0 +1,25 @@
+# Minimal NATS server config with JetStream ON (M148/m148.7).
+#
+# JetStream is OFF by default in a stock nats-server, and the platform's async
+# backend (ADR 0121) is a persisted STREAM plus named durable consumers — so
+# without this the publish edge connects successfully and then fails on the first
+# stream operation, which is a worse failure than not connecting at all.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-config
+  namespace: system
+  labels:
+    control-plane: nats
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/managed-by: kustomize
+data:
+  nats.conf: |
+    port: 4222
+    http: 8222
+    jetstream {
+      store_dir: "/data"
+      # Bounded so a runaway producer fills a quota rather than the node's disk.
+      max_memory_store: 256MB
+      max_file_store: 4GB
+    }

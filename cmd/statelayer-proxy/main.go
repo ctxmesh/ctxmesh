@@ -37,6 +37,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	"github.com/ctxmesh/ctxmesh/internal/runtimelimit"
 	"github.com/ctxmesh/ctxmesh/internal/statelayer"
 )
 
@@ -54,6 +55,12 @@ const (
 )
 
 func main() {
+	// Teach the Go runtime about the cgroup it lives in (M148, internal/runtimelimit).
+	// Without GOMEMLIMIT the GC sizes the heap from GOGC alone and grows straight
+	// through the container limit, so the kernel kills the process instead of the
+	// collector working harder. Slower beats dead for a control plane.
+	runtimelimit.Apply()
+
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	log := ctrl.Log.WithName("statelayer-proxy")
 	if err := run(log); err != nil {

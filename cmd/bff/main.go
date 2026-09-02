@@ -76,9 +76,16 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/preflight"
 	"github.com/ctxmesh/ctxmesh/internal/prompt"
 	runstore "github.com/ctxmesh/ctxmesh/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/runtimelimit"
 )
 
 func main() {
+	// Teach the Go runtime about the cgroup it lives in (M148, internal/runtimelimit).
+	// Without GOMEMLIMIT the GC sizes the heap from GOGC alone and grows straight
+	// through the container limit, so the kernel kills the process instead of the
+	// collector working harder. Slower beats dead for a control plane.
+	runtimelimit.Apply()
+
 	var (
 		addr        string
 		staticDir   string

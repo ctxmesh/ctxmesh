@@ -41,6 +41,25 @@ security:
 namespace: ctxmesh
 
 controllerManager:
+  # --- Egress durability knobs (M148, m52 Theme M143-knobs) -------------------
+  # Passed through to each agent's egress sidecar. Both have been READ by the
+  # sidecar since M126 and set by nothing, so the failure they exist for had no
+  # dial. Empty ⇒ the in-code defaults.
+  #
+  # A change here rolls a new agent revision rather than being silently dropped:
+  # the values are folded into egressDigest (M146.7). Sidecar env that does not
+  # move the revision name is discarded by the CreateOrUpdate guard — the M4
+  # landmine — so an operator would edit this and see nothing happen.
+  egress:
+    # Bound on how long the sidecar waits for a tool's RESPONSE HEADERS.
+    # Default 120s. Go duration string, e.g. "90s", "2m".
+    responseHeaderTimeout: ""
+    # Bound on the GAP BETWEEN BYTES once a tool has started streaming. This is
+    # the one that matters: a response-header timeout is DISARMED the moment
+    # headers arrive (learning/architecture.md), so a tool that sends 200 OK and
+    # then goes silent is unbounded without it. Default 300s.
+    streamIdleTimeout: ""
+
   image:
     # The controller-manager image. Override repository+tag for a real registry
     # (air-gapped installs point this at the internal registry, spec §6).
@@ -145,6 +164,13 @@ preflight:
 gateway:
   replicas: 1
 tokenService:
+  # The token-service is the SOLE holder of the pgvector knowledge + long-term-memory
+  # stores and embeds the QUERY through the gateway. Both WithMemory and WithKnowledge
+  # hang off a single "is the gateway set" condition, so leaving this empty does not
+  # degrade retrieval — it never wires it, and every KB search returns nothing with no
+  # error. Defaults to the in-cluster gateway this chart ships (M148, m148.11).
+  modelGatewayURL: ""
+
   replicas: 1
   image:
     # The token-service (credential plane) image. Empty tag → Chart.appVersion ("latest"),
@@ -184,6 +210,33 @@ crds:
 # `enabled: false` and point the controller at an externally-managed data plane.
 devDataPlane:
   enabled: true
+
+# --- Control-plane / run-store PostgreSQL (M148, ADR 0130) -------------------
+# The database the platform cannot start without. ADR 0044 retired ToolRegistry
+# and PromptVersion to Postgres, so the controller-manager and the BFF both exit
+# at startup when CONTROLPLANE_DSN is empty. Before M148 the chart consumed that
+# value from a `bff-adapters` Secret it never created, so a stock install
+# CrashLooped — the gap was even documented in config/manager as audit FUNC-1 and
+# carried as a comment instead of a fix.
+#
+# DEV/TRIAL (default): a single-node pgvector Deployment + PVC is rendered under
+# `devDataPlane.enabled`, with deterministic dev credentials (PRD §23) — the same
+# posture as the bundled Valkey and MinIO.
+#
+# PRODUCTION: set `devDataPlane.enabled=false` and point `externalDsn` at an
+# operator-managed PostgreSQL. `profile: production` REQUIRES externalDsn and
+# fails the render without it, rather than installing something that cannot start.
+#
+# pgvector is REQUIRED, not a nice-to-have: knowledge chunks are searched by
+# vector similarity (ADR 0084). A plain postgres image installs cleanly, passes
+# every probe, and then fails the first knowledge query with `type "vector" does
+# not exist` — a failure that surfaces a long way from its cause.
+postgres:
+  # BYO-external DSN for the control plane AND the run store (they are the same
+  # database; splitting them would let half an install point elsewhere). Empty ⇒
+  # the bundled in-cluster Postgres Service in the install namespace.
+  #   postgres://user:password@host:5432/dbname?sslmode=require
+  externalDsn: ""
 
 # --- In-cluster PERSISTENT state layer (M48, ADR 0047) — OPT-IN --------------
 # For a self-hosted install that wants DURABLE in-cluster memory without running
@@ -285,6 +338,33 @@ ui:
 # `helm install --set bff.providerConnect.enabled=false` renders "false" to
 # disable it — the ADR 0015 hardened-install path.
 bff:
+  # --- Model-service + async wiring (M148, m52 M141-install) -----------------
+  # Before M148 none of these had a chart home, so four features that exist in
+  # the code could not be turned on from the product's only documented install
+  # path. The degradation was honest — KB ingest 501s without a gateway, the
+  # discovery edge 501s without a route, the publish edge is never registered
+  # without a backend — but honest-when-unset is not the same as installable.
+  #
+  # modelGatewayURL defaults to the in-cluster LiteLLM gateway THIS CHART SHIPS,
+  # so KB ingestion and generation work out of the box. Override to point at an
+  # external gateway.
+  modelGatewayURL: ""
+  # The offline OCR + reranker services (M140) are deployed separately; empty
+  # keeps their honest degradation (a scanned PDF stays PartiallyIngested; the
+  # rerank stage is skipped) rather than pretending they exist.
+  ingestOcrURL: ""
+  knowledgeRerankURL: ""
+  # Capability discovery (M141, ADR 0120) embeds through a ModelRoute the
+  # operator names here; empty ⇒ the discovery edge answers 501.
+  discoveryEmbeddingRoute: ""
+  discoveryRerankURL: ""
+  # Async A2A backend (M141, ADR 0121). BYO by design, like Valkey (ADR 0053):
+  # set asyncBackend + natsURL to ride a JetStream the operator runs. Empty ⇒
+  # the publish edge is not registered at all, so ?mode=async fails loudly.
+  asyncBackend: ""
+  natsURL: ""
+  natsCredentialsFile: ""
+
   image:
     # The BFF (console backend) image. Empty tag → Chart.appVersion ("latest"), matching
     # bff:latest in config/default. PRODUCTION: signed image, immutable digest (OPS-4b).

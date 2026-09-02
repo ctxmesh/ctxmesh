@@ -430,6 +430,10 @@ helm-generate: manifests kustomize ## Regenerate the Helm chart templates from c
 crd-version-parity: manifests ## Guard: multi-version CRDs keep matching top-level CEL validations (conversion is None; audit FUNC-8).
 	./hack/check-crd-version-parity.sh config/crd/bases
 
+.PHONY: install-truth
+install-truth: ## Assert the chart provisions what it consumes (M148). Render-only, no cluster.
+	./hack/install-truth.sh
+
 .PHONY: helm-verify
 helm-verify: manifests kustomize ## Prove the Helm chart does not drift from `kustomize build config/default` (no-drift gate).
 	@set -e; \

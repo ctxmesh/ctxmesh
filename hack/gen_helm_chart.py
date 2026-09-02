@@ -59,14 +59,23 @@ PROVIDER_CONNECT_ENV_HELM = (
 # nothing, so the BFF env is byte-identical to kustomize (no-drift); enabled, the BFF
 # gets RUN_STORE_DSN (from the operator Secret) + RUN_WORKER_DISPATCH=true so it
 # dispatches runs to the run-worker (run-worker.yaml) instead of executing in-process.
+# M148 hardening (close gate a, finding A1): RUN_STORE_DSN is NO LONGER an explicit
+# `env` entry here.
+#
+# An explicit container `env` beats EVERY `envFrom` entry regardless of order, so this
+# entry shadowed the chart-owned ctxmesh-postgres-dsn Secret and pointed the BFF at a
+# `run-store` Secret nothing creates — the exact bug M148 exists to fix, restated for a
+# different Secret, on the path `profile=production` makes mandatory. Because it had no
+# `optional: true`, the pod could not even build its container config
+# (CreateContainerConfigError), so there was not even a log line naming the DSN.
+#
+# Now it comes from `envFrom` like CONTROLPLANE_DSN, which is what makes ADR 0130's
+# override order actually apply to it. `bff.runStore.dsnSecretName` remains the seam for
+# an operator who wants a SEPARATE run-store database: setting it adds that Secret to
+# envFrom AFTER the chart's, so later-wins gives them the override.
 RUN_STORE_ENV_INJECT = (
     PROVIDER_CONNECT_ENV_HELM + "\n"
     "{{- if .Values.bff.runStore.enabled }}\n"
-    "        - name: RUN_STORE_DSN\n"
-    "          valueFrom:\n"
-    "            secretKeyRef:\n"
-    "              name: {{ .Values.bff.runStore.dsnSecretName }}\n"
-    "              key: dsn\n"
     "        - name: RUN_WORKER_DISPATCH\n"
     '          value: "true"\n'
     "{{- end }}"
@@ -149,6 +158,58 @@ MCP_CREDENTIAL_NAMESPACE_ENV_HELM = (
 # runs by default (→ cost_rollups → /api/cost + chargeback). Templated from bff.costRollupEnabled;
 # default "1" renders == kustomize (no drift). BFF-only literal (do NOT add to the run-worker — same
 # binary, two rollup writers). The gate is exactly "1" (cmd/bff/main.go), so it stays a quoted string.
+# Model-service + async wiring (M148/m148.5, m52 M141-install). config/bff hardcodes the
+# in-cluster gateway for MODEL_GATEWAY_URL (the chart SHIPS that gateway, so there is no
+# reason for it to be unset) and "" for the rest, which name services the chart does not
+# ship. Templated so an operator can enable RAG depth (M140) and discovery + async (M141)
+# from values.yaml instead of patching a Deployment. Defaults render == kustomize (no drift).
+# The token-service's own gateway URL (M148/m148.11). Same literal, same treatment as the
+# BFF's — but a SEPARATE constant because the two are different Deployments and a single
+# replace would only hit the first. Retrieval is served here, so this one is what makes a
+# KB search return anything at all.
+TOKEN_SVC_GATEWAY_KUSTOMIZE = (
+    "        - name: MODEL_GATEWAY_URL\n"
+    "          value: http://ctxmesh-gateway.ctxmesh.svc:4000"
+)
+TOKEN_SVC_GATEWAY_HELM = (
+    "        - name: MODEL_GATEWAY_URL\n"
+    "          value: {{ .Values.tokenService.modelGatewayURL | "
+    'default (printf "http://ctxmesh-gateway.%s.svc:4000" .Values.namespace) }}'
+)
+
+MODEL_SERVICE_ENV_KUSTOMIZE = (
+    "        - name: MODEL_GATEWAY_URL\n"
+    "          value: http://ctxmesh-gateway.ctxmesh.svc:4000"
+)
+MODEL_SERVICE_ENV_HELM = (
+    "        - name: MODEL_GATEWAY_URL\n"
+    "          value: {{ .Values.bff.modelGatewayURL | "
+    'default (printf "http://ctxmesh-gateway.%s.svc:4000" .Values.namespace) }}'
+)
+
+# The optional model-service / async vars: one values key each, all defaulting to "" so the
+# default render is byte-identical to kustomize. Listed as (env name, values path).
+# Durability knobs (M148/m148.9, m52 Theme M143-knobs). config/manager hardcodes ""
+# for all three so the in-code defaults apply and the render is unchanged; the chart
+# templates them so an operator can actually turn the dials. The two egress timeouts
+# ride through to the sidecar and are folded into egressDigest (M146.7), so a change
+# rolls a new revision instead of being silently dropped.
+DURABILITY_KNOB_ENV = [
+    ("EGRESS_RESPONSE_HEADER_TIMEOUT", "controllerManager.egress.responseHeaderTimeout"),
+    ("EGRESS_STREAM_IDLE_TIMEOUT", "controllerManager.egress.streamIdleTimeout"),
+    ("KNOWLEDGE_SETTLE_WINDOW", "knowledgeSettleWindow"),
+]
+
+OPTIONAL_MODEL_ENV = [
+    ("INGEST_OCR_URL", "bff.ingestOcrURL"),
+    ("KNOWLEDGE_RERANK_URL", "bff.knowledgeRerankURL"),
+    ("DISCOVERY_EMBEDDING_ROUTE", "bff.discoveryEmbeddingRoute"),
+    ("DISCOVERY_RERANK_URL", "bff.discoveryRerankURL"),
+    ("ASYNC_BACKEND", "bff.asyncBackend"),
+    ("NATS_URL", "bff.natsURL"),
+    ("NATS_CREDENTIALS_FILE", "bff.natsCredentialsFile"),
+]
+
 COST_ROLLUP_ENABLED_ENV_KUSTOMIZE = (
     '        - name: COST_ROLLUP_ENABLED\n' '          value: "1"'
 )
@@ -299,7 +360,7 @@ ENABLE_TENANT_LABEL_WEBHOOK_ENV_HELM = (
 # Resources whose `control-plane:` label marks them as the bundled DEV data
 # plane (in-cluster Valkey/MinIO). Production supplies its own — PRD §23 — so
 # these are gated behind .Values.devDataPlane.enabled.
-DEV_DATA_PLANE_LABELS = {"statelayer", "objectstore"}
+DEV_DATA_PLANE_LABELS = {"statelayer", "objectstore", "postgres", "nats"}
 
 # Resources whose `control-plane:` label marks them as the Go BFF (the UI's
 # server-side layer) + its least-privilege SA/RBAC. Gated behind
@@ -386,6 +447,41 @@ def substitute(doc: str) -> str:
         "{{ .Values.statelayer.externalAddr | "
         'default (printf "ctxmesh-statelayer.%s.svc:6379" .Values.namespace) }}',
     )
+    # Control-plane / run-store DSN (M148, ADR 0130). Same treatment as
+    # statelayer.externalAddr above and for the same reason: the kustomize literal
+    # names the bundled in-cluster Postgres at a FIXED namespace, which (a) does not
+    # resolve for a non-default-namespace install and (b) does not EXIST at all in a
+    # production render, where devDataPlane.enabled=false. Templating it lets
+    # `postgres.externalDsn` repoint the control plane at an operator-managed
+    # database while the default renders byte-identical to kustomize (no drift).
+    #
+    # The literal appears twice (CONTROLPLANE_DSN and RUN_STORE_DSN in the same
+    # Secret) and the replace hits both, which is intended — they are the same
+    # database and splitting them would let an install point half of itself
+    # somewhere else.
+    doc = doc.replace(
+        f"postgres://ctxmesh:ctxmesh-dev-secret@ctxmesh-postgres.{NS_KUSTOMIZE}.svc:5432/ctxmesh?sslmode=disable",
+        # Quoting is conditional, and that is deliberate (M148 hardening, finding B5).
+        #
+        # An OPERATOR-supplied DSN must be quoted: a libpq keyword/value string
+        # legitimately contains spaces, so unquoted it is truncated at the first " #"
+        # — YAML takes the rest as a comment and the control plane connects to
+        # something other than what was written, with no error at all. A value
+        # containing ':' or a leading '*' fails the render outright, naming the wrong
+        # line.
+        #
+        # The DEFAULT literal must stay unquoted, because `helm-verify` diffs the
+        # default render against `kustomize build` as TEXT and kustomize strips quotes
+        # on re-emit. An unconditional `| quote` broke no-drift — and the first attempt
+        # at fixing that by quoting the kustomize source instead silently killed the
+        # override entirely, because the generator's exact-string replace no longer
+        # matched what kustomize emitted. The if/else gives both: byte-identical at
+        # default, quoted the moment an operator supplies a value.
+        '{{ if .Values.postgres.externalDsn }}{{ .Values.postgres.externalDsn | quote }}'
+        "{{ else }}"
+        '{{ printf "postgres://ctxmesh:ctxmesh-dev-secret@ctxmesh-postgres.%s.svc:5432/ctxmesh?sslmode=disable" .Values.namespace }}'
+        "{{ end }}",
+    )
     # BFF connect-a-provider kill-switch -> Helm value (ADR 0015). Only the BFF
     # deployment carries this exact env block; the default keeps the render at
     # "true" == kustomize (no drift), while `--set …=false` disables it.
@@ -393,6 +489,28 @@ def substitute(doc: str) -> str:
         PROVIDER_CONNECT_ENV_KUSTOMIZE,
         PROVIDER_CONNECT_ENV_HELM,
     )
+    # M148/m148.5 — the model-service + async block.
+    # The BFF and the token-service carry the SAME MODEL_GATEWAY_URL literal in two
+    # different Deployments, and they need two different values keys. Route by the
+    # component label FIRST — a single unconditional replace would silently give the
+    # token-service the BFF's key, and the render would still look right.
+    if "control-plane: token-service" in doc:
+        doc = doc.replace(TOKEN_SVC_GATEWAY_KUSTOMIZE, TOKEN_SVC_GATEWAY_HELM)
+    else:
+        doc = doc.replace(MODEL_SERVICE_ENV_KUSTOMIZE, MODEL_SERVICE_ENV_HELM)
+    # M148/m148.9 — the durability knobs (manager env; same empty-default shape).
+    for env_name, val_path in DURABILITY_KNOB_ENV:
+        doc = doc.replace(
+            f'        - name: {env_name}\n          value: ""',
+            "        - name: %s\n          value: {{ .Values.%s | default \"\" | quote }}"
+            % (env_name, val_path),
+        )
+    for env_name, val_path in OPTIONAL_MODEL_ENV:
+        doc = doc.replace(
+            f'        - name: {env_name}\n          value: ""',
+            "        - name: %s\n          value: {{ .Values.%s | default \"\" | quote }}"
+            % (env_name, val_path),
+        )
     # BFF durable-run-store dispatch (ADR 0051): inject the run-store env AFTER the
     # provider-connect env (now in its Helm form) — a BFF-only anchor. Default OFF ⇒
     # renders nothing ⇒ no-drift; enabled ⇒ RUN_STORE_DSN + RUN_WORKER_DISPATCH.

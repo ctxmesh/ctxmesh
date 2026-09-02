@@ -77,6 +77,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/prompt"
 	"github.com/ctxmesh/ctxmesh/internal/promql"
 	"github.com/ctxmesh/ctxmesh/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/runtimelimit"
 	enginewebhook "github.com/ctxmesh/ctxmesh/internal/webhook"
 	// +kubebuilder:scaffold:imports
 )
@@ -281,6 +282,12 @@ func splitCommaList(raw string) []string {
 
 // nolint:gocyclo
 func main() {
+	// Teach the Go runtime about the cgroup it lives in (M148, internal/runtimelimit).
+	// Without GOMEMLIMIT the GC sizes the heap from GOGC alone and grows straight
+	// through the container limit, so the kernel kills the process instead of the
+	// collector working harder. Slower beats dead for a control plane.
+	runtimelimit.Apply()
+
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
