@@ -235,6 +235,14 @@ jobs:
       # other, in milliseconds.
       - name: Provider parity gate (the console offers exactly what the API supports)
         run: ./hack/provider-parity.sh
+      # M154 m154.2 — a release must publish everything an install needs, at a version.
+      #
+      # Every other test installs from the working tree, so none of them could see that
+      # the chart's first-party images were bare names (docker.io/library/controller),
+      # that appVersion was "latest", or that release.yml pushed one of five images and
+      # no chart. This reads the release artifacts themselves.
+      - name: Release-truth gate (the release publishes what an install needs)
+        run: ./hack/release-truth.sh
 
   envtest:
     name: envtest
@@ -362,4 +370,39 @@ jobs:
               bad=1
             fi
           done < <(git log --format=%s "origin/${BASE_REF}..HEAD")
+          exit "$bad"
+
+  dco:
+    name: dco
+    # Contributions are certified by DCO, not a CLA (ADR 0134). There is nothing to
+    # sign: `git commit -s` appends the Signed-off-by trailer, and this job checks that
+    # every commit on the PR carries one. Enforced in CI rather than trusted, for the
+    # same reason the conventional-commits job exists — a convention nobody checks is a
+    # convention that decays, and provenance is the one that is expensive to unwind.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Every commit is signed off
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          bad=0
+          while IFS= read -r sha; do
+            subj="$(git log -1 --format=%s "$sha")"
+            case "$subj" in
+              Merge*) continue ;;
+            esac
+            if ! git log -1 --format=%B "$sha" | grep -qE '^Signed-off-by: .+ <.+@.+>'; then
+              echo "missing Signed-off-by: $sha $subj"
+              echo "  fix with: git rebase --signoff origin/${BASE_REF}"
+              bad=1
+            fi
+          done < <(git log --format=%H "origin/${BASE_REF}..HEAD")
           exit "$bad"

@@ -100,7 +100,7 @@ def main() -> None:
 
     print(
         f"NO-DRIFT OK: {len(kustomize)} resources match between "
-        "`kustomize build config/default` and `helm template` (default values)."
+        "`kustomize build config/default` and `helm template` with the dev image overrides."
     )
 
 
