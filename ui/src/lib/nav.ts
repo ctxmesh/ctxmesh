@@ -71,6 +71,9 @@ export type Milestone =
 export const RES_AGENTS = "agentdeployments";
 export const RES_ROUTES = "modelroutes";
 export const RES_SECRETS = "secretbindings";
+// The CORE-group Secret, reported by the BFF as its own synthetic capability.
+// Distinct from RES_SECRETS above, which is the SecretBinding CRD.
+export const RES_CORE_SECRETS = "secrets";
 export const RES_REGISTRIES = "agentregistries";
 export const RES_MEMORY = "memorybindings";
 export const RES_SCALING = "agentscalingpolicies";
@@ -605,4 +608,24 @@ export function buildCrumbs(pathname: string): ShellCrumb[] {
     crumbs.push({ label: tail.map(decodeURIComponent).join("/") });
   }
   return crumbs;
+}
+
+/**
+ * May this caller connect a provider?
+ *
+ * Connecting writes TWO objects: the core Secret holding the key, and the
+ * SecretBinding that points at it. The console used to ask only about the
+ * binding, so a caller with binding-create and no Secret-create was shown the
+ * full wizard, typed their API key, and got `forbidden: not allowed to create
+ * Secret` — the refusal arriving only once the credential was already in flight.
+ *
+ * A permission check that asks about less than the operation needs is worse than
+ * none: it converts an honest up-front "you can't do this" into a late failure
+ * with the user's secret in the request body. The rule lives here so the two
+ * pages that gate on it (Providers, Connect a provider) cannot drift apart.
+ */
+export function canConnectProvider(
+  can: (resource: string, verb: string) => boolean,
+): boolean {
+  return can(RES_SECRETS, "create") && can(RES_CORE_SECRETS, "create");
 }

@@ -28,7 +28,7 @@ import {
 } from "@/components/kit";
 import { api, ApiError, type ProviderSummary } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
-import { RES_SECRETS } from "@/lib/nav";
+import { canConnectProvider, RES_SECRETS } from "@/lib/nav";
 
 // ProvidersPage — the connected-providers admin surface (m18.5, ADR 0018;
 // re-housed on the editorial system in M151, spec §6.2: "Rotate/Disconnect as
@@ -244,7 +244,7 @@ function RowActions({
 export function ProvidersPage() {
   const navigate = useNavigate();
   const { can, reprobe } = useCapabilities();
-  const canConnect = can(RES_SECRETS, "create");
+  const canConnect = canConnectProvider(can);
   const canRotate = can(RES_SECRETS, "update");
   const canDisconnect = can(RES_SECRETS, "delete");
 

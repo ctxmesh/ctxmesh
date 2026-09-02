@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  canConnectProvider,
   NAV_SECTIONS,
   NAV_ITEMS,
   navRoute,
@@ -239,5 +240,27 @@ describe("first-run checklist derives from nav (m54.4)", () => {
     expect(byKey.run.to).toBe(navRoute("playground"));
     // Three steps, each mapped to a distinct live signal.
     expect(FIRST_RUN_CHECKLIST.map((s) => s.doneKey)).toEqual(["provider", "agent", "run"]);
+  });
+});
+
+describe("canConnectProvider", () => {
+  // Connecting a provider writes TWO objects: the core Secret holding the key, and
+  // the SecretBinding pointing at it. The console used to ask only about the binding,
+  // so a caller with binding-create and no Secret-create was shown the whole wizard,
+  // typed their API key, and got `forbidden: not allowed to create Secret` — the
+  // refusal arriving with the credential already in the request body (M153).
+  const can = (allowed: Record<string, boolean>) => (resource: string, _verb: string) =>
+    allowed[resource] ?? false;
+
+  it("needs BOTH the SecretBinding and the core Secret", () => {
+    expect(canConnectProvider(can({ secretbindings: true, secrets: true }))).toBe(true);
+  });
+
+  it("refuses when only the SecretBinding is allowed — the case that leaked a key into a doomed request", () => {
+    expect(canConnectProvider(can({ secretbindings: true, secrets: false }))).toBe(false);
+  });
+
+  it("refuses when only the core Secret is allowed", () => {
+    expect(canConnectProvider(can({ secretbindings: false, secrets: true }))).toBe(false);
   });
 });

@@ -434,6 +434,10 @@ crd-version-parity: manifests ## Guard: multi-version CRDs keep matching top-lev
 rbac-least-privilege: manifests ## Assert the SHIPPED roles grant no verb wildcards and no cluster-scoped Secret writes (M149).
 	./hack/rbac-least-privilege.sh config/rbac
 
+.PHONY: provider-parity
+provider-parity: ## Assert the console offers exactly the providers the BFF supports (M153). Static, no cluster.
+	./hack/provider-parity.sh
+
 .PHONY: install-truth
 install-truth: ## Assert the chart provisions what it consumes (M148). Render-only, no cluster.
 	./hack/install-truth.sh
