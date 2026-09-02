@@ -76,6 +76,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/preflight"
 	"github.com/ctxmesh/ctxmesh/internal/prompt"
 	runstore "github.com/ctxmesh/ctxmesh/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 	"github.com/ctxmesh/ctxmesh/internal/runtimelimit"
 )
 
@@ -156,7 +157,53 @@ func runPreflight(ctx context.Context) int {
 		}
 		return db.Close()
 	}
-	errs := preflight.Check(ctx, cfg, ping)
+	// Can this database actually run the pgvector migration? (M149 m149.7)
+	//
+	// Connect() is open+ping only — Migrate() is separate — so a reachable database passes
+	// the check above and then fails at 0003_agent_memories.sql. `vector` is NOT a trusted
+	// extension, so CREATE EXTENSION needs superuser (or rds_superuser, or a pre-created
+	// extension) on RDS, Cloud SQL and Azure, and M148 made pgvector a hard production
+	// requirement without saying who provisions it.
+	//
+	// The check performs the REAL operation inside a transaction and rolls it back, rather
+	// than inferring from pg_roles — managed providers grant this through role membership
+	// (rds_superuser) rather than rolsuper, so an inference would be wrong on exactly the
+	// platforms this is for.
+	checkVector := func(ctx context.Context, dsn string) error {
+		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		db, err := controlplane.Connect(cctx, dsn)
+		if err != nil {
+			return nil // unreachable is already reported by the ping check; do not double-report
+		}
+		defer func() { _ = db.Close() }()
+
+		var installed bool
+		if err := db.QueryRowContext(cctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')`).Scan(&installed); err == nil && installed {
+			return nil
+		}
+
+		tx, err := db.BeginTx(cctx, nil)
+		if err != nil {
+			return nil // cannot tell; the ping already covers connectivity
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(cctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
+			return fmt.Errorf(
+				"the control-plane database cannot enable the `vector` extension, which the schema "+
+					"migration REQUIRES (knowledge chunks and long-term memory are searched by vector "+
+					"similarity, ADR 0084): %w\n"+
+					"    `vector` is not a trusted extension, so CREATE EXTENSION needs elevated rights. "+
+					"On a managed Postgres, either grant the install role rds_superuser (RDS) / "+
+					"cloudsqlsuperuser (Cloud SQL) / azure_pg_admin (Azure), or have a DBA run "+
+					"`CREATE EXTENSION vector;` in this database once — after which this check passes "+
+					"and no elevated rights are needed at runtime", err)
+		}
+		return nil
+	}
+
+	errs := preflight.Check(ctx, cfg, ping, checkVector)
 	if len(errs) == 0 {
 		log.Info("preflight OK — install configuration is coherent")
 		return 0
@@ -508,6 +555,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		// state-layer Valkey so "already bound" is the same answer on every replica; without an addr
 		// there is no exchange edge, and capabilities stay bearer.
 		RuncapBind:   runcapBindStore(log),
+		ProofSpender: proofSpender(log),
 		SpawnBudgets: spawnbudget.NewPostgresStore(cpDB),
 		// The scoped kill switch (M146, ADR 0126). This is the FAIL-CLOSED half: the worker reads it
 		// before claiming and the run-create edge reads it before accepting, and neither consults the
@@ -815,6 +863,26 @@ func runcapBindStore(log logr.Logger) bff.RuncapBindStore {
 	}
 	log.Info("run-capability binding enabled (ADR 0124): single-use exchange over the state layer")
 	return bff.NewRedisRuncapBindStore(addr,
+		strings.TrimSpace(os.Getenv("STATELAYER_USERNAME")), os.Getenv("STATELAYER_PASSWORD"))
+}
+
+// proofSpender builds the CROSS-REPLICA proof-replay set over the same state-layer Valkey
+// (M149 m149.4). It must be shared for the same reason the bind store must: the verifier's
+// default seen-set is per-process, so a proof spent on one replica stays unseen by the
+// others for its whole freshness window and replays cleanly against whichever replica the
+// load balancer picks. ADR 0124 accepted that at replicas=1; M148 made multi-replica the
+// production posture, which is what turns the residual into a real one.
+//
+// No STATELAYER_ADDR ⇒ nil ⇒ the in-process map, which is correct for the single-pod dev
+// install that has no state layer to share through.
+func proofSpender(log logr.Logger) runcap.ProofSpender {
+	addr := strings.TrimSpace(os.Getenv("STATELAYER_ADDR"))
+	if addr == "" {
+		log.Info("proof-replay set is PER-PROCESS: STATELAYER_ADDR unset — correct at one replica, permissive at several")
+		return nil
+	}
+	log.Info("proof-replay set shared across replicas (M149): single-use proofs over the state layer")
+	return bff.NewRedisProofSpender(addr,
 		strings.TrimSpace(os.Getenv("STATELAYER_USERNAME")), os.Getenv("STATELAYER_PASSWORD"))
 }
 

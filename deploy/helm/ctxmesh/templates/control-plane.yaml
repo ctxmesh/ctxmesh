@@ -10,6 +10,10 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: ctxmesh
     control-plane: controller-manager
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
   name: {{ .Values.namespace }}
 ---
 apiVersion: v1
@@ -133,7 +137,14 @@ rules:
   resources:
   - agentdeployments
   verbs:
-  - '*'
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+  - deletecollection
 - apiGroups:
   - agents.ctxmesh.ai
   resources:
@@ -204,7 +215,14 @@ rules:
   resources:
   - agentversions
   verbs:
-  - '*'
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+  - deletecollection
 - apiGroups:
   - agents.ctxmesh.ai
   resources:
@@ -384,19 +402,10 @@ rules:
   - ""
   resources:
   - pods
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
   - secrets
   verbs:
-  - create
   - get
   - list
-  - update
   - watch
 - apiGroups:
   - admissionregistration.k8s.io
@@ -623,7 +632,14 @@ rules:
   - auditlogs
   - costrollups
   verbs:
-  - '*'
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+  - deletecollection
 - apiGroups:
   - agents.ctxmesh.ai
   resources:

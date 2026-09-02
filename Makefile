@@ -430,6 +430,10 @@ helm-generate: manifests kustomize ## Regenerate the Helm chart templates from c
 crd-version-parity: manifests ## Guard: multi-version CRDs keep matching top-level CEL validations (conversion is None; audit FUNC-8).
 	./hack/check-crd-version-parity.sh config/crd/bases
 
+.PHONY: rbac-least-privilege
+rbac-least-privilege: manifests ## Assert the SHIPPED roles grant no verb wildcards and no cluster-scoped Secret writes (M149).
+	./hack/rbac-least-privilege.sh config/rbac
+
 .PHONY: install-truth
 install-truth: ## Assert the chart provisions what it consumes (M148). Render-only, no cluster.
 	./hack/install-truth.sh

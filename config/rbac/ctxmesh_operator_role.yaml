@@ -62,8 +62,28 @@ rules:
   # older Langfuse-backed /api/cost + /api/cost/breakdown are now ALSO gated on this same resource
   # (handleCost/handleCostBreakdown), so the whole cost-view family shares one costrollups posture.
   - costrollups
+  # Enumerated rather than '*' (M149 m149.3, closing m52 M146-operator-wildcard).
+  #
+  # This is BEHAVIOUR-PRESERVING: these are every standard Kubernetes verb, so an
+  # operator can do exactly what they could before. What it removes is the implication
+  # of FUTURE verbs. M146 hit that directly — it needed a `kill` permission that
+  # `verbs: ["*"]` would have silently granted to every operator, and had to route the
+  # control through the `agentdeployments/kill` SUBRESOURCE to escape it (a resource-name
+  # grant does not cover subresources). That was the right call then and it left the
+  # hazard in place: the next custom verb ON THE RESOURCE would have been implied too,
+  # and the acceptance bar only caught the first one because someone thought to look.
+  #
+  # A new verb now has to be granted deliberately, which is the property that makes the
+  # subresource trick unnecessary next time.
   verbs:
-  - '*'
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+  - deletecollection
 - apiGroups:
   - agents.ctxmesh.ai
   resources:

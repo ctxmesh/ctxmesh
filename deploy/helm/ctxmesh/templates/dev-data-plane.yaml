@@ -511,6 +511,85 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: ctxmesh
+    control-plane: nats
+  name: ctxmesh-nats-ingress
+  namespace: {{ .Values.namespace }}
+spec:
+  ingress:
+  - from:
+    - podSelector:
+        matchExpressions:
+        - key: control-plane
+          operator: Exists
+    ports:
+    - port: 4222
+      protocol: TCP
+    - port: 8222
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      control-plane: nats
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: objectstore
+  name: ctxmesh-objectstore-ingress
+  namespace: {{ .Values.namespace }}
+spec:
+  ingress:
+  - from:
+    - podSelector:
+        matchExpressions:
+        - key: control-plane
+          operator: Exists
+    ports:
+    - port: 9000
+      protocol: TCP
+    - port: 9001
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      control-plane: objectstore
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: postgres
+  name: ctxmesh-postgres-ingress
+  namespace: {{ .Values.namespace }}
+spec:
+  ingress:
+  - from:
+    - podSelector:
+        matchExpressions:
+        - key: control-plane
+          operator: Exists
+    ports:
+    - port: 5432
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      control-plane: postgres
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
     control-plane: statelayer
   name: ctxmesh-statelayer-ingress
   namespace: {{ .Values.namespace }}

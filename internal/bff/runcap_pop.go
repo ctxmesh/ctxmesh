@@ -99,6 +99,18 @@ func requestURL(r *http.Request) string {
 // Server rather than one per request: a fresh verifier would remember nothing and every proof would be
 // replayable, which is the kind of mistake that looks like working code.
 func (s *Server) proofVerifier() *runcap.ProofVerifier {
-	s.proofOnce.Do(func() { s.popVerifier = runcap.NewProofVerifier(nil) })
+	s.proofOnce.Do(func() {
+		v := runcap.NewProofVerifier(nil)
+		// Share the replay set across replicas when a state layer exists (M149 m149.4).
+		// One-per-Server is not enough once there is more than one Server: a proof spent
+		// on replica A stays unseen by replica B for the whole freshness window, so the
+		// same captured proof replays cleanly against whichever replica the load balancer
+		// happens to pick. ADR 0124 accepted that at replicas=1; M148 made multi-replica
+		// the production posture.
+		if s.proofSpender != nil {
+			v = v.WithSharedSpender(s.proofSpender)
+		}
+		s.popVerifier = v
+	})
 	return s.popVerifier
 }
