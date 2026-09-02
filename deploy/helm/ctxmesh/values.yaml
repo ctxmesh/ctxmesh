@@ -41,6 +41,25 @@ security:
 namespace: ctxmesh
 
 controllerManager:
+  # --- Egress durability knobs (M148, m52 Theme M143-knobs) -------------------
+  # Passed through to each agent's egress sidecar. Both have been READ by the
+  # sidecar since M126 and set by nothing, so the failure they exist for had no
+  # dial. Empty ⇒ the in-code defaults.
+  #
+  # A change here rolls a new agent revision rather than being silently dropped:
+  # the values are folded into egressDigest (M146.7). Sidecar env that does not
+  # move the revision name is discarded by the CreateOrUpdate guard — the M4
+  # landmine — so an operator would edit this and see nothing happen.
+  egress:
+    # Bound on how long the sidecar waits for a tool's RESPONSE HEADERS.
+    # Default 120s. Go duration string, e.g. "90s", "2m".
+    responseHeaderTimeout: ""
+    # Bound on the GAP BETWEEN BYTES once a tool has started streaming. This is
+    # the one that matters: a response-header timeout is DISARMED the moment
+    # headers arrive (learning/architecture.md), so a tool that sends 200 OK and
+    # then goes silent is unbounded without it. Default 300s.
+    streamIdleTimeout: ""
+
   image:
     # The controller-manager image. Override repository+tag for a real registry
     # (air-gapped installs point this at the internal registry, spec §6).

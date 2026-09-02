@@ -1078,6 +1078,12 @@ spec:
           value: {{ .Values.devDataPlane.enabled | quote }}
         - name: ENABLE_TENANT_LABEL_WEBHOOK
           value: {{ ternary "true" "false" .Values.security.tenantLabelWebhook.enabled | quote }}
+        - name: EGRESS_RESPONSE_HEADER_TIMEOUT
+          value: {{ .Values.controllerManager.egress.responseHeaderTimeout | default "" | quote }}
+        - name: EGRESS_STREAM_IDLE_TIMEOUT
+          value: {{ .Values.controllerManager.egress.streamIdleTimeout | default "" | quote }}
+        - name: KNOWLEDGE_SETTLE_WINDOW
+          value: {{ .Values.knowledgeSettleWindow | default "" | quote }}
         envFrom:
         - secretRef:
             name: ctxmesh-postgres-dsn
