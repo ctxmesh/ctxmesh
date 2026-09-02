@@ -124,6 +124,22 @@ spec:
           value: {{ .Values.bff.mcp.credentialNamespace | default .Values.namespace }}
         - name: TOKEN_SERVICE_URL
           value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default (printf "%s://ctxmesh-token-service.%s.svc:8443" (ternary "https" "http" .Values.tokenService.tls.required) .Values.namespace) }}
+        - name: MODEL_GATEWAY_URL
+          value: {{ .Values.bff.modelGatewayURL | default (printf "http://ctxmesh-gateway.%s.svc:4000" .Values.namespace) }}
+        - name: INGEST_OCR_URL
+          value: {{ .Values.bff.ingestOcrURL | default "" | quote }}
+        - name: KNOWLEDGE_RERANK_URL
+          value: {{ .Values.bff.knowledgeRerankURL | default "" | quote }}
+        - name: DISCOVERY_EMBEDDING_ROUTE
+          value: {{ .Values.bff.discoveryEmbeddingRoute | default "" | quote }}
+        - name: DISCOVERY_RERANK_URL
+          value: {{ .Values.bff.discoveryRerankURL | default "" | quote }}
+        - name: ASYNC_BACKEND
+          value: {{ .Values.bff.asyncBackend | default "" | quote }}
+        - name: NATS_URL
+          value: {{ .Values.bff.natsURL | default "" | quote }}
+        - name: NATS_CREDENTIALS_FILE
+          value: {{ .Values.bff.natsCredentialsFile | default "" | quote }}
         - name: MCP_OBO_REQUIRED
           value: {{ .Values.controllerManager.oboEgress.enabled | quote }}
         - name: OIDC_ENABLED

@@ -149,6 +149,33 @@ MCP_CREDENTIAL_NAMESPACE_ENV_HELM = (
 # runs by default (→ cost_rollups → /api/cost + chargeback). Templated from bff.costRollupEnabled;
 # default "1" renders == kustomize (no drift). BFF-only literal (do NOT add to the run-worker — same
 # binary, two rollup writers). The gate is exactly "1" (cmd/bff/main.go), so it stays a quoted string.
+# Model-service + async wiring (M148/m148.5, m52 M141-install). config/bff hardcodes the
+# in-cluster gateway for MODEL_GATEWAY_URL (the chart SHIPS that gateway, so there is no
+# reason for it to be unset) and "" for the rest, which name services the chart does not
+# ship. Templated so an operator can enable RAG depth (M140) and discovery + async (M141)
+# from values.yaml instead of patching a Deployment. Defaults render == kustomize (no drift).
+MODEL_SERVICE_ENV_KUSTOMIZE = (
+    "        - name: MODEL_GATEWAY_URL\n"
+    "          value: http://ctxmesh-gateway.ctxmesh.svc:4000"
+)
+MODEL_SERVICE_ENV_HELM = (
+    "        - name: MODEL_GATEWAY_URL\n"
+    "          value: {{ .Values.bff.modelGatewayURL | "
+    'default (printf "http://ctxmesh-gateway.%s.svc:4000" .Values.namespace) }}'
+)
+
+# The optional model-service / async vars: one values key each, all defaulting to "" so the
+# default render is byte-identical to kustomize. Listed as (env name, values path).
+OPTIONAL_MODEL_ENV = [
+    ("INGEST_OCR_URL", "bff.ingestOcrURL"),
+    ("KNOWLEDGE_RERANK_URL", "bff.knowledgeRerankURL"),
+    ("DISCOVERY_EMBEDDING_ROUTE", "bff.discoveryEmbeddingRoute"),
+    ("DISCOVERY_RERANK_URL", "bff.discoveryRerankURL"),
+    ("ASYNC_BACKEND", "bff.asyncBackend"),
+    ("NATS_URL", "bff.natsURL"),
+    ("NATS_CREDENTIALS_FILE", "bff.natsCredentialsFile"),
+]
+
 COST_ROLLUP_ENABLED_ENV_KUSTOMIZE = (
     '        - name: COST_ROLLUP_ENABLED\n' '          value: "1"'
 )
@@ -410,6 +437,14 @@ def substitute(doc: str) -> str:
         PROVIDER_CONNECT_ENV_KUSTOMIZE,
         PROVIDER_CONNECT_ENV_HELM,
     )
+    # M148/m148.5 — the model-service + async block.
+    doc = doc.replace(MODEL_SERVICE_ENV_KUSTOMIZE, MODEL_SERVICE_ENV_HELM)
+    for env_name, val_path in OPTIONAL_MODEL_ENV:
+        doc = doc.replace(
+            f'        - name: {env_name}\n          value: ""',
+            "        - name: %s\n          value: {{ .Values.%s | default \"\" | quote }}"
+            % (env_name, val_path),
+        )
     # BFF durable-run-store dispatch (ADR 0051): inject the run-store env AFTER the
     # provider-connect env (now in its Helm form) — a BFF-only anchor. Default OFF ⇒
     # renders nothing ⇒ no-drift; enabled ⇒ RUN_STORE_DSN + RUN_WORKER_DISPATCH.
