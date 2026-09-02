@@ -1,0 +1,60 @@
+# Object-store (MinIO) ingress restriction — M149 re-audit finding A2.
+#
+# WHY THIS WAS MISSED, AND WHY IT MATTERS MORE THAN IT LOOKS. m149.2 gave the bundled
+# Postgres and NATS a "retained second layer" and stated the threat as *"a pod running
+# prompt-injectable tool calls could read every tenant's memories and knowledge chunks"*.
+# That threat was closed for the CHUNKS — which live in Postgres — and left wide open for
+# the SOURCE DOCUMENTS, which live here. The re-audit listed every tenant's knowledge
+# documents from a foreign namespace using `ctxmesh-dev` / `ctxmesh-dev-secret` exactly as
+# committed to git, and `mc admin info` succeeded: that is MinIO ROOT.
+#
+# The blast radius is larger than a per-tenant store would be. `knowledgeBaseBucket` is a
+# SINGLE bucket ("ctxmesh-knowledge") partitioned by key prefix only, and the controller
+# injects the same root credential as static env into every registry member — so one
+# credential reads every tenant's corpus.
+#
+# The lesson for the next store: "we secured the datastores" meant the two that were named
+# in the finding. A third existed, held the same class of data, and was not enumerated.
+#
+# Same shape as config/postgres/networkpolicy.yaml: only pods carrying a `control-plane`
+# label — which every platform component has and no agent pod does. NOT `podSelector: {}`,
+# which admits any pod in this namespace including an agent a shipped persona can schedule
+# here (the bypass that finding B3 found in the first version of those policies).
+#
+# WHAT THIS DOES NOT COVER — say it here rather than let a reader infer more (M149 re-audit,
+# finding A1). NetworkPolicy `from` selectors match PODS. A pod with `hostNetwork: true`
+# has no pod identity on the wire, so Calico does not apply pod policy to it and this rule
+# does not see it. Proven: a hostNetwork probe in a namespace with no AgentRegistry and no
+# Tenant read the table straight through these policies.
+#
+# The control that stops that is Pod Security admission — `baseline` forbids hostNetwork —
+# which is a NAMESPACE-level guarantee, not a network one. Until every namespace the
+# platform manages carries it, this policy is a second layer against ordinary pods and NOT
+# a boundary against a tenant who can set a pod spec. An overclaimed control is worse than
+# an absent one, because it stops people looking.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: objectstore-ingress
+  namespace: system
+  labels:
+    control-plane: objectstore
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: objectstore
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: control-plane
+                operator: Exists
+      ports:
+        - protocol: TCP
+          port: 9000
+        - protocol: TCP
+          port: 9001

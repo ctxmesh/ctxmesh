@@ -10,6 +10,10 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: ctxmesh
     control-plane: controller-manager
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
   name: {{ .Values.namespace }}
 ---
 apiVersion: v1

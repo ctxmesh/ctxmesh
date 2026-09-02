@@ -16,6 +16,18 @@
 # The kubelet's httpGet probe against :8222 comes from the NODE, not from a pod, and
 # Kubernetes does not apply NetworkPolicy to kubelet health probes — verified live after
 # applying this policy: the pod stays Ready.
+#
+# WHAT THIS DOES NOT COVER — say it here rather than let a reader infer more (M149 re-audit,
+# finding A1). NetworkPolicy `from` selectors match PODS. A pod with `hostNetwork: true`
+# has no pod identity on the wire, so Calico does not apply pod policy to it and this rule
+# does not see it. Proven: a hostNetwork probe in a namespace with no AgentRegistry and no
+# Tenant read the table straight through these policies.
+#
+# The control that stops that is Pod Security admission — `baseline` forbids hostNetwork —
+# which is a NAMESPACE-level guarantee, not a network one. Until every namespace the
+# platform manages carries it, this policy is a second layer against ordinary pods and NOT
+# a boundary against a tenant who can set a pod spec. An overclaimed control is worse than
+# an absent one, because it stops people looking.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
