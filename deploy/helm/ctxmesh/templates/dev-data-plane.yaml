@@ -8,6 +8,26 @@
 # Production sets devDataPlane.enabled=false and brings its own data plane.
 {{- if .Values.devDataPlane.enabled }}
 apiVersion: v1
+data:
+  nats.conf: |
+    port: 4222
+    http: 8222
+    jetstream {
+      store_dir: "/data"
+      # Bounded so a runaway producer fills a quota rather than the node's disk.
+      max_memory_store: 256MB
+      max_file_store: 4GB
+    }
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: nats
+  name: ctxmesh-nats-config
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: v1
 kind: Secret
 metadata:
   labels:
@@ -35,6 +55,30 @@ stringData:
   password: ctxmesh-dev-secret
   username: ctxmesh
 type: Opaque
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: nats
+  name: ctxmesh-nats
+  namespace: {{ .Values.namespace }}
+spec:
+  ports:
+  - name: client
+    port: 4222
+    protocol: TCP
+    targetPort: 4222
+  - name: monitor
+    port: 8222
+    protocol: TCP
+    targetPort: 8222
+  selector:
+    app.kubernetes.io/name: ctxmesh
+    control-plane: nats
+  type: ClusterIP
 ---
 apiVersion: v1
 kind: Service
@@ -106,6 +150,22 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: ctxmesh
+    control-plane: nats
+  name: ctxmesh-nats-data
+  namespace: {{ .Values.namespace }}
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 4Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
     control-plane: postgres
   name: ctxmesh-postgres-data
   namespace: {{ .Values.namespace }}
@@ -115,6 +175,84 @@ spec:
   resources:
     requests:
       storage: 8Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: nats
+  name: ctxmesh-nats
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ctxmesh
+      control-plane: nats
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ctxmesh
+        control-plane: nats
+    spec:
+      containers:
+      - args:
+        - --config
+        - /etc/nats/nats.conf
+        image: nats:2.11-alpine@sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8222
+          initialDelaySeconds: 15
+          periodSeconds: 15
+        name: nats
+        ports:
+        - containerPort: 4222
+          name: client
+          protocol: TCP
+        - containerPort: 8222
+          name: monitor
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8222
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - mountPath: /etc/nats
+          name: config
+        - mountPath: /data
+          name: data
+      securityContext:
+        fsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - configMap:
+          name: ctxmesh-nats-config
+        name: config
+      - name: data
+        persistentVolumeClaim:
+          claimName: ctxmesh-nats-data
 ---
 apiVersion: apps/v1
 kind: Deployment
