@@ -185,6 +185,21 @@ spec:
             # the chart default (no drift).
             - name: MCP_OBO_REQUIRED
               value: "false"
+            # MCP_GRANT_HMAC_KEY — the per-cluster salt for user-identity hashes on MCP
+            # grants (ADR 0029 §7). Unset ⇒ legacy UNSALTED SHA-256, which is enumerable:
+            # a known username hashes to a known value, so a reader of the grant Secrets
+            # can identify users without reading any token.
+            #
+            # M150 m150.2: the drivers were hand-setting this because the install had no way
+            # to. That is the shape the driver-drift gate exists to catch — a script
+            # patching around a gap that everyone who is not us simply lives with. The
+            # Fable re-audit reached the same finding independently (M149 B9).
+            #
+            # Empty here so the render is unchanged and today's honest start-up warning
+            # still fires; `profile=production` REQUIRES it (ha-profile-guards), because
+            # shipping enumerable identity hashes is not a posture anyone chose.
+            - name: MCP_GRANT_HMAC_KEY
+              value: ""
             # OIDC_ENABLED / OIDC_ISSUER / OIDC_CLIENT_ID are the ADR 0020 console
             # SSO seam (m19.6). OFF by default ("false" + empty) → the BFF advertises
             # NO OIDC at GET /api/authconfig and the SPA uses token login (ADR 0012).

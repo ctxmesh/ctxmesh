@@ -200,6 +200,11 @@ DURABILITY_KNOB_ENV = [
     ("KNOWLEDGE_SETTLE_WINDOW", "knowledgeSettleWindow"),
 ]
 
+# MCP_GRANT_HMAC_KEY (M150 m150.2): the per-cluster salt for MCP grant identity hashes.
+# config/bff hardcodes "" so the render is unchanged and the honest warning still fires;
+# the chart templates it so an install can actually provide one.
+MCP_HMAC_ENV = [("MCP_GRANT_HMAC_KEY", "bff.mcp.grantHmacKey")]
+
 OPTIONAL_MODEL_ENV = [
     ("INGEST_OCR_URL", "bff.ingestOcrURL"),
     ("KNOWLEDGE_RERANK_URL", "bff.knowledgeRerankURL"),
@@ -505,7 +510,7 @@ def substitute(doc: str) -> str:
             "        - name: %s\n          value: {{ .Values.%s | default \"\" | quote }}"
             % (env_name, val_path),
         )
-    for env_name, val_path in OPTIONAL_MODEL_ENV:
+    for env_name, val_path in OPTIONAL_MODEL_ENV + MCP_HMAC_ENV:
         doc = doc.replace(
             f'        - name: {env_name}\n          value: ""',
             "        - name: %s\n          value: {{ .Values.%s | default \"\" | quote }}"

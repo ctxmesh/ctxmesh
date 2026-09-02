@@ -448,6 +448,11 @@ bff:
   # MCP_REQUIRE_APPROVAL envs; with these defaults the render is "true"/"false" ==
   # kustomize (helm-verify no-drift).
   mcp:
+    # Per-cluster salt for MCP grant identity hashes (ADR 0029 §7). Empty ⇒ legacy
+    # UNSALTED SHA-256, which is enumerable: a known username hashes to a known value, so
+    # a reader of the grant Secrets can identify users without reading a token.
+    # REQUIRED under profile=production. Changing it later re-keys grants (re-consent).
+    grantHmacKey: ""
     enabled: true
     requireApproval: false
     # credentialNamespace is the LOCKED platform namespace that holds every MCP grant

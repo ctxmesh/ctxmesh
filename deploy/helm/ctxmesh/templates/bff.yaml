@@ -143,6 +143,8 @@ spec:
           value: {{ .Values.bff.natsCredentialsFile | default "" | quote }}
         - name: MCP_OBO_REQUIRED
           value: {{ .Values.controllerManager.oboEgress.enabled | quote }}
+        - name: MCP_GRANT_HMAC_KEY
+          value: {{ .Values.bff.mcp.grantHmacKey | default "" | quote }}
         - name: OIDC_ENABLED
           value: {{ .Values.auth.oidc.enabled | quote }}
         - name: OIDC_ISSUER

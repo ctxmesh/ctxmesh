@@ -69,6 +69,9 @@ profile). Closes m52.D2 (the proxy-HA render guard) and generalizes it.
    documented as required alongside CONTROLPLANE_DSN; the enforceable, highest-risk knob is
    the credential namespace. */ -}}
 {{- if .Values.bff.mcp.enabled }}
+{{- if not .Values.bff.mcp.grantHmacKey }}
+{{- fail "\n\nprofile=production with bff.mcp.enabled requires bff.mcp.grantHmacKey — without it MCP grant\nidentity hashes are UNSALTED SHA-256 and therefore enumerable: a known username hashes to a\nknown value, so anyone who can read the grant Secrets can identify users without reading a\ntoken (ADR 0029 §7). Set a per-cluster random value; changing it later re-keys grants and\nrequires re-consent, so choose it once. (M150 m150.2 — the audit found this enforced by\nnothing but a start-up warning.)\n" }}
+{{- end }}
 {{- if not .Values.bff.mcp.credentialNamespace }}
 {{- fail "\n\nprofile=production with bff.mcp.enabled requires bff.mcp.credentialNamespace — else per-user\nMCP grant Secrets (3rd-party OAuth tokens) are stored in the AGENT's own namespace, where a\ntenant CAN read another user's grant tokens (ADR 0029 §7). Set a locked, dedicated\ncredential namespace; also provision MCP_GRANT_HMAC_KEY + the capability seed in the\nbff-adapters Secret (unsalted identity hashes + disabled capability minting otherwise).\n" }}
 {{- end }}
