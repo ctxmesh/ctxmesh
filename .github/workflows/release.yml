@@ -1,6 +1,20 @@
-# Tag job per ADR 0003: versioned image pushed to GHCR on v* tags.
-# Helm chart lint/package is added when the chart exists (tracked on the
-# milestone board in agent-brain).
+# Release — publish every artifact an install needs, at one version.
+#
+# WHAT THIS REPLACED, AND WHY
+# ---------------------------
+# This workflow used to build and push ONE image (the controller) and no chart, while
+# the chart references four first-party images and the controller injects a fifth
+# (managed-agent) into every managed agent at runtime. A release that ships one of five
+# images and no chart is not a release; nobody could install the product from it.
+#
+# That was invisible to every test the project had, because every test installs from the
+# working tree — from `config/`, or from images built locally and loaded into kind. A
+# release is the first artifact that has to stand up without the checkout. `hack/
+# release-truth.sh` is the static guard (it reads the chart's own image values and this
+# file); `harness/scripts/e2e-install-from-artifacts.sh` is the live one.
+#
+# THE VERSION IS THE TAG. Every image and the chart carry it, so an install is
+# reproducible and an upgrade is defined — see ADR 0133.
 name: Release
 
 on:
@@ -10,13 +24,38 @@ on:
 permissions: {}
 
 jobs:
-  image:
-    name: release-image
+  images:
+    name: release-images
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every first-party image an install needs. `image` is the chart's repository
+        # basename (release-truth.sh matches on it); `target` is the Makefile rule.
+        include:
+          - image: controller
+            target: docker-build
+            local: controller:latest
+          - image: bff
+            target: docker-build-bff
+            local: bff:latest
+          - image: token-service
+            target: docker-build-token-service
+            local: token-service:latest
+          - image: statelayer-proxy
+            target: docker-build-statelayer-proxy
+            local: statelayer-proxy:latest
+          # managed-agent is not in the chart's image values — the CONTROLLER injects it
+          # from a compiled-in default. It is still an image every managed agent needs,
+          # and an unpublished default is precisely the ContainerMissing dead end M153
+          # hit on the dev clusters. Shipping that to users is not an option.
+          - image: managed-agent
+            target: docker-build-managed
+            local: managed-agent:latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -26,7 +65,49 @@ jobs:
           go-version-file: go.mod
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - name: Build versioned image
-        run: make docker-build IMG="ghcr.io/${{ github.repository }}:${GITHUB_REF_NAME}"
-      - name: Push image
-        run: docker push "ghcr.io/${{ github.repository }}:${GITHUB_REF_NAME}"
+      - name: Build ${{ matrix.image }}
+        # The controller rule takes IMG; the rest bake their own local tag and are
+        # retagged below. One retag step keeps every image on the same code path.
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.target }}" = "docker-build" ]; then
+            make docker-build IMG="${{ matrix.local }}"
+          else
+            make "${{ matrix.target }}"
+          fi
+      - name: Tag + push ghcr.io/ctxmesh/${{ matrix.image }}:${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ref="ghcr.io/ctxmesh/${{ matrix.image }}:${GITHUB_REF_NAME}"
+          docker tag "${{ matrix.local }}" "$ref"
+          docker push "$ref"
+
+  chart:
+    name: release-chart
+    needs: images
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+      # The chart's version and appVersion are stamped from the TAG, not read from
+      # Chart.yaml. A committed version drifts from the tag the moment anyone forgets to
+      # bump it, and a chart whose appVersion disagrees with the images it installs is
+      # the same "pins nothing" defect in a subtler costume.
+      - name: Stamp the chart at ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          v="${GITHUB_REF_NAME#v}"
+          helm package deploy/helm/ctxmesh \
+            --version "$v" --app-version "${GITHUB_REF_NAME}" -d dist/
+      - name: Push the chart
+        run: |
+          set -euo pipefail
+          v="${GITHUB_REF_NAME#v}"
+          helm push "dist/ctxmesh-${v}.tgz" oci://ghcr.io/ctxmesh/charts

@@ -68,7 +68,7 @@ controllerManager:
     # enforce signatures with a cluster admission policy (cosign / Sigstore
     # policy-controller / Kyverno). The chart sets the image ref; signature
     # ENFORCEMENT is a cluster-policy concern (specs/deployment.md), not a toggle.
-    repository: controller
+    repository: ghcr.io/ctxmesh/controller
     # Empty tag falls back to Chart.appVersion ("latest"), matching
     # `controller:latest` in config/default. Set an immutable tag in production.
     tag: ""
@@ -176,7 +176,7 @@ tokenService:
     # The token-service (credential plane) image. Empty tag → Chart.appVersion ("latest"),
     # matching token-service:latest in config/default. PRODUCTION: point at a signed image in
     # your registry, pinned to an immutable digest (OPS-4b).
-    repository: token-service
+    repository: ghcr.io/ctxmesh/token-service
     tag: ""
   tls:
     # SEC-5: false ⇒ absent mTLS certs degrade to plain HTTP (dev default; renders ==
@@ -196,7 +196,7 @@ statelayerProxy:
   image:
     # The state-layer proxy image. Empty tag → Chart.appVersion ("latest"), matching
     # statelayer-proxy:latest in config/default. PRODUCTION: signed image, immutable digest (OPS-4b).
-    repository: statelayer-proxy
+    repository: ghcr.io/ctxmesh/statelayer-proxy
     tag: ""
 
 # CRDs are installed with the chart by default. Set false to manage CRD
@@ -381,7 +381,7 @@ bff:
   image:
     # The BFF (console backend) image. Empty tag → Chart.appVersion ("latest"), matching
     # bff:latest in config/default. PRODUCTION: signed image, immutable digest (OPS-4b).
-    repository: bff
+    repository: ghcr.io/ctxmesh/bff
     tag: ""
   # COST_ROLLUP_ENABLED (M124/Gate A, audit G11e): "1" (default ON) starts the cost-rollup worker so
   # a fresh install aggregates per-agent spend into cost_rollups (→ /api/cost + chargeback). A STRING,

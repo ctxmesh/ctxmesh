@@ -24,11 +24,42 @@ first beta. Keeping authorship settled until that cut is deliberate.
 
 ## This is time-bounded, not permanent
 
-This policy expires at the **first beta**. At that point we will decide between a DCO and a CLA, publish
-a contributor workflow, and open up. That expiry is recorded as a scheduled milestone task rather than
-left to memory, specifically so it cannot quietly become permanent.
+This policy expires at the **first beta**. That expiry was recorded as a scheduled milestone task rather
+than left to memory, specifically so it could not quietly become permanent — and it did not: the
+DCO-vs-CLA question is now **decided in favour of the DCO** (ADR 0134), and the workflow is documented
+below. Contributions open when the beta ships.
 
 If you want to be told when that happens, watch the repository for releases.
+
+## When contributions open: the DCO
+
+We use the [Developer Certificate of Origin](https://developercertificate.org/), not a CLA. There is
+nothing to sign and no form to fill in — you certify each commit with a trailer:
+
+```sh
+git commit -s -m "fix(bff): ..."
+```
+
+which appends `Signed-off-by: Your Name <your@email>`. That line is you asserting you have the right to
+submit the work under the project's licence. `git config user.name` and `user.email` supply the values,
+and `git rebase --signoff` fixes a branch you forgot to sign.
+
+We chose the DCO because it is what the Linux kernel, Kubernetes and the CNCF use, so it is the mechanism
+a contributor to a project of this shape already expects to meet — and because a CLA buys the ability to
+relicense unilaterally, which we do not plan to do and are not willing to charge every contributor an
+out-of-band signing step for. The reasoning is written down in full in ADR 0134.
+
+## Commit messages
+
+Every commit subject must match [Conventional Commits](https://www.conventionalcommits.org/) — the
+`conventional-commits` CI job checks all of them, not just the last:
+
+```
+feat(bff): connect an OpenAI-compatible provider
+fix(ui): poll while an agent is still starting
+```
+
+Scopes may contain `/` but not `,` — `fix(bff/ui)` passes, `fix(bff,ui)` does not.
 
 ## If you are here to understand the codebase
 
