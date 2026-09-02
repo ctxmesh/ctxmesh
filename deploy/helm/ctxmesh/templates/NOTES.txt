@@ -28,6 +28,11 @@ UI + Go BFF (spec §6):
                                is the single authz source.
   - reach the UI:              kubectl -n {{ .Values.namespace }} port-forward svc/ctxmesh-bff 9090:9090
                                then open http://localhost:9090/ (and /api/health)
+  - database:                  {{ if .Values.postgres.externalDsn }}operator-managed (postgres.externalDsn){{ else }}BUNDLED dev PostgreSQL + pgvector
+                               (deterministic dev credentials — NOT for production).
+                               Production: devDataPlane.enabled=false and set
+                               postgres.externalDsn to your own PostgreSQL with the
+                               pgvector extension (ADR 0130){{ end }}
   - adapter creds (optional):  create a Secret named `bff-adapters` in
                                {{ .Values.namespace }} with LANGFUSE_HOST /
                                LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY /
