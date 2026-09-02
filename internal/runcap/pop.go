@@ -17,6 +17,7 @@ limitations under the License.
 package runcap
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -62,6 +63,11 @@ const (
 	// with the request it authorizes, so its whole value is that a captured one expires before it can be
 	// replayed elsewhere. Long enough to survive real clock skew between pods, and no longer.
 	popMaxAge = 60 * time.Second
+	// sharedSpendTimeout bounds the cross-replica spend call. It is deliberately short:
+	// this sits on the tool-call hot path, and a state layer that cannot answer in this
+	// long is a state layer that is down — at which point the shared implementation's own
+	// failure posture decides, not a hung request.
+	sharedSpendTimeout = 2 * time.Second
 )
 
 // popClaims is the proof payload: which request, when, and once.
@@ -166,10 +172,38 @@ func canonicalHTU(raw string) string {
 // the window from "forever" to "under a minute, on a different replica" — a large reduction that stops
 // short of elimination. Closing it needs a shared seen-set (the state layer already has one for A2A
 // message ids); carded rather than pretended.
+// ProofSpender records a proof id exactly once. It exists so the seen-set can be SHARED
+// across BFF replicas (M149 m149.4).
+//
+// Why it had to become an interface: the in-process map below is correct for one replica
+// and silently wrong for several. A proof spent on replica A is unseen by replica B for
+// the whole freshness window, so a captured proof replays cleanly against any replica
+// that has not seen it — and the probability of landing on a different one is exactly
+// what a load balancer is for. ADR 0124 accepted that when the BFF ran single-pod; M148
+// made multi-replica the production posture (profile=production requires it), which is
+// what makes the residual real rather than theoretical.
+//
+// Spend returns ErrProofReplayed if the id was already used, nil if this call claimed it.
+// An implementation MUST be atomic across processes — a read-then-write loses the race it
+// exists to prevent.
+type ProofSpender interface {
+	Spend(ctx context.Context, jti string, ttl time.Duration) error
+}
+
 type ProofVerifier struct {
 	mu   sync.Mutex
 	seen map[string]time.Time
 	now  func() time.Time
+	// shared is the cross-replica seen-set. Nil ⇒ the in-process map, which is correct
+	// for a single replica and is what `ctxmesh dev` and the unit tests run on.
+	shared ProofSpender
+}
+
+// WithSharedSpender routes replay detection through a store shared by every replica.
+// Returns the verifier for chaining.
+func (v *ProofVerifier) WithSharedSpender(s ProofSpender) *ProofVerifier {
+	v.shared = s
+	return v
 }
 
 // NewProofVerifier returns a verifier with an empty replay set. `now` is injectable for tests, matching
@@ -248,6 +282,14 @@ func (v *ProofVerifier) VerifyProof(cap Capability, proof, method, rawURL string
 // window on the way through: a proof past popMaxAge is refused by the age check anyway, so remembering it
 // only grows the map.
 func (v *ProofVerifier) spend(jti string, now time.Time) error {
+	if v.shared != nil {
+		// The TTL is the freshness window plus skew: a proof older than that is refused by
+		// the age check anyway, so remembering it longer only grows the store. Expiry is
+		// the eviction — there is no sweeper to run and none to forget to run.
+		ctx, cancel := context.WithTimeout(context.Background(), sharedSpendTimeout)
+		defer cancel()
+		return v.shared.Spend(ctx, jti, popMaxAge+clockSkew)
+	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	for id, at := range v.seen {
