@@ -206,6 +206,11 @@ DURABILITY_KNOB_ENV = [
 MCP_HMAC_ENV = [("MCP_GRANT_HMAC_KEY", "bff.mcp.grantHmacKey")]
 
 OPTIONAL_MODEL_ENV = [
+    # MANAGED_AGENT_IMAGE (M153): the runtime image a MANAGED agent runs. The expander's
+    # compiled-in default is a public GHCR tag — right for a stock install, wrong wherever
+    # a registry is mirrored or air-gapped, and until now changeable only by patching the
+    # Deployment. Empty keeps the compiled-in default, byte-identical to before.
+    ("MANAGED_AGENT_IMAGE", "bff.managedAgentImage"),
     ("INGEST_OCR_URL", "bff.ingestOcrURL"),
     ("KNOWLEDGE_RERANK_URL", "bff.knowledgeRerankURL"),
     ("DISCOVERY_EMBEDDING_ROUTE", "bff.discoveryEmbeddingRoute"),

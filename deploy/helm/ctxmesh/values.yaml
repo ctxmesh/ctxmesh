@@ -360,6 +360,11 @@ bff:
   # The offline OCR + reranker services (M140) are deployed separately; empty
   # keeps their honest degradation (a scanned PDF stays PartiallyIngested; the
   # rerank stage is skipped) rather than pretending they exist.
+  # The image a MANAGED agent runs (ADR 0013). Empty keeps the compiled-in default
+  # (a public GHCR tag); set it to a mirror, an air-gapped registry, or a locally
+  # loaded tag. Without this seam every managed agent on an unreachable-registry
+  # cluster sits at ContainerMissing with nothing in the console explaining why.
+  managedAgentImage: ""
   ingestOcrURL: ""
   knowledgeRerankURL: ""
   # Capability discovery (M141, ADR 0120) embeds through a ModelRoute the

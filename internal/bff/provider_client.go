@@ -39,7 +39,23 @@ import (
 const (
 	providerAnthropic = "anthropic"
 	providerOpenAI    = "openai"
+	// providerCustom is any OpenAI-compatible endpoint the operator points us at:
+	// a self-hosted gateway, vLLM, Ollama, an Azure deployment, a proxy. It is
+	// OpenAI-SHAPED (Bearer auth, GET {base}/v1/models, POST {base}/v1/chat/
+	// completions) and differs only in having NO public default — the base URL is
+	// the whole identity of the provider, so it is required rather than optional.
+	//
+	// The console has offered this in its connect wizard, with a Base URL field,
+	// since M15; the BFF rejected it as "unsupported provider". A user picked it,
+	// typed their key, and hit a hard error — a break BETWEEN two screens, which no
+	// per-screen test could see. The M153 journey test walked into it (hack/
+	// provider-parity.sh now keeps the two lists from diverging again).
+	providerCustom = "custom"
 )
+
+// msgCustomNeedsBaseURL is the client-safe rejection when a custom provider is
+// connected without the one thing that identifies it.
+const msgCustomNeedsBaseURL = "a base URL is required for an OpenAI-compatible provider"
 
 // defaultProviderTimeout bounds the single validation/list call so a slow or
 // hostile provider endpoint cannot hang a BFF request.
@@ -99,12 +115,45 @@ func providerModels(ctx context.Context, httpClient *http.Client, provider, apiK
 		return anthropicModels(ctx, c, apiKey, baseURL)
 	case providerOpenAI:
 		return openaiModels(ctx, c, apiKey, baseURL)
+	case providerCustom:
+		if strings.TrimSpace(baseURL) == "" {
+			return nil, &providerError{status: http.StatusBadRequest, msg: msgCustomNeedsBaseURL}
+		}
+		return customModels(ctx, c, apiKey, baseURL)
 	default:
 		return nil, &providerError{
 			status: http.StatusBadRequest,
-			msg:    fmt.Sprintf("unsupported provider %q (supported: anthropic, openai)", provider),
+			msg:    fmt.Sprintf("unsupported provider %q (supported: anthropic, openai, custom)", provider),
 		}
 	}
+}
+
+// customModels probes an OpenAI-compatible endpoint the operator supplied. Auth
+// and shape are OpenAI's; the difference is that `base` is REQUIRED (checked by
+// the caller) because there is no public default to fall back to.
+//
+// The base URL may or may not already end in /v1 — an operator pastes whichever
+// their gateway documents, and both are correct for that gateway. Appending a
+// second /v1 to a base that has one produces a 404 the user cannot diagnose, so
+// the suffix is only added when it is absent.
+func customModels(ctx context.Context, c *http.Client, apiKey, baseURL string) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, customModelsURL(baseURL), nil)
+	if err != nil {
+		return nil, &providerError{status: http.StatusBadGateway, msg: msgBuildProviderReq}
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Accept", "application/json")
+	return doModelList(c, req, providerCustom)
+}
+
+// customModelsURL builds {base}/v1/models, tolerating a base that already ends
+// in /v1. Exported to the package's tests as the single place this rule lives.
+func customModelsURL(baseURL string) string {
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if strings.HasSuffix(base, "/v1") {
+		return base + "/models"
+	}
+	return base + "/v1/models"
 }
 
 // modelListResponse is the shared shape of the OpenAI + Anthropic model-list

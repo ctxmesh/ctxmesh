@@ -163,6 +163,19 @@ spec:
             # user's own ModelRoute; the async broker is BYO per ADR 0121). They keep
             # their honest-empty default and gain a values seam, so enabling them is a
             # `--set`, not a Deployment patch.
+            # MANAGED_AGENT_IMAGE — the runtime image a MANAGED agent runs (ADR 0013).
+            # A managed agent carries no image of its own; the expander fills in
+            # DefaultManagedImage. That default is a public GHCR tag, which is right for
+            # a stock install and wrong everywhere a registry is mirrored, air-gapped, or
+            # simply not reachable — and until now there was no way to change it without
+            # patching the Deployment. The dev clusters hit exactly that: every managed
+            # agent the console created sat at ContainerMissing, because the default was
+            # unpullable and the install had no seam to point it elsewhere (M153).
+            #
+            # Honest-empty: unset ⇒ the expander's compiled-in default, byte-identical to
+            # the previous behaviour. Setting it is a `--set`, not a Deployment patch.
+            - name: MANAGED_AGENT_IMAGE
+              value: ""
             - name: INGEST_OCR_URL
               value: ""
             - name: KNOWLEDGE_RERANK_URL
