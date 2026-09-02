@@ -67,6 +67,20 @@ spec:
         imagePullPolicy: IfNotPresent
         name: manager
         env:
+          # CONTAINER_MEMORY_LIMIT_BYTES — the container's own memory limit, via the
+          # downward API. internal/runtimelimit reads it at startup and sets GOMEMLIMIT
+          # to 80% of it.
+          #
+          # Without this the Go GC sizes the heap from GOGC alone, knows nothing about
+          # the cgroup, and grows straight through the limit — so the kernel kills the
+          # process rather than the collector working harder. M148 watched the BFF do
+          # exactly that at 512Mi AND again at 1Gi: the ceiling was never the problem.
+          - name: CONTAINER_MEMORY_LIMIT_BYTES
+            valueFrom:
+              resourceFieldRef:
+                containerName: manager
+                resource: limits.memory
+                divisor: "1"
           # POD_NAMESPACE (downward API): the manager's install namespace — the platform
           # cert-controller (M128/Gate E, ADR 0102) puts its CA + serving-cert Secret here and
           # derives the webhook Service SAN from it. Inert when the tenant-label webhook is off.

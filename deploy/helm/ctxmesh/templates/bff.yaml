@@ -95,6 +95,12 @@ spec:
     spec:
       containers:
       - env:
+        - name: CONTAINER_MEMORY_LIMIT_BYTES
+          valueFrom:
+            resourceFieldRef:
+              containerName: bff
+              divisor: "1"
+              resource: limits.memory
         - name: PROVIDER_CONNECT_ENABLED
           value: {{ .Values.bff.providerConnect.enabled | quote }}
 {{- if .Values.bff.runStore.enabled }}

@@ -67,6 +67,19 @@ spec:
           # `helm install --set bff.providerConnect.enabled=false` — the generator
           # (hack/gen_helm_chart.py) substitutes it, default renders "true" (no drift).
           env:
+            # CONTAINER_MEMORY_LIMIT_BYTES — the container's own memory limit, via the downward
+            # API. internal/runtimelimit reads it at startup and sets GOMEMLIMIT to 80% of it.
+            #
+            # Without this the Go GC sizes the heap from GOGC alone, knows nothing about the
+            # cgroup, and grows straight through the limit — so the kernel kills the process
+            # rather than the collector working harder. M148 watched the BFF do exactly that at
+            # 512Mi AND again at 1Gi: the ceiling was never the problem (M148/m148.12).
+            - name: CONTAINER_MEMORY_LIMIT_BYTES
+              valueFrom:
+                resourceFieldRef:
+                  containerName: bff
+                  resource: limits.memory
+                  divisor: "1"
             - name: PROVIDER_CONNECT_ENABLED
               value: "true"
             # RECIPES_OVERLAY_DIR (S1): the mounted operator-recipes ConfigMap dir. Set ⇒ the BFF

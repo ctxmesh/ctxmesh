@@ -1046,6 +1046,12 @@ spec:
         command:
         - /manager
         env:
+        - name: CONTAINER_MEMORY_LIMIT_BYTES
+          valueFrom:
+            resourceFieldRef:
+              containerName: manager
+              divisor: "1"
+              resource: limits.memory
         - name: POD_NAMESPACE
           valueFrom:
             fieldRef:
@@ -1232,6 +1238,12 @@ spec:
     spec:
       containers:
       - env:
+        - name: CONTAINER_MEMORY_LIMIT_BYTES
+          valueFrom:
+            resourceFieldRef:
+              containerName: statelayer-proxy
+              divisor: "1"
+              resource: limits.memory
         - name: STATELAYER_ADDR
           value: {{ .Values.statelayer.externalAddr | default (printf "ctxmesh-statelayer.%s.svc:6379" .Values.namespace) }}
         - name: STATELAYER_USERNAME
@@ -1302,6 +1314,12 @@ spec:
     spec:
       containers:
       - env:
+        - name: CONTAINER_MEMORY_LIMIT_BYTES
+          valueFrom:
+            resourceFieldRef:
+              containerName: token-service
+              divisor: "1"
+              resource: limits.memory
         - name: MCP_CREDENTIAL_NAMESPACE
           value: {{ .Values.bff.mcp.credentialNamespace | default .Values.namespace }}
         - name: MODEL_GATEWAY_URL

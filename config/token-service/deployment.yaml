@@ -47,6 +47,19 @@ spec:
               containerPort: 8443
               protocol: TCP
           env:
+            # CONTAINER_MEMORY_LIMIT_BYTES — the container's own memory limit, via the downward
+            # API. internal/runtimelimit reads it at startup and sets GOMEMLIMIT to 80% of it.
+            #
+            # Without this the Go GC sizes the heap from GOGC alone, knows nothing about the
+            # cgroup, and grows straight through the limit — so the kernel kills the process
+            # rather than the collector working harder. M148 watched the BFF do exactly that at
+            # 512Mi AND again at 1Gi: the ceiling was never the problem (M148/m148.12).
+            - name: CONTAINER_MEMORY_LIMIT_BYTES
+              valueFrom:
+                resourceFieldRef:
+                  containerName: token-service
+                  resource: limits.memory
+                  divisor: "1"
             # MCP_CREDENTIAL_NAMESPACE is the locked namespace holding per-user grant Secrets
             # (ADR 0029 §7); must match the BFF's bff.mcp.credentialNamespace. Empty (default)
             # keeps the legacy per-source-namespace grant path so kustomize/helm-default stay
