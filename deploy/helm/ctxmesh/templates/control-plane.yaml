@@ -384,19 +384,10 @@ rules:
   - ""
   resources:
   - pods
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
   - secrets
   verbs:
-  - create
   - get
   - list
-  - update
   - watch
 - apiGroups:
   - admissionregistration.k8s.io
@@ -623,7 +614,14 @@ rules:
   - auditlogs
   - costrollups
   verbs:
-  - '*'
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+  - deletecollection
 - apiGroups:
   - agents.ctxmesh.ai
   resources:

@@ -160,10 +160,23 @@ const (
 )
 
 // Platform cert-controller RBAC (M128/Gate E, ADR 0102): the in-process rotator manages its
-// own CA + serving-cert Secret and injects the caBundle into the tenant-label VWC. secrets
-// create/update is already granted elsewhere for the manager; the VWC verbs are new here.
+// own CA + serving-cert Secret and injects the caBundle into the tenant-label VWC.
+//
+// The Secret WRITES are namespace-scoped (M149 m149.3, closing the remaining half of the
+// Fable audit's SEC-3). This marker used to grant create;update on Secrets CLUSTER-WIDE,
+// and nothing needed it: the rotator writes exactly one Secret, into managerNamespace()
+// (see SetupWebhookCertRotator below — Namespace: managerNamespace()). Every other Secret
+// write in the tree is either namespaced to the gateway
+// (modelroute_controller.go), scoped to the install namespace (internal/bootstrap/capkey.go),
+// or executed on the CALLER's token rather than the controller's (internal/bff/*, ADR 0011).
+//
+// Cluster-wide get;list;watch stays: the controller genuinely resolves SecretBindings'
+// referenced Secrets in agent namespaces. Reads were never the finding — SEC-3's cache half
+// is closed harder than the audit asked, since Secrets are not cached at all
+// (client.CacheOptions{DisableFor: Secret}).
 // +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get;list;watch;create;update
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,namespace=ctxmesh,verbs=create;update
 
 // managerNamespace resolves the manager's install namespace (where the cert Secret lives +
 // the webhook Service resolves): POD_NAMESPACE (downward API) first, then the ServiceAccount
