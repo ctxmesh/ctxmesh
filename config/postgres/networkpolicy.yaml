@@ -1,0 +1,75 @@
+# Control-plane Postgres ingress restriction (M149 m149.2; the finding came out of
+# M148's own close gate).
+#
+# WHY. The only clients of :5432 are control-plane components in the install namespace —
+# the controller-manager, the BFF, the run-worker and the token-service. Agent workloads
+# run in OTHER namespaces and hold no database path at all: the token-service is the sole
+# holder of the pgvector stores by design (ADR 0061 Fork 3), precisely so that agent pods
+# never carry DB credentials.
+#
+# That design was enforced by ONE layer, and it had a gap. The egress allowlists that deny
+# an agent a route to :5432 are stamped only by the AgentRegistry controller and the
+# opt-in Tenant controller — so an AgentDeployment in a namespace with neither gets no
+# policy at all and has unrestricted egress. Proven live before this policy existed: a pod
+# in a namespace with no registry and no tenant ran
+#   SELECT count(*) FROM knowledge_chunks
+# against ctxmesh-postgres using the committed dev credentials, and got an answer. A pod
+# running prompt-injectable tool calls could read every tenant's memories and knowledge
+# chunks, bypassing the per-subject scoping the credential plane exists to enforce.
+#
+# This is the same "retained second layer" the state layer already has
+# (config/statelayer/networkpolicy.yaml, ADR 0050 §8) — applied to a store with strictly
+# more sensitive contents and a password that is a fixed constant committed to git.
+#
+# Kubelet probes are unaffected: the readiness/liveness probes here are `exec`
+# (pg_isready inside the container), not network probes, so no ingress rule can block them.
+#
+# WHAT THIS DOES NOT COVER — say it here rather than let a reader infer more (M149 re-audit,
+# finding A1). NetworkPolicy `from` selectors match PODS. A pod with `hostNetwork: true`
+# has no pod identity on the wire, so Calico does not apply pod policy to it and this rule
+# does not see it. Proven: a hostNetwork probe in a namespace with no AgentRegistry and no
+# Tenant read the table straight through these policies.
+#
+# The control that stops that is Pod Security admission — `baseline` forbids hostNetwork —
+# which is a NAMESPACE-level guarantee, not a network one. Until every namespace the
+# platform manages carries it, this policy is a second layer against ordinary pods and NOT
+# a boundary against a tenant who can set a pod spec. An overclaimed control is worse than
+# an absent one, because it stops people looking.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-ingress
+  namespace: system
+  labels:
+    control-plane: postgres
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    # Control-plane components ONLY — pods carrying a `control-plane` label, which every
+    # platform component has and no agent pod does (verified live across the install
+    # namespace and an agent namespace).
+    #
+    # An empty `podSelector: {}` was the obvious spelling and it had a bypass (found by
+    # M149's own re-audit): it admits ANY pod in this namespace, and nothing stops an agent
+    # from being one. `ctxmesh-developer` — a SHIPPED persona, bound the documented way
+    # with a ClusterRoleBinding — can create an AgentDeployment in the install namespace,
+    # and no admission path rejects it. Verified: `kubectl auth can-i create
+    # agentdeployments -n ctxmesh --as=…:uie2e-developer` → yes, and a pod in this
+    # namespace read knowledge_chunks with the committed dev credentials.
+    #
+    # So the same-namespace allow was only as strong as "no agent runs here", which
+    # nothing enforced. Selecting on the label enforces it.
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: control-plane
+                operator: Exists
+      ports:
+        - protocol: TCP
+          port: 5432

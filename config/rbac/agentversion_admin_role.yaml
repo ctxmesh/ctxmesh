@@ -17,8 +17,19 @@ rules:
   - agents.ctxmesh.ai
   resources:
   - agentversions
+  # Enumerated rather than '*' (M149 m149.3). Behaviour-preserving — these are every
+  # standard verb — but a FUTURE custom verb is no longer implied. M146 needed a `kill`
+  # permission that a wildcard would have granted to every holder of this role, and had to
+  # route it through a subresource to escape that; this removes the hazard at the source.
   verbs:
-  - '*'
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+  - deletecollection
 - apiGroups:
   - agents.ctxmesh.ai
   resources:

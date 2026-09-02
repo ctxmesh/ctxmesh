@@ -1,0 +1,70 @@
+# Dev NATS JetStream ingress restriction (M149 m149.2).
+#
+# WHY. Same shape as the Postgres policy beside it, and slightly worse on one axis: the
+# bundled NATS has no `authorization` block at all, so :4222 is an UNAUTHENTICATED
+# JetStream. Its only legitimate clients are control-plane components in the install
+# namespace (the BFF's publish edge and its durable consumers); agents reach A2A through
+# the platform, never the broker directly.
+#
+# Proven live before this policy existed: a pod in a namespace with no AgentRegistry and
+# no Tenant — so covered by neither egress allowlist — reached the monitoring endpoint on
+# :8222 and got HTTP 200. With no auth on :4222, the same pod could publish onto, consume
+# from, or purge another tenant's A2A stream.
+#
+# :8222 (monitoring) is restricted alongside :4222 rather than left open: it exposes
+# stream and consumer topology, which is a tenancy leak even though it is read-only.
+# The kubelet's httpGet probe against :8222 comes from the NODE, not from a pod, and
+# Kubernetes does not apply NetworkPolicy to kubelet health probes — verified live after
+# applying this policy: the pod stays Ready.
+#
+# WHAT THIS DOES NOT COVER — say it here rather than let a reader infer more (M149 re-audit,
+# finding A1). NetworkPolicy `from` selectors match PODS. A pod with `hostNetwork: true`
+# has no pod identity on the wire, so Calico does not apply pod policy to it and this rule
+# does not see it. Proven: a hostNetwork probe in a namespace with no AgentRegistry and no
+# Tenant read the table straight through these policies.
+#
+# The control that stops that is Pod Security admission — `baseline` forbids hostNetwork —
+# which is a NAMESPACE-level guarantee, not a network one. Until every namespace the
+# platform manages carries it, this policy is a second layer against ordinary pods and NOT
+# a boundary against a tenant who can set a pod spec. An overclaimed control is worse than
+# an absent one, because it stops people looking.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nats-ingress
+  namespace: system
+  labels:
+    control-plane: nats
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: nats
+  policyTypes:
+    - Ingress
+  ingress:
+    # Control-plane components ONLY — pods carrying a `control-plane` label, which every
+    # platform component has and no agent pod does (verified live across the install
+    # namespace and an agent namespace).
+    #
+    # An empty `podSelector: {}` was the obvious spelling and it had a bypass (found by
+    # M149's own re-audit): it admits ANY pod in this namespace, and nothing stops an agent
+    # from being one. `ctxmesh-developer` — a SHIPPED persona, bound the documented way
+    # with a ClusterRoleBinding — can create an AgentDeployment in the install namespace,
+    # and no admission path rejects it. Verified: `kubectl auth can-i create
+    # agentdeployments -n ctxmesh --as=…:uie2e-developer` → yes, and a pod in this
+    # namespace read knowledge_chunks with the committed dev credentials.
+    #
+    # So the same-namespace allow was only as strong as "no agent runs here", which
+    # nothing enforced. Selecting on the label enforces it.
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: control-plane
+                operator: Exists
+      ports:
+        - protocol: TCP
+          port: 4222
+        - protocol: TCP
+          port: 8222

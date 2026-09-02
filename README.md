@@ -86,6 +86,22 @@ The bundled data plane uses deterministic, obviously-fake dev credentials and is
 installing a control plane that cannot start — the alternative is a CrashLoopBackOff whose cause is
 three layers from its symptom.
 
+**Who enables `vector`.** The schema migration runs `CREATE EXTENSION IF NOT EXISTS vector`, and
+`vector` is **not** a PostgreSQL *trusted* extension — so creating it requires elevated rights that a
+least-privilege application role does not have on a managed database. Either:
+
+- grant the install role the provider's superuser group — `rds_superuser` (RDS),
+  `cloudsqlsuperuser` (Cloud SQL), `azure_pg_admin` (Azure); **or**
+- have a DBA run `CREATE EXTENSION vector;` once in the target database, after which the
+  application role needs no elevated rights at all.
+
+The preflight job checks this before the control plane starts and names the missing extension, so a
+misprovisioned database fails the install rather than the first knowledge query.
+
+**Note for on-premise PostgreSQL:** the server also needs the pgvector *package* installed
+(`postgresql-NN-pgvector` or equivalent) — the extension cannot be created if the server does not
+ship it.
+
 Uninstall with `helm uninstall ctxmesh -n ctxmesh`.
 
 ## The console
