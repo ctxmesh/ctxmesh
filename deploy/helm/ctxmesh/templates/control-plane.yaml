@@ -1304,6 +1304,10 @@ spec:
       - env:
         - name: MCP_CREDENTIAL_NAMESPACE
           value: {{ .Values.bff.mcp.credentialNamespace | default .Values.namespace }}
+        - name: MODEL_GATEWAY_URL
+          value: {{ .Values.tokenService.modelGatewayURL | default (printf "http://ctxmesh-gateway.%s.svc:4000" .Values.namespace) }}
+        - name: KNOWLEDGE_RERANK_URL
+          value: {{ .Values.bff.knowledgeRerankURL | default "" | quote }}
         - name: TOKEN_SERVICE_TLS_CERT_FILE
           value: /etc/token-service/tls/tls.crt
         - name: TOKEN_SERVICE_TLS_KEY_FILE
@@ -1313,6 +1317,9 @@ spec:
         - name: TOKEN_SERVICE_TLS_REQUIRED
           value: {{ .Values.tokenService.tls.required | quote }}
         envFrom:
+        - secretRef:
+            name: ctxmesh-postgres-dsn
+            optional: true
         - secretRef:
             name: bff-adapters
             optional: true

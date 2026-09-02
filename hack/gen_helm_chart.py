@@ -154,6 +154,20 @@ MCP_CREDENTIAL_NAMESPACE_ENV_HELM = (
 # reason for it to be unset) and "" for the rest, which name services the chart does not
 # ship. Templated so an operator can enable RAG depth (M140) and discovery + async (M141)
 # from values.yaml instead of patching a Deployment. Defaults render == kustomize (no drift).
+# The token-service's own gateway URL (M148/m148.11). Same literal, same treatment as the
+# BFF's — but a SEPARATE constant because the two are different Deployments and a single
+# replace would only hit the first. Retrieval is served here, so this one is what makes a
+# KB search return anything at all.
+TOKEN_SVC_GATEWAY_KUSTOMIZE = (
+    "        - name: MODEL_GATEWAY_URL\n"
+    "          value: http://ctxmesh-gateway.ctxmesh.svc:4000"
+)
+TOKEN_SVC_GATEWAY_HELM = (
+    "        - name: MODEL_GATEWAY_URL\n"
+    "          value: {{ .Values.tokenService.modelGatewayURL | "
+    'default (printf "http://ctxmesh-gateway.%s.svc:4000" .Values.namespace) }}'
+)
+
 MODEL_SERVICE_ENV_KUSTOMIZE = (
     "        - name: MODEL_GATEWAY_URL\n"
     "          value: http://ctxmesh-gateway.ctxmesh.svc:4000"
@@ -449,7 +463,14 @@ def substitute(doc: str) -> str:
         PROVIDER_CONNECT_ENV_HELM,
     )
     # M148/m148.5 — the model-service + async block.
-    doc = doc.replace(MODEL_SERVICE_ENV_KUSTOMIZE, MODEL_SERVICE_ENV_HELM)
+    # The BFF and the token-service carry the SAME MODEL_GATEWAY_URL literal in two
+    # different Deployments, and they need two different values keys. Route by the
+    # component label FIRST — a single unconditional replace would silently give the
+    # token-service the BFF's key, and the render would still look right.
+    if "control-plane: token-service" in doc:
+        doc = doc.replace(TOKEN_SVC_GATEWAY_KUSTOMIZE, TOKEN_SVC_GATEWAY_HELM)
+    else:
+        doc = doc.replace(MODEL_SERVICE_ENV_KUSTOMIZE, MODEL_SERVICE_ENV_HELM)
     # M148/m148.9 — the durability knobs (manager env; same empty-default shape).
     for env_name, val_path in DURABILITY_KNOB_ENV:
         doc = doc.replace(
