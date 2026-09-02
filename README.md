@@ -18,16 +18,22 @@ There are three ways to work with it:
 ctxmesh ships as a Helm chart in [`deploy/helm/ctxmesh`](deploy/helm/ctxmesh). It installs the
 control plane — controller-manager + CRDs, the LiteLLM model gateway, RBAC personas
 (`ctxmesh-{operator,developer,viewer}`), the operator UI + Go BFF, and (for dev/trial) a bundled
-data plane (Valkey + MinIO).
+data plane: PostgreSQL with pgvector, Valkey, MinIO and NATS JetStream.
 
 **Prerequisites.** A Kubernetes cluster (≥ 1.29) with **Knative Serving + Eventing** and **KEDA**
 already installed — the controller reconciles their CRDs and agents won't come up without them
 (ctxmesh does *not* bundle them) — plus Helm 3.
 
 ```sh
-# from a clone of this repo — a dev/trial install (bundled Valkey + MinIO, single replica)
+# from a clone of this repo — a dev/trial install, everything bundled, single replica
 helm install ctxmesh ./deploy/helm/ctxmesh --namespace ctxmesh --create-namespace
 ```
+
+That is the whole install. There is **no Secret to create by hand and no environment variable to
+export** — the chart provisions the database it needs and points the control plane at it. (Until
+M148 it did not: `bff-adapters` was consumed by four templates and created by none, and nothing
+deployed PostgreSQL at all, so this command produced a CrashLoopBackOff. `harness/scripts/accept-m148.sh`
+now asserts that everything the chart consumes, the chart creates.)
 
 Wait for it to come up, then open the console:
 
@@ -35,6 +41,12 @@ Wait for it to come up, then open the console:
 kubectl -n ctxmesh rollout status deploy/ctxmesh-controller-manager
 kubectl -n ctxmesh port-forward svc/ctxmesh-bff 9090:9090   # → http://localhost:9090/
 ```
+
+**What works immediately, and what needs a key.** Knowledge-base ingestion and retrieval work out
+of the box: the chart wires the model gateway by default, so uploading documents to a
+KnowledgeBase and searching it returns ranked, **cited** chunks with no external service involved.
+Running an *agent* needs a model, so connect a provider in the console (or create a `SecretBinding`
++ `ModelRoute`) before an agent can answer anything.
 
 **Use your own images.** The chart defaults to the `:latest` tags built by `make docker-build-*`
 (side-loaded into a kind cluster). For a real cluster, push the images to a registry and override
@@ -47,9 +59,26 @@ helm install ctxmesh ./deploy/helm/ctxmesh -n ctxmesh --create-namespace \
   # …likewise bff.image.* and gateway.image.* (see values.yaml)
 ```
 
-**Production.** Add `--set profile=production` to make the HA invariants hard — multiple replicas +
-leader election, PodDisruptionBudgets, an external data plane (not the bundled Valkey/MinIO), and
-signed images. See [`values-production.yaml`](deploy/helm/ctxmesh/values-production.yaml).
+### Production
+
+Add `--set profile=production` to make the HA invariants hard — multiple replicas + leader
+election, PodDisruptionBudgets, an external data plane, and signed images. See
+[`values-production.yaml`](deploy/helm/ctxmesh/values-production.yaml).
+
+A production install **must** supply its own PostgreSQL (with the `pgvector` extension — knowledge
+chunks are searched by vector similarity):
+
+```sh
+helm install ctxmesh ./deploy/helm/ctxmesh -n ctxmesh --create-namespace \
+  --set profile=production \
+  -f deploy/helm/ctxmesh/values-production.yaml \
+  --set postgres.externalDsn='postgres://user:pass@db.example:5432/ctxmesh?sslmode=require'
+```
+
+The bundled data plane uses deterministic, obviously-fake dev credentials and is not rendered under
+`profile=production`. The render **fails** if `postgres.externalDsn` is missing rather than
+installing a control plane that cannot start — the alternative is a CrashLoopBackOff whose cause is
+three layers from its symptom.
 
 Uninstall with `helm uninstall ctxmesh -n ctxmesh`.
 
