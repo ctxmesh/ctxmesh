@@ -213,26 +213,30 @@ func TestCapabilitiesBatchesTheMatrix(t *testing.T) {
 	assert.Equal(t, "operator-persona-token", factory.gotToken)
 
 	// Exactly the golden cross product (resources × verbs) in the agents group + the requested
-	// namespace, PLUS the single synthetic `get pods/log` probe in the CORE group (M100 UI99-logs).
+	// namespace, PLUS the two synthetic CORE-group probes: `get pods/log` (M100 UI99-logs)
+	// and `create secrets` (M153 — connecting a provider writes a core Secret as well as a
+	// SecretBinding, and gating the console on the binding alone invited a user to type an
+	// API key into a request the API server would refuse).
 	want := map[probe]bool{}
 	for _, res := range goldenResources {
 		for _, verb := range goldenVerbs {
 			want[probe{res, verb, "prod", agentsAPIGroup}] = true
 		}
 	}
-	want[probe{"pods", "get", "prod", ""}] = true // the logs subresource probe (core group)
-	require.Len(t, got, len(want), "one SSAR per golden resource×verb, plus the logs probe")
+	want[probe{"pods", "get", "prod", ""}] = true       // the logs subresource probe (core group)
+	want[probe{"secrets", "create", "prod", ""}] = true // the connect-a-provider probe (core group)
+	require.Len(t, got, len(want), "one SSAR per golden resource×verb, plus the two core-group probes")
 	for _, p := range got {
 		assert.Contains(t, want, p, "unexpected SSAR probe: %+v", p)
 		delete(want, p)
 	}
-	assert.Empty(t, want, "every golden resource×verb + the logs probe must be probed exactly once")
+	assert.Empty(t, want, "every golden resource×verb + both core-group probes must be probed exactly once")
 
-	// The response echoes the namespace and carries the full flat matrix + the logs cell.
+	// The response echoes the namespace and carries the full flat matrix + both core cells.
 	var body CapabilitiesResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, "prod", body.Namespace)
-	require.Len(t, body.Allowed, len(goldenResources)+1) // golden kinds + the synthetic "logs"
+	require.Len(t, body.Allowed, len(goldenResources)+2) // golden kinds + "logs" + "secrets"
 	for _, res := range goldenResources {
 		require.Contains(t, body.Allowed, res)
 		for _, verb := range goldenVerbs {
@@ -241,6 +245,10 @@ func TestCapabilitiesBatchesTheMatrix(t *testing.T) {
 	}
 	require.Contains(t, body.Allowed, resLogs)
 	assert.True(t, body.Allowed[resLogs]["get"], "the logs capability should reflect the pods/log SSAR")
+	// The console gates connect-a-provider on this; without it the SPA falls back to
+	// optimistic-allow and re-opens the flow that refuses with the key already sent.
+	require.Contains(t, body.Allowed, resSecrets)
+	assert.True(t, body.Allowed[resSecrets][verbCreate], "the secrets capability should reflect the core-group SSAR")
 }
 
 // TestCapabilitiesProbesLogsGate proves the synthetic `logs` capability tracks the caller's
