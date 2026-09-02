@@ -1,0 +1,49 @@
+# Control-plane Postgres ingress restriction (M149 m149.2; the finding came out of
+# M148's own close gate).
+#
+# WHY. The only clients of :5432 are control-plane components in the install namespace —
+# the controller-manager, the BFF, the run-worker and the token-service. Agent workloads
+# run in OTHER namespaces and hold no database path at all: the token-service is the sole
+# holder of the pgvector stores by design (ADR 0061 Fork 3), precisely so that agent pods
+# never carry DB credentials.
+#
+# That design was enforced by ONE layer, and it had a gap. The egress allowlists that deny
+# an agent a route to :5432 are stamped only by the AgentRegistry controller and the
+# opt-in Tenant controller — so an AgentDeployment in a namespace with neither gets no
+# policy at all and has unrestricted egress. Proven live before this policy existed: a pod
+# in a namespace with no registry and no tenant ran
+#   SELECT count(*) FROM knowledge_chunks
+# against ctxmesh-postgres using the committed dev credentials, and got an answer. A pod
+# running prompt-injectable tool calls could read every tenant's memories and knowledge
+# chunks, bypassing the per-subject scoping the credential plane exists to enforce.
+#
+# This is the same "retained second layer" the state layer already has
+# (config/statelayer/networkpolicy.yaml, ADR 0050 §8) — applied to a store with strictly
+# more sensitive contents and a password that is a fixed constant committed to git.
+#
+# Kubelet probes are unaffected: the readiness/liveness probes here are `exec`
+# (pg_isready inside the container), not network probes, so no ingress rule can block them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-ingress
+  namespace: system
+  labels:
+    control-plane: postgres
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    # Same-namespace (control-plane) pods only — an empty podSelector with no
+    # namespaceSelector matches pods in THIS policy's namespace. Everything in another
+    # namespace, including every agent, is denied.
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 5432
