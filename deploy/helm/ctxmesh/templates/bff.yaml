@@ -104,11 +104,6 @@ spec:
         - name: PROVIDER_CONNECT_ENABLED
           value: {{ .Values.bff.providerConnect.enabled | quote }}
 {{- if .Values.bff.runStore.enabled }}
-        - name: RUN_STORE_DSN
-          valueFrom:
-            secretKeyRef:
-              name: {{ .Values.bff.runStore.dsnSecretName }}
-              key: dsn
         - name: RUN_WORKER_DISPATCH
           value: "true"
 {{- end }}

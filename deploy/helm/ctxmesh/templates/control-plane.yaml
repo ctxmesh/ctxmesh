@@ -907,8 +907,8 @@ metadata:
   name: ctxmesh-postgres-dsn
   namespace: {{ .Values.namespace }}
 stringData:
-  CONTROLPLANE_DSN: {{ .Values.postgres.externalDsn | default (printf "postgres://ctxmesh:ctxmesh-dev-secret@ctxmesh-postgres.%s.svc:5432/ctxmesh?sslmode=disable" .Values.namespace) }}
-  RUN_STORE_DSN: {{ .Values.postgres.externalDsn | default (printf "postgres://ctxmesh:ctxmesh-dev-secret@ctxmesh-postgres.%s.svc:5432/ctxmesh?sslmode=disable" .Values.namespace) }}
+  CONTROLPLANE_DSN: {{ if .Values.postgres.externalDsn }}{{ .Values.postgres.externalDsn | quote }}{{ else }}{{ printf "postgres://ctxmesh:ctxmesh-dev-secret@ctxmesh-postgres.%s.svc:5432/ctxmesh?sslmode=disable" .Values.namespace }}{{ end }}
+  RUN_STORE_DSN: {{ if .Values.postgres.externalDsn }}{{ .Values.postgres.externalDsn | quote }}{{ else }}{{ printf "postgres://ctxmesh:ctxmesh-dev-secret@ctxmesh-postgres.%s.svc:5432/ctxmesh?sslmode=disable" .Values.namespace }}{{ end }}
 type: Opaque
 ---
 apiVersion: v1

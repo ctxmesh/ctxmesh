@@ -53,11 +53,23 @@ spec:
           image: {{ printf "%s:%s" .Values.bff.image.repository (.Values.bff.image.tag | default .Chart.AppVersion) }}
           imagePullPolicy: IfNotPresent
           env:
-            - name: RUN_STORE_DSN
+            # M148 hardening (close gate a, finding B3). The run-worker runs the SAME bff
+            # binary and EXECUTES ingestion runs (internal/bff/run_worker.go: if
+            # rn.IsIngestionJob() { s.executeIngestion(...) }), and profile=production
+            # makes it mandatory. M148 measured a 582Mi ingestion peak and raised the BFF
+            # to 1Gi — but in the durable configuration that identical work ran here, in a
+            # 256Mi container, with no soft limit. Production would have got the OOMKill
+            # the milestone believed it had fixed, at a LOWER ceiling than the one that
+            # failed.
+            - name: CONTAINER_MEMORY_LIMIT_BYTES
               valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.bff.runStore.dsnSecretName }}
-                  key: dsn
+                resourceFieldRef:
+                  containerName: run-worker
+                  resource: limits.memory
+                  divisor: "1"
+            # RUN_STORE_DSN is deliberately NOT an explicit env entry — see the envFrom
+            # comment below. It arrives with CONTROLPLANE_DSN from the chart-owned Secret,
+            # which is what lets ADR 0130's override order apply to it at all.
             # Workers EXECUTE runs (concurrency>0 starts the claim-loop pool). Dispatch
             # is OFF here — the front-end BFF is what dispatches (RUN_WORKER_DISPATCH).
             - name: RUN_WORKER_CONCURRENCY
@@ -68,6 +80,30 @@ spec:
             - name: MCP_OBO_REQUIRED
               value: {{ .Values.controllerManager.oboEgress.enabled | quote }}
           envFrom:
+            # M148 hardening (close gate a, finding A1). This Deployment used to take
+            # RUN_STORE_DSN from an explicit `env` secretKeyRef onto a `run-store` Secret
+            # that NO chart path creates — and an explicit env beats every envFrom entry,
+            # so it also shadowed the chart-owned DSN. With no `optional: true` the kubelet
+            # could not build the container config at all (CreateContainerConfigError), so
+            # the pod never started and never logged a cause. profile=production makes this
+            # Deployment mandatory, so the documented production install was dead on
+            # arrival — the exact bug M148 exists to fix, restated for a second Secret.
+            #
+            # This template is HAND-MAINTAINED (the run-worker is not in config/default),
+            # which is why helm-verify never compared it against the kustomize twin that
+            # m148.3 did fix. The two install paths silently disagreed.
+            #
+            # Chart-owned DSN FIRST — it carries CONTROLPLANE_DSN and RUN_STORE_DSN.
+            - secretRef:
+                name: ctxmesh-postgres-dsn
+                optional: true
+{{- if ne .Values.bff.runStore.dsnSecretName "run-store" }}
+            # An operator pointing the run store at a SEPARATE database supplies their own
+            # Secret; it comes after the chart's, so later-wins gives them the override.
+            - secretRef:
+                name: {{ .Values.bff.runStore.dsnSecretName }}
+                optional: true
+{{- end }}
             # The worker runs the SAME bff binary, so it needs the SAME operator env the
             # BFF gets from bff-adapters — most importantly CONTROLPLANE_DSN (required at
             # startup, ADR 0044) + the adapter creds (m55.5 finding: the M32 worker config
@@ -91,7 +127,9 @@ spec:
               cpu: 50m
               memory: 64Mi
             limits:
-              memory: 256Mi
+              # Raised 256Mi -> 1Gi to MATCH the BFF: this container runs the same
+              # ingestion path, so it needs the same measured headroom (M148 B3).
+              memory: 1Gi
 ---
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
