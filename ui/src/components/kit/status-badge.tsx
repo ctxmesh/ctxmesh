@@ -144,9 +144,18 @@ export function StatusBadge({
   reason?: string;
   className?: string;
 }) {
-  const { variant, label } = resolveStatus(ready, phase, reason);
+  const { tone, variant, label } = resolveStatus(ready, phase, reason);
   return (
-    <Badge variant={variant} className={className}>
+    // The chip is the console's answer to "is my agent running?", so it carries a
+    // stable hook. `data-status-tone` is the machine-readable half: the LABEL is
+    // humanised per phase/reason and varies across resources, but the TONE is the
+    // resolved verdict, which is what a journey test actually needs to assert (M153).
+    <Badge
+      variant={variant}
+      className={className}
+      data-testid="status-badge"
+      data-status-tone={tone}
+    >
       {label}
     </Badge>
   );

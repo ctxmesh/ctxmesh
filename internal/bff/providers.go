@@ -335,10 +335,20 @@ func createProviderObjects(ctx context.Context, w client.Client, spec providerCr
 		},
 		Spec: agentsv1alpha1.ModelRouteSpec{
 			Providers: []agentsv1alpha1.ProviderRef{{
-				Provider:         provider,
+				// The route's provider is the GATEWAY's word for the vendor (a LiteLLM
+				// prefix), which is not always the console's word for it. "custom" is a
+				// console identity — an OpenAI-compatible endpoint the operator named —
+				// and LiteLLM has no such prefix; on the wire it is `openai/<model>`
+				// aimed at apiBase. The label keeps the identity (routeProbeInputs reads
+				// the label first), so the console still shows "custom" and re-probes it
+				// as custom while the gateway sees a shape it understands.
+				Provider:         routeProviderFor(provider),
 				Model:            primaryModel(spec.models),
 				Priority:         1,
 				SecretBindingRef: spec.name,
+				// The base URL IS the identity of a custom provider, so it has to reach
+				// the gateway, not just the re-probe annotation.
+				APIBase: spec.baseURL,
 			}},
 			RateLimit: &agentsv1alpha1.RateLimit{TenantRPM: defaultTenantRPM},
 		},
@@ -757,4 +767,14 @@ func (s *Server) handleDisconnectProvider(w http.ResponseWriter, r *http.Request
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// routeProviderFor maps a console provider id to the LiteLLM provider prefix the
+// gateway renders. Only "custom" differs: it is an OpenAI-compatible endpoint,
+// addressed as openai/<model> plus api_base.
+func routeProviderFor(provider string) string {
+	if provider == providerCustom {
+		return providerOpenAI
+	}
+	return provider
 }

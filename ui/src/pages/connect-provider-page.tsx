@@ -19,7 +19,7 @@ import {
   type WizardStep,
 } from "@/components/kit";
 import { useCapabilities } from "@/lib/capabilities";
-import { RES_SECRETS } from "@/lib/nav";
+import { canConnectProvider } from "@/lib/nav";
 import { cn } from "@/lib/utils";
 import { api, ApiError, type ConnectProviderResponse } from "@/lib/api";
 
@@ -72,7 +72,16 @@ import { api, ApiError, type ConnectProviderResponse } from "@/lib/api";
 const PROVIDERS = [
   { id: "anthropic", name: "Anthropic", models: "Claude", needsBaseURL: false },
   { id: "openai", name: "OpenAI", models: "GPT", needsBaseURL: false },
-  { id: "google", name: "Google", models: "Gemini", needsBaseURL: false },
+  // Google/Gemini is deliberately NOT a tile. It was one, and the BFF rejected
+  // `google` as an unsupported provider — so picking it meant typing an API key
+  // into a form that could never work (found by the M153 journey test; the gate
+  // hack/provider-parity.sh now fails the build on any such divergence).
+  //
+  // The capability is not lost: Gemini serves an OpenAI-compatible API, so it
+  // connects today through "Custom / OpenAI-compatible" with the base URL
+  // https://generativelanguage.googleapis.com/v1beta/openai. A native tile means
+  // a native probe path, which is real work with no way to prove it offline —
+  // carded rather than guessed at (m52, Theme R).
   {
     id: "custom",
     name: "Custom / OpenAI-compatible",
@@ -141,7 +150,7 @@ export function ConnectProviderPage() {
   // in the shell; if they reach this page directly the API 403 is the real gate.
   // DISPLAY-ONLY (ADR 0011).
   const { can, reprobe } = useCapabilities();
-  const canConnect = can(RES_SECRETS, "create");
+  const canConnect = canConnectProvider(can);
 
   const provider = PROVIDERS.find((p) => p.id === providerId)!;
 

@@ -225,6 +225,16 @@ jobs:
       # This gate reads the manifests, so it needs no cluster and costs milliseconds.
       - name: RBAC least-privilege gate (no verb wildcards, no cluster-scoped Secret writes)
         run: ./hack/rbac-least-privilege.sh config/rbac
+      # M153 m153.3 — the console may not offer a provider the API rejects.
+      #
+      # The connect wizard offered four providers; the BFF accepted two. Picking one of
+      # the other two meant typing an API key into a form that could never work. Every
+      # per-screen test passed: the page rendered its four choices, the BFF rejected
+      # "custom" correctly, and only WALKING from one screen to the next revealed the
+      # product promising something it cannot do. Two static lists, checked against each
+      # other, in milliseconds.
+      - name: Provider parity gate (the console offers exactly what the API supports)
+        run: ./hack/provider-parity.sh
 
   envtest:
     name: envtest
