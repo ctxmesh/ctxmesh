@@ -79,6 +79,14 @@ const (
 	// resPods / verbGet name the core-group pods/log SSAR the logs capability probes (M100).
 	resPods = "pods"
 	verbGet = "get"
+	// resSecrets is the CORE-group Secret. Connecting a provider writes one (the key)
+	// alongside the SecretBinding, and the console used to gate that flow on the
+	// SecretBinding alone — so a caller who could create bindings but not Secrets was
+	// invited to type an API key into a form the API would refuse, and only found out
+	// once the credential was already in flight (M153). The synthetic `secrets.create`
+	// capability exists so the console can ask about what the operation ACTUALLY needs.
+	resSecrets = "secrets"
+	verbCreate = "create"
 	// verbList is the read verb the caller-scoped stop list probes with (ADR 0129).
 	verbList = "list"
 )
@@ -105,7 +113,7 @@ var (
 		resAuditLogs,
 		resKnowledgeBases,
 	}
-	goldenVerbs = []string{verbGet, verbList, "create", "update", "delete"}
+	goldenVerbs = []string{verbGet, verbList, verbCreate, "update", "delete"}
 )
 
 // handleWhoAmI serves GET /api/whoami — the caller's identity (username +
@@ -197,6 +205,9 @@ func probeCapabilities(ctx context.Context, caller client.Client, namespace stri
 	// The synthetic `logs` capability is a SINGLE `get pods/log` probe (core group + subresource),
 	// distinct from the agents-group golden cross-product — seed its own cell.
 	allowed[resLogs] = make(map[string]bool, 1)
+	// Same shape as `logs`: a single core-group probe outside the agents-group
+	// cross-product, seeded with its own cell.
+	allowed[resSecrets] = make(map[string]bool, 1)
 
 	var (
 		wg       sync.WaitGroup
@@ -235,6 +246,15 @@ func probeCapabilities(ctx context.Context, caller client.Client, namespace stri
 		return nil, err
 	}
 	allowed[resLogs][verbGet] = logsOK
+
+	// The core-group `create secrets` probe. Connect-a-provider needs BOTH this and
+	// secretbindings.create; reporting only the latter is what let the console offer
+	// a flow the API server would refuse.
+	secretsOK, err := reviewCoreAccess(ctx, caller, namespace, resSecrets, "", verbCreate)
+	if err != nil {
+		return nil, err
+	}
+	allowed[resSecrets][verbCreate] = secretsOK
 	return allowed, nil
 }
 
@@ -265,14 +285,22 @@ func reviewAccess(ctx context.Context, caller client.Client, namespace, resource
 // the `log` subresource, not in agents.ctxmesh.ai. A transport/API error (not the allow/deny
 // answer) is returned so the caller can fail honestly.
 func reviewLogsAccess(ctx context.Context, caller client.Client, namespace string) (bool, error) {
+	return reviewCoreAccess(ctx, caller, namespace, resPods, "log", verbGet)
+}
+
+// reviewCoreAccess issues one SelfSubjectAccessReview against the CORE API group
+// (the empty group) for (namespace, resource[/subresource], verb). The agents-group
+// probes go through reviewAccess; this is its core-group sibling, shared by the
+// pods/log and secrets probes so the two cannot drift apart.
+func reviewCoreAccess(ctx context.Context, caller client.Client, namespace, resource, subresource, verb string) (bool, error) {
 	ssar := &authzv1.SelfSubjectAccessReview{
 		Spec: authzv1.SelfSubjectAccessReviewSpec{
 			ResourceAttributes: &authzv1.ResourceAttributes{
 				Namespace:   namespace,
 				Group:       "", // core API group
-				Resource:    resPods,
-				Subresource: "log",
-				Verb:        verbGet,
+				Resource:    resource,
+				Subresource: subresource,
+				Verb:        verb,
 			},
 		},
 	}

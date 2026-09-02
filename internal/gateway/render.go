@@ -280,17 +280,26 @@ func Render(
 				e.apiKey = mockDummyAPIKey
 				e.mockResp = MockResponse
 				e.isMock = true
-			} else if p.APIBase != "" {
-				// api_base seam: proxy this route to an arbitrary OpenAI-compatible
-				// upstream (e.g. the deterministic tool-call mock). LiteLLM PROXIES
-				// the request (relaying tools/tool_calls unchanged) rather than
-				// short-circuiting like mock. The upstream needs no real key, so a
-				// dummy non-empty api_key is used and NO SecretBinding/env var is
-				// required — mirrors the CLI dev_plan.go real-with-api_base path and
-				// harness/mock-provider/litellm-tool-mock.yaml.
+			} else if p.APIBase != "" && p.SecretBindingRef == "" {
+				// api_base seam, UNAUTHENTICATED: proxy this route to an arbitrary
+				// OpenAI-compatible upstream (e.g. the deterministic tool-call mock).
+				// LiteLLM PROXIES the request (relaying tools/tool_calls unchanged)
+				// rather than short-circuiting like mock. The upstream needs no real
+				// key, so a dummy non-empty api_key is used and NO SecretBinding/env
+				// var is required — mirrors the CLI dev_plan.go real-with-api_base path
+				// and harness/mock-provider/litellm-tool-mock.yaml.
+				//
+				// A route with apiBase AND a binding takes the branch below instead:
+				// that is the console's connect-a-custom-provider shape (M153), where
+				// the endpoint is the operator's own gateway and the key they pasted is
+				// exactly what authenticates to it. Sending the dummy key there would
+				// silently drop the user's credential.
 				e.apiBase = p.APIBase
 				e.apiKey = mockDummyAPIKey
 			} else {
+				// A custom/OpenAI-compatible upstream still needs its api_base; the key
+				// resolution below is the normal SecretBinding path either way.
+				e.apiBase = p.APIBase
 				bindingKey := r.Namespace + "/" + p.SecretBindingRef
 				sb := bindings[bindingKey]
 				evName := EnvVarName(p.SecretBindingRef)

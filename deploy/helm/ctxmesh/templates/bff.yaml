@@ -127,6 +127,8 @@ spec:
           value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default (printf "%s://ctxmesh-token-service.%s.svc:8443" (ternary "https" "http" .Values.tokenService.tls.required) .Values.namespace) }}
         - name: MODEL_GATEWAY_URL
           value: {{ .Values.bff.modelGatewayURL | default (printf "http://ctxmesh-gateway.%s.svc:4000" .Values.namespace) }}
+        - name: MANAGED_AGENT_IMAGE
+          value: {{ .Values.bff.managedAgentImage | default "" | quote }}
         - name: INGEST_OCR_URL
           value: {{ .Values.bff.ingestOcrURL | default "" | quote }}
         - name: KNOWLEDGE_RERANK_URL

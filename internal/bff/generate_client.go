@@ -39,7 +39,13 @@ import (
 // / usage views (ADR 0014 — generation is cost-tagged + honest, not hidden). Both
 // Anthropic and OpenAI echo a request `metadata` object into their usage/cost
 // analytics; tagging here is the visible, provider-side cost marker.
+const chatRoleSystem = "system"
+
 const generationCostTag = "ctxmesh/create-from-prompt"
+
+// metaPurpose is the provider-metadata key the cost tag is stamped under. One
+// constant so the three provider paths cannot drift on the spelling.
+const metaPurpose = "purpose"
 
 // maxGenerationTokens bounds the model's completion. A simplified agent.yaml is
 // small; this cap keeps the generation call cheap and its cost predictable.
@@ -89,10 +95,19 @@ func chatComplete(ctx context.Context, httpClient *http.Client, provider, apiKey
 		return anthropicChat(ctx, c, apiKey, baseURL, model, systemPrompt, description, costTag)
 	case providerOpenAI:
 		return openaiChat(ctx, c, apiKey, baseURL, model, systemPrompt, description, costTag)
+	case providerCustom:
+		// Same wall, one screen later. A custom provider that can be CONNECTED but
+		// cannot GENERATE would leave the "Describe it" entrance broken for exactly
+		// the users the connect fix just unblocked, which is the same between-screens
+		// defect wearing a different hat.
+		if strings.TrimSpace(baseURL) == "" {
+			return "", &providerError{status: http.StatusBadRequest, msg: msgCustomNeedsBaseURL}
+		}
+		return customChat(ctx, c, apiKey, baseURL, model, systemPrompt, description, costTag)
 	default:
 		return "", &providerError{
 			status: http.StatusBadRequest,
-			msg:    fmt.Sprintf("unsupported provider %q (supported: anthropic, openai)", provider),
+			msg:    fmt.Sprintf("unsupported provider %q (supported: anthropic, openai, custom)", provider),
 		}
 	}
 }
@@ -200,14 +215,14 @@ func openaiChat(ctx context.Context, c *http.Client, apiKey, baseURL, model, sys
 	base := providerBaseURL(baseURL, openaiDefaultBaseURL)
 	msgs := make([]openaiChatMessage, 0, 2)
 	if systemPrompt != "" {
-		msgs = append(msgs, openaiChatMessage{Role: "system", Content: systemPrompt})
+		msgs = append(msgs, openaiChatMessage{Role: chatRoleSystem, Content: systemPrompt})
 	}
 	msgs = append(msgs, openaiChatMessage{Role: chatRoleUser, Content: description})
 	payload := openaiChatRequest{
 		Model:     model,
 		MaxTokens: maxGenerationTokens,
 		Messages:  msgs,
-		Metadata:  map[string]string{"purpose": costTag},
+		Metadata:  map[string]string{metaPurpose: costTag},
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -257,10 +272,10 @@ func chatCompleteViaGateway(ctx context.Context, c *http.Client, gatewayURL, mod
 	}
 	msgs := make([]openaiChatMessage, 0, 2)
 	if systemPrompt != "" {
-		msgs = append(msgs, openaiChatMessage{Role: "system", Content: systemPrompt})
+		msgs = append(msgs, openaiChatMessage{Role: chatRoleSystem, Content: systemPrompt})
 	}
 	msgs = append(msgs, openaiChatMessage{Role: chatRoleUser, Content: description})
-	meta := map[string]string{"purpose": costTag}
+	meta := map[string]string{metaPurpose: costTag}
 	if strings.TrimSpace(callerTag) != "" {
 		meta["user"] = callerTag // per-caller spend attribution in the gateway's logs
 	}
@@ -335,4 +350,54 @@ func doChat(c *http.Client, req *http.Request, provider string) ([]byte, error) 
 		}
 	}
 	return raw, nil
+}
+
+// customChat drives an operator-supplied OpenAI-compatible endpoint. Identical to
+// openaiChat but with no public default base URL (the caller checked it) and the
+// same tolerance for a base that already ends in /v1 as the model-list probe.
+func customChat(ctx context.Context, c *http.Client, apiKey, baseURL, model, systemPrompt, description, costTag string) (string, error) {
+	msgs := make([]openaiChatMessage, 0, 2)
+	if systemPrompt != "" {
+		msgs = append(msgs, openaiChatMessage{Role: chatRoleSystem, Content: systemPrompt})
+	}
+	msgs = append(msgs, openaiChatMessage{Role: chatRoleUser, Content: description})
+	body, err := json.Marshal(openaiChatRequest{
+		Model:     model,
+		MaxTokens: maxGenerationTokens,
+		Messages:  msgs,
+		Metadata:  map[string]string{metaPurpose: costTag},
+	})
+	if err != nil {
+		return "", &providerError{status: http.StatusInternalServerError, msg: msgBuildGenerationReq}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, customChatURL(baseURL), bytes.NewReader(body))
+	if err != nil {
+		return "", &providerError{status: http.StatusBadGateway, msg: msgBuildProviderReq}
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	raw, err := doChat(c, req, providerCustom)
+	if err != nil {
+		return "", err
+	}
+	var out openaiChatResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", &providerError{status: http.StatusBadGateway, msg: "could not parse the custom generation response"}
+	}
+	if len(out.Choices) == 0 {
+		return "", &providerError{status: http.StatusBadGateway, msg: "the custom generation response had no choices"}
+	}
+	return out.Choices[0].Message.Content, nil
+}
+
+// customChatURL builds {base}/v1/chat/completions, tolerating a base that already
+// ends in /v1 — the same rule as customModelsURL, kept beside its sibling.
+func customChatURL(baseURL string) string {
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if strings.HasSuffix(base, "/v1") {
+		return base + "/chat/completions"
+	}
+	return base + "/v1/chat/completions"
 }

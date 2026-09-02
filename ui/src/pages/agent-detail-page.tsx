@@ -170,6 +170,10 @@ function resolveTab(raw: string | null): Tab {
   return TABS.find((x) => x.toLowerCase() === t) ?? TAB_ALIAS[t] ?? "Overview";
 }
 
+/** How often an UNSETTLED agent's page re-checks. Fast enough that a pod coming up
+ *  feels live, slow enough that a page left open costs nothing worth counting. */
+const AGENT_SETTLE_POLL_MS = 4_000;
+
 type Load =
   | { kind: "loading" }
   | { kind: "ready"; detail: AgentDetailResponse }
@@ -233,9 +237,12 @@ export function AgentDetailPage() {
     setSearchParams((p) => { p.delete("delete"); return p; });
   }
 
-  const load = React.useCallback(() => {
+  // `silent` re-fetches WITHOUT dropping back to the skeleton — the difference between
+  // a refresh and a reload. The settle poll below uses it, because flashing the whole
+  // page every few seconds while an agent starts is worse than the staleness it fixes.
+  const load = React.useCallback((silent = false) => {
     const controller = new AbortController();
-    setState({ kind: "loading" });
+    if (!silent) setState({ kind: "loading" });
     api
       .agentDetail(ns, name, controller.signal)
       .then((detail) => {
@@ -263,6 +270,27 @@ export function AgentDetailPage() {
   }, [ns, name]);
 
   React.useEffect(() => load(), [load]);
+
+  // ── Watch it settle ────────────────────────────────────────────────────────
+  // The page used to fetch exactly once. Create an agent, land here while it is still
+  // provisioning, and the status chip said "still working" forever — the agent reached
+  // Ready forty seconds later and the screen never noticed. The user's only recourse
+  // was to reload a page that gave them no reason to think reloading would help.
+  //
+  // That is the seam this page sits on: creating works, the controller works, and the
+  // one surface joining them was a snapshot. So poll while the agent is UNSETTLED and
+  // stop the moment it settles — no timer on a steady-state page, no websocket to keep
+  // alive, and nothing to clean up but an interval.
+  const settled = state.kind === "ready" && state.detail.ready;
+  React.useEffect(() => {
+    if (state.kind !== "ready" || settled) return;
+    const id = window.setInterval(() => {
+      // Skip while the tab is hidden: a backgrounded page polling a cluster is pure
+      // cost, and it re-syncs on the next visible tick anyway.
+      if (document.visibilityState === "visible") load(true);
+    }, AGENT_SETTLE_POLL_MS);
+    return () => window.clearInterval(id);
+  }, [state.kind, settled, load]);
 
   // ── Loading (§7 A2: header band + a panel skeleton + rail kv bars) ─────────
   if (state.kind === "loading") {
@@ -567,7 +595,11 @@ function AgentBand({
       title={detail.name}
       titleMono
       status={
-        <span className="flex flex-wrap items-center gap-1.5">
+        // The header's own status cluster. Named because "the agent's status" has to be
+        // addressable on a page that renders several StatusBadges (versions, gates,
+        // reachability) — an unscoped lookup finds whichever happens to come first in
+        // the DOM and reports its verdict as the agent's (M153).
+        <span className="flex flex-wrap items-center gap-1.5" data-testid="agent-status">
           <StatusBadge
             ready={detail.ready}
             phase={detail.phase}
