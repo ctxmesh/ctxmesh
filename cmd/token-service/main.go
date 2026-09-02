@@ -51,6 +51,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 	"github.com/ctxmesh/ctxmesh/internal/credstore"
+	"github.com/ctxmesh/ctxmesh/internal/runtimelimit"
 )
 
 // mcpAuthTypeAnnotation MUST match internal/bff.annMCPAuthType — the non-secret annotation
@@ -85,6 +86,12 @@ const (
 )
 
 func main() {
+	// Teach the Go runtime about the cgroup it lives in (M148, internal/runtimelimit).
+	// Without GOMEMLIMIT the GC sizes the heap from GOGC alone and grows straight
+	// through the container limit, so the kernel kills the process instead of the
+	// collector working harder. Slower beats dead for a control plane.
+	runtimelimit.Apply()
+
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	log := ctrl.Log.WithName("token-service")
 	if err := run(log); err != nil {

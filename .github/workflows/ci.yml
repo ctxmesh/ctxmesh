@@ -203,6 +203,19 @@ jobs:
       # top-level CEL validations across versions (audit FUNC-8).
       - name: CRD version-parity gate
         run: make crd-version-parity
+      # M148 ✅ line: the install proof runs in CI so it cannot rot the way G7/G11 did.
+      #
+      # Every assertion is about the RENDER, so it needs no cluster and costs seconds —
+      # which is what makes it affordable on every PR. It catches the exact class of
+      # defect M148 fixed: a resource the chart consumes and never creates, an env var
+      # code reads that has no chart home, RAG wired on only one of its two halves, and
+      # a production render that installs something which cannot start.
+      #
+      # The CLUSTER-level bring-up is deliberately not here: it needs Knative + KEDA +
+      # a kind cluster (~10 min a run) and this project has already had its Actions
+      # minutes exhausted once (m52.G3). Carded for M150.
+      - name: Install-truth gate (the chart provisions what it consumes)
+        run: ./hack/install-truth.sh
 
   envtest:
     name: envtest
