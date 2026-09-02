@@ -59,14 +59,23 @@ PROVIDER_CONNECT_ENV_HELM = (
 # nothing, so the BFF env is byte-identical to kustomize (no-drift); enabled, the BFF
 # gets RUN_STORE_DSN (from the operator Secret) + RUN_WORKER_DISPATCH=true so it
 # dispatches runs to the run-worker (run-worker.yaml) instead of executing in-process.
+# M148 hardening (close gate a, finding A1): RUN_STORE_DSN is NO LONGER an explicit
+# `env` entry here.
+#
+# An explicit container `env` beats EVERY `envFrom` entry regardless of order, so this
+# entry shadowed the chart-owned ctxmesh-postgres-dsn Secret and pointed the BFF at a
+# `run-store` Secret nothing creates — the exact bug M148 exists to fix, restated for a
+# different Secret, on the path `profile=production` makes mandatory. Because it had no
+# `optional: true`, the pod could not even build its container config
+# (CreateContainerConfigError), so there was not even a log line naming the DSN.
+#
+# Now it comes from `envFrom` like CONTROLPLANE_DSN, which is what makes ADR 0130's
+# override order actually apply to it. `bff.runStore.dsnSecretName` remains the seam for
+# an operator who wants a SEPARATE run-store database: setting it adds that Secret to
+# envFrom AFTER the chart's, so later-wins gives them the override.
 RUN_STORE_ENV_INJECT = (
     PROVIDER_CONNECT_ENV_HELM + "\n"
     "{{- if .Values.bff.runStore.enabled }}\n"
-    "        - name: RUN_STORE_DSN\n"
-    "          valueFrom:\n"
-    "            secretKeyRef:\n"
-    "              name: {{ .Values.bff.runStore.dsnSecretName }}\n"
-    "              key: dsn\n"
     "        - name: RUN_WORKER_DISPATCH\n"
     '          value: "true"\n'
     "{{- end }}"
@@ -452,8 +461,26 @@ def substitute(doc: str) -> str:
     # somewhere else.
     doc = doc.replace(
         f"postgres://ctxmesh:ctxmesh-dev-secret@ctxmesh-postgres.{NS_KUSTOMIZE}.svc:5432/ctxmesh?sslmode=disable",
-        "{{ .Values.postgres.externalDsn | "
-        'default (printf "postgres://ctxmesh:ctxmesh-dev-secret@ctxmesh-postgres.%s.svc:5432/ctxmesh?sslmode=disable" .Values.namespace) }}',
+        # Quoting is conditional, and that is deliberate (M148 hardening, finding B5).
+        #
+        # An OPERATOR-supplied DSN must be quoted: a libpq keyword/value string
+        # legitimately contains spaces, so unquoted it is truncated at the first " #"
+        # — YAML takes the rest as a comment and the control plane connects to
+        # something other than what was written, with no error at all. A value
+        # containing ':' or a leading '*' fails the render outright, naming the wrong
+        # line.
+        #
+        # The DEFAULT literal must stay unquoted, because `helm-verify` diffs the
+        # default render against `kustomize build` as TEXT and kustomize strips quotes
+        # on re-emit. An unconditional `| quote` broke no-drift — and the first attempt
+        # at fixing that by quoting the kustomize source instead silently killed the
+        # override entirely, because the generator's exact-string replace no longer
+        # matched what kustomize emitted. The if/else gives both: byte-identical at
+        # default, quoted the moment an operator supplies a value.
+        '{{ if .Values.postgres.externalDsn }}{{ .Values.postgres.externalDsn | quote }}'
+        "{{ else }}"
+        '{{ printf "postgres://ctxmesh:ctxmesh-dev-secret@ctxmesh-postgres.%s.svc:5432/ctxmesh?sslmode=disable" .Values.namespace }}'
+        "{{ end }}",
     )
     # BFF connect-a-provider kill-switch -> Helm value (ADR 0015). Only the BFF
     # deployment carries this exact env block; the default keeps the render at

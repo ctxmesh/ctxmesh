@@ -62,6 +62,16 @@ spec:
           # check) come from the bff-capability + bff-adapters Secrets the BFF reads; optional so
           # `helm template` renders before they exist.
           envFrom:
+            # M148 hardening (close gate a, finding B1): the preflight Job is the install's
+            # OWN gate, and it could not see the database M148 added. internal/preflight
+            # only pings when ControlPlaneDSN is non-empty, and the DSN is not in the
+            # required set — so with it absent the ping was SKIPPED and the job logged
+            # "preflight OK". An operator with a wrong password got a green post-install
+            # hook, a successful `helm install`, and then three CrashLooping components.
+            # A probe that cannot fail is worse than no probe.
+            - secretRef:
+                name: ctxmesh-postgres-dsn
+                optional: true
             - secretRef:
                 name: bff-adapters
                 optional: true

@@ -42,11 +42,17 @@ kubectl -n ctxmesh rollout status deploy/ctxmesh-controller-manager
 kubectl -n ctxmesh port-forward svc/ctxmesh-bff 9090:9090   # → http://localhost:9090/
 ```
 
-**What works immediately, and what needs a key.** Knowledge-base ingestion and retrieval work out
-of the box: the chart wires the model gateway by default, so uploading documents to a
-KnowledgeBase and searching it returns ranked, **cited** chunks with no external service involved.
-Running an *agent* needs a model, so connect a provider in the console (or create a `SecretBinding`
-+ `ModelRoute`) before an agent can answer anything.
+**What you get, and what you have to add.** The install brings up a working control plane: the
+console, the CRDs, the model gateway, the databases and the credential plane. It ships **no models** —
+the gateway starts with an empty model list — so the first thing to do is connect a provider in the
+console (or create a `SecretBinding` + `ModelRoute`), which is what lets an agent answer anything.
+
+Knowledge bases need one more piece than agents do: an **embedding** `ModelRoute`, named in the
+KnowledgeBase's `spec.embeddingRoute`. It can point at a hosted embedding model through the provider
+you just connected, or at a self-hosted one — ctxmesh embeds through the gateway either way, so
+retrieval works with no external service if you run your own embedder. Once that route exists,
+uploading documents and searching returns ranked chunks **with citations** (`documentRef` +
+`chunkIndex`), which is what an agent grounds its answers on.
 
 **Use your own images.** The chart defaults to the `:latest` tags built by `make docker-build-*`
 (side-loaded into a kind cluster). For a real cluster, push the images to a registry and override

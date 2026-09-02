@@ -55,6 +55,20 @@ spec:
               containerPort: 9092
               protocol: TCP
           env:
+            # M148 hardening (close gate a, finding B3). The run-worker runs the SAME bff
+            # binary and EXECUTES ingestion runs (internal/bff/run_worker.go: if
+            # rn.IsIngestionJob() { s.executeIngestion(...) }), and profile=production
+            # makes it mandatory. M148 measured a 582Mi ingestion peak and raised the BFF
+            # to 1Gi — but in the durable configuration that identical work ran here, in a
+            # 256Mi container, with no soft limit. Production would have got the OOMKill
+            # the milestone believed it had fixed, at a LOWER ceiling than the one that
+            # failed.
+            - name: CONTAINER_MEMORY_LIMIT_BYTES
+              valueFrom:
+                resourceFieldRef:
+                  containerName: run-worker
+                  resource: limits.memory
+                  divisor: "1"
             # RUN_STORE_DSN points at the durable Postgres run store (operator-provided Secret).
             # The KEDA postgresql scaler reads the SAME env (connectionFromEnv) — one source of truth.
             # M148/ADR 0130: sourced from the chart-owned postgres-dsn Secret.
@@ -100,4 +114,6 @@ spec:
               cpu: 50m
               memory: 64Mi
             limits:
-              memory: 256Mi
+              # Raised 256Mi -> 1Gi to MATCH the BFF: this container runs the same
+              # ingestion path, so it needs the same measured headroom (M148 B3).
+              memory: 1Gi

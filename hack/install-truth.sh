@@ -88,4 +88,44 @@ fi
 grep -q 'postgres.externalDsn' "$PROD" || fail "the production render failed for some reason other than the missing external DSN"
 ok "profile=production refuses without an operator-managed database"
 
+# 9. The DURABLE run path, which profile=production makes mandatory.
+#
+# Everything above renders DEFAULT values, where bff.runStore.enabled=false and the
+# run-worker renders nothing at all. That blind spot is not hypothetical: it is how this
+# gate passed over a run-worker whose RUN_STORE_DSN pointed at a `run-store` Secret the
+# chart never creates — the same defect M148 exists to fix, on the one path a production
+# install cannot avoid (M148 close gate a, finding A1). A gate named "the chart provisions
+# what it consumes" has to render the configurations an operator actually runs.
+RUNSTORE="$(mktemp)"; trap 'rm -f "$RENDER" "$PROD" "$RUNSTORE"' EXIT
+helm template ctxmesh "$CHART" -n ctxmesh --set bff.runStore.enabled=true > "$RUNSTORE" 2>/dev/null \
+  || fail "the chart does not template with the durable run store enabled"
+
+# Every Secret this render CONSUMES must be one it CREATES or one explicitly marked
+# optional. An explicit `env` secretKeyRef is the dangerous shape: it has no optional
+# flag in practice here, it beats every envFrom entry regardless of order, and a missing
+# target leaves the pod in CreateContainerConfigError with no log line at all.
+python3 - "$RUNSTORE" <<'PY' || fail "the durable run path consumes a Secret the chart does not create"
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+created = {d["metadata"]["name"] for d in docs if d.get("kind") == "Secret"}
+bad = []
+for d in docs:
+    if d.get("kind") not in ("Deployment", "StatefulSet", "Job"):
+        continue
+    name = d["metadata"]["name"]
+    for c in d["spec"]["template"]["spec"].get("containers", []):
+        for e in c.get("env") or []:
+            ref = (e.get("valueFrom") or {}).get("secretKeyRef")
+            if ref and ref.get("name") not in created and not ref.get("optional"):
+                bad.append(f"{name}: env {e['name']} -> Secret {ref['name']} (not created, not optional)")
+        for ef in c.get("envFrom") or []:
+            ref = ef.get("secretRef")
+            if ref and ref.get("name") not in created and not ref.get("optional"):
+                bad.append(f"{name}: envFrom -> Secret {ref['name']} (not created, not optional)")
+for b in bad:
+    print("    " + b, file=sys.stderr)
+sys.exit(1 if bad else 0)
+PY
+ok "the durable run path (bff.runStore.enabled=true) consumes nothing the chart does not create"
+
 echo "PASS: the chart provisions what it consumes"
