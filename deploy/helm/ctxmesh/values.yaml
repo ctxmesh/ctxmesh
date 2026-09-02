@@ -236,6 +236,14 @@ postgres:
   # database; splitting them would let half an install point elsewhere). Empty ⇒
   # the bundled in-cluster Postgres Service in the install namespace.
   #   postgres://user:password@host:5432/dbname?sslmode=require
+  #
+  # The target database must be able to run `CREATE EXTENSION IF NOT EXISTS vector`.
+  # `vector` is NOT a trusted extension, so that needs elevated rights a least-privilege
+  # application role does not have on a managed provider: grant rds_superuser (RDS) /
+  # cloudsqlsuperuser (Cloud SQL) / azure_pg_admin (Azure), OR have a DBA create the
+  # extension once — after which no elevated rights are needed at runtime. The preflight
+  # job checks this and names the extension, so a misprovisioned database fails the
+  # install rather than the first knowledge query (M149 m149.7).
   externalDsn: ""
 
 # --- In-cluster PERSISTENT state layer (M48, ADR 0047) — OPT-IN --------------

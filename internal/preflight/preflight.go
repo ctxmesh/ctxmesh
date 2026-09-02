@@ -44,9 +44,17 @@ type Config struct {
 // reachability check (env + keypair coherence still run).
 type PingDSN func(ctx context.Context, dsn string) error
 
+// CheckVector reports whether the control-plane database can run the pgvector migration.
+//
+// Separate from PingDSN because reachable and usable are different questions, and only the
+// second one catches the least-privilege managed-Postgres case: `vector` is NOT a trusted
+// extension, so `CREATE EXTENSION` requires superuser (or rds_superuser, or a
+// pre-created extension) on RDS, Cloud SQL and Azure. Nil skips the check.
+type CheckVector func(ctx context.Context, dsn string) error
+
 // Check runs every coherence check and returns ALL failures (not just the first) so an operator fixes
 // the whole misconfiguration in one pass. A nil/empty result means the install is coherent.
-func Check(ctx context.Context, cfg Config, ping PingDSN) []error {
+func Check(ctx context.Context, cfg Config, ping PingDSN, checkVector CheckVector) []error {
 	var errs []error
 
 	// 1. Required settings must be non-empty — the silent-feature-off surface.
@@ -69,6 +77,21 @@ func Check(ctx context.Context, cfg Config, ping PingDSN) []error {
 	if cfg.ControlPlaneDSN != "" && ping != nil {
 		if err := ping(ctx, cfg.ControlPlaneDSN); err != nil {
 			errs = append(errs, fmt.Errorf("control-plane store (CONTROLPLANE_DSN) is unreachable: %w — check the DSN + that the database is up", err))
+		} else if checkVector != nil {
+			// 3b. …and it must be able to run the pgvector migration (M149 m149.7).
+			//
+			// A reachable database is not a usable one. 0003_agent_memories.sql and
+			// 0005_knowledge_chunks.sql both run `CREATE EXTENSION IF NOT EXISTS vector`,
+			// controlplane.Connect returns the migration error, and every caller exits — so a
+			// managed Postgres without the extension, or with a least-privilege role that
+			// cannot create it, produces a CrashLoop three layers from its cause. That is
+			// exactly the failure M148 existed to remove, relocated to production.
+			//
+			// It is checked HERE, in the install's own gate, because the alternative is
+			// discovering it from a controller's exit code.
+			if err := checkVector(ctx, cfg.ControlPlaneDSN); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 

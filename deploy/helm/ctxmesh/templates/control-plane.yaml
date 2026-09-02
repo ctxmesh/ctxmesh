@@ -133,7 +133,14 @@ rules:
   resources:
   - agentdeployments
   verbs:
-  - '*'
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+  - deletecollection
 - apiGroups:
   - agents.ctxmesh.ai
   resources:
@@ -204,7 +211,14 @@ rules:
   resources:
   - agentversions
   verbs:
-  - '*'
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+  - deletecollection
 - apiGroups:
   - agents.ctxmesh.ai
   resources:
