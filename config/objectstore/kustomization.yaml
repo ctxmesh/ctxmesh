@@ -2,3 +2,4 @@ resources:
 - secret.yaml
 - deployment.yaml
 - service.yaml
+- networkpolicy.yaml
