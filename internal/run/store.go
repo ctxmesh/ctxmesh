@@ -121,6 +121,14 @@ type Event struct {
 type Store interface {
 	// Create stores a new run. It errors if the id already exists.
 	Create(r *Run) error
+	// ActiveIngestion returns the id of a queued-or-running ingestion run for
+	// (namespace, knowledgeBase), or "" when none is in flight (M152 m152.3).
+	//
+	// It exists because concurrent ingests on one KB are MUTUALLY DESTRUCTIVE rather than
+	// merely wasteful: SweepOrphans deletes a document's chunks whose ingestion_run_id
+	// differs from the current run, so two runs each sweep the other's rows and both report
+	// success. Nothing errors, so nothing surfaces it.
+	ActiveIngestion(namespace, knowledgeBase string) (string, error)
 	// Get returns a COPY of the run (callers must not mutate the store's object).
 	Get(id string) (*Run, error)
 	// GetByTraceID returns a COPY of the run whose TraceID matches traceID, or (nil, nil) if none
@@ -493,6 +501,26 @@ func (m *memStore) waitMetLocked(r *Run) bool {
 		}
 	}
 	return waitSatisfied(r.WaitMode, statuses)
+}
+
+// ActiveIngestion scans for a queued-or-running ingestion run on the KB (M152 m152.3).
+//
+// The mem store is the dev/single-pod path, so a linear scan is right: the alternative is an
+// index that has to stay correct across every status transition for a store whose whole
+// point is that it is simple.
+func (m *memStore) ActiveIngestion(namespace, knowledgeBase string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, e := range m.entries {
+		r := e.run
+		if r == nil || r.IngestionRef != knowledgeBase || r.Namespace != namespace {
+			continue
+		}
+		if r.Status == StatusQueued || r.Status == StatusRunning {
+			return id, nil
+		}
+	}
+	return "", nil
 }
 
 func (m *memStore) Create(r *Run) error {

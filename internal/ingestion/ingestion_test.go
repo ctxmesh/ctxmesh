@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -32,11 +33,39 @@ import (
 
 type fakeRunStore struct {
 	created []*run.Run
+	// active simulates a queued-or-running ingestion for the KB (M152 m152.3); activeErr
+	// simulates a store that cannot answer, which the Creator must treat as fail-closed.
+	active    string
+	activeErr error
 }
 
 func (f *fakeRunStore) Create(rn *run.Run) error {
 	f.created = append(f.created, rn)
 	return nil
+}
+
+func (f *fakeRunStore) ActiveIngestion(_, _ string) (string, error) {
+	return f.active, f.activeErr
+}
+
+// newTestCreator builds a Creator over a mem object store holding one document, plus the KB
+// that names it — the minimum a CreateIngestionRun call needs to get past source resolution
+// and reach the guards under test.
+func newTestCreator(t *testing.T, rs *fakeRunStore) (*Creator, *agentsv1beta1.KnowledgeBase) {
+	t.Helper()
+	ns, kbName := "team-a", "docs-kb"
+	store := objectstore.NewMemObjectStore()
+	prefix := objectstore.KnowledgePrefix(ns, kbName)
+	require.NoError(t, store.Put(context.Background(), prefix+"a.md",
+		bytes.NewReader([]byte("aaa")), 3, "text/markdown"))
+	return &Creator{DocStore: store, RunStore: rs}, &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: kbName, Namespace: ns},
+		Spec: agentsv1beta1.KnowledgeBaseSpec{
+			Source:         agentsv1beta1.KnowledgeBaseSource{Type: SourceTypeUpload},
+			EmbeddingRoute: "demo-embed",
+			Chunking:       agentsv1beta1.ChunkingConfig{Size: 512, Overlap: 64, Splitter: "recursive"},
+		},
+	}
 }
 
 func TestCreator_CreateIngestionRun_PinsSpecAndCreatesRun(t *testing.T) {
@@ -75,4 +104,35 @@ func TestCreator_CreateIngestionRun_PinsSpecAndCreatesRun(t *testing.T) {
 	require.Equal(t, kbName, spec.KnowledgeBase)
 	require.Equal(t, "demo-embed", spec.EmbeddingRoute)
 	require.Len(t, spec.Documents, 2, "both source documents are pinned into the spec")
+}
+
+// M152 m152.3: the shared Creator refuses a second ingest, so the controller's SCHEDULED
+// re-ingest is guarded too — not only the BFF handler. M148 put the empty-corpus guard in
+// the handler alone and M149's re-audit found the scheduled path still creating
+// zero-document runs on a timer; the same mistake twice would be a pattern.
+func TestCreateIngestionRun_RefusesWhenOneIsAlreadyInFlight(t *testing.T) {
+	rs := &fakeRunStore{active: "run-already-going"}
+	c, kb := newTestCreator(t, rs)
+
+	_, err := c.CreateIngestionRun(context.Background(), kb)
+	if !errors.Is(err, ErrIngestionInFlight) {
+		t.Fatalf("expected ErrIngestionInFlight, got %v", err)
+	}
+	if len(rs.created) != 0 {
+		t.Fatalf("a refused ingest must create no run; got %d", len(rs.created))
+	}
+}
+
+// A store that cannot answer must FAIL CLOSED. Admitting a second run on an unknown state is
+// the worst option available: concurrent ingests destroy the corpus silently.
+func TestCreateIngestionRun_FailsClosedWhenTheStoreCannotAnswer(t *testing.T) {
+	rs := &fakeRunStore{activeErr: errors.New("store down")}
+	c, kb := newTestCreator(t, rs)
+
+	if _, err := c.CreateIngestionRun(context.Background(), kb); err == nil {
+		t.Fatal("an unanswerable in-flight check must refuse, not admit")
+	}
+	if len(rs.created) != 0 {
+		t.Fatalf("nothing may be created when the guard cannot run; got %d", len(rs.created))
+	}
 }

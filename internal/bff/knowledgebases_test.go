@@ -772,3 +772,51 @@ func TestSearchKB_AbsentKB_Returns404(t *testing.T) {
 	code, body := searchKB(t, s, "ghost-kb", kbNS, reqBody)
 	assert.Equal(t, http.StatusNotFound, code, "expected 404 for absent KB; body: %s", string(body))
 }
+
+// M152 m152.3: two concurrent ingests on one KB are MUTUALLY DESTRUCTIVE, so the second is
+// refused rather than queued.
+//
+// SweepOrphans deletes a document's chunks whose ingestion_run_id differs from the current
+// run. With runs A and B on one KB: A upserts as A, B upserts as B, A sweeps everything ≠ A
+// (taking B's rows), B sweeps everything ≠ B (taking A's). Both runs report SUCCESS and the
+// corpus is left holding whichever fragment lost the race last. Nothing errors, which is why
+// nothing ever surfaced it.
+func TestIngestKB_SecondConcurrentIngestIsRefused(t *testing.T) {
+	kb := mockKnowledgeBase("my-kb", kbNS)
+	kb.Spec.EmbeddingRoute = "embed-v1"
+	s, docStore := newIngestEndpointServer(t, kb)
+
+	key := objectstore.KnowledgeKey(kbNS, "my-kb", "guide.md")
+	require.NoError(t, docStore.Put(context.Background(), key,
+		bytes.NewReader([]byte("The quick brown fox jumps over the lazy dog.")), -1, "text/markdown"))
+
+	code, body := postIngest(t, s, "my-kb", kbNS)
+	require.Equal(t, http.StatusAccepted, code, "the FIRST ingest is accepted; body: %s", string(body))
+
+	// The first run is now queued. A second must not join it.
+	code2, body2 := postIngest(t, s, "my-kb", kbNS)
+	require.Equal(t, http.StatusConflict, code2,
+		"a second concurrent ingest must be REFUSED — queueing it lets the two runs sweep each other's chunks while both report success; body: %s", string(body2))
+	assert.Contains(t, string(body2), "already in flight")
+}
+
+// The guard keys on the KB, not on "any ingest anywhere": a request naming a DIFFERENT
+// knowledge base is not answered with the in-flight conflict. (Their chunks never share a
+// sweep scope, so blocking across KBs would be a serialisation nobody asked for.)
+func TestIngestKB_TheConflictIsScopedToTheKnowledgeBase(t *testing.T) {
+	kb := mockKnowledgeBase("kb-a", kbNS)
+	kb.Spec.EmbeddingRoute = "embed-v1"
+	s, docStore := newIngestEndpointServer(t, kb)
+	require.NoError(t, docStore.Put(context.Background(),
+		objectstore.KnowledgeKey(kbNS, "kb-a", "guide.md"),
+		bytes.NewReader([]byte("content")), -1, "text/markdown"))
+
+	code, _ := postIngest(t, s, "kb-a", kbNS)
+	require.Equal(t, http.StatusAccepted, code)
+
+	// kb-b does not exist on this server, so the KB lookup 404s BEFORE the in-flight check.
+	// The point is that it is not a 409: the guard did not fire for an unrelated KB.
+	code2, body2 := postIngest(t, s, "kb-b", kbNS)
+	assert.NotEqual(t, http.StatusConflict, code2,
+		"the in-flight conflict must be scoped to the KB being ingested; body: %s", string(body2))
+}

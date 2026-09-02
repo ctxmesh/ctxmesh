@@ -26,6 +26,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -89,9 +90,22 @@ func ResolveKBSources(
 	}
 }
 
-// RunStore is the narrow write seam the Creator needs (the run store's Create).
+// RunStore is the narrow seam the Creator needs: create a run, and answer whether one is
+// already in flight for a knowledge base.
+//
+// ActiveIngestion exists because SweepOrphans makes concurrent ingests MUTUALLY
+// DESTRUCTIVE, not merely wasteful (M152 m152.3). It deletes a document's chunks whose
+// ingestion_run_id differs from the current run — so with runs A and B on one KB: A upserts
+// as A, B upserts as B, A sweeps everything ≠ A (taking B's rows), B sweeps everything ≠ B
+// (taking A's). Both runs report success and the corpus is left holding whichever fragment
+// lost the race last. Nothing errors, so nothing surfaces it.
 type RunStore interface {
 	Create(rn *run.Run) error
+	// ActiveIngestion returns the id of a queued-or-running ingestion run for (namespace,
+	// knowledgeBase), or "" when none is in flight. An implementation that cannot answer
+	// returns an error — the caller FAILS CLOSED rather than admitting a second run, because
+	// the damage is silent corpus loss.
+	ActiveIngestion(namespace, knowledgeBase string) (string, error)
 }
 
 // Creator builds + creates ingestion runs — the ONE source of truth used by the BFF /ingest handler AND the
@@ -106,12 +120,35 @@ type Creator struct {
 // CreateIngestionRun resolves the KB's source, pins the IngestionSpec, and creates a queued ingestion Run,
 // returning its id. For a per-user corpus each document's owner subject is recovered from its object key and
 // pinned; a per-user document with no recoverable owner is fail-closed skipped (never misattributed).
+// ErrIngestionInFlight reports that a KB already has a queued-or-running ingestion. The BFF
+// translates it to 409; the controller's scheduled re-ingest treats it as "skip this tick",
+// which is the correct behaviour for a timer that fires while the previous run is still going.
+var ErrIngestionInFlight = errors.New("an ingestion is already in flight for this knowledge base")
+
+// ErrEmptyCorpus reports that the resolved source contains no documents. Ingesting nothing is
+// never what a caller meant, and a run that succeeds having read nothing makes the console
+// show an ingested KB whose retrieval is silently empty (M148 m148.11, moved here by M152 so
+// the SCHEDULED path is guarded too).
+var ErrEmptyCorpus = errors.New("the knowledge base has no documents to ingest")
+
 func (c *Creator) CreateIngestionRun(ctx context.Context, kb *agentsv1beta1.KnowledgeBase) (string, error) {
 	ns := kb.Namespace
 	infos, err := ResolveKBSources(ctx, c.DocStore, ns, kb)
 	if err != nil {
 		return "", fmt.Errorf("resolve KB sources: %w", err)
 	}
+	// One ingestion at a time per KB (M152 m152.3). Checked HERE rather than in the BFF
+	// handler because this Creator is the ONE source of truth for both entry points — the
+	// handler and the controller's scheduled re-ingest. M148 put the empty-corpus guard in
+	// the handler alone, and M149's re-audit found the scheduled path still creating
+	// zero-document runs that succeeded having read nothing (m52 M148-ingest-guard-layer).
+	// The same mistake made twice would be a pattern, not an oversight.
+	if active, aErr := c.RunStore.ActiveIngestion(ns, kb.Name); aErr != nil {
+		return "", fmt.Errorf("could not determine whether an ingestion is already running for %q (failing closed — a concurrent ingest silently destroys the corpus): %w", kb.Name, aErr)
+	} else if active != "" {
+		return "", fmt.Errorf("%w: ingestion run %s is already in flight for KnowledgeBase %q", ErrIngestionInFlight, active, kb.Name)
+	}
+
 	docs := make([]IngestionDoc, 0, len(infos))
 	for _, info := range infos {
 		subject := ""
@@ -128,6 +165,15 @@ func (c *Creator) CreateIngestionRun(ctx context.Context, kb *agentsv1beta1.Know
 			Subject:     subject,
 		})
 	}
+	// Ingesting nothing is never what a caller meant, and a run that succeeds having read
+	// nothing leaves the console showing an ingested KB whose retrieval is silently empty.
+	// M148 put this in the BFF handler; M149's re-audit found the controller's SCHEDULED
+	// re-ingest still creating zero-document runs on a timer, because it does not go through
+	// that handler. It belongs here, where both entry points meet.
+	if len(docs) == 0 {
+		return "", ErrEmptyCorpus
+	}
+
 	spec := IngestionSpec{
 		Namespace:      ns,
 		KnowledgeBase:  kb.Name,
