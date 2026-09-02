@@ -463,6 +463,28 @@ func (s *Server) handleIngestKB(w http.ResponseWriter, r *http.Request) {
 	//
 	// Ingesting nothing is never what the caller meant. 422 says so while the caller is
 	// still watching, which is the whole difference.
+	// One ingestion at a time per KB (M152 m152.3). Concurrent ingests are MUTUALLY
+	// DESTRUCTIVE, not merely wasteful: SweepOrphans deletes a document's chunks whose
+	// ingestion_run_id differs from the current run, so with two runs each sweeps the other's
+	// rows and BOTH report success. Nothing errors, so nothing surfaces it — the corpus is
+	// just left holding whichever fragment lost the race last.
+	//
+	// Checked here AND in internal/ingestion's Creator, because this handler builds its own
+	// spec rather than going through that Creator — the duplication M149's re-audit named
+	// (m52 M148-ingest-guard-layer). Guarding both is correct today; collapsing them into one
+	// path is carded rather than done inside a RAG milestone.
+	if active, aErr := s.runStore.ActiveIngestion(ns, kbName); aErr != nil {
+		writeError(w, http.StatusInternalServerError,
+			"could not determine whether an ingestion is already running (refusing rather than risking a concurrent ingest, which silently destroys the corpus)")
+		return
+	} else if active != "" {
+		writeError(w, http.StatusConflict,
+			fmt.Sprintf("an ingestion is already in flight for KnowledgeBase %q (run %s). "+
+				"Concurrent ingests overwrite each other's chunks, so this one is refused rather "+
+				"than queued — retry once it finishes.", kbName, active))
+		return
+	}
+
 	if len(infos) == 0 {
 		writeError(w, http.StatusUnprocessableEntity,
 			fmt.Sprintf("KnowledgeBase %q has no documents to ingest. Upload documents first; "+
