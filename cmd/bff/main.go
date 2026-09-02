@@ -157,7 +157,53 @@ func runPreflight(ctx context.Context) int {
 		}
 		return db.Close()
 	}
-	errs := preflight.Check(ctx, cfg, ping)
+	// Can this database actually run the pgvector migration? (M149 m149.7)
+	//
+	// Connect() is open+ping only — Migrate() is separate — so a reachable database passes
+	// the check above and then fails at 0003_agent_memories.sql. `vector` is NOT a trusted
+	// extension, so CREATE EXTENSION needs superuser (or rds_superuser, or a pre-created
+	// extension) on RDS, Cloud SQL and Azure, and M148 made pgvector a hard production
+	// requirement without saying who provisions it.
+	//
+	// The check performs the REAL operation inside a transaction and rolls it back, rather
+	// than inferring from pg_roles — managed providers grant this through role membership
+	// (rds_superuser) rather than rolsuper, so an inference would be wrong on exactly the
+	// platforms this is for.
+	checkVector := func(ctx context.Context, dsn string) error {
+		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		db, err := controlplane.Connect(cctx, dsn)
+		if err != nil {
+			return nil // unreachable is already reported by the ping check; do not double-report
+		}
+		defer func() { _ = db.Close() }()
+
+		var installed bool
+		if err := db.QueryRowContext(cctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')`).Scan(&installed); err == nil && installed {
+			return nil
+		}
+
+		tx, err := db.BeginTx(cctx, nil)
+		if err != nil {
+			return nil // cannot tell; the ping already covers connectivity
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(cctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
+			return fmt.Errorf(
+				"the control-plane database cannot enable the `vector` extension, which the schema "+
+					"migration REQUIRES (knowledge chunks and long-term memory are searched by vector "+
+					"similarity, ADR 0084): %w\n"+
+					"    `vector` is not a trusted extension, so CREATE EXTENSION needs elevated rights. "+
+					"On a managed Postgres, either grant the install role rds_superuser (RDS) / "+
+					"cloudsqlsuperuser (Cloud SQL) / azure_pg_admin (Azure), or have a DBA run "+
+					"`CREATE EXTENSION vector;` in this database once — after which this check passes "+
+					"and no elevated rights are needed at runtime", err)
+		}
+		return nil
+	}
+
+	errs := preflight.Check(ctx, cfg, ping, checkVector)
 	if len(errs) == 0 {
 		log.Info("preflight OK — install configuration is coherent")
 		return 0
