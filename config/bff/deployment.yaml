@@ -131,6 +131,39 @@ spec:
             # Default renders the in-cluster http addr == the chart's default (no drift). (M124/Gate A.)
             - name: TOKEN_SERVICE_URL
               value: http://ctxmesh-token-service.ctxmesh.svc:8443
+            # --- Model-service + async wiring (M148/m148.5, m52 M141-install) -----
+            # Before M148 NONE of these had a chart home. The degradation was honest
+            # — no MODEL_GATEWAY_URL ⇒ KB ingest 501s; no DISCOVERY_EMBEDDING_ROUTE ⇒
+            # the discovery edge 501s; no ASYNC_BACKEND ⇒ the publish edge is never
+            # registered — but honest-when-unset is not the same as INSTALLABLE: on a
+            # stock `helm install` there was no way to turn any of them ON.
+            #
+            # MODEL_GATEWAY_URL is the one with a real default, because the chart
+            # SHIPS the gateway it points at (config/gateway). The KB-ingest embedder
+            # and the generation path both read it. Leaving it unset while deploying
+            # the gateway anyway is the exact "empty config default" shape that keeps
+            # biting (learning/architecture.md, now 3x).
+            - name: MODEL_GATEWAY_URL
+              value: http://ctxmesh-gateway.ctxmesh.svc:4000
+            # The rest name services the chart does NOT ship (the offline OCR and
+            # reranker services are deployed separately; the discovery route names a
+            # user's own ModelRoute; the async broker is BYO per ADR 0121). They keep
+            # their honest-empty default and gain a values seam, so enabling them is a
+            # `--set`, not a Deployment patch.
+            - name: INGEST_OCR_URL
+              value: ""
+            - name: KNOWLEDGE_RERANK_URL
+              value: ""
+            - name: DISCOVERY_EMBEDDING_ROUTE
+              value: ""
+            - name: DISCOVERY_RERANK_URL
+              value: ""
+            - name: ASYNC_BACKEND
+              value: ""
+            - name: NATS_URL
+              value: ""
+            - name: NATS_CREDENTIALS_FILE
+              value: ""
             # MCP_OBO_REQUIRED (M124/Gate A, ADR 0095 §2) — the fail-CLOSED switch for per-user OBO.
             # "false" (default) keeps a no-OBO install unaffected. The Helm chart templates it from
             # controllerManager.oboEgress.enabled: when the operator enables OBO egress, the BFF/worker

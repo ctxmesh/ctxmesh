@@ -312,6 +312,33 @@ ui:
 # `helm install --set bff.providerConnect.enabled=false` renders "false" to
 # disable it — the ADR 0015 hardened-install path.
 bff:
+  # --- Model-service + async wiring (M148, m52 M141-install) -----------------
+  # Before M148 none of these had a chart home, so four features that exist in
+  # the code could not be turned on from the product's only documented install
+  # path. The degradation was honest — KB ingest 501s without a gateway, the
+  # discovery edge 501s without a route, the publish edge is never registered
+  # without a backend — but honest-when-unset is not the same as installable.
+  #
+  # modelGatewayURL defaults to the in-cluster LiteLLM gateway THIS CHART SHIPS,
+  # so KB ingestion and generation work out of the box. Override to point at an
+  # external gateway.
+  modelGatewayURL: ""
+  # The offline OCR + reranker services (M140) are deployed separately; empty
+  # keeps their honest degradation (a scanned PDF stays PartiallyIngested; the
+  # rerank stage is skipped) rather than pretending they exist.
+  ingestOcrURL: ""
+  knowledgeRerankURL: ""
+  # Capability discovery (M141, ADR 0120) embeds through a ModelRoute the
+  # operator names here; empty ⇒ the discovery edge answers 501.
+  discoveryEmbeddingRoute: ""
+  discoveryRerankURL: ""
+  # Async A2A backend (M141, ADR 0121). BYO by design, like Valkey (ADR 0053):
+  # set asyncBackend + natsURL to ride a JetStream the operator runs. Empty ⇒
+  # the publish edge is not registered at all, so ?mode=async fails loudly.
+  asyncBackend: ""
+  natsURL: ""
+  natsCredentialsFile: ""
+
   image:
     # The BFF (console backend) image. Empty tag → Chart.appVersion ("latest"), matching
     # bff:latest in config/default. PRODUCTION: signed image, immutable digest (OPS-4b).
