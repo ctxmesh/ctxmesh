@@ -32,8 +32,25 @@ spec:
   policyTypes:
     - Ingress
   ingress:
+    # Control-plane components ONLY — pods carrying a `control-plane` label, which every
+    # platform component has and no agent pod does (verified live across the install
+    # namespace and an agent namespace).
+    #
+    # An empty `podSelector: {}` was the obvious spelling and it had a bypass (found by
+    # M149's own re-audit): it admits ANY pod in this namespace, and nothing stops an agent
+    # from being one. `ctxmesh-developer` — a SHIPPED persona, bound the documented way
+    # with a ClusterRoleBinding — can create an AgentDeployment in the install namespace,
+    # and no admission path rejects it. Verified: `kubectl auth can-i create
+    # agentdeployments -n ctxmesh --as=…:uie2e-developer` → yes, and a pod in this
+    # namespace read knowledge_chunks with the committed dev credentials.
+    #
+    # So the same-namespace allow was only as strong as "no agent runs here", which
+    # nothing enforced. Selecting on the label enforces it.
     - from:
-        - podSelector: {}
+        - podSelector:
+            matchExpressions:
+              - key: control-plane
+                operator: Exists
       ports:
         - protocol: TCP
           port: 4222
