@@ -517,7 +517,10 @@ metadata:
 spec:
   ingress:
   - from:
-    - podSelector: {}
+    - podSelector:
+        matchExpressions:
+        - key: control-plane
+          operator: Exists
     ports:
     - port: 4222
       protocol: TCP
@@ -541,7 +544,10 @@ metadata:
 spec:
   ingress:
   - from:
-    - podSelector: {}
+    - podSelector:
+        matchExpressions:
+        - key: control-plane
+          operator: Exists
     ports:
     - port: 5432
       protocol: TCP
