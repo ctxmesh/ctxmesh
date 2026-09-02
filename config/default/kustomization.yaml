@@ -28,6 +28,11 @@ resources:
 # the generated chart, exactly like the Valkey and MinIO above; production sets
 # `postgres.externalDsn` and renders none of it.
 - ../postgres
+# The bundled dev NATS JetStream (M148/m148.7, ADR 0121) — the async A2A broker.
+# BYO stays the production posture (like Valkey, ADR 0053); this exists so the async
+# hop's LIVE proof can run on a real cluster at all, instead of only against the
+# hermetic embedded broker. Dev/trial tier: gated behind `devDataPlane.enabled`.
+- ../nats
 # The Go BFF (UI server-side layer) + its least-privilege SA/RBAC. Flows into
 # both `make deploy` and the generated Helm chart (no-drift). ADR 0011: the BFF
 # SA holds no agent-CRD access — user ops run on the caller's token.

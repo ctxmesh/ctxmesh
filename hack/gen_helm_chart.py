@@ -337,7 +337,7 @@ ENABLE_TENANT_LABEL_WEBHOOK_ENV_HELM = (
 # Resources whose `control-plane:` label marks them as the bundled DEV data
 # plane (in-cluster Valkey/MinIO). Production supplies its own — PRD §23 — so
 # these are gated behind .Values.devDataPlane.enabled.
-DEV_DATA_PLANE_LABELS = {"statelayer", "objectstore", "postgres"}
+DEV_DATA_PLANE_LABELS = {"statelayer", "objectstore", "postgres", "nats"}
 
 # Resources whose `control-plane:` label marks them as the Go BFF (the UI's
 # server-side layer) + its least-privilege SA/RBAC. Gated behind
