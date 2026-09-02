@@ -439,7 +439,21 @@ func (r *AlertPolicyReconciler) evalBudgetSoft(
 	// Reuse the enforcer's soft-threshold semantics: fire when spent >= cap * softPct
 	// (enforcer.go: soft := cap.MulPercent(softPct); spent.AtLeast(soft)).
 	soft := budgetCap.MulPercent(pct)
-	value := fmt.Sprintf("%s/%s", spent.String(), budgetCap.String())
+	// The value names its SOURCE (M150 m150.7, ADR 0132).
+	//
+	// There are two spend numbers and they legitimately differ. The GATEWAY fail-closes on
+	// the live state-layer counter, incremented before the call; this alert reads the
+	// cost-rollup LEDGER, written post-hoc and lagging by roughly one run (observed $0.0103
+	// against $0.0236 for the same tenant). Both are correct for their own purpose, and the
+	// consequence is that an operator can read "80% of budget" here while the gateway is
+	// already refusing calls.
+	//
+	// Until this condition can read the live counter — which needs the controller to reach
+	// the state layer, a dependency it does not have today (m52 M150-budget-live-counter) —
+	// the number says where it came from. A figure that is quietly one run stale is how a
+	// person concludes the enforcement is broken when it is working exactly as designed.
+	value := fmt.Sprintf("%s/%s (cost-rollup ledger; the gateway enforces on the live counter, which may be higher)",
+		spent.String(), budgetCap.String())
 	return spent.AtLeast(soft), value
 }
 
