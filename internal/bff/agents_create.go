@@ -559,15 +559,23 @@ func decodeManifests(manifests []byte, scheme *runtime.Scheme) ([]decodedObject,
 // with the appropriate HTTP status. The object identity is folded into the
 // message so a partial multi-object apply names the doc that failed.
 func classifyCreateError(err error, kind, name string) *createError {
+	return classifyWriteError(err, "create", kind, name)
+}
+
+// classifyWriteError is classifyCreateError with the VERB named. An upsert can be denied on
+// its update rather than its create, and reporting that as "not allowed to create" sends a
+// user to ask an admin for a permission they already hold — which is exactly what happened
+// while building M155's credential role.
+func classifyWriteError(err error, verb, kind, name string) *createError {
 	switch {
 	case apierrors.IsAlreadyExists(err):
 		return &createError{status: 409, msg: fmt.Sprintf("%s %q already exists", kind, name)}
 	case apierrors.IsForbidden(err):
 		// M11 RBAC denial (e.g. a viewer persona) — surface the 403, do not 500.
-		return &createError{status: 403, msg: fmt.Sprintf("forbidden: not allowed to create %s %q", kind, name)}
+		return &createError{status: 403, msg: fmt.Sprintf("forbidden: not allowed to %s %s %q", verb, kind, name)}
 	case apierrors.IsInvalid(err), apierrors.IsBadRequest(err):
 		return &createError{status: 400, msg: fmt.Sprintf("%s %q rejected: %v", kind, name, err)}
 	default:
-		return &createError{status: 502, msg: fmt.Sprintf("failed to create %s %q: %v", kind, name, err)}
+		return &createError{status: 502, msg: fmt.Sprintf("failed to %s %s %q: %v", verb, kind, name, err)}
 	}
 }

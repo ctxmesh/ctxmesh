@@ -33,6 +33,7 @@ resources:
 # scaffolds above). Bound to users/groups/ServiceAccounts by the cluster admin;
 # they make the RBAC authz story meaningful — a subject without the role is
 # denied, an anonymous request is rejected by the K8s API server's authn.
+- ctxmesh_credential_admin_role.yaml
 - ctxmesh_operator_role.yaml
 - ctxmesh_developer_role.yaml
 - ctxmesh_killswitch_role.yaml

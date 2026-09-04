@@ -286,6 +286,25 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: ctxmesh
+    rbac.ctxmesh.ai/bind-only: "true"
+    rbac.ctxmesh.ai/persona: credential-admin
+  name: ctxmesh-credential-admin
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - update
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
     rbac.ctxmesh.ai/persona: developer
   name: ctxmesh-developer
 rules:
