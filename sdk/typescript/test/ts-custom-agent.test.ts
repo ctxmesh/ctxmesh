@@ -20,7 +20,7 @@ import { Client } from "../src/client.js";
 import * as semconv from "../src/_semconv.js";
 import { makeRequestHandler } from "../src/serve.js";
 import { handle, runLoop } from "../examples/ts-custom-agent/agent.js";
-import { startPlane, type MockPlane } from "./plane.js";
+import { startPlane, type MockPlane } from "../src/testing.js";
 
 let plane: MockPlane;
 

@@ -44,7 +44,7 @@ import {
   DiscoveryStub,
   InMemorySpanCollector,
   MemoryStub,
-} from "./plane.js";
+} from "../src/testing.js";
 
 // ── the harness m14.2 two-turn tool-call contract (mirror of tool-call-mock.py) ──
 const TOOL_NAME = DiscoveryStub.CATALOG_NAME; // "word-count"; MCP name is "word_count"
