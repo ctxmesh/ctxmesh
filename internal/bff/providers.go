@@ -363,8 +363,8 @@ func createProviderObjects(ctx context.Context, w client.Client, spec providerCr
 		{secretBindingKind, binding},
 		{modelRouteKind, route},
 	} {
-		if err := upsertObject(ctx, w, obj.o); err != nil {
-			return created, classifyCreateError(err, obj.kind, obj.o.GetName())
+		if verb, err := upsertObject(ctx, w, obj.o); err != nil {
+			return created, classifyWriteError(err, verb, obj.kind, obj.o.GetName())
 		}
 		created = append(created, createdObject{
 			Kind:      obj.kind,
@@ -376,30 +376,29 @@ func createProviderObjects(ctx context.Context, w client.Client, spec providerCr
 }
 
 // upsertObject creates obj, or — if it already exists — updates it in place (the
-// idempotent-connect contract, ADR 0018). On AlreadyExists it fetches the live
-// object for its resourceVersion/UID, carries them onto the desired object, and
-// Updates: the Secret's Data is replaced (rotating the key), the SecretBinding/
-// ModelRoute Spec is refreshed — while status subresources are untouched. Every
-// call is CALLER-SCOPED; a caller without update is denied by the API server and
-// the error propagates unchanged for classifyCreateError to map (Forbidden→403).
-func upsertObject(ctx context.Context, w client.Client, obj client.Object) error {
-	err := w.Create(ctx, obj)
-	if err == nil || !apierrors.IsAlreadyExists(err) {
-		return err
+// idempotent-connect contract, ADR 0018). The Secret's Data is replaced (rotating the
+// key), the SecretBinding/ModelRoute Spec refreshed, status subresources untouched. Every
+// call is CALLER-SCOPED, so the API server makes the authorization decision.
+//
+// The update is UNCONDITIONAL — no resourceVersion, and deliberately no prior Get.
+//
+// It used to Get the live object first, to carry its resourceVersion and UID. That made
+// `get secrets` a hidden requirement of connecting a provider, and `get` on a Secret
+// returns its DATA — so the credential-writing role would have had to be a
+// credential-READING role, which is the thing it exists not to be (ADR 0136). A rotate is
+// an unconditional overwrite by intent: the caller is stating the new key, not merging
+// with the old one, so optimistic concurrency buys nothing here and costs read access to
+// every credential in the namespace.
+//
+// The write verb is threaded back to the caller so a denial names the verb that was
+// actually refused — a Forbidden on update reported as "not allowed to create" sends a
+// user to ask an admin for a grant they already hold (found in M155).
+func upsertObject(ctx context.Context, w client.Client, obj client.Object) (verb string, err error) {
+	if err := w.Create(ctx, obj); err == nil || !apierrors.IsAlreadyExists(err) {
+		return verbCreate, err
 	}
-	// Exists → read the live object to obtain its resourceVersion/UID, then Update
-	// the desired object in place. A fresh copy of the SAME concrete type is the
-	// Get target (Get overwrites it with cluster state).
-	live, ok := obj.DeepCopyObject().(client.Object)
-	if !ok {
-		return err // unreachable for our typed objects; keep the AlreadyExists
-	}
-	if getErr := w.Get(ctx, client.ObjectKeyFromObject(obj), live); getErr != nil {
-		return getErr
-	}
-	obj.SetResourceVersion(live.GetResourceVersion())
-	obj.SetUID(live.GetUID())
-	return w.Update(ctx, obj)
+	obj.SetResourceVersion("")
+	return verbUpdate, w.Update(ctx, obj)
 }
 
 // defaultPrimaryModel is the fallback model name returned by primaryModel when the
