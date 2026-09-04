@@ -74,6 +74,7 @@ import { cn } from "@/lib/utils";
 //   sso-login       — the console SSO button (present only when OIDC is on)
 //   end-user-login  — the tenant IdP button on an assistant's own front door
 //   token-login     — the token submit
+//   token-login-disclosure — the summary that reveals the token form when SSO is on
 //   auth-probing    — the pre-register skeleton
 
 interface FromState {
@@ -230,6 +231,22 @@ function FinePrint({ children }: { children: React.ReactNode }) {
 function Strong({ children }: { children: React.ReactNode }) {
   return (
     <span className="font-medium text-secondary-foreground">{children}</span>
+  );
+}
+
+/**
+ * How to mint a token. Rendered wherever the token form is and nowhere else —
+ * on its own it advertises a control the reader cannot see.
+ */
+function TokenHint() {
+  return (
+    <FinePrint>
+      <Strong>First time?</Strong> Get a short-lived token with{" "}
+      <span className="font-mono text-xs">
+        kubectl create token &lt;sa&gt; -n &lt;ns&gt;
+      </span>
+      . It expires on its own — paste a fresh one when it does.
+    </FinePrint>
   );
 }
 
@@ -532,23 +549,38 @@ export function LoginPage() {
               )}
             </div>
           )}
-          <div className="mt-5 flex items-center gap-3 font-mono text-2xs uppercase tracking-wide text-faint">
-            <span aria-hidden="true" className="h-px flex-1 bg-border" />
-            or use a token
-            <span aria-hidden="true" className="h-px flex-1 bg-border" />
-          </div>
         </div>
       )}
 
-      <div className="mt-5">{tokenForm}</div>
+      {/* ONE primary action when there is one. With SSO available it is the way
+          in, and the token path is what covers the cases SSO cannot: a cluster
+          whose API server does not trust the issuer, a managed control plane
+          that cannot be given --oidc-* flags at all, or an IdP that is down.
+          Folding it into a closed disclosure — the same shape the end-user
+          register above already uses — leaves one button on the page without
+          locking anyone out of a door they still need.
 
-      <FinePrint>
-        <Strong>First time?</Strong> Get a short-lived token with{" "}
-        <span className="font-mono text-xs">
-          kubectl create token &lt;sa&gt; -n &lt;ns&gt;
-        </span>
-        . It expires on its own — paste a fresh one when it does.
-      </FinePrint>
+          The test is `=== true`, not truthiness: while the probe is in flight
+          ssoEnabled is undefined and the page may not yet claim SSO exists, so
+          the form stays open. Collapsing on "not yet known" would hide the only
+          working control on an install that turns out to have no SSO at all. */}
+      {ssoEnabled === true ? (
+        <details className="mt-5 border-t border-border-soft pt-4">
+          <summary
+            data-testid="token-login-disclosure"
+            className="cursor-pointer text-sm text-faint marker:text-ghost hover:text-secondary-foreground"
+          >
+            Use a cluster token instead
+          </summary>
+          <div className="mt-4">{tokenForm}</div>
+          <TokenHint />
+        </details>
+      ) : (
+        <>
+          <div className="mt-5">{tokenForm}</div>
+          <TokenHint />
+        </>
+      )}
       {/* §7 A7: an install without OIDC does not advertise it, so there is no
           disabled button to explain. The absence is stated instead, once, so
           nobody hunts for a control that was never rendered. */}

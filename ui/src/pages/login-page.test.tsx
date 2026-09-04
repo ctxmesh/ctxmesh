@@ -231,6 +231,41 @@ describe("LoginPage + auth routing", () => {
     ).toBeNull();
   });
 
+  it("OIDC configured: the token form is behind a closed disclosure, not beside the button", async () => {
+    stubFetch({ oidcEnabled: true });
+
+    render(
+      <MemoryRouter initialEntries={["/login"]}>
+        <TestApp />
+      </MemoryRouter>,
+    );
+
+    // The disclosure exists and is CLOSED, so the token field is present in the
+    // DOM (it is a <details>, not a conditional render) but not visible. Asserting
+    // on `open` is what distinguishes "collapsed" from "removed" — removing it
+    // would lock out every cluster whose API server does not trust the issuer.
+    const disclosure = await screen.findByTestId("token-login-disclosure");
+    expect(disclosure.closest("details")).not.toHaveAttribute("open");
+    // The kubectl hint travels with the form: it must not advertise a control
+    // the reader cannot currently see.
+    expect(screen.queryByText(/kubectl create token/)).not.toBeVisible();
+  });
+
+  it("no OIDC: the token form is open, never hidden behind a click", async () => {
+    stubFetch({ oidcEnabled: false });
+
+    render(
+      <MemoryRouter initialEntries={["/login"]}>
+        <TestApp />
+      </MemoryRouter>,
+    );
+
+    // With no SSO this form is the ONLY way in. A disclosure here would hide the
+    // single working control on the page behind a click nobody knows to make.
+    expect(await screen.findByTestId("token-login")).toBeVisible();
+    expect(screen.queryByTestId("token-login-disclosure")).toBeNull();
+  });
+
   it("unauthenticated console visit redirects to /login preserving the return path", async () => {
     stubFetch({ whoami: () => reject(401) });
 
