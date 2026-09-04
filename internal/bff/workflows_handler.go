@@ -16,59 +16,29 @@ limitations under the License.
 
 package bff
 
-// ── POST /api/workflows/{name}/runs (m67.4, ADR 0060) ─────────────────────────────────────────────────────
+// Workflow run endpoints (ADR 0060).
 //
-// Creates a workflow instance run. The handler:
-//   1. Resolves the named Workflow CR through the CALLER-SCOPED client (ADR 0011 — caller's RBAC governs).
-//   2. Validates the request body's `input` against the workflow's inputSchema (when declared).
-//   3. Snapshots the resolved WorkflowSpec to JSON and pins it on the new run (SpecSnapshot pattern).
-//   4. Creates the run (IsWorkflowInstance() == true → the run-worker routes it to executeWorkflow).
-//   5. Returns 202 {id, status:"queued"}.
+// POST /api/workflows/{name}/runs runs a Workflow CR; POST /api/workflows/runs runs an
+// INLINE spec, so a model-authored plan never has to become an etcd object (ADR 0042). Both
+// resolve through the caller-scoped client (ADR 0011), snapshot the spec onto the run, and
+// return 202.
 //
-// ── POST /api/workflows/runs — the INLINE-spec run (planning mode, m67.7, ADR 0060 §6) ─────────────────────
+// Two things here are load-bearing and not obvious from the code:
 //
-// A runtime-generated plan runs WITHOUT a Workflow CR (a plan must never create an etcd object, ADR 0042).
-// The body carries an inline WorkflowSpec + input. The handler:
-//   1. VALIDATES the inline spec via the SHARED, k8s-client-free library internal/workflow.Validate (m67.1)
-//      — this is exactly why that validator takes the spec by value and imports no k8s client: the executor
-//      path validates a plan that never becomes a CR. An invalid plan is a 422 with the reason (never run).
-//   2. Resolves registryRef + every step's agentRef to registry MEMBERS through the caller-scoped client —
-//      the same trust-boundary check the m67.1 CR controller runs at admission, done here because a runtime
-//      plan has no controller. A missing registry / missing agent / non-member is a 422.
-//   3. Validates the input against the inline spec's inputSchema (when declared).
-//   4. Snapshots the inline spec + creates the instance run with NO WorkflowRef (workflowRef=""), so the run
-//      is a workflow instance driven off its pinned SpecSnapshot, exactly as the CR path — minus the CR.
+//   - The inline path validates through internal/workflow.Validate, which takes the spec by
+//     VALUE and imports no k8s client — precisely so a plan that never becomes a CR can be
+//     checked. It also re-runs the registry-membership check the CR controller does at
+//     admission, because a runtime plan has no controller to do it.
 //
-// ── The planner pattern (the bridge this endpoint completes) ────────────────────────────────────────────────
+//   - Node endpoints are resolved and PINNED at create, caller-scoped. The executor runs
+//     off-request in the run-worker with no bearer token, and the BFF's own Role grants no
+//     agent-CRD access (config/bff/role.yaml is `rules: []`), so re-resolving later would be
+//     forbidden on a real cluster.
 //
-// "An agent produces a plan then executes it" (ADR 0060 §6) is: a PLANNER agent whose
-// spec.runtime.outputSchema IS the WorkflowSpec JSON schema (M65 structured outputs) emits a WorkflowSpec as
-// its terminal answer; the caller feeds that plan to POST /api/workflows/runs (with requireApproval to gate
-// it behind a human). No new "planner runtime" is needed — the inline-spec endpoint + the plan-approval gate
-// ARE the mechanism; the deterministic executor runs the model-authored graph under the same
-// identity/governance as any workflow. The served WorkflowSpec JSON-Schema ARTIFACT (m83.2) IS now shipped:
-// GET /api/workflows/spec-schema returns a pure JSON-Schema a planner sets VERBATIM as its
-// spec.runtime.outputSchema so the model emits a WorkflowSpec this endpoint accepts. It is DERIVED from the
-// generated CRD openAPIV3Schema (config/crd/bases/...workflows.yaml) — its `properties.spec` sub-schema IS
-// WorkflowSpec (controller-gen from the struct) — by recursively stripping every `x-kubernetes-*` extension
-// (list-type / list-map-keys / preserve-unknown-fields / …) to leave draft-2020-12 JSON-Schema. The
-// transform (internal/bff.GenerateWorkflowSpecSchema) is run by `make gen-workflow-schema` into the committed
-// workflow_spec_schema.json (go:embed'd here) and a tier0 DRIFT test regenerates it in-memory and asserts a
-// byte-equal match, so a WorkflowSpec change that isn't regenerated fails tier0 (the helm-verify analog). No
-// new module dependency and no hand-authored schema to drift from the type.
-//
-// ── Node-endpoint resolution + pinning at CREATE (m67.13, ADR 0011/0060) ──────────────────────────────────
-//
-// A workflow instance run resolves each node agentRef → the agent's invoke endpoint at CREATE time, through
-// the CALLER-SCOPED client, and PINS them onto the run (run.NodeEndpoints) — exactly as a single run pins its
-// Endpoint at create (m32.2) and as ADR 0060 pins the spec snapshot. The workflow executor runs OFF-REQUEST
-// in the run-worker goroutine (no request context, no caller bearer token), so it reads the PINNED endpoints
-// rather than re-resolving an AgentDeployment. This is load-bearing for ADR 0011: the BFF's own Role holds NO
-// agent-CRD access (config/bff/role.yaml is `rules: []`), so an off-request BFF-SA read of `agentdeployments`
-// would be forbidden on a real cluster — the m67.10 live-tier2 failure this fix closes. Resolving at create,
-// caller-scoped, keeps the create-time RBAC decision the gate (the caller is authorized for these agents —
-// they are the workflow's registry members) and needs the BFF no new RBAC.
-
+// GET /api/workflows/spec-schema serves a planner the exact JSON-Schema to set as its
+// outputSchema. It is derived from the generated CRD, regenerated by `make
+// gen-workflow-schema`, and a tier0 test asserts byte-equality so a WorkflowSpec change that
+// is not regenerated fails the build.
 import (
 	"context"
 	_ "embed"

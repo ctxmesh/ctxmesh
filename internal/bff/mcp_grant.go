@@ -24,21 +24,17 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
-// Per-user on-behalf-of (OBO) MCP grants (m17.3, ADR 0016 §5) — the FILL-IN of the
-// (server, user) credential-resolution seam (mcp_credential.go).
+// Per-user on-behalf-of MCP grants (ADR 0016 §5) — the fill-in of the (server, user)
+// credential-resolution seam in mcp_credential.go.
 //
-// M14 stored a SHARED service key + ignored `user`. M17.3 turns the seam per-user:
-// the first time a user invokes an agent that calls an OAuth MCP server, THAT user
-// consents (the m17.2 Auth-Code + PKCE flow) → their OAuth grant is stored as a
-// Secret keyed (user, server) → the agent's calls to that server run AS THAT USER
-// (refresh + revocation + audit). User A's grant NEVER resolves for user B.
+// The first time a user invokes an agent that calls an OAuth MCP server, that user consents
+// and their grant is stored as a Secret keyed (user, server), so the agent's calls run AS
+// THAT USER — refresh, revocation and audit included. User A's grant never resolves for B.
 //
-// The token discipline is the m17.2 lesson, unchanged: the OAuth access/refresh
-// tokens live ONLY in the Secret's data — NEVER in a label, an annotation, a DTO,
-// or a log line. Labels are LOOKUP KEYS ONLY: a hash of the username (not the raw
-// username — which may be an email/PII) and the server name. This is why we hash:
-// a label value must be a bounded, non-PII, DNS-1123-safe token, and the raw
-// username is none of those.
+// Token discipline: access and refresh tokens live ONLY in the Secret's data — never in a
+// label, an annotation, a DTO or a log line. Labels are lookup keys only, and the username is
+// HASHED because a label value must be bounded, non-PII and DNS-1123-safe; a raw username
+// (often an email) is none of those.
 
 // Grant-Secret label keys + Secret name prefix now live in internal/credresolve — the
 // SINGLE SOURCE of the grant wire format (ADR 0030), shared by the BFF consent WRITER

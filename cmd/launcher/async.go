@@ -16,33 +16,21 @@ limitations under the License.
 
 package main
 
-// The async A2A consumer + publisher (M7, specs/eventing-scaling.md §"Async A2A
-// envelope", §"Idempotency (launcher consumer)"). An eventing-model agent's
-// Knative Trigger (m7.5) delivers a CloudEvent to the agent's ksvc; the launcher
-// fronting the ksvc:
+// The async A2A consumer + publisher (M7, specs/eventing-scaling.md).
 //
-//  1. recognises a CloudEvent inbound (a POST carrying the CloudEvent HTTP
-//     binding headers, structured or binary content mode);
-//  2. decodes the platform envelope from it (cloudevent.go);
-//  3. dedupes on the envelope's messageId against a short-TTL Valkey seen-set —
-//     a redelivery of a messageId already seen inside the window is ACKED
-//     without re-invoking the agent (at-least-once + idempotency, §12.6);
-//  4. invokes the agent (the user container) with the envelope's payload;
-//  5. emits an a2a.async.consume span recording the dedupe hit/miss.
+// A Knative Trigger delivers a CloudEvent to the agent's ksvc; the launcher recognises it,
+// decodes the platform envelope, dedupes on the envelope's messageId against a short-TTL
+// Valkey seen-set, invokes the user container with the payload, and emits an
+// a2a.async.consume span recording the dedupe hit or miss.
 //
-// FAIL-CLOSED (M11, resolves M7 deferral — specs/trace-governance-security.md
-// §"Eventing dedupe fail-open → fail-closed"): if the dedupe store is
-// unreachable or the per-op timeout fires, the message is NOT processed — the
-// consumer NACKs (non-2xx) so the broker retries. A transient Valkey blip means
-// the retry's dedupe check succeeds and the message processes exactly once; a
-// persistent outage lets the broker's bounded retry schedule exhaust and land the
-// message in the per-registry DLQ (M7 machinery, no new loop here). This
-// prevents a dedupe-store blip from causing double-processing, which is the M11
-// security posture: dedupe uncertainty → reject/retry, not process.
+// FAIL-CLOSED on the dedupe store: if it is unreachable or the per-op timeout fires, the
+// message is NOT processed — the consumer NACKs so the broker retries. A blip means the
+// retry's check succeeds and the message processes exactly once; a persistent outage lets
+// the broker's bounded retries exhaust into the per-registry DLQ. Dedupe uncertainty must
+// resolve to reject-and-retry, never to process, or a store blip becomes double-processing.
 //
-// The publisher (publishEnvelope) is the producer side: it encodes an envelope
-// as a CloudEvent and POSTs it to the registry broker — enough for the e2e (and
-// a future producer example, m7.7) to emit an async A2A event.
+// publishEnvelope is the producer side: encode an envelope as a CloudEvent, POST it to the
+// registry broker.
 
 import (
 	"bytes"
