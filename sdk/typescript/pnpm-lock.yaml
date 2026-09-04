@@ -9,25 +9,22 @@ importers:
   .:
     dependencies:
       '@arizeai/openinference-semantic-conventions':
-        specifier: 2.7.0
+        specifier: ^2.7.0
         version: 2.7.0
-      '@opentelemetry/api':
-        specifier: 1.9.1
-        version: 1.9.1
       '@opentelemetry/core':
-        specifier: 2.10.0
+        specifier: ^2.10.0
         version: 2.10.0(@opentelemetry/api@1.9.1)
       '@opentelemetry/exporter-trace-otlp-grpc':
-        specifier: 0.221.0
+        specifier: ^0.221.0
         version: 0.221.0(@opentelemetry/api@1.9.1)
       '@opentelemetry/resources':
-        specifier: 2.10.0
+        specifier: ^2.10.0
         version: 2.10.0(@opentelemetry/api@1.9.1)
       '@opentelemetry/sdk-trace-base':
-        specifier: 2.10.0
+        specifier: ^2.10.0
         version: 2.10.0(@opentelemetry/api@1.9.1)
       '@opentelemetry/sdk-trace-node':
-        specifier: 2.10.0
+        specifier: ^2.10.0
         version: 2.10.0(@opentelemetry/api@1.9.1)
       ajv:
         specifier: ^8
@@ -36,6 +33,9 @@ importers:
       '@eslint/js':
         specifier: 9.17.0
         version: 9.17.0
+      '@opentelemetry/api':
+        specifier: 1.9.1
+        version: 1.9.1
       '@types/node':
         specifier: 22.10.5
         version: 22.10.5
