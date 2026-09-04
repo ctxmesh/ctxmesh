@@ -259,6 +259,12 @@ jobs:
       # and carded as separate bugs, because nothing connected them.
       - name: Flow-completability gate (no flow no role can complete)
         run: ./hack/flow-completability.sh
+      # M158 — no new wall-of-text comments. 28% of non-test Go source was comments, most of
+      # the bulk milestone archaeology the brain already records. This caps a single block;
+      # the style rule in CLAUDE.md handles the rest by judgment. The grandfathered list is
+      # named rather than silent, and may only shrink.
+      - name: Comment-budget gate (no new wall-of-text comment blocks)
+        run: ./hack/comment-budget.sh
 
   envtest:
     name: envtest

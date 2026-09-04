@@ -370,23 +370,16 @@ func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *a
 					Ports: []networkingv1.NetworkPolicyPort{{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(langfusePort)}},
 				},
 				{ // platform backends in ctxmesh: gateway :4000, minio :9000, state-layer PROXY
-					// :8080 (memory/quota/dedup/control/SPAWN — the pod-authed, per-tenant-scoped choke point),
-					// token-service :8443 (long-term-memory OBO). Omitting :8080 makes a member's quota
-					// fail-closed (402) post-cutover (audit SEC-1).
+					// :8080 (memory/quota/dedup/control/spawn — the pod-authed, per-tenant choke
+					// point) and token-service :8443 (long-term-memory OBO). Omitting :8080 makes a
+					// member's quota fail closed (402) post-cutover.
 					//
-					// RESOLVED (audit P1-2, M94 + M97, 2026-08-17): raw Valkey `:6379` is NO LONGER in this
-					// allowlist. It was direct access to the SHARED, UNAUTHENTICATED Valkey (ADR 0049) — an
-					// agent could issue arbitrary Redis against every tenant's keys, bypassing the :8080
-					// proxy's per-tenant scoping. The last direct-`:6379` consumer was the AgentTeam-supervisor
-					// spawn guard; M94 added `/spawn/acquire`+`/spawn/release` to the state-layer proxy and a
-					// launcher httpSpawnStore, and the controller now injects `STATELAYER_PROXY_URL` (not
-					// `TENANT_QUOTA_ADDR`) for a supervisor when the proxy is configured. **M97 (audit P1-A)
-					// also dropped `:6379` from the REGISTRY-member egress NP (agentregistry_controller.go) —
-					// NP rules are additive, and a supervisor is a registry member, so BOTH NPs had to drop it.**
-					// The retained second layer is the `statelayer-ingress` NP (config/statelayer), which admits
-					// `:6379` only from the proxy/BFF's own namespace. So no agent reaches raw Valkey — every
-					// memory/quota/dedup/control/spawn op flows through the pod-authed proxy. (Live
-					// supervisor-fail-closed proof on kind+Calico is user-gated — carded m52.C13.)
+					// Raw Valkey :6379 is deliberately ABSENT. It was direct access to the shared,
+					// unauthenticated Valkey (ADR 0049), letting an agent issue arbitrary Redis
+					// against every tenant's keys and bypass the proxy's per-tenant scoping. It had
+					// to be dropped from the registry-member NP too, since NP rules are additive and
+					// a supervisor is a registry member. The remaining layer is the
+					// statelayer-ingress NP, which admits :6379 only from the proxy/BFF namespace.
 					To: []networkingv1.NetworkPolicyPeer{platformNS(agentEngineSystemNamespace)},
 					Ports: []networkingv1.NetworkPolicyPort{
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(modelGatewayPort)},
