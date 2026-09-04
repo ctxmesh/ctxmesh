@@ -244,3 +244,51 @@ func TestAPIResponsesHaveNoCSP(t *testing.T) {
 	assert.Empty(t, rec.Header().Get("Content-Security-Policy"),
 		"/api/health must not carry the SPA CSP")
 }
+
+// TestCSPAllowsTheOIDCIssuerOrigin covers the defect that made console SSO
+// impossible in a browser: the base policy pins connect-src to 'self', but an
+// OIDC login fetches the issuer's discovery document and POSTs the PKCE code
+// exchange cross-origin, so both were denied and the login reported only
+// "Failed to fetch". An issuer is cross-origin by definition, so this was
+// broken on every install with SSO configured, not just local ones.
+func TestCSPAllowsTheOIDCIssuerOrigin(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the issuer origin is added to connect-src", func(t *testing.T) {
+		got := cspWithConnectSrc("https://dex.example.com:8443")
+		assert.Contains(t, got, "connect-src 'self' https://dex.example.com:8443;")
+		// Widening connect-src must not disturb any other directive.
+		assert.Contains(t, got, "default-src 'self';")
+		assert.Contains(t, got, "script-src 'self';")
+		assert.Contains(t, got, "frame-ancestors 'none';")
+		assert.NotContains(t, got, "'unsafe-eval'")
+	})
+
+	t.Run("only the ORIGIN is allowed, never the issuer path", func(t *testing.T) {
+		// A CSP source carrying a path is matched by PREFIX, so allowing
+		// ".../tenant1" would also allow ".../tenant1-evil". The path must be
+		// stripped rather than trusted.
+		got := cspWithConnectSrc("https://idp.example.com/tenant1")
+		assert.Contains(t, got, "connect-src 'self' https://idp.example.com;")
+		assert.NotContains(t, got, "tenant1")
+	})
+
+	t.Run("a malformed or non-http issuer widens nothing", func(t *testing.T) {
+		for _, bad := range []string{
+			"", "   ", "not a url", "javascript:alert(1)", "file:///etc/passwd",
+			"data:text/html,x", "ftp://idp.example.com",
+		} {
+			assert.Equal(t, contentSecurityPolicy, cspWithConnectSrc(bad),
+				"issuer %q must not alter the policy", bad)
+		}
+	})
+
+	t.Run("duplicate issuers appear once", func(t *testing.T) {
+		got := cspWithConnectSrc("https://dex.example.com", "https://dex.example.com/x")
+		assert.Contains(t, got, "connect-src 'self' https://dex.example.com;")
+	})
+
+	t.Run("no issuer configured leaves the strict policy untouched", func(t *testing.T) {
+		assert.Equal(t, contentSecurityPolicy, cspWithConnectSrc())
+	})
+}
