@@ -434,6 +434,10 @@ crd-version-parity: manifests ## Guard: multi-version CRDs keep matching top-lev
 rbac-least-privilege: manifests ## Assert the SHIPPED roles grant no verb wildcards and no cluster-scoped Secret writes (M149).
 	./hack/rbac-least-privilege.sh config/rbac
 
+.PHONY: sdk-contract
+sdk-contract: ## Assert the SDKs track the product — every launcher route reachable, both languages at parity, one version (M155). Static.
+	./hack/sdk-contract.sh
+
 .PHONY: release-truth
 release-truth: ## Assert the release publishes every artifact an install needs, at a version (M154). Static, no cluster.
 	./hack/release-truth.sh
