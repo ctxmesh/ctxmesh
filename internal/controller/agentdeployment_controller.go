@@ -990,20 +990,15 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		return podTemplate{}, err
 	}
 
-	// Cost budget (M8, specs/cost-governance.md) + tenant model quota (M47) + guardrails (M66): when
-	// ANY is set, the agent's LLM calls must flow through the launcher's in-pod gateway proxy so it can
-	// enforce the cap / inspect content BEFORE the provider is hit. So MODEL_GATEWAY_URL points at the
-	// proxy (localhost:2996), the real LiteLLM address travels as GATEWAY_UPSTREAM_URL, and the knobs
-	// are injected as STATIC env (values known at reconcile time — NEVER valueFrom, the m5.7 Knative
-	// landmine / tier1 no-valueFrom guard). An agent with none gets the plain LiteLLM URL and no proxy
-	// env — byte-for-byte M2 behavior.
-	// Record mode (M78, ADR 0071 §1): a RECORD-CAPABLE agent (spec.record) is a NEW interposition
-	// reason for the launcher gateway — the capture rides the :2996 proxy (raw model I/O incl. SSE),
-	// which is conditionally interposed (ADR 0071 C2), so recording must force it on the same way a
-	// budget/quota/guardrail does. Enablement is per-DEPLOYMENT here; the per-RUN capture toggle rides
-	// the invoke (the BFF stamps X-Ctxmesh-Record when run.Record) and the BFF fails a recorded run
-	// CLOSED when the agent is NOT record-capable (no gateway to capture at). Non-record-capable agents
-	// are byte-for-byte unchanged (this reason is off, no RECORD_CAPABLE env).
+	// Any of a cost budget, a tenant model quota, guardrails, or record mode forces the agent's
+	// LLM calls through the launcher's in-pod proxy, so the cap can be enforced and the content
+	// inspected before the provider is hit. MODEL_GATEWAY_URL then points at the proxy
+	// (localhost:2996) and the real LiteLLM address travels as GATEWAY_UPSTREAM_URL.
+	//
+	// The knobs are STATIC env — never valueFrom. A valueFrom here trips the Knative landmine
+	// the tier1 no-valueFrom guard exists to catch.
+	//
+	// An agent with none of those reasons gets the plain LiteLLM URL and no proxy env.
 	recordCapable := deploy.Spec.Record
 
 	gatewayURL := litellmGatewayURL

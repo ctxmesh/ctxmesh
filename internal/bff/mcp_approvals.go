@@ -31,33 +31,21 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
 
-// The MCP APPROVAL QUEUE — the operator-facing surface for the HARDENED trust
-// mode (mcp.requireApproval, ADR 0016 §3). It is the M17 counterpart to the M14
-// register flow: register MARKS a BYO server pending on a hardened cluster (and,
-// per the m14.6 B1 fix, opens NO egress + leaves its tools un-bindable); this
-// file lets an operator move a pending server to approved.
+// The MCP approval queue — the operator surface for hardened trust mode
+// (mcp.requireApproval, ADR 0016 §3). Registering marks a BYO server pending; this file moves
+// it to approved.
 //
-// THE INVARIANT (the m14.6 B1 lesson, which the reviewer will hammer):
+// THE INVARIANT: a pending server has NO per-server egress NetworkPolicy and its tools are
+// not bindable. Approving is the only transition that opens egress, and it opens exactly one
+// bounded per-server destination — never a blanket hole. A rejected server never gets one.
 //
-//	A PENDING MCP server has NO per-server egress NetworkPolicy and its tools are
-//	NOT bindable. APPROVING is the ONLY transition that opens egress + makes the
-//	tools bindable. A pending or rejected server never gets an egress hole. The
-//	M6 whitelist + M11 default-deny are preserved — approve opens exactly one
-//	bounded per-server egress destination (reusing the register flow's
-//	mcpEgressNetworkPolicy), never a blanket open.
+// Caller-scoped throughout (ADR 0011), which is what makes this operator-only: approving
+// UPDATEs toolregistries and creates a NetworkPolicy, rejecting DELETEs the ToolRegistry, so
+// the API server issues the 403 for a caller without those verbs. There is no BFF-side check
+// and no BFF-SA fallback.
 //
-// EVERYTHING IS CALLER-SCOPED (ADR 0011): the list/approve/reject all run through
-// the CALLER'S own client, so the K8s API server enforces the caller's RBAC. The
-// "operator-only" property is NOT a BFF check — it IS the API server's decision:
-// approving flips the ToolRegistry entries (an UPDATE on toolregistries) and
-// creates a NetworkPolicy; rejecting DELETES the ToolRegistry (+ its Secret
-// artifacts). A developer/viewer whose RBAC lacks update/delete on those kinds
-// gets the API server's real 403 — there is NO bypass and NO BFF-SA fallback.
-//
-// SELF-SERVE MODE (requireApproval off): a freshly-registered server is already
-// approved, so the pending queue is empty and inert — but the endpoints exist and
-// behave honestly (the list returns []; an approve of a not-found/already-approved
-// server behaves per the object state, never a lie).
+// With requireApproval off, a new server is already approved: the queue is empty and the
+// endpoints still answer honestly rather than pretending.
 
 // mcpApprovalRejected is the MCPApprovalActionResponse.Status value returned when
 // an operator denies a pending server (the catalog entry is removed).

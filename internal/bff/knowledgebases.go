@@ -453,26 +453,16 @@ func (s *Server) handleIngestKB(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// An ingest that resolves NO documents is refused, not accepted (M148/m148.11).
+	// An ingest that resolves NO documents is refused (422), not accepted. It used to return
+	// 202 and the run then succeeded having done nothing, so retrieval's later emptiness
+	// looked like a model problem rather than a corpus that was never read.
 	//
-	// It used to return 202 with documentCount:0 and the run then SUCCEEDED having done
-	// nothing — so the console showed an ingested KB, and retrieval's later emptiness
-	// looked like a model or embedding problem rather than a corpus that was never read.
-	// Found live: an ingest issued in the same second as the last upload resolved zero
-	// documents, reported success, and wrote no chunks.
+	// One ingestion at a time per KB. Concurrent ingests are mutually DESTRUCTIVE, not merely
+	// wasteful: SweepOrphans deletes a document's chunks whose ingestion_run_id differs from
+	// the current run, so two runs each sweep the other's rows and both report success.
 	//
-	// Ingesting nothing is never what the caller meant. 422 says so while the caller is
-	// still watching, which is the whole difference.
-	// One ingestion at a time per KB (M152 m152.3). Concurrent ingests are MUTUALLY
-	// DESTRUCTIVE, not merely wasteful: SweepOrphans deletes a document's chunks whose
-	// ingestion_run_id differs from the current run, so with two runs each sweeps the other's
-	// rows and BOTH report success. Nothing errors, so nothing surfaces it — the corpus is
-	// just left holding whichever fragment lost the race last.
-	//
-	// Checked here AND in internal/ingestion's Creator, because this handler builds its own
-	// spec rather than going through that Creator — the duplication M149's re-audit named
-	// (m52 M148-ingest-guard-layer). Guarding both is correct today; collapsing them into one
-	// path is carded rather than done inside a RAG milestone.
+	// Guarded here AND in internal/ingestion's Creator, because this handler builds its own
+	// spec rather than going through it. Collapsing the two paths is carded (m52).
 	if active, aErr := s.runStore.ActiveIngestion(ns, kbName); aErr != nil {
 		writeError(w, http.StatusInternalServerError,
 			"could not determine whether an ingestion is already running (refusing rather than risking a concurrent ingest, which silently destroys the corpus)")
