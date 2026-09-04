@@ -107,7 +107,7 @@ func TestCostBreakdownTotalFromDailyMetrics(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/public/traces": // per-agent source: one agent trace at 0.10
 			_ = json.NewEncoder(w).Encode(lfTracesResponse{Data: []lfTrace{
-				{ID: "t1", Name: "run", TotalCost: 0.10, Tags: []string{"agent:default/echo"}},
+				{ID: "t1", Name: "run", TotalCost: costPtr(0.10), Tags: []string{"agent:default/echo"}},
 			}})
 		case "/api/public/metrics/daily": // the window total the dashboard sees: 7.50
 			_ = json.NewEncoder(w).Encode(lfDailyMetricsResponse{Data: []lfDailyMetric{
@@ -131,7 +131,8 @@ func TestCostBreakdownTotalFromDailyMetrics(t *testing.T) {
 	// Per-agent breakdown is still trace-derived.
 	require.Len(t, resp.Agents, 1)
 	assert.Equal(t, "echo", resp.Agents[0].AgentName)
-	assert.InDelta(t, 0.10, resp.Agents[0].TotalCostUSD, 1e-9)
+	assert.InDelta(t, 0.10, costOrZero(resp.Agents[0].TotalCostUSD), 1e-9)
+	assert.NotNil(t, resp.Agents[0].TotalCostUSD, "a priced agent must not report an unknown cost")
 }
 
 // TestCostBreakdownGroupsMixedCorpus is the core correctness test: 2 named
@@ -140,12 +141,12 @@ func TestCostBreakdownTotalFromDailyMetrics(t *testing.T) {
 func TestCostBreakdownGroupsMixedCorpus(t *testing.T) {
 	corpus := []lfTrace{
 		// default/alpha: 2 traces, total cost 0.5+0.3=0.8, tokens 100+200=300
-		{ID: "a1", Tags: []string{"agent:default/alpha"}, TotalCost: 0.5, Usage: &lfUsage{TotalTokens: 100}},
-		{ID: "a2", Tags: []string{"agent:default/alpha"}, TotalCost: 0.3, Usage: &lfUsage{TotalTokens: 200}},
+		{ID: "a1", Tags: []string{"agent:default/alpha"}, TotalCost: costPtr(0.5), Usage: &lfUsage{TotalTokens: 100}},
+		{ID: "a2", Tags: []string{"agent:default/alpha"}, TotalCost: costPtr(0.3), Usage: &lfUsage{TotalTokens: 200}},
 		// other/beta: 1 trace, total cost 1.0, tokens 500
-		{ID: "b1", Tags: []string{"agent:other/beta"}, TotalCost: 1.0, Usage: &lfUsage{TotalTokens: 500}},
+		{ID: "b1", Tags: []string{"agent:other/beta"}, TotalCost: costPtr(1.0), Usage: &lfUsage{TotalTokens: 500}},
 		// untagged: no agent tag, cost 0.1, tokens 50
-		{ID: "u1", TotalCost: 0.1, TotalTokens: 50},
+		{ID: "u1", TotalCost: costPtr(0.1), TotalTokens: 50},
 	}
 	srv := fakeLangfuseBreakdown(t, corpus)
 	a := newTestLangfuse(t, srv.URL)
@@ -162,20 +163,23 @@ func TestCostBreakdownGroupsMixedCorpus(t *testing.T) {
 	// Sorted by cost desc.
 	assert.Equal(t, "other", resp.Agents[0].AgentNs)
 	assert.Equal(t, "beta", resp.Agents[0].AgentName)
-	assert.InDelta(t, 1.0, resp.Agents[0].TotalCostUSD, 1e-9)
+	assert.InDelta(t, 1.0, costOrZero(resp.Agents[0].TotalCostUSD), 1e-9)
+	assert.NotNil(t, resp.Agents[0].TotalCostUSD, "a priced agent must not report an unknown cost")
 	assert.Equal(t, int64(500), resp.Agents[0].TotalTokens)
 	assert.Equal(t, 1, resp.Agents[0].RunCount)
 
 	assert.Equal(t, "default", resp.Agents[1].AgentNs)
 	assert.Equal(t, "alpha", resp.Agents[1].AgentName)
-	assert.InDelta(t, 0.8, resp.Agents[1].TotalCostUSD, 1e-9)
+	assert.InDelta(t, 0.8, costOrZero(resp.Agents[1].TotalCostUSD), 1e-9)
+	assert.NotNil(t, resp.Agents[1].TotalCostUSD, "a priced agent must not report an unknown cost")
 	assert.Equal(t, int64(300), resp.Agents[1].TotalTokens)
 	assert.Equal(t, 2, resp.Agents[1].RunCount)
 
 	// Untagged bucket.
 	assert.Equal(t, "", resp.Agents[2].AgentNs)
 	assert.Equal(t, "(untagged)", resp.Agents[2].AgentName)
-	assert.InDelta(t, 0.1, resp.Agents[2].TotalCostUSD, 1e-9)
+	assert.InDelta(t, 0.1, costOrZero(resp.Agents[2].TotalCostUSD), 1e-9)
+	assert.NotNil(t, resp.Agents[2].TotalCostUSD, "a priced agent must not report an unknown cost")
 	assert.Equal(t, int64(50), resp.Agents[2].TotalTokens)
 	assert.Equal(t, 1, resp.Agents[2].RunCount)
 
@@ -192,9 +196,9 @@ func TestCostBreakdownGroupsMixedCorpus(t *testing.T) {
 // time. Round-trips nextCursor → cursor so each page is reached correctly.
 func TestCostBreakdownCursorPagination(t *testing.T) {
 	corpus := []lfTrace{
-		{ID: "a1", Tags: []string{"agent:default/alpha"}, TotalCost: 0.8},
-		{ID: "b1", Tags: []string{"agent:other/beta"}, TotalCost: 1.0},
-		{ID: "c1", Tags: []string{"agent:ns/gamma"}, TotalCost: 0.5},
+		{ID: "a1", Tags: []string{"agent:default/alpha"}, TotalCost: costPtr(0.8)},
+		{ID: "b1", Tags: []string{"agent:other/beta"}, TotalCost: costPtr(1.0)},
+		{ID: "c1", Tags: []string{"agent:ns/gamma"}, TotalCost: costPtr(0.5)},
 	}
 	srv := fakeLangfuseBreakdown(t, corpus)
 	a := newTestLangfuse(t, srv.URL)
@@ -432,7 +436,7 @@ func TestHandlerCostBreakdownBadCursor400(t *testing.T) {
 func TestHandlerCostBreakdownData200(t *testing.T) {
 	br := &CostBreakdownResponse{
 		Agents: []AgentCostItem{
-			{AgentNs: "default", AgentName: "foo", TotalCostUSD: 1.5, TotalTokens: 300, RunCount: 2},
+			{AgentNs: "default", AgentName: "foo", TotalCostUSD: costPtr(1.5), TotalTokens: 300, RunCount: 2},
 		},
 		Total:      CostSummary{TotalCostUSD: 1.5, TotalTokens: 300, Observations: 2, ByModel: []MetricPoint{}},
 		NextCursor: "",
@@ -448,7 +452,8 @@ func TestHandlerCostBreakdownData200(t *testing.T) {
 	require.Len(t, resp.Agents, 1)
 	assert.Equal(t, "default", resp.Agents[0].AgentNs)
 	assert.Equal(t, "foo", resp.Agents[0].AgentName)
-	assert.InDelta(t, 1.5, resp.Agents[0].TotalCostUSD, 1e-9)
+	assert.InDelta(t, 1.5, costOrZero(resp.Agents[0].TotalCostUSD), 1e-9)
+	assert.NotNil(t, resp.Agents[0].TotalCostUSD, "a priced agent must not report an unknown cost")
 	assert.Equal(t, int64(300), resp.Agents[0].TotalTokens)
 	assert.Equal(t, 2, resp.Agents[0].RunCount)
 }
@@ -556,7 +561,7 @@ func TestHandlerCostBreakdownRequiresTenant(t *testing.T) {
 // of 400 — the "per-agent fallback" so the Cost page isn't empty on a tenant-less cluster.
 func TestHandlerCostBreakdownZeroTenantsFallback(t *testing.T) {
 	br := &CostBreakdownResponse{
-		Agents:     []AgentCostItem{{AgentNs: "default", AgentName: "a1", TotalCostUSD: 1.5, TotalTokens: 100, RunCount: 3}},
+		Agents:     []AgentCostItem{{AgentNs: "default", AgentName: "a1", TotalCostUSD: costPtr(1.5), TotalTokens: 100, RunCount: 3}},
 		Total:      CostSummary{TotalCostUSD: 1.5, TotalTokens: 100, Observations: 3, ByModel: []MetricPoint{}},
 		NextCursor: "",
 	}
@@ -578,9 +583,9 @@ func TestHandlerCostBreakdownFiltersByTenantNamespaces(t *testing.T) {
 	// Langfuse (cluster-wide) returns three agents in three distinct namespaces.
 	br := &CostBreakdownResponse{
 		Agents: []AgentCostItem{
-			{AgentNs: "ns-a", AgentName: "alpha", TotalCostUSD: 1.00, TotalTokens: 100, RunCount: 1},
-			{AgentNs: "ns-b", AgentName: "beta", TotalCostUSD: 2.00, TotalTokens: 200, RunCount: 2},
-			{AgentNs: "ns-c", AgentName: "gamma", TotalCostUSD: 4.00, TotalTokens: 400, RunCount: 4},
+			{AgentNs: "ns-a", AgentName: "alpha", TotalCostUSD: costPtr(1.00), TotalTokens: 100, RunCount: 1},
+			{AgentNs: "ns-b", AgentName: "beta", TotalCostUSD: costPtr(2.00), TotalTokens: 200, RunCount: 2},
+			{AgentNs: "ns-c", AgentName: "gamma", TotalCostUSD: costPtr(4.00), TotalTokens: 400, RunCount: 4},
 		},
 		// The pre-filter cluster-wide total (must NOT leak into resp.Total).
 		Total:      CostSummary{TotalCostUSD: 7.00, TotalTokens: 700, Observations: 7, ByModel: []MetricPoint{}},
@@ -613,7 +618,7 @@ func TestHandlerCostBreakdownFiltersByTenantNamespaces(t *testing.T) {
 // exists → 404 (the Get fails) — a non-existent tenant leaks nothing.
 func TestHandlerCostBreakdownUnknownTenantIs404(t *testing.T) {
 	br := &CostBreakdownResponse{
-		Agents:     []AgentCostItem{{AgentNs: "ns-a", AgentName: "alpha", TotalCostUSD: 1.0, TotalTokens: 100, RunCount: 1}},
+		Agents:     []AgentCostItem{{AgentNs: "ns-a", AgentName: "alpha", TotalCostUSD: costPtr(1.0), TotalTokens: 100, RunCount: 1}},
 		Total:      CostSummary{TotalCostUSD: 1.0, TotalTokens: 100, ByModel: []MetricPoint{}},
 		NextCursor: "",
 	}
@@ -621,4 +626,52 @@ func TestHandlerCostBreakdownUnknownTenantIs404(t *testing.T) {
 	s := newIsolationCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{breakdown: br}}, costrollup.NewMemStore())
 	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent&tenant=ghost")
 	assert.Equal(t, http.StatusNotFound, w.Code, "an unknown tenant ⇒ 404, never a cluster-wide leak")
+}
+
+// costPtr is the test helper for the nullable trace cost. lfTrace.TotalCost became a pointer
+// so an UNPRICED trace (Langfuse could not match the model name to a price) is
+// distinguishable from a free one — see AgentCostItem.TotalCostUSD. A test that wants a real
+// cost says so; a test that wants "unpriced" leaves it nil.
+func costPtr(v float64) *float64 { return &v }
+
+// TestCostBreakdown_UnpricedIsNotZero is the M157 ✅.
+//
+// A trace the store could not price is UNKNOWN cost, not zero. Rendering it as $0.00 is why
+// the cost pipeline could sit unwired and still look plausible: a zero receipt does not read
+// as a failure, it reads as a cheap agent. This pins that the two are distinguishable, in
+// both directions — an unpriced agent reports null, and a genuinely-free one reports 0.
+func TestCostBreakdown_UnpricedIsNotZero(t *testing.T) {
+	zero := 0.0
+	corpus := []lfTrace{
+		// Priced at exactly zero — a real answer, and it must survive as one.
+		{ID: "free1", Tags: []string{"agent:default/free"}, TotalCost: &zero, Usage: &lfUsage{TotalTokens: 10}},
+		// No cost at all: the store could not price it (our route alias has no price entry).
+		{ID: "un1", Tags: []string{"agent:default/unpriced"}, Usage: &lfUsage{TotalTokens: 900}},
+		{ID: "un2", Tags: []string{"agent:default/unpriced"}, Usage: &lfUsage{TotalTokens: 100}},
+	}
+	srv := fakeLangfuseBreakdown(t, corpus)
+	a := newTestLangfuse(t, srv.URL)
+	resp, err := a.CostBreakdown(context.Background(), 10, "")
+	require.NoError(t, err)
+
+	byName := map[string]AgentCostItem{}
+	for _, a := range resp.Agents {
+		byName[a.AgentName] = a
+	}
+
+	free, ok := byName["free"]
+	require.True(t, ok, "the priced-at-zero agent must appear")
+	require.NotNil(t, free.TotalCostUSD, "a priced-at-zero agent reports 0, not unknown")
+	assert.InDelta(t, 0.0, *free.TotalCostUSD, 1e-9)
+
+	un, ok := byName["unpriced"]
+	require.True(t, ok, "the unpriced agent must appear — it has runs")
+	assert.Nil(t, un.TotalCostUSD,
+		"an agent the store could not price must report UNKNOWN cost, never $0.00")
+	assert.Equal(t, int64(1000), un.TotalTokens, "tokens are known even when cost is not")
+	assert.Equal(t, 2, un.RunCount)
+
+	// The window total is the sum of what is KNOWN — an unknown must not be counted as zero
+	// and quietly make a partial figure look complete.
+	assert.InDelta(t, 0.0, resp.Total.TotalCostUSD, 1e-9)
 }

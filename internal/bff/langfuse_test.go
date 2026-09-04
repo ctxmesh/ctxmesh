@@ -375,9 +375,9 @@ func traceHasAllTags(tr lfTrace, want []string) bool {
 // RunsForAgent(default, foo) must return ONLY default/foo's runs, never other/foo's.
 func TestLangfuseRunsForAgentFiltersCrossNamespace(t *testing.T) {
 	corpus := []lfTrace{
-		{ID: "d1", Name: "agent.invoke", Timestamp: "2026-07-01T00:02:00Z", TotalCost: 0.5, Tags: []string{"agent:default/foo"}},
-		{ID: "d2", Name: "agent.invoke", Timestamp: "2026-07-01T00:01:00Z", TotalCost: 0.3, Tags: []string{"agent:default/foo"}},
-		{ID: "o1", Name: "agent.invoke", Timestamp: "2026-07-01T00:03:00Z", TotalCost: 9.9, Tags: []string{"agent:other/foo"}},
+		{ID: "d1", Name: "agent.invoke", Timestamp: "2026-07-01T00:02:00Z", TotalCost: costPtr(0.5), Tags: []string{"agent:default/foo"}},
+		{ID: "d2", Name: "agent.invoke", Timestamp: "2026-07-01T00:01:00Z", TotalCost: costPtr(0.3), Tags: []string{"agent:default/foo"}},
+		{ID: "o1", Name: "agent.invoke", Timestamp: "2026-07-01T00:03:00Z", TotalCost: costPtr(9.9), Tags: []string{"agent:other/foo"}},
 	}
 	srv, rec := fakeLangfuseTagged(t, corpus)
 	a := newTestLangfuse(t, srv.URL)

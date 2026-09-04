@@ -124,11 +124,30 @@ type lfPageMeta struct {
 	TotalPages int `json:"totalPages"`
 }
 
+// traceCost is the trace's cost, or 0 when Langfuse could not price it. Use it ONLY where a
+// number is required and the caller has already recorded whether the figure is known —
+// summing an unpriced trace as zero is exactly the silent lie this pointer exists to expose.
+func traceCost(t lfTrace) float64 {
+	if t.TotalCost == nil {
+		return 0
+	}
+	return *t.TotalCost
+}
+
+// tracePriced reports whether Langfuse returned a cost for this trace at all. False means
+// UNPRICED, which is not the same as free.
+func tracePriced(t lfTrace) bool { return t.TotalCost != nil }
+
 type lfTrace struct {
-	ID        string  `json:"id"`
-	Name      string  `json:"name"`
-	Timestamp string  `json:"timestamp"`
-	TotalCost float64 `json:"totalCost"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Timestamp string `json:"timestamp"`
+	// TotalCost is a POINTER so an absent cost is distinguishable from a zero one. Langfuse
+	// omits the field when it could not price the trace — which happens whenever the model
+	// name it sees has no entry in its price table, and ours currently sends the ROUTE ALIAS
+	// (m52.G11f). Decoded into a float64 that would read $0.00, indistinguishable from a
+	// genuinely free run: a receipt that does not look like a failure, it looks cheap.
+	TotalCost *float64 `json:"totalCost"`
 	// LatencySec is the Langfuse trace `latency` — in SECONDS (Langfuse's unit). The flat
 	// RunSummary/TraceRollup expose milliseconds (see latencyMsOf), so callers must convert.
 	LatencySec  float64  `json:"latency"`
@@ -219,7 +238,7 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 			// trace name when no agent tag is present.
 			Name:      runDisplayName(t),
 			Timestamp: t.Timestamp,
-			CostUSD:   t.TotalCost,
+			CostUSD:   traceCost(t),
 			Tokens:    traceTokens(t),
 			LatencyMs: latencyMsOf(t),
 			AgentNs:   ns,
@@ -442,7 +461,7 @@ func (a *langfuseAdapter) RunsForAgent(ctx context.Context, namespace, name stri
 			TraceID:   t.ID,
 			Name:      t.Name,
 			Timestamp: t.Timestamp,
-			CostUSD:   t.TotalCost,
+			CostUSD:   traceCost(t),
 			Tokens:    traceTokens(t),
 			LatencyMs: latencyMsOf(t),
 		})
@@ -607,7 +626,7 @@ func appendRunTraces(dst []RunSummary, data []lfTrace, agentTag, q2 string) []Ru
 			TraceID:   t.ID,
 			Name:      display,
 			Timestamp: t.Timestamp,
-			CostUSD:   t.TotalCost,
+			CostUSD:   traceCost(t),
 			Tokens:    traceTokens(t),
 			LatencyMs: latencyMsOf(t),
 			AgentNs:   ns,
@@ -824,8 +843,13 @@ func (a *langfuseAdapter) CostBreakdown(ctx context.Context, limit int, cursor s
 	// Accumulate per-agent cost/tokens/count.
 	type acc struct {
 		totalCostUSD float64
-		totalTokens  int64
-		runCount     int
+		// priced is true once ANY trace in this bucket carried a cost. When it stays false
+		// the agent's cost is UNKNOWN, not zero — the bucket has runs, Langfuse simply could
+		// not price them. Reporting that as $0.00 is the failure this milestone is about: a
+		// zero receipt does not look like a failure, it looks like a cheap agent.
+		priced      bool
+		totalTokens int64
+		runCount    int
 	}
 	accs := map[agentCostKey]*acc{}
 	// Order keys to preserve insertion order for deterministic output when costs
@@ -836,7 +860,7 @@ func (a *langfuseAdapter) CostBreakdown(ctx context.Context, limit int, cursor s
 	var totalTokens int64
 
 	for _, t := range body.Data {
-		totalCost += t.TotalCost
+		totalCost += traceCost(t)
 		totalTokens += traceTokens(t)
 
 		// Find the first agent tag on the trace.
@@ -858,7 +882,8 @@ func (a *langfuseAdapter) CostBreakdown(ctx context.Context, limit int, cursor s
 			accs[key] = &acc{}
 			keyOrder = append(keyOrder, key)
 		}
-		accs[key].totalCostUSD += t.TotalCost
+		accs[key].totalCostUSD += traceCost(t)
+		accs[key].priced = accs[key].priced || tracePriced(t)
 		accs[key].totalTokens += traceTokens(t)
 		accs[key].runCount++
 	}
@@ -867,22 +892,33 @@ func (a *langfuseAdapter) CostBreakdown(ctx context.Context, limit int, cursor s
 	agents := make([]AgentCostItem, 0, len(accs))
 	for _, k := range keyOrder {
 		a := accs[k]
-		agents = append(agents, AgentCostItem{
-			AgentNs:      k.ns,
-			AgentName:    k.name,
-			TotalCostUSD: a.totalCostUSD,
-			TotalTokens:  a.totalTokens,
-			RunCount:     a.runCount,
-		})
+		item := AgentCostItem{
+			AgentNs:     k.ns,
+			AgentName:   k.name,
+			TotalTokens: a.totalTokens,
+			RunCount:    a.runCount,
+		}
+		if a.priced {
+			cost := a.totalCostUSD
+			item.TotalCostUSD = &cost
+		}
+		agents = append(agents, item)
 	}
 
 	// Sort by totalCostUSD desc; tie-break (agentNs, agentName) asc.
 	slices.SortStableFunc(agents, func(a, b AgentCostItem) int {
-		if b.TotalCostUSD != a.TotalCostUSD {
-			// Desc: higher cost first. b > a → return -1 (a comes after b)? No:
-			// SortStableFunc returns negative if a < b. We want higher cost first,
-			// so when a.Cost > b.Cost → a comes first → return -1.
-			if a.TotalCostUSD > b.TotalCostUSD {
+		// Desc by cost, with UNPRICED agents last: an agent whose cost is unknown must not
+		// sort as if it were the cheapest, which is what treating nil as 0 would do.
+		ac, bc := costOrZero(a.TotalCostUSD), costOrZero(b.TotalCostUSD)
+		if (a.TotalCostUSD == nil) != (b.TotalCostUSD == nil) {
+			if a.TotalCostUSD == nil {
+				return 1
+			}
+			return -1
+		}
+		if ac != bc {
+			// SortStableFunc returns negative when a sorts first; higher cost first.
+			if ac > bc {
 				return -1
 			}
 			return 1
@@ -916,7 +952,7 @@ func (a *langfuseAdapter) CostBreakdown(ctx context.Context, limit int, cursor s
 			if name == "" {
 				name = "unnamed"
 			}
-			byName[name] += t.TotalCost
+			byName[name] += traceCost(t)
 		}
 		byModel := make([]MetricPoint, 0, len(byName))
 		for n, cost := range byName {
@@ -1075,7 +1111,7 @@ func (a *langfuseAdapter) TraceDetail(ctx context.Context, traceID string) (Trac
 			TraceID:   body.ID,
 			Name:      body.Name,
 			Timestamp: body.Timestamp,
-			CostUSD:   body.TotalCost,
+			CostUSD:   traceCost(body.lfTrace),
 			Tokens:    tokens,
 			LatencyMs: latencyMsOf(body.lfTrace),
 			SpanCount: len(ordered),
@@ -1506,4 +1542,13 @@ func orderSpansDFS(spans []SpanSummary) (ordered []SpanSummary, rootID string) {
 	}
 
 	return ordered, rootID
+}
+
+// costOrZero unwraps a nullable cost for arithmetic and ordering. The caller must have
+// already decided what an absent cost MEANS — this is a convenience, not a semantics.
+func costOrZero(v *float64) float64 {
+	if v == nil {
+		return 0
+	}
+	return *v
 }
