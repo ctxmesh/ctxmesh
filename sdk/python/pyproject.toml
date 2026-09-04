@@ -21,6 +21,9 @@ name = "ctxmesh"
 version = "0.1.0"
 description = "Typed Python SDK over the ctxmesh launcher localhost plane (memory / tools / feedback)."
 readme = "README.md"
+# 3.9 is the floor because the agent base image still ships it; the classifiers below
+# state the range actually supported. A library that claims only 3.9 reads as abandoned to
+# anyone running a current interpreter, whether or not it works there.
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 authors = [{ name = "ctxmesh" }]
@@ -28,6 +31,10 @@ keywords = ["ctxmesh", "ctxmesh", "llm", "agents", "observability"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "License :: OSI Approved :: Apache Software License",
 ]
 # Runtime deps for the m10.3 model + step-tracing helpers. Pinned to the exact
@@ -38,13 +45,22 @@ classifiers = [
 #   * openinference-semantic-conventions — the CHAIN/TOOL/LLM span kinds + attr
 #     keys, so a custom-loop tree is byte-for-byte a framework tree.
 # All three install cleanly and run on the 3.9 target (host python 3.9.6).
+# RANGES, not pins. This is a LIBRARY: it is installed alongside the user's own code, and
+# an exact pin on opentelemetry-sdk makes ctxmesh uninstallable next to any application that
+# already has a different OTel — which is most applications that would want us. An
+# application pins; a library states the range it works across and lets the resolver decide.
+#
+# Compatible-release (~=) on the OTel packages: they move together and have broken minor to
+# minor before, so the ceiling is deliberate rather than optimistic. jsonschema has a stable
+# 4.x API and gets the wider range.
+#
+# The images that BUNDLE this SDK pin exact versions in their own requirements.txt — that is
+# where pinning belongs, because an image IS an application.
 dependencies = [
-    "opentelemetry-sdk==1.27.0",
-    "opentelemetry-exporter-otlp-proto-grpc==1.27.0",
-    "openinference-semantic-conventions==0.1.30",
-    # JSON Schema validation for structured outputs (m65.5, ADR 0058): the
-    # standard Python validator; pinned to the exact version used at integration.
-    "jsonschema==4.23.0",
+    "opentelemetry-sdk~=1.27",
+    "opentelemetry-exporter-otlp-proto-grpc~=1.27",
+    "openinference-semantic-conventions~=0.1.30",
+    "jsonschema>=4.20,<5",
 ]
 
 [project.optional-dependencies]

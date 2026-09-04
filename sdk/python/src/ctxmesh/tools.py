@@ -432,7 +432,14 @@ class ToolsClient:
         raise ConfigError(f"tool {name!r} is not in the current manifest")
 
     # ── invocation ───────────────────────────────────────────────────────────
-    def call(self, name: str, *, timeout: Optional[float] = None, **args: Any) -> Any:
+    def call(
+        self,
+        name: str,
+        args: Optional[Dict[str, Any]] = None,
+        *,
+        timeout: Optional[float] = None,
+        **kwargs: Any,
+    ) -> Any:
         """Invoke a bound MCP tool by its *catalog* name; return its result.
 
         *name* is the discovery-manifest catalog key. The client resolves the
@@ -442,17 +449,25 @@ class ToolsClient:
         tool's text result is returned parsed as JSON when it is a JSON document,
         else as the raw string.
 
-        *timeout* (m65.7, ADR 0058) is a keyword-only per-tool-call socket timeout
-        in seconds, plumbed to every MCP round-trip of this call; ``None`` (the
-        default) keeps the historical :data:`_TOOL_CALL_TIMEOUT`. The managed loop's
-        per-turn resilience (``ManagedConfig.resilience.toolCall.timeoutSeconds``)
-        supplies it. It is keyword-only so it can never collide with a tool
-        argument literally named ``timeout``.
+        Arguments may be passed either as a **dict** (``call("t", {"q": "x"})``, the
+        TypeScript shape) or as keywords (``call("t", q="x")``, the ergonomic one). Prefer
+        the dict for anything MODEL-PRODUCED, and pass it that way from any tool-calling
+        loop, because keyword-spreading model output cannot express an argument named
+        ``timeout``: the docstring here used to claim keyword-only ``timeout`` "can never
+        collide with a tool argument literally named timeout", and the opposite was true —
+        ``call("t", timeout=30)`` bound the socket timeout and the tool never saw the
+        argument at all (M156). The dict path has no such ambiguity.
+
+        *timeout* is a per-tool-call socket timeout in seconds (m65.7, ADR 0058), plumbed to
+        every MCP round-trip of this call; ``None`` keeps :data:`_TOOL_CALL_TIMEOUT`. The
+        managed loop supplies it from ``ManagedConfig.resilience.toolCall.timeoutSeconds``.
         """
         tool = self._find(name)
         if not tool.endpoint:
             raise ConfigError(f"tool {name!r} has no endpoint in the manifest")
-        raw_text = _mcp_call_tool(tool.endpoint, name, args, timeout=timeout)
+        merged: Dict[str, Any] = dict(args or {})
+        merged.update(kwargs)
+        raw_text = _mcp_call_tool(tool.endpoint, name, merged, timeout=timeout)
         try:
             return json.loads(raw_text)
         except (json.JSONDecodeError, TypeError):
@@ -846,9 +861,26 @@ def _resolve_tool_name(catalog_name: str, server_names: List[str], endpoint: str
 
 
 def _first_text_content(result: Optional[Dict[str, Any]], endpoint: str) -> str:
-    """Pull the first text content item out of an MCP CallToolResult."""
+    """Pull the first text content item out of an MCP CallToolResult.
+
+    A result carrying ``isError: true`` is an EXECUTION FAILURE the server is reporting in
+    band — MCP does not signal it at the JSON-RPC layer. Returning its text as an ordinary
+    result told the model, the TOOL span and the author that a failed call had succeeded,
+    and, worse, hid it from the managed loop's resilience machinery: the circuit breaker and
+    the idempotent-retry gate only count exceptions, so a tool failing every single time
+    never tripped either (M156).
+    """
     if not isinstance(result, dict):
         raise EndpointError(f"MCP tools/call at {endpoint} returned no result object")
+    if result.get("isError") is True:
+        detail = ""
+        content_ = result.get("content")
+        if isinstance(content_, list) and content_ and isinstance(content_[0], dict):
+            detail = str(content_[0].get("text", ""))[:200]
+        raise EndpointError(
+            f"MCP tools/call at {endpoint} reported a tool execution error"
+            + (f": {detail}" if detail else "")
+        )
     content = result.get("content")
     if not isinstance(content, list) or not content:
         raise EndpointError(f"MCP tools/call at {endpoint} returned empty content")

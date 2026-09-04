@@ -1569,12 +1569,17 @@ def _call_tool_with_resilience(
     recorded on the breaker; a success resets it. Raises :class:`_CircuitOpenError` when the
     breaker is open (the caller threads an honest "circuit open" tool result to the model)."""
     tool_call = _resilience_section(config.resilience, "toolCall")
-    call_kwargs: Dict[str, Any] = dict(args)
+    # The model's arguments go through the DICT path and the socket timeout stays a keyword,
+    # so the two can never be confused. This used to merge the configured timeout INTO the
+    # args dict, which overwrote any model-supplied argument named `timeout` and sent the
+    # SDK's socket timeout to the tool in its place (M156).
+    call_args: Dict[str, Any] = dict(args)
+    call_timeout: Optional[float] = None
     retries = 0
     if tool_call is not None:
         timeout_seconds = _positive_int(tool_call, "timeoutSeconds")
         if timeout_seconds > 0:
-            call_kwargs["timeout"] = timeout_seconds
+            call_timeout = float(timeout_seconds)
         # Retry ONLY when configured AND this tool is explicitly retryable (idempotent).
         if _tool_retryable(config.tool_policy, name):
             retries = _effective_retries(_positive_int(tool_call, "maxRetries"), spawn_depth)
@@ -1584,7 +1589,7 @@ def _call_tool_with_resilience(
         if breaker is not None and not breaker.allow(name):
             raise _CircuitOpenError(name)
         try:
-            result = client.tools.call(name, **call_kwargs)
+            result = client.tools.call(name, call_args, timeout=call_timeout)
         except ConsentRequiredError:
             # Consent-required is a user-action outcome, NOT a transient fault: it must not
             # count toward the breaker or be retried — surface it to the existing handler.

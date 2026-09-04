@@ -49,6 +49,8 @@ __all__ = [
     "DiscoveryStub",
     "GatewayStub",
     "FeedbackStub",
+    "MeshStub",
+    "DelegateStub",
 ]
 
 
@@ -160,6 +162,9 @@ def _normalise(path: str) -> str:
     if len(parts) >= 2 and parts[0] == "memory":
         tail = "/" + "/".join(parts[2:]) if len(parts) > 2 else ""
         return "/memory/{id}" + tail
+    # /a2a/research -> /a2a/{target} (the mesh listener, M156)
+    if len(parts) == 2 and parts[0] == "a2a":
+        return "/a2a/{target}"
     return path
 
 
@@ -425,3 +430,94 @@ class FeedbackStub(_BaseStub):
             return 202, {}, b""
 
         self.state.routes.update({"POST /feedback": feedback})
+
+
+class DelegateStub(_BaseStub):
+    """Fake of the launcher delegate/handoff endpoints (``POST /delegate``, ``POST /handoff``).
+
+    TypeScript shipped this stub and Python never had it — invisible to a parity check that
+    compares MODULE sets, since both languages have a `testing` module either way. The
+    sdk-contract gate now compares the stubs themselves (M156).
+
+    Both endpoints answer the launcher's shape: ``{ok, answer, subRun}`` for a delegation,
+    ``{ok, runId, sourceRun, handedOffTo}`` for a handoff. A denial or a spawn-guard refusal
+    arrives as ``ok: false`` rather than an exception — the launcher makes it an OUTCOME the
+    model reads, so a test that only exercises the happy path has not exercised delegation.
+    """
+
+    def __init__(
+        self,
+        delegate_response: Optional[Dict[str, Any]] = None,
+        handoff_response: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.delegate_response = (
+            delegate_response
+            if delegate_response is not None
+            else {"ok": True, "answer": "sub-answer", "subRun": "sub-1"}
+        )
+        self.handoff_response = (
+            handoff_response
+            if handoff_response is not None
+            else {
+                "ok": True,
+                "runId": "hand-1",
+                "sourceRun": "A-1",
+                "handedOffTo": "billing",
+            }
+        )
+        super().__init__()
+
+    def _install_routes(self) -> None:
+        def delegate(_state: "_StubState", _req: RecordedRequest):
+            body = json.dumps(self.delegate_response).encode()
+            return 200, {"Content-Type": "application/json"}, body
+
+        def handoff(_state: "_StubState", _req: RecordedRequest):
+            body = json.dumps(self.handoff_response).encode()
+            return 200, {"Content-Type": "application/json"}, body
+
+        self.state.routes.update(
+            {"POST /delegate": delegate, "POST /handoff": handoff}
+        )
+
+
+class MeshStub(_BaseStub):
+    """Fake of the launcher A2A listener (``POST /a2a/{targetAgent}``, :2997).
+
+    The real launcher stamps the platform envelope, resolves the target over DNS and
+    forwards. A stub imitates none of that and should not pretend to. What it CAN stand in
+    for is the contract the SDK sees: a target that resolves returns the peer's JSON, and a
+    target the launcher refuses comes back as a typed status.
+
+    ``deny`` drives the refusal paths, which are the interesting ones — a mediated mesh
+    exists in order to say no, so an agent that never exercises its refusal handling has not
+    exercised the mesh at all.
+    """
+
+    def __init__(
+        self,
+        *,
+        response: Optional[Dict[str, Any]] = None,
+        deny: Optional[Dict[str, int]] = None,
+    ) -> None:
+        self.response = (
+            response if response is not None else {"ok": True, "answer": "from the peer"}
+        )
+        #: target -> the status the launcher would answer with: 403 caller_not_allowed
+        #: or cross_registry_denied, 404 unknown_target, 502 blocked.
+        self.deny = deny or {}
+        super().__init__()
+
+    def _install_routes(self) -> None:
+        def call(_state: "_StubState", req: RecordedRequest):
+            target = req.path.rstrip("/").rsplit("/", 1)[-1]
+            status = self.deny.get(target)
+            if status:
+                reason = {403: "caller_not_allowed", 404: "unknown_target"}.get(
+                    status, "upstream_failure"
+                )
+                body = json.dumps({"error": reason}).encode()
+                return status, {"Content-Type": "application/json"}, body
+            return 200, {"Content-Type": "application/json"}, json.dumps(self.response).encode()
+
+        self.state.routes.update({"POST /a2a/{target}": call})

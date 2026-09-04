@@ -162,6 +162,12 @@ type AlertRuleState struct {
 	Firing bool `json:"firing"`
 
 	// lastValue is the most recent evaluated metric value (string, same encoding as Threshold).
+	//
+	// For budgetSoft it is "spent/budget" read from the durable cost-rollup ledger. The
+	// GATEWAY enforces on a live counter that may be higher, so this figure can read below
+	// budget while calls are already being refused — see ADR 0132 for which number is
+	// authoritative. That distinction lives here rather than in the value, which must stay
+	// machine-readable.
 	// +optional
 	LastValue string `json:"lastValue,omitempty"`
 

@@ -10,7 +10,7 @@ import { FeedbackClient } from "../src/feedback.js";
 import { KnowledgeClient } from "../src/knowledge.js";
 import { MemoryClient } from "../src/memory.js";
 import { ModelClient } from "../src/model.js";
-import { startPlane, type MockPlane } from "./plane.js";
+import { startPlane, type MockPlane } from "../src/testing.js";
 
 let plane: MockPlane;
 

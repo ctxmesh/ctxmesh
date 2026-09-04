@@ -47,6 +47,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Union
 
 from ctxmesh import agent as _agent_module
 from ctxmesh.client import Client
+from ctxmesh.errors import ApprovalRequiredError, ConsentRequiredError
 from ctxmesh.managed import (
     ManagedConfig,
     ManagedResult,
@@ -186,7 +187,30 @@ def process_invoke(
         emit_step=on_step or (lambda _frame: None),
     )
     with client.trace.request_context(headers), client.request_scope(headers, approvals=approvals):
-        result = handler(req)
+        try:
+            result = handler(req)
+        except ApprovalRequiredError as exc:
+            # A CUSTOM handler that calls pause_for_approval for a not-yet-approved key is
+            # taking the documented HITL path (errors.py: the pause becomes a requires_action
+            # outcome). Without this catch the HTTP layer maps it to a 502 and the author gets
+            # a FAILED RUN where the product should show an approval prompt — the managed loop
+            # already converts it, so only hand-rolled handlers were broken. TypeScript has
+            # done this since it shipped, and its comment claims to "mirror Python" (M156).
+            result = ManagedResult(
+                output=f"Awaiting approval: {exc.summary}",
+                steps=1,
+                tools_called=[],
+                approval_required={"key": exc.key, "summary": exc.summary},
+            )
+        except ConsentRequiredError as exc:
+            # Same shape for the consent path: the run needs a "Connect your account" CTA,
+            # not a 502.
+            result = ManagedResult(
+                output=f"consent required for {exc.server}",
+                steps=1,
+                tools_called=[],
+                consent_required=[exc.server] if exc.server else [],
+            )
     return _envelope(agent_name, result)
 
 

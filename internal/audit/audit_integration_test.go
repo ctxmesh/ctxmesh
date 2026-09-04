@@ -242,9 +242,16 @@ func TestPersonaClusterRoles_InstallAndValid(t *testing.T) {
 		wantAuditlogs bool
 	}{
 		{
-			file:          "ctxmesh_operator_role.yaml",
-			roleName:      "operator",
-			wantVerbs:     []string{"*"},
+			file:     "ctxmesh_operator_role.yaml",
+			roleName: "operator",
+			// Explicit verbs, not ["*"]. M149's least-privilege gate forbids verb wildcards
+			// (a "*" silently grants every FUTURE verb, including ones a later milestone
+			// adds — the hazard M146 had to route around), so the operator role enumerates
+			// them. This expectation still said "*" and the test had been failing since;
+			// envtest is not a required check, so it went unnoticed until M156.
+			wantVerbs: []string{
+				"create", "delete", "deletecollection", "get", "list", "patch", "update", "watch",
+			},
 			wantAuditlogs: true,
 		},
 		{

@@ -1,6 +1,12 @@
 /**
- * The mock launcher plane — `node:http` stubs of the localhost plane, at parity
- * with `sdk/python/src/ctxmesh/testing.py` (+ the `conftest.py` fixtures).
+ * `ctxmesh/testing` — offline fakes of the launcher localhost plane, at parity with
+ * `sdk/python/src/ctxmesh/testing.py`.
+ *
+ * SHIPPED, as of M156. This lived in `test/` and was excluded from the package, so a
+ * TypeScript agent author got no offline fakes at all while Python authors got five — the
+ * asymmetry tracked as m52.O13. It is a SUBPATH export (`ctxmesh/testing`) rather than part
+ * of the main entry: an agent runtime should never carry HTTP servers it does not use, and a
+ * subpath keeps them out of the bundle without relying on tree-shaking to do it.
  *
  * Test a ctxmesh agent with NO cluster and NO launcher: these tiny http-server
  * stubs stand in for the real localhost plane, so a handler or a custom loop can be
@@ -31,7 +37,7 @@ import {
   type SpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 
-import { PlaneConfig, makeRunContext, type RunContext } from "../src/config.js";
+import { PlaneConfig, makeRunContext, type RunContext } from "./config.js";
 
 /** A captured inbound request the stub recorded, for assertions. */
 export interface RecordedRequest {
@@ -63,6 +69,10 @@ export function normalisePath(path: string): string {
   if (parts.length >= 2 && parts[0] === "memory") {
     const tail = parts.length > 2 ? "/" + parts.slice(2).join("/") : "";
     return "/memory/{id}" + tail;
+  }
+  // /a2a/research -> /a2a/{target} (the mesh listener, M156)
+  if (parts.length === 2 && parts[0] === "a2a") {
+    return "/a2a/{target}";
   }
   return path;
 }
@@ -411,6 +421,47 @@ export class FeedbackStub extends BaseStub {
   }
 }
 
+/**
+ * Fake of the launcher A2A listener (`POST /a2a/{targetAgent}`, :2997) — the fake behind
+ * `client.mesh`.
+ *
+ * The real launcher stamps the platform envelope, resolves the target over DNS and forwards.
+ * A stub imitates none of that and should not pretend to. What it CAN stand in for is the
+ * contract the SDK sees: a target that resolves returns the peer's JSON, and a target the
+ * launcher refuses comes back as a typed status.
+ *
+ * `deny` drives the refusal paths, which are the interesting ones — a mediated mesh exists
+ * in order to say no, so an agent that never exercises its refusal handling has not
+ * exercised the mesh at all.
+ */
+export class MeshStub extends BaseStub {
+  constructor(
+    private readonly opts: {
+      response?: Record<string, unknown>;
+      /** target -> the status the launcher would answer with (403/404/502). */
+      deny?: Record<string, number>;
+    } = {},
+  ) {
+    super();
+  }
+
+  protected installRoutes(): void {
+    this.routes.set("POST /a2a/{target}", (_s, req) => {
+      const target = req.path.replace(/\/$/, "").split("/").pop() ?? "";
+      const status = this.opts.deny?.[target];
+      if (status) {
+        const reason =
+          status === 403 ? "caller_not_allowed" : status === 404 ? "unknown_target" : "upstream_failure";
+        return { status, body: JSON.stringify({ error: reason }) };
+      }
+      return {
+        status: 200,
+        body: JSON.stringify(this.opts.response ?? { ok: true, answer: "from the peer" }),
+      };
+    });
+  }
+}
+
 // ── in-memory span capture (trace tests) ────────────────────────────────────
 /**
  * A real in-memory span capture — the analogue of the Python `InMemorySpanExporter`
@@ -448,13 +499,14 @@ export interface MockPlane {
   feedback: FeedbackStub;
   gateway: GatewayStub;
   delegate: DelegateStub;
+  mesh: MeshStub;
   spans: InMemorySpanCollector;
   config: PlaneConfig;
   stop(): Promise<void>;
 }
 
 /**
- * Start the memory/discovery/feedback/gateway/delegate stubs together and return a
+ * Start the memory/discovery/feedback/gateway/delegate/mesh stubs together and return a
  * `PlaneConfig.forTest(...)` pointed at them (the Python `plane` + `client` fixture
  * shape). Call `stop()` to tear everything down.
  */
@@ -463,6 +515,13 @@ export async function startPlane(
     run?: RunContext;
     gateway?: ConstructorParameters<typeof GatewayStub>[0];
     delegateEnabled?: boolean;
+    /**
+     * Opt in to a wired mesh. Off by default because an agent OUTSIDE an AgentRegistry is
+     * the common production case — defaulting it on would leave the path most agents take
+     * as the one no test covers. Pass `mesh: { deny: { peer: 403 } }` to drive the refusal
+     * paths, which are the interesting ones: a mediated mesh exists in order to say no.
+     */
+    mesh?: ConstructorParameters<typeof MeshStub>[0] | true;
   } = {},
 ): Promise<MockPlane> {
   const memory = new MemoryStub();
@@ -470,12 +529,14 @@ export async function startPlane(
   const feedback = new FeedbackStub();
   const gateway = new GatewayStub(opts.gateway);
   const delegate = new DelegateStub();
+  const mesh = new MeshStub(opts.mesh === true ? {} : opts.mesh);
   await Promise.all([
     memory.start(),
     discovery.start(),
     feedback.start(),
     gateway.start(),
     delegate.start(),
+    mesh.start(),
   ]);
 
   const config = PlaneConfig.forTest({
@@ -484,8 +545,10 @@ export async function startPlane(
     feedbackBaseUrl: feedback.baseUrl,
     modelGatewayUrl: gateway.baseUrl,
     delegateBaseUrl: delegate.baseUrl,
+    meshBaseUrl: mesh.baseUrl,
     run: opts.run ?? makeRunContext({ agentName: "test-agent" }),
     delegateEnabled: opts.delegateEnabled ?? false,
+    meshWired: opts.mesh !== undefined,
   });
 
   return {
@@ -494,6 +557,7 @@ export async function startPlane(
     feedback,
     gateway,
     delegate,
+    mesh,
     spans: new InMemorySpanCollector(),
     config,
     async stop() {
@@ -503,6 +567,7 @@ export async function startPlane(
         feedback.stop(),
         gateway.stop(),
         delegate.stop(),
+        mesh.stop(),
       ]);
     },
   };

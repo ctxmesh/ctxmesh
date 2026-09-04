@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as capMod from "../src/_capability.js";
 import { ConfigError, EndpointError } from "../src/errors.js";
 import { MemoryClient } from "../src/memory.js";
-import { startPlane, type MockPlane } from "./plane.js";
+import { startPlane, type MockPlane } from "../src/testing.js";
 
 let plane: MockPlane;
 
