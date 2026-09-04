@@ -226,14 +226,22 @@ func TestCapabilitiesBatchesTheMatrix(t *testing.T) {
 			want[probe{res, verb, "prod", agentsAPIGroup}] = true
 		}
 	}
-	want[probe{"pods", "get", "prod", ""}] = true       // the logs subresource probe (core group)
-	want[probe{"secrets", "create", "prod", ""}] = true // the connect-a-provider probe (core group)
-	require.Len(t, got, len(want), "one SSAR per golden resource×verb, plus the two core-group probes")
+	want[probe{"pods", "get", "prod", ""}] = true // the logs subresource probe (core group)
+	// The core-group Secret verbs are DERIVED from the flow registry, not hardcoded: connect
+	// needs create, and rotate needs update because upsertObject falls back to Update when the
+	// object exists. Gating rotation on `secretbindings.update` — as the console did — asks
+	// about the wrong object entirely; the write that matters is the Secret.
+	for _, verb := range flowNeedsCoreSecretVerbs() {
+		want[probe{"secrets", verb, "prod", ""}] = true
+	}
+	require.Contains(t, flowNeedsCoreSecretVerbs(), verbUpdate,
+		"rotate must contribute a core-secret update probe, or the flow evaluates an unprobed cell")
+	require.Len(t, got, len(want), "one SSAR per golden resource×verb, plus the core-group probes")
 	for _, p := range got {
 		assert.Contains(t, want, p, "unexpected SSAR probe: %+v", p)
 		delete(want, p)
 	}
-	assert.Empty(t, want, "every golden resource×verb + both core-group probes must be probed exactly once")
+	assert.Empty(t, want, "every golden resource×verb + every core-group probe must be probed exactly once")
 
 	// The response echoes the namespace and carries the full flat matrix + both core cells.
 	var body CapabilitiesResponse

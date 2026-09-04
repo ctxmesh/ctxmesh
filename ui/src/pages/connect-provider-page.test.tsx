@@ -50,10 +50,26 @@ function recordingFetch(opts: {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({
-            namespace: "",
-            allowed: opts.caps ?? { secretbindings: { create: true } },
-          }),
+          json: async () => {
+            // The default now states everything the connect flow writes. The old fixture
+            // granted `secretbindings` alone and still enabled the button, because the
+            // removed helper's other cell was unprobed and read as optimistic-true.
+            const caps = opts.caps ?? {
+              secretbindings: { create: true },
+              secrets: { create: true },
+              modelroutes: { create: true },
+            };
+            // Mirrors the server rule (internal/bff/flows.go).
+            const all = (verb: string) =>
+              ["secrets", "secretbindings", "modelroutes"].every(
+                (r) => caps[r]?.[verb] === true,
+              );
+            return {
+              namespace: "",
+              allowed: caps,
+              flows: { connectProvider: all("create"), rotateProviderKey: all("update") },
+            };
+          },
         } as Response);
       }
       if (url === "/api/providers" && method === "POST" && opts.connectRejects) {
@@ -383,10 +399,16 @@ describe("ConnectProviderPage — RBAC-gated", () => {
   });
 
   it("renders ForbiddenInline when the connect POST returns 403 (the real gate)", async () => {
-    // Optimistic caps (create allowed by display) but the API denies — the stale
-    // "yes" surprise path: 403 → ForbiddenInline.
+    // The stale-"yes" surprise path: the probe said the flow WAS completable and the API
+    // denies anyway — RBAC changed between probe and click, the race the display-only
+    // capability contract explicitly accepts. The caps must therefore GRANT the flow; gating
+    // it off here would test a user who never reaches the POST and lose the 403 coverage.
     recordingFetch({
-      caps: { secretbindings: { create: true } },
+      caps: {
+        secretbindings: { create: true },
+        secrets: { create: true },
+        modelroutes: { create: true },
+      },
       connect: () => ({
         ok: false,
         status: 403,

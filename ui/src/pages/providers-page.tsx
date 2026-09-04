@@ -28,7 +28,7 @@ import {
 } from "@/components/kit";
 import { api, ApiError, type ProviderSummary } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
-import { canConnectProvider, RES_SECRETS } from "@/lib/nav";
+import { RES_SECRETS } from "@/lib/nav";
 
 // ProvidersPage — the connected-providers admin surface (m18.5, ADR 0018;
 // re-housed on the editorial system in M151, spec §6.2: "Rotate/Disconnect as
@@ -243,9 +243,14 @@ function RowActions({
 
 export function ProvidersPage() {
   const navigate = useNavigate();
-  const { can, reprobe } = useCapabilities();
-  const canConnect = canConnectProvider(can);
-  const canRotate = can(RES_SECRETS, "update");
+  const { can, canFlow, reprobe } = useCapabilities();
+  // Both of these are now the SERVER's answer about the whole flow, not a conjunction this
+  // page assembles. It got that wrong twice: connect omitted the ModelRoute the handler
+  // writes (and the Secret is written first, so the denial landed after a live credential
+  // was in the cluster), and rotate asked about `secretbindings.update` while the write that
+  // matters is the core Secret. See internal/bff/flows.go.
+  const canConnect = canFlow("connectProvider");
+  const canRotate = canFlow("rotateProviderKey");
   const canDisconnect = can(RES_SECRETS, "delete");
 
   const { toast } = useToast();
