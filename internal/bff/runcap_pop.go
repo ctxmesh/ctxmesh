@@ -88,9 +88,9 @@ func (s *Server) verifyRuncapWithProof(r *http.Request) (runcap.Capability, erro
 // server-side request carries only the path in r.URL, so scheme and host come from the request context —
 // and the caller's Host header is what it actually dialled, which is the value it signed over.
 func requestURL(r *http.Request) string {
-	scheme := "http"
+	scheme := schemeHTTP
 	if r.TLS != nil {
-		scheme = "https"
+		scheme = schemeHTTPS
 	}
 	return scheme + "://" + r.Host + r.URL.Path
 }

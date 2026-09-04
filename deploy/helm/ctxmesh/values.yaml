@@ -364,6 +364,22 @@ bff:
   # (a public GHCR tag); set it to a mirror, an air-gapped registry, or a locally
   # loaded tag. Without this seam every managed agent on an unreachable-registry
   # cluster sits at ContainerMissing with nothing in the console explaining why.
+  # Reaching the console. OFF by default: the console holds the caller's Kubernetes bearer
+  # token, so an install must not put it on the network unless asked. Enabling it is how a
+  # user reaches the console without `kubectl port-forward`, which was the only documented
+  # route until M159.
+  #
+  # No ingress controller is shipped and none is assumed — set className to whatever your
+  # cluster runs. NOT Kourier: it implements Knative's KIngress CRD rather than
+  # networking.k8s.io/v1 Ingress, so it does not serve this object (the local kind cluster has
+  # no IngressClass at all until the harness installs one).
+  ingress:
+    enabled: false
+    host: ""
+    className: ""
+    annotations: {}
+    tls: []
+
   managedAgentImage: ""
   ingestOcrURL: ""
   knowledgeRerankURL: ""
@@ -509,9 +525,12 @@ auth:
       enabled: true
       email: "admin@ctxmesh.local"
       username: "admin"
-      # bcrypt("ctxmesh-dev"). Regenerate with:
-      #   htpasswd -bnBC 10 "" <your-password> | tr -d ':\n'
-      passwordHash: "$2y$10$.wIDp8LyQ40/H.bdsuASxevjXyUk0gXCj9jaGQVJp.BnqiVxCxpj6"
+      # bcrypt("ctxmesh-dev") — VERIFIED against the password above, which the previous
+      # hash was not: it matched no plausible password, so the documented demo login could
+      # never succeed and Dex answered "Invalid username or password". Nobody noticed
+      # because the login flow had never been run (M159).
+      # Regenerate with: htpasswd -bnBC 10 "" <your-password> | tr -d ':\n'
+      passwordHash: "$2b$10$HZHxr/eo.cWiz8G0OMmUn.kGm2GN6nhJF16w5RZsOO8.wojldKpSe"
     # Federated IdP connectors (enterprise): each entry is a raw Dex connector object
     # (type/id/name/config). Google/Azure AD/Okta/GitHub/LDAP = OIDC connectors;
     # SAML = a Dex SAML connector. Empty = static-user-only (the OSS demo).
