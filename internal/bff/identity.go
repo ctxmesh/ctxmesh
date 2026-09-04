@@ -188,6 +188,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, CapabilitiesResponse{
 		Namespace: namespace,
 		Allowed:   allowed,
+		Flows:     evaluateFlows(allowed),
 	})
 }
 
@@ -250,14 +251,16 @@ func probeCapabilities(ctx context.Context, caller client.Client, namespace stri
 	}
 	allowed[resLogs][verbGet] = logsOK
 
-	// The core-group `create secrets` probe. Connect-a-provider needs BOTH this and
-	// secretbindings.create; reporting only the latter is what let the console offer
-	// a flow the API server would refuse.
-	secretsOK, err := reviewCoreAccess(ctx, caller, namespace, resSecrets, "", verbCreate)
-	if err != nil {
-		return nil, err
+	// The core-group Secret probes. Which verbs to ask about is DERIVED from the flow registry
+	// rather than hardcoded, so a flow that starts needing a new verb cannot end up evaluating
+	// against an unprobed cell — which the UI's optimistic default would read as allowed.
+	for _, verb := range flowNeedsCoreSecretVerbs() {
+		ok, err := reviewCoreAccess(ctx, caller, namespace, resSecrets, "", verb)
+		if err != nil {
+			return nil, err
+		}
+		allowed[resSecrets][verb] = ok
 	}
-	allowed[resSecrets][verbCreate] = secretsOK
 	return allowed, nil
 }
 

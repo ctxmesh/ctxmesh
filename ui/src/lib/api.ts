@@ -504,6 +504,13 @@ export interface FeedbackResponse {
 export interface CapabilitiesResponse {
   namespace: string;
   allowed: Record<string, Record<string, boolean>>;
+  /**
+   * Flow name → completable, computed SERVER-side by the handler that performs the writes
+   * (internal/bff/flows.go). The UI asks "may I run this flow?" rather than assembling a
+   * resource×verb conjunction, which it got wrong twice. Optional on the wire so an older
+   * BFF degrades to "no flow is offered" rather than to a wrong yes.
+   */
+  flows?: Record<string, boolean>;
 }
 
 // --- Namespaces (GET /api/namespaces) ---------------------------------------

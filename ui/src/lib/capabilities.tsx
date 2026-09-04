@@ -30,7 +30,12 @@ import { useNamespace } from "@/lib/namespace";
 // "probe failed" — both mean: don't hide affordances, show the banner if failed.
 export type CapState =
   | { kind: "loading" }
-  | { kind: "ready"; allowed: Record<string, Record<string, boolean>> }
+  | {
+      kind: "ready";
+      allowed: Record<string, Record<string, boolean>>;
+      /** Server-computed flow → completable (see internal/bff/flows.go). */
+      flows: Record<string, boolean>;
+    }
   | { kind: "error"; message: string };
 
 export interface CapabilitiesContextValue {
@@ -43,6 +48,17 @@ export interface CapabilitiesContextValue {
    * see their affordances; a probe hiccup never blanks a working console.
    */
   can: (resource: string, verb: string) => boolean;
+  /**
+   * canFlow(name) — may the caller complete this whole console FLOW? Answered by the
+   * server from the handler that performs the writes, so the UI never assembles a
+   * resource×verb conjunction again. It got that wrong twice: omitting the ModelRoute the
+   * connect path writes, and gating rotation on the binding rather than the Secret.
+   *
+   * UNLIKE can(), this fails CLOSED while loading or after a probe failure. Optimism is
+   * right for chrome and wrong for a write — offering a flow we did not verify is how a
+   * partial write leaves a live credential behind with no route to use it.
+   */
+  canFlow: (name: string) => boolean;
   /** True while the current namespace's probe is in flight. */
   loading: boolean;
   /**
@@ -72,15 +88,21 @@ export function CapabilitiesProvider({
   // Per-namespace session cache of the last successful map. Keyed by namespace
   // ("" = all). A cache HIT serves instantly; a miss (or a forced reprobe)
   // fetches. Kept in a ref so it survives re-renders without re-triggering them.
-  const cacheRef = React.useRef<Map<string, Record<string, Record<string, boolean>>>>(
-    new Map(),
-  );
+  const cacheRef = React.useRef<
+    Map<
+      string,
+      {
+        allowed: Record<string, Record<string, boolean>>;
+        flows: Record<string, boolean>;
+      }
+    >
+  >(new Map());
 
   const fetchCaps = React.useCallback(
     (ns: string, force: boolean, signal?: AbortSignal) => {
       const cached = cacheRef.current.get(ns);
       if (cached && !force) {
-        setState({ kind: "ready", allowed: cached });
+        setState({ kind: "ready", allowed: cached.allowed, flows: cached.flows });
         return;
       }
       setState({ kind: "loading" });
@@ -88,8 +110,8 @@ export function CapabilitiesProvider({
         .capabilities(ns, signal)
         .then((res) => {
           if (signal?.aborted) return;
-          cacheRef.current.set(ns, res.allowed);
-          setState({ kind: "ready", allowed: res.allowed });
+          cacheRef.current.set(ns, { allowed: res.allowed, flows: res.flows ?? {} });
+          setState({ kind: "ready", allowed: res.allowed, flows: res.flows ?? {} });
         })
         .catch((err: unknown) => {
           if (signal?.aborted) return;
@@ -123,9 +145,13 @@ export function CapabilitiesProvider({
       if (!verbs || !(verb in verbs)) return true; // unprobed cell → optimistic.
       return verbs[verb];
     };
+    // Fails CLOSED, deliberately the opposite of can(). See canFlow's doc above.
+    const canFlow = (name: string): boolean =>
+      state.kind === "ready" && state.flows[name] === true;
     return {
       state,
       can,
+      canFlow,
       loading: state.kind === "loading",
       probeError: state.kind === "error" ? state.message : null,
       reprobe,
@@ -148,8 +174,11 @@ export function useCapabilities(): CapabilitiesContextValue {
 }
 
 const FALLBACK: CapabilitiesContextValue = {
-  state: { kind: "ready", allowed: {} },
+  state: { kind: "ready", allowed: {}, flows: {} },
   can: () => true,
+  // No provider ⇒ no flow was verified. can() stays optimistic here (it only reveals chrome),
+  // but a WRITE must not be offered on the strength of a missing provider.
+  canFlow: () => false,
   loading: false,
   probeError: null,
   reprobe: () => {},

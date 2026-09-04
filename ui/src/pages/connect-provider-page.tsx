@@ -19,7 +19,6 @@ import {
   type WizardStep,
 } from "@/components/kit";
 import { useCapabilities } from "@/lib/capabilities";
-import { canConnectProvider } from "@/lib/nav";
 import { cn } from "@/lib/utils";
 import { api, ApiError, type ConnectProviderResponse } from "@/lib/api";
 
@@ -149,8 +148,9 @@ export function ConnectProviderPage() {
   // route — a write. A viewer (no create on secretbindings) sees the gated entry
   // in the shell; if they reach this page directly the API 403 is the real gate.
   // DISPLAY-ONLY (ADR 0011).
-  const { can, reprobe } = useCapabilities();
-  const canConnect = canConnectProvider(can);
+  const { canFlow, reprobe } = useCapabilities();
+  // The SERVER answers whether the whole connect flow is completable — see flows.go.
+  const canConnect = canFlow("connectProvider");
 
   const provider = PROVIDERS.find((p) => p.id === providerId)!;
 

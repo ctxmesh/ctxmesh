@@ -330,6 +330,11 @@ type WhoAmIResponse struct {
 type CapabilitiesResponse struct {
 	Namespace string                     `json:"namespace"`
 	Allowed   map[string]map[string]bool `json:"allowed"`
+	// Flows is flow name → completable, computed SERVER-side from the registry in flows.go.
+	// The UI asks "may I run this flow?" instead of assembling a resource×verb conjunction it
+	// has twice got wrong — once by omitting the ModelRoute the connect path writes, and once
+	// by gating rotation on secretbindings.update while the write that matters is the Secret.
+	Flows map[string]bool `json:"flows"`
 }
 
 // NamespaceSummary is the flat projection of one Namespace the caller can see.
