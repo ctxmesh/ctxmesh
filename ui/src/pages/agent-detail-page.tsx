@@ -876,22 +876,28 @@ function AgentRail({ detail }: { detail: AgentDetailResponse }) {
     },
     {
       key: "Endpoint",
-      value: detail.url ? (
+      // externalUrl, NOT url. `url` is the agent's CLUSTER-LOCAL address — what an
+      // in-cluster dispatch must use and what no browser can resolve. Rendering it as an
+      // <a href> produced a link to svc.cluster.local that was dead on every click: a
+      // broken link in the product's own UI, on the page whose job is to show the agent.
+      // No fallback to `url` on purpose — a link that cannot open is worse than the honest
+      // "not reachable from here", which is what a cluster-local agent genuinely is.
+      value: detail.externalUrl ? (
         <a
-          href={detail.url}
+          href={detail.externalUrl}
           target="_blank"
           rel="noreferrer"
-          title={detail.url}
+          title={detail.externalUrl}
           data-testid="agent-url"
           className={`inline-flex max-w-full items-center gap-1 ${linkClass}`}
         >
           {/* One line, end-ellipsis, full value in `title` (§4.5) — a URL is
               never allowed to set the rail's width. */}
-          <span className="truncate">{hostOf(detail.url)}</span>
+          <span className="truncate">{hostOf(detail.externalUrl)}</span>
           <ExternalLink aria-hidden="true" className="h-3 w-3 shrink-0" />
         </a>
       ) : undefined,
-      absent: "not serving yet",
+      absent: detail.url ? "not reachable from outside the cluster" : "not serving yet",
     },
     {
       key: "Image",

@@ -890,10 +890,22 @@ type AgentDeploymentStatus struct {
 	// +optional
 	Rollout *RolloutStatus `json:"rollout,omitempty"`
 
-	// url is the public HTTP endpoint assigned to the agent, copied verbatim from
-	// the Knative Service status once it becomes ready.
+	// url is the address an IN-CLUSTER caller should dispatch to — the Knative
+	// Service's cluster-local address when it has one (see preferredAgentURL). The
+	// external route URL is not hairpin-routable from inside the cluster, so the BFF
+	// Playground invoke must use this one. It is therefore NOT a link a browser can
+	// open; externalURL is.
 	// +optional
 	URL string `json:"url,omitempty"`
+
+	// externalURL is the agent's public route — the Knative Service's own status.url,
+	// the address a person reaches the agent at from outside the cluster. Separate from
+	// url because the two genuinely differ: a browser cannot open a cluster-local
+	// address, and an in-cluster dispatch to the external one fails against the ingress.
+	// Empty until the route is admitted, and empty for a cluster-local agent, so a
+	// consumer must treat "" as "no public address" rather than falling back to url.
+	// +optional
+	ExternalURL string `json:"externalURL,omitempty"`
 
 	// latestVersion is the name of the most recently created AgentVersion snapshot
 	// for this deployment, e.g. "echo-agent-7d9f4c1a".
