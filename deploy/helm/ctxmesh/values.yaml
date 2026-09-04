@@ -370,7 +370,9 @@ bff:
   # route until M159.
   #
   # No ingress controller is shipped and none is assumed — set className to whatever your
-  # cluster runs (on the local kind cluster that is Kourier, which Knative already provides).
+  # cluster runs. NOT Kourier: it implements Knative's KIngress CRD rather than
+  # networking.k8s.io/v1 Ingress, so it does not serve this object (the local kind cluster has
+  # no IngressClass at all until the harness installs one).
   ingress:
     enabled: false
     host: ""
