@@ -704,7 +704,10 @@ func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 	for _, a := range resp.Agents {
 		if _, in := nsSet[a.AgentNs]; in {
 			kept = append(kept, a)
-			total.TotalCostUSD += a.TotalCostUSD
+			// An UNPRICED agent contributes nothing to the total and does not make it wrong:
+			// the total is the sum of what is known. Treating unknown as zero would report a
+			// confident figure built partly from absence.
+			total.TotalCostUSD += costOrZero(a.TotalCostUSD)
 			total.TotalTokens += a.TotalTokens
 		}
 	}

@@ -508,11 +508,16 @@ type CostResponse struct {
 // format). AgentName is "(untagged)" for traces that carry no agent tag at all
 // — surfaced explicitly so they are visible, not silently dropped.
 type AgentCostItem struct {
-	AgentNs      string  `json:"agentNs"`
-	AgentName    string  `json:"agentName"`
-	TotalCostUSD float64 `json:"totalCostUSD"`
-	TotalTokens  int64   `json:"totalTokens"`
-	RunCount     int     `json:"runCount"`
+	AgentNs   string `json:"agentNs"`
+	AgentName string `json:"agentName"`
+	// TotalCostUSD is null when the cost is UNKNOWN — the agent has runs, and the trace store
+	// could not price any of them. That is not the same as zero, and rendering it as $0.00
+	// was the lie this field now refuses to tell: a zero receipt does not look like a
+	// failure, it looks like a cheap agent, so the surface stayed plausible while the cost
+	// pipeline was unwired. A real 0 means priced-at-zero.
+	TotalCostUSD *float64 `json:"totalCostUSD"`
+	TotalTokens  int64    `json:"totalTokens"`
+	RunCount     int      `json:"runCount"`
 }
 
 // CostBreakdownResponse is returned by GET /api/cost/breakdown?by=agent.

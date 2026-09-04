@@ -198,7 +198,13 @@ type ViewId = "all" | "attention" | "spending";
 const VIEWS: { id: ViewId; label: string; match: (p: Priced) => boolean }[] = [
   { id: "all", label: "Everything", match: () => true },
   { id: "attention", label: "Needs a person", match: (p) => p.next.tone !== "none" },
-  { id: "spending", label: "With spend", match: (p) => p.item.totalCostUSD > 0 },
+  {
+    id: "spending",
+    label: "With spend",
+    // An UNKNOWN cost is not "no spend" — it is an unanswered question, so it must not be
+    // filtered out of a view whose job is to show where money goes.
+    match: (p) => p.item.totalCostUSD !== null && p.item.totalCostUSD > 0,
+  },
 ];
 
 const VIEW_EMPTY: Record<Exclude<ViewId, "all">, { title: string; description: string }> = {
@@ -222,10 +228,12 @@ const VIEW_EMPTY: Record<Exclude<ViewId, "all">, { title: string; description: s
 export function closingLine(rows: Priced[], complete: boolean): string | null {
   if (rows.length === 0) return null;
   const named = rows.filter((p) => !p.untagged);
-  const spend = rows.reduce((sum, p) => sum + p.item.totalCostUSD, 0);
+  // Sum what is KNOWN. Counting an unknown as zero produces a confident total built partly
+  // from absence.
+  const spend = rows.reduce((sum, p) => sum + (p.item.totalCostUSD ?? 0), 0);
   const loose = rows
     .filter((p) => p.untagged)
-    .reduce((sum, p) => sum + p.item.totalCostUSD, 0);
+    .reduce((sum, p) => sum + (p.item.totalCostUSD ?? 0), 0);
   const where = complete ? "in this window" : "on this page";
   const head =
     named.length === 1
@@ -645,7 +653,8 @@ export function CostPage() {
     rows.sort(
       (a, b) =>
         nextStepRank(a.next.tone) - nextStepRank(b.next.tone) ||
-        b.item.totalCostUSD - a.item.totalCostUSD ||
+        // Unpriced agents sort last rather than as if they were the cheapest.
+        (b.item.totalCostUSD ?? -1) - (a.item.totalCostUSD ?? -1) ||
         a.item.agentName.localeCompare(b.item.agentName),
     );
     return rows;
@@ -676,7 +685,7 @@ export function CostPage() {
   // The Share denominator: the spend of the rows in hand. NEVER `total`, which
   // on the cluster-wide path is a different window entirely (see the header).
   const rowSpend = useMemo(
-    () => sorted.reduce((sum, p) => sum + p.item.totalCostUSD, 0),
+    () => sorted.reduce((sum, p) => sum + (p.item.totalCostUSD ?? 0), 0),
     [sorted],
   );
   const shareKnown = listComplete && rowSpend > 0;
@@ -772,7 +781,13 @@ export function CostPage() {
         <QuantityValue
           // A share of a partial page is not a share of anything a reader
           // means, so it is absent rather than wrong.
-          value={shareKnown ? (item.totalCostUSD / rowSpend) * 100 : UNKNOWN}
+          // An agent whose own cost is unknown has no computable share either — the
+          // denominator being known is not enough.
+          value={
+            shareKnown && item.totalCostUSD !== null
+              ? (item.totalCostUSD / rowSpend) * 100
+              : UNKNOWN
+          }
           format={formatShare}
           title="A share can only be computed when the whole breakdown is loaded — unknown, not zero."
         />
