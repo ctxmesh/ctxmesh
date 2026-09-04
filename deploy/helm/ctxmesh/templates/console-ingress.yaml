@@ -8,7 +8,12 @@
 # first-hour gap, not a convenience.
 #
 # ingressClassName is left to the operator: this ships no ingress controller and does not
-# assume one. On the local kind cluster the class is Kourier, which Knative already runs.
+# assume one — INCLUDING on the local kind cluster, which has no IngressClass at all
+# (`kubectl get ingressclass` is empty there). Kourier is an Envoy, but it implements
+# Knative's KIngress CRD, not networking.k8s.io/v1 Ingress, so it does NOT serve this object.
+# Enabling this without installing a real ingress controller creates an Ingress nothing
+# reconciles: the console stays unreachable and the resource looks healthy, which is the
+# worst of both. The local console is reached instead through the kind host-port mapping.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
