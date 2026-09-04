@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { ConfigError, EndpointError } from "../src/errors.js";
 import { FeedbackClient } from "../src/feedback.js";
-import { startPlane, FeedbackStub, type MockPlane } from "./plane.js";
+import { startPlane, FeedbackStub, type MockPlane } from "../src/testing.js";
 
 let plane: MockPlane;
 

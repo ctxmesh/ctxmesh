@@ -50,6 +50,7 @@ __all__ = [
     "GatewayStub",
     "FeedbackStub",
     "MeshStub",
+    "DelegateStub",
 ]
 
 
@@ -429,6 +430,55 @@ class FeedbackStub(_BaseStub):
             return 202, {}, b""
 
         self.state.routes.update({"POST /feedback": feedback})
+
+
+class DelegateStub(_BaseStub):
+    """Fake of the launcher delegate/handoff endpoints (``POST /delegate``, ``POST /handoff``).
+
+    TypeScript shipped this stub and Python never had it — invisible to a parity check that
+    compares MODULE sets, since both languages have a `testing` module either way. The
+    sdk-contract gate now compares the stubs themselves (M156).
+
+    Both endpoints answer the launcher's shape: ``{ok, answer, subRun}`` for a delegation,
+    ``{ok, runId, sourceRun, handedOffTo}`` for a handoff. A denial or a spawn-guard refusal
+    arrives as ``ok: false`` rather than an exception — the launcher makes it an OUTCOME the
+    model reads, so a test that only exercises the happy path has not exercised delegation.
+    """
+
+    def __init__(
+        self,
+        delegate_response: Optional[Dict[str, Any]] = None,
+        handoff_response: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.delegate_response = (
+            delegate_response
+            if delegate_response is not None
+            else {"ok": True, "answer": "sub-answer", "subRun": "sub-1"}
+        )
+        self.handoff_response = (
+            handoff_response
+            if handoff_response is not None
+            else {
+                "ok": True,
+                "runId": "hand-1",
+                "sourceRun": "A-1",
+                "handedOffTo": "billing",
+            }
+        )
+        super().__init__()
+
+    def _install_routes(self) -> None:
+        def delegate(_state: "_StubState", _req: RecordedRequest):
+            body = json.dumps(self.delegate_response).encode()
+            return 200, {"Content-Type": "application/json"}, body
+
+        def handoff(_state: "_StubState", _req: RecordedRequest):
+            body = json.dumps(self.handoff_response).encode()
+            return 200, {"Content-Type": "application/json"}, body
+
+        self.state.routes.update(
+            {"POST /delegate": delegate, "POST /handoff": handoff}
+        )
 
 
 class MeshStub(_BaseStub):

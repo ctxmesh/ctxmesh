@@ -26,7 +26,7 @@ import * as capMod from "../src/_capability.js";
 import * as recordMod from "../src/_record.js";
 import { ApprovalRequiredError, ConfigError, EndpointError } from "../src/errors.js";
 import { Tool, ToolsClient, DELEGATE_TOOL_NAME, HANDOFF_TOOL_NAME, KNOWLEDGE_SEARCH_TOOL_NAME } from "../src/tools.js";
-import { DiscoveryStub, startPlane, type MockPlane, type StubResponse } from "./plane.js";
+import { DiscoveryStub, startPlane, type MockPlane, type StubResponse } from "../src/testing.js";
 
 let plane: MockPlane;
 

@@ -40,15 +40,14 @@ bad() { echo "FAIL: $*" >&2; rc=1; }
 # point of writing it down here is that the next person reads it in the same breath as the
 # rule it bends.
 #
-#   /healthz        — the launcher's own liveness probe. Not an agent-facing capability.
-#   /a2a            — REAL GAP, tracked as m52.O14. The M6 agent-mesh outbound call is
-#                     served by the launcher and exposed by neither SDK. Closing it is a new
-#                     public API surface in two languages (config seam for A2A_PORT, a client
-#                     method, fakes, docs), so it is a scheduled task rather than a drive-by.
-#                     Remove this waiver when the SDKs cover it.
+#   /healthz — the launcher liveness probe. Not an agent-facing capability.
+#
+# /a2a was waived here until M156, when both SDKs gained client.mesh. The waiver is gone,
+# which is the point of writing waivers down: it was a tracked gap with an owner, not a
+# silenced check.
 waived() {
   case "$1" in
-    /healthz|/a2a) return 0 ;;
+    /healthz) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -81,14 +80,39 @@ done <<< "$routes"
 # the known, carded exceptions are named rather than hidden.
 #   _http    — Python's transport helper; TS uses fetch. An implementation detail.
 #   index    — the TS package entry point. Python uses __init__.
-#   testing  — Python-only offline fakes. Carded as m52.O13 (TS parity).
-py_mods="$(cd "$PY_SRC" && find . -maxdepth 1 -name "*.py" | sed 's#\./##; s#\.py$##' | grep -vE '^(__init__|_http|testing)$' | sort)"
+#
+# `testing` was excluded here while the offline fakes were Python-only (m52.O13). M156
+# shipped the TypeScript ones as the `ctxmesh/testing` subpath, so the exclusion is gone and
+# the two are compared like every other module — which is the whole point of closing a
+# parity gap rather than tolerating it.
+py_mods="$(cd "$PY_SRC" && find . -maxdepth 1 -name "*.py" | sed 's#\./##; s#\.py$##' | grep -vE '^(__init__|_http)$' | sort)"
 ts_mods="$(cd "$TS_SRC" && find . -maxdepth 1 -name "*.ts" | sed 's#\./##; s#\.ts$##' | grep -vE '^(index)$' | sort)"
 if [ "$py_mods" != "$ts_mods" ]; then
   bad "the SDKs have diverged on modules (a capability in one language only):"
   diff <(echo "$py_mods") <(echo "$ts_mods") | sed 's/^/    /' >&2 || true
 else
   echo "  ok: the two SDKs expose the same module set"
+fi
+
+# ── 2b. the offline FAKES are at parity, stub by stub ────────────────────────
+# Module-set parity (check 2) is too coarse to see this: both languages have a `testing`
+# module, so a stub present in one and missing in the other is invisible to it. That is not
+# hypothetical — TypeScript shipped a DelegateStub that Python never had, and the module
+# check was perfectly happy (found by the M156 design review).
+#
+# The fakes are the surface an author tests against, so an asymmetry here means an agent
+# testable in one language and not the other.
+py_stubs="$(grep -oE '^class ([A-Za-z]+)Stub\(_BaseStub\)' "$PY_SRC/testing.py" \
+  | sed -E 's/^class //; s/\(_BaseStub\)//' | sort -u)"
+ts_stubs="$(grep -oE '^export class ([A-Za-z]+)Stub extends BaseStub' "$TS_SRC/testing.ts" \
+  | sed -E 's/^export class //; s/ extends BaseStub//' | sort -u)"
+if [ -z "$py_stubs" ] || [ -z "$ts_stubs" ]; then
+  bad "could not read the stub sets out of both testing modules — the gate is not actually checking anything"
+elif [ "$py_stubs" != "$ts_stubs" ]; then
+  bad "the offline fakes have diverged (a stub an author can use in one language only):"
+  diff <(echo "$py_stubs") <(echo "$ts_stubs") | sed 's/^/    /' >&2 || true
+else
+  echo "  ok: both testing modules expose the same stubs"
 fi
 
 # ── 3. version coherence ──────────────────────────────────────────────────────
