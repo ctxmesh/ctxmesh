@@ -16,47 +16,29 @@ limitations under the License.
 
 package main
 
-// The synchronous agent-to-agent (A2A) mesh surface (M6, agent-mesh.md
-// §"The A2A call contract", §"Message envelope", §"Design"). Two surfaces live
-// here, both reusing the M3 OTel plumbing (tracer + W3C propagator) rather than
-// rebuilding it:
+// The synchronous agent-to-agent (A2A) mesh surface (M6, spec agent-mesh.md).
 //
-//  1. OUTBOUND — a localhost listener serving POST /a2a/{targetAgent}. Started
-//     ONLY when AGENT_REGISTRY_ID is injected (i.e. the agent is a resolved
-//     AgentRegistry member), the same "env-gate a second listener" pattern as
-//     the :2998 memory endpoint. The agent POSTs its opaque JSON payload; the
-//     launcher stamps the platform envelope (§12.5), resolves the target over
-//     DNS, injects W3C traceparent so the callee CONTINUES the same trace, and
-//     forwards. It returns the peer's response, or a typed error — a
-//     blocked/unknown/cross-registry target FAST-FAILS, never hangs.
+// NOTE ON THE NAME: this predates and is unrelated to Google's Agent2Agent specification.
+// Ours is a MEDIATION protocol — the launcher governs calls between agents the platform
+// already owns. The SDK exposes it as `client.mesh` for exactly that reason (M156).
 //
-//  2. INBOUND access control — a middleware the /invoke proxy runs on the
-//     CALLEE side. When a request carries an A2A envelope (header
-//     X-A2A-Envelope, stamped by the caller's launcher), the callee enforces —
-//     in order — cross-registry isolation (the envelope's registryId must match
-//     this agent's), then its allowedCallers allowlist and role rules, BEFORE
-//     forwarding to the user container: a foreign registry is a hard deny with
-//     cross_registry_denied (403), a disallowed caller with caller_not_allowed
-//     (403). A request with no envelope (an ordinary external /invoke) passes
-//     through untouched. (agent-mesh.md §"Design": layers 2–3 are L7; layer 1,
-//     registry isolation, is ALSO enforced here app-layer — NetworkPolicy cannot
-//     isolate Knative-routed A2A because kourier fronts every hop, so it is
-//     defense-in-depth only.)
+// Two surfaces live here:
 //
-// Trace shape (the crux): caller's agent.invoke → a2a.call span (this file) →
-// callee's agent.invoke → callee's tools/memory. The a2a.call span is the
-// parent of the outbound HTTP request; injecting its context as traceparent
-// makes the callee's server span a child, so ONE trace tree spans both agents.
+//   1. OUTBOUND — a localhost listener on :2997 serving POST /a2a/{targetAgent}, started
+//      only when AGENT_REGISTRY_ID is present. The agent POSTs an opaque payload; the
+//      launcher stamps the envelope, resolves the target over DNS, injects W3C traceparent
+//      so the callee continues the same trace, and forwards. A blocked, unknown or
+//      cross-registry target fast-fails typed rather than hanging.
 //
-// Envelope depth/path (first-hop vs chained-hop): if the incoming /a2a request
-// carries NO X-A2A-Envelope, this is a FIRST hop — the agent was invoked
-// externally (or is the conversation root) — so depth=1 and path=[self]. If it
-// DOES carry one, the agent was itself reached via A2A and is forwarding, so
-// this is a CHAINED hop: depth=incoming.depth+1, path=incoming.path++[self],
-// and traceId/registryId/conversationId are INHERITED from the incoming
-// envelope (immutable downstream, §12.5). This is the single seam m6.6 extends:
-// checkGuards(env) runs against the OUTGOING envelope just before forwarding.
-
+//   2. INBOUND access control — middleware on the /invoke proxy. A request carrying an
+//      X-A2A-Envelope is checked for cross-registry isolation first, then the callee's
+//      allowedCallers and role rules, before the user container sees it. A request with no
+//      envelope is an ordinary /invoke and passes through.
+//
+// The envelope's depth/path grow per hop: no incoming envelope means a FIRST hop (depth 1,
+// path [self]); an incoming one means this agent was itself reached via A2A and is
+// forwarding, so depth and path extend while traceId/registryId/conversationId are
+// inherited and immutable downstream. checkGuards runs against the OUTGOING envelope.
 import (
 	"bytes"
 	"context"

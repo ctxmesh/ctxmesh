@@ -16,52 +16,32 @@ limitations under the License.
 
 package main
 
-// The in-path guardrail engine (M66, ADR 0059 §8). When the controller resolves a
-// spec.guardrailPolicyRef it injects the validated GuardrailPolicySpec as the
-// GUARDRAIL_POLICY env and FORCES the outbound :2996 proxy on (m66.2). This file
-// builds the deterministic, fail-closed engine from that env and scans every scan
-// point on the model REQUEST and RESPONSE bodies:
+// The in-path guardrail engine (ADR 0059 §8). Built from the GUARDRAIL_POLICY env the
+// controller injects when an agent has a guardrailPolicyRef; scans the model request and
+// response at three points:
 //
-//   - input      (request, user-role messages): the untrusted user prompt.
-//   - toolOutput (request, tool-role messages): tool results re-enter as tool-role
-//     messages on the next model call — scanning them here catches injected
-//     instructions BEFORE the model consumes them. This is a TRIPWIRE for known
-//     patterns (posture), NOT injection resistance (ADR 0059 §3).
-//   - output     (response, choices[].message.content): the model completion.
+//   - input      user-role messages — the untrusted prompt.
+//   - toolOutput tool-role messages — tool results re-enter on the next call, so scanning
+//                here catches injected instructions before the model reads them. A tripwire
+//                for known patterns, NOT injection resistance (ADR 0059 §3).
+//   - output     the model completion.
 //
-// Each rule carries an action:
+// Actions are block, auditOnly and redact; precedence within a scan point is
+// block > redact > auditOnly, and a block short-circuits. Blocking on OUTPUT still books
+// spend — the model already generated (ADR 0059 §7). A redact rewrites only the matched
+// string and re-serialises; every other field survives.
 //
-//   - block:     the matched call is refused with a typed 403 guardrail_blocked.
-//                On an input/tool block the upstream is NEVER reached; on an OUTPUT
-//                block the model already generated, so spend is still booked (ADR
-//                0059 §7) and the completion is REPLACED with the refusal.
-//   - auditOnly: recorded (span event) and the content passes unchanged.
-//   - redact:    the matched substring is replaced with telemetry.RedactString's
-//                [REDACTED:<name>] marker and the body is RE-SERIALIZED — the scrubbed
-//                request is forwarded (input/tool) or the scrubbed response relayed
-//                (output). Only the matched message/completion STRING changes; every
-//                other field (tool_calls, non-string content, role, ...) is preserved.
+// Two invariants worth keeping straight:
 //
-// Precedence within a scan point: block > redact > auditOnly. A block short-circuits
-// (a blocked call is never also redacted); redactions are applied to the surviving body.
+//   - Fail-closed on the REQUEST: a body that cannot be fully scanned (oversize,
+//     unparseable) is blocked, never truncated and forwarded. Responses are deliberately
+//     not symmetric — a completion is our own model's output being sanitised on the way
+//     out, so an unparseable one is relayed rather than failing every non-JSON stream.
+//   - The audit event carries the detector, action, scan point, a sha256 hash and offsets —
+//     never the matched substring, or the guardrail log becomes the largest PII store the
+//     platform holds (ADR 0059 §6). Redactions included.
 //
-// Fail-closed is the invariant: an active policy whose request body cannot be fully
-// scanned (oversize, unparseable JSON, malformed body) is BLOCKED, never truncated
-// and forwarded — a guarded call that can't be inspected must not pass. (The response
-// body is already buffered and priced by M8; an unparseable RESPONSE is relayed as-is
-// — a completion is the model's own output being sanitised on the way OUT, not
-// untrusted input inspected before it runs, and failing every non-JSON stream closed
-// would be wrong.)
-//
-// PII-safe audit (ADR 0059 §6): the guardrail.decision span event carries the
-// detector name, action, scan point, a sha256 content HASH, and the match offsets —
-// NEVER the matched substring (else the guardrail audit becomes the largest PII
-// repository the platform holds). This holds for redact decisions too.
-//
-// No GUARDRAIL_POLICY ⇒ newGuardrailEngine returns nil and BOTH paths are byte-for-byte
-// unchanged: serve() does not buffer the request, forward() streams r.Body exactly as
-// pre-M66, and the response is relayed verbatim.
-
+// No GUARDRAIL_POLICY ⇒ nil engine and both paths are byte-for-byte unchanged.
 import (
 	"bytes"
 	"context"
