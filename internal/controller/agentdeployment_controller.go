@@ -2501,6 +2501,12 @@ func (r *AgentDeploymentReconciler) syncStatus(
 	if u := preferredAgentURL(ksvc); u != "" {
 		deploy.Status.URL = u
 	}
+	// The PUBLIC route, kept separate from the in-cluster address above. The console renders
+	// this one as a clickable link; rendering status.url produced an <a href> pointing at
+	// svc.cluster.local, which no browser can open — a dead link in the product's own UI.
+	if ksvc.Status.URL != nil {
+		deploy.Status.ExternalURL = ksvc.Status.URL.String()
+	}
 	deploy.Status.LatestVersion = latestVersion
 	deploy.Status.ObservedGeneration = deploy.Generation
 

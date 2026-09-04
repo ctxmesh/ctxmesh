@@ -57,7 +57,10 @@ interface DetailOpts {
 const DEFAULT_DETAIL = {
   name: "billing", namespace: "prod", image: "ghcr.io/x/billing:1", executionModel: "serving",
   role: "assistant", scaling: { min: 0, max: 3 }, phase: "Ready", ready: true,
-  url: "http://billing.prod.example", latestVersion: "billing-v2",
+  // url is the CLUSTER-LOCAL address; externalUrl is the public route. The rail links to
+  // the latter — linking to the former produced an <a href> to svc.cluster.local.
+  url: "http://billing.prod.svc.cluster.local",
+  externalUrl: "http://billing.prod.example", latestVersion: "billing-v2",
   conditions: [
     { type: "Ready", status: "True", reason: "Deployed", message: "rollout complete", lastTransitionTime: "2026-07-11T00:00:00Z" },
     { type: "RouteReady", status: "True", reason: "RouteReady", message: "", lastTransitionTime: "" },
@@ -327,6 +330,13 @@ describe("AgentDetailPage (landing page)", () => {
     // which persists across every tab (§6.1 A2).
     expect(screen.getByRole("heading", { name: "billing" })).toBeInTheDocument();
     expect(screen.getByTestId("agent-url")).toHaveAttribute("href", "http://billing.prod.example");
+    // The link is the PUBLIC route, never the cluster-local address in `url` — an <a href>
+    // to svc.cluster.local is dead on every click, in the one place the console exists to
+    // show you the agent.
+    expect(screen.getByTestId("agent-url")).not.toHaveAttribute(
+      "href",
+      "http://billing.prod.svc.cluster.local",
+    );
     // The namespace links to its governing tenant (m49.4 — closes the agent→tenant leg).
     expect(screen.getByTestId("agent-namespace-link")).toHaveAttribute("href", "/tenants?q=prod");
     // The condition story, told from the controller's conditions.

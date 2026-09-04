@@ -22,6 +22,7 @@ import (
 	"html"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"strings"
@@ -297,6 +298,10 @@ type Server struct {
 	oidcEnabled  bool
 	oidcIssuer   string
 	oidcClientID string
+	// spaCSP is the SPA's Content-Security-Policy with the console issuer's origin
+	// already folded into connect-src. Precomputed once: it depends only on config,
+	// and it is written on every static response.
+	spaCSP string
 
 	// endUserVerifier verifies END-USER OIDC ID tokens against a tenant issuer (M137/EU1b, ADR 0106).
 	// nil ⇒ end-user OIDC is off and /chat stays console-authenticated. saIssuer is the cluster
@@ -668,6 +673,7 @@ func NewServer(opts Options) *Server {
 		oidcEnabled:              opts.OIDCEnabled,
 		oidcIssuer:               opts.OIDCIssuer,
 		oidcClientID:             opts.OIDCClientID,
+		spaCSP:                   cspWithConnectSrc(opts.OIDCIssuer),
 		consoleURL:               strings.TrimRight(strings.TrimSpace(opts.ConsoleURL), "/"),
 		providerConnect:          opts.ProviderConnect,
 		providerHTTP:             opts.ProviderHTTP,
@@ -1646,9 +1652,11 @@ func (s *Server) Handler() http.Handler {
 //	img-src 'self' data:    same-origin images + data: URIs (inline SVG icons /
 //	                        tiny data-URL assets Vite may inline).
 //	font-src 'self'         fonts are same-origin only (none are third-party).
-//	connect-src 'self'      XHR/fetch (the /api/* calls) only to the serving
-//	                        origin — the bearer token can never be POSTed to a
-//	                        third party even if injected script tried.
+//	connect-src 'self'      XHR/fetch (the /api/* calls) to the serving origin,
+//	                        PLUS the configured OIDC issuer ORIGIN(s) and nothing
+//	                        else — see cspWithConnectSrc. The bearer token can
+//	                        never be POSTed to an arbitrary third party even if
+//	                        injected script tried.
 //	frame-ancestors 'none'  the console is never framed (clickjacking guard).
 //	base-uri 'self'         a <base> injection can't repoint relative asset URLs.
 //	form-action 'self'      a stolen form can't submit off-origin.
@@ -1669,12 +1677,66 @@ const contentSecurityPolicy = "default-src 'self'; " +
 	"form-action 'self'; " +
 	"object-src 'none'"
 
+// cspWithConnectSrc returns the policy with `extra` origins appended to
+// connect-src, which is what an OIDC login actually requires: the SPA fetches
+// the issuer's discovery document and POSTs the PKCE code exchange to its token
+// endpoint, both from the BROWSER and both cross-origin (ADR 0020 — the console
+// is a public client, so the exchange cannot move server-side).
+//
+// Without this the base policy denies both calls and the login reports a bare
+// "Failed to fetch" — which is not a local-setup problem but the state every
+// install with an external IdP was in, since an issuer is cross-origin by
+// definition (Okta, Entra, Google, or a self-hosted Dex on its own host).
+//
+// Only ORIGINS are appended, never a full issuer URL: a CSP source with a path
+// is matched by prefix, so "https://idp.example.com/tenant1" would also permit
+// "https://idp.example.com/tenant1-evil". issuerOrigin strips to scheme://host:port
+// and drops anything that is not a well-formed http(s) URL, so a malformed or
+// hostile issuer widens the policy by nothing at all.
+func cspWithConnectSrc(extra ...string) string {
+	seen := map[string]bool{}
+	var srcs []string
+	for _, e := range extra {
+		if o := issuerOrigin(e); o != "" && !seen[o] {
+			seen[o] = true
+			srcs = append(srcs, o)
+		}
+	}
+	if len(srcs) == 0 {
+		return contentSecurityPolicy
+	}
+	return strings.Replace(contentSecurityPolicy,
+		"connect-src 'self';",
+		"connect-src 'self' "+strings.Join(srcs, " ")+";", 1)
+}
+
+// issuerOrigin reduces an issuer URL to the scheme://host[:port] a CSP source
+// list can safely carry. Returns "" for anything that is not an absolute http(s)
+// URL with a host — an empty/garbage issuer must not become a CSP entry.
+func issuerOrigin(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	if u.Scheme != schemeHTTPS && u.Scheme != schemeHTTP {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
 // setSPASecurityHeaders applies the SPA's security headers to a response. Called
 // on every static/index response (not /api). CSP is the sessionStorage-token XSS
 // mitigation (ADR 0012); the companions are cheap, standard hardening.
-func setSPASecurityHeaders(w http.ResponseWriter) {
+func setSPASecurityHeaders(w http.ResponseWriter, policy string) {
 	h := w.Header()
-	h.Set("Content-Security-Policy", contentSecurityPolicy)
+	if policy == "" {
+		policy = contentSecurityPolicy
+	}
+	h.Set("Content-Security-Policy", policy)
 	// Belt-and-braces alongside the CSP frame-ancestors directive (older UAs).
 	h.Set("X-Frame-Options", "DENY")
 	// Don't let the browser MIME-sniff a static asset into an executable type.
@@ -1695,7 +1757,7 @@ func (s *Server) spaHandler() http.Handler {
 			return
 		}
 		// Security headers on every SPA response — the document AND its assets.
-		setSPASecurityHeaders(w)
+		setSPASecurityHeaders(w, s.spaCSP)
 		// Clean the request path to a filesystem path (io/fs uses no leading /).
 		name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
 		// The SPA SHELL (root "/" or an explicit index.html) must ALWAYS be served
@@ -1746,6 +1808,21 @@ func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	if pin := agentPinForRequest(r); pin != "" {
 		data = injectHeadMeta(data, "agent-pin", pin) // m37.3: boot the single-agent chatbox
+
+		// The end-user register (M137/EU1b) signs in against the TENANT's IdP, a different
+		// cross-origin issuer from the console's and knowable only from the host. Widen
+		// connect-src for THIS document when the host maps to a tenant that has end-user
+		// login enabled — otherwise that login hits the same CSP denial the console one did.
+		// Guarded by the agent-pin branch, so the console origin never pays the lookup.
+		host := r.Header.Get("X-Forwarded-Host")
+		if host == "" {
+			host = r.Host
+		}
+		if _, ns := parseAgentFromHost(host); ns != "" {
+			if cfg, err := s.resolveEndUserIdentity(r.Context(), ns); err == nil && cfg != nil {
+				w.Header().Set("Content-Security-Policy", cspWithConnectSrc(s.oidcIssuer, cfg.Issuer))
+			}
+		}
 	}
 	// ADR 0040: tell the SPA the canonical console origin so a chatbox at an agent hostname trusts the
 	// cross-origin "connected" relay message from the MCP-consent callback (which runs at that origin).

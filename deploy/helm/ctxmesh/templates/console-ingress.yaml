@@ -1,0 +1,48 @@
+{{- if .Values.bff.ingress.enabled }}
+# The console Ingress. OFF BY DEFAULT, and that is a security decision rather than a
+# preference: the console holds the caller's Kubernetes bearer token, so an install must not
+# expose it to the network unless someone asked for that.
+#
+# It exists because after M154 the platform installs from published artifacts and a stranger
+# still had no documented way to REACH the console except `kubectl port-forward` — a real
+# first-hour gap, not a convenience.
+#
+# ingressClassName is left to the operator: this ships no ingress controller and does not
+# assume one — INCLUDING on the local kind cluster, which has no IngressClass at all
+# (`kubectl get ingressclass` is empty there). Kourier is an Envoy, but it implements
+# Knative's KIngress CRD, not networking.k8s.io/v1 Ingress, so it does NOT serve this object.
+# Enabling this without installing a real ingress controller creates an Ingress nothing
+# reconciles: the console stays unreachable and the resource looks healthy, which is the
+# worst of both. The local console is reached instead through the kind host-port mapping.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ctxmesh-console
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/component: console
+  {{- with .Values.bff.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.bff.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.bff.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ required "bff.ingress.host is required when bff.ingress.enabled" .Values.bff.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ctxmesh-bff
+                port:
+                  number: 9090
+{{- end }}
