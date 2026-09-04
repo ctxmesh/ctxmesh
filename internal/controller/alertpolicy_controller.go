@@ -452,8 +452,12 @@ func (r *AlertPolicyReconciler) evalBudgetSoft(
 	// the state layer, a dependency it does not have today (m52 M150-budget-live-counter) —
 	// the number says where it came from. A figure that is quietly one run stale is how a
 	// person concludes the enforcement is broken when it is working exactly as designed.
-	value := fmt.Sprintf("%s/%s (cost-rollup ledger; the gateway enforces on the live counter, which may be higher)",
-		spent.String(), budgetCap.String())
+	// lastValue is "spent/budget" and nothing else: the field's contract is "the most recent
+	// evaluated metric value (string, same encoding as Threshold)", so a prose clause here
+	// makes a DATA field unparseable. The provenance this number needs — that it reads the
+	// cost-rollup ledger while the gateway enforces on the live counter, which may be higher
+	// — belongs to the field's documentation and ADR 0132, not to its value.
+	value := fmt.Sprintf("%s/%s", spent.String(), budgetCap.String())
 	return spent.AtLeast(soft), value
 }
 
