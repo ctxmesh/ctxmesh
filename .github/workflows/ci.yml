@@ -243,6 +243,13 @@ jobs:
       # no chart. This reads the release artifacts themselves.
       - name: Release-truth gate (the release publishes what an install needs)
         run: ./hack/release-truth.sh
+      # The SDKs are typed sugar over the launcher plane, so drift between them is uniquely
+      # expensive: it tells an author a capability exists, or is shaped a certain way, when
+      # the platform disagrees — and the failure lands in the USER's agent at runtime, never
+      # in our CI. Nothing bound them together until an audit found `POST /a2a/{target}`
+      # served by the launcher and exposed by neither SDK.
+      - name: SDK-contract gate (the SDKs track the product)
+        run: ./hack/sdk-contract.sh
 
   envtest:
     name: envtest
