@@ -624,7 +624,12 @@ export interface CostResponse {
 export interface AgentCostItem {
   agentNs: string;
   agentName: string;
-  totalCostUSD: number;
+  /**
+   * null when the cost is UNKNOWN — the agent has runs and the trace store could not price
+   * any of them. That is not zero, and rendering it as $0.00 is why an unwired cost pipeline
+   * looked plausible: a zero receipt reads as a cheap agent, not as a failure (M157).
+   */
+  totalCostUSD: number | null;
   totalTokens: number;
   runCount: number;
 }
