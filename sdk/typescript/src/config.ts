@@ -29,6 +29,8 @@ export const DEFAULT_TOOLS_JSON_PATH = "/etc/agent/tools.json";
 
 export const DEFAULT_MEMORY_PORT = 2998;
 export const DEFAULT_FEEDBACK_PORT = 2995;
+/** The launcher A2A listener port (M6); overridable via A2A_PORT. */
+export const DEFAULT_MESH_PORT = 2997;
 export const DEFAULT_OTLP_ENDPOINT = "localhost:4317";
 
 /**
@@ -104,6 +106,7 @@ export interface ForTestOptions {
   memoryBaseUrl?: string;
   discoveryBaseUrl?: string;
   feedbackBaseUrl?: string;
+  meshBaseUrl?: string;
   delegateBaseUrl?: string;
   modelGatewayUrl?: string;
   modelGatewayKey?: string;
@@ -113,6 +116,7 @@ export interface ForTestOptions {
   memoryWired?: boolean;
   longtermWired?: boolean;
   feedbackWired?: boolean;
+  meshWired?: boolean;
   knowledgeEnabled?: boolean;
   delegateEnabled?: boolean;
 }
@@ -129,6 +133,16 @@ export class PlaneConfig {
   readonly discoveryBaseUrl: string;
   /** feedback (:2995) base URL. */
   readonly feedbackBaseUrl: string;
+  /**
+   * agent-to-agent mesh (:2997, A2A_PORT) base URL.
+   *
+   * Named `mesh` on the surface because "A2A" now unambiguously means Google's Agent2Agent
+   * spec, which this is not: theirs is an INTEROP protocol for agents from different
+   * organisations; ours is a MEDIATION protocol the launcher uses to govern calls between
+   * agents the platform already owns (envelope, hop depth, traversal path, spend budget).
+   * The wire path keeps /a2a (M156).
+   */
+  readonly meshBaseUrl: string;
   /** synthetic delegate/handoff (:2994) base URL (127.0.0.1). */
   readonly delegateBaseUrl: string;
   /** the discovery sidecar's durable cold-start backing file. */
@@ -147,6 +161,13 @@ export class PlaneConfig {
    */
   readonly longtermWired: boolean;
   readonly feedbackWired: boolean;
+  /**
+   * Whether the agent-to-agent mesh is wired. The launcher starts its :2997 listener ONLY
+   * for a resolved AgentRegistry member (AGENT_REGISTRY_ID) — an agent outside a registry
+   * has no peers by construction, so client.mesh raises ConfigError rather than meeting a
+   * connection-refused on a port the author never heard of.
+   */
+  readonly meshWired: boolean;
   /** Whether the knowledge-base data plane (M68) is enabled. Gate: KNOWLEDGE_BASE_ENABLED=true. */
   readonly knowledgeEnabled: boolean;
   /** Whether synthetic delegate/handoff (:2994) is enabled. Gate: DELEGATE_ENABLED=true. */
@@ -172,12 +193,14 @@ export class PlaneConfig {
     memoryBaseUrl: string;
     discoveryBaseUrl: string;
     feedbackBaseUrl: string;
+    meshBaseUrl: string;
     delegateBaseUrl: string;
     toolsJsonPath: string;
     run: RunContext;
     memoryWired: boolean;
     longtermWired: boolean;
     feedbackWired: boolean;
+    meshWired: boolean;
     knowledgeEnabled: boolean;
     delegateEnabled: boolean;
     modelGatewayUrl: string;
@@ -187,12 +210,14 @@ export class PlaneConfig {
     this.memoryBaseUrl = init.memoryBaseUrl;
     this.discoveryBaseUrl = init.discoveryBaseUrl;
     this.feedbackBaseUrl = init.feedbackBaseUrl;
+    this.meshBaseUrl = init.meshBaseUrl;
     this.delegateBaseUrl = init.delegateBaseUrl;
     this.toolsJsonPath = init.toolsJsonPath;
     this.run = init.run;
     this.memoryWired = init.memoryWired;
     this.longtermWired = init.longtermWired;
     this.feedbackWired = init.feedbackWired;
+    this.meshWired = init.meshWired;
     this.knowledgeEnabled = init.knowledgeEnabled;
     this.delegateEnabled = init.delegateEnabled;
     this.modelGatewayUrl = init.modelGatewayUrl;
@@ -224,6 +249,7 @@ export class PlaneConfig {
 
     const memoryPort = parsePort(env.MEMORY_PORT, DEFAULT_MEMORY_PORT, "MEMORY_PORT");
     const feedbackPort = parsePort(env.FEEDBACK_PORT, DEFAULT_FEEDBACK_PORT, "FEEDBACK_PORT");
+    const meshPort = parsePort(env.A2A_PORT, DEFAULT_MESH_PORT, "A2A_PORT");
 
     // Memory is wired iff the launcher started the :2998 listener (spec.sessionMemory
     // injected MEMORY_PORT / MEMORY_BACKEND_ADDR). Feedback is wired iff
@@ -231,6 +257,9 @@ export class PlaneConfig {
     // addressable when a discovery sidecar is present.
     const memoryWired = Boolean(env.MEMORY_PORT || env.MEMORY_BACKEND_ADDR);
     const feedbackWired = Boolean(env.FEEDBACK_PORT || env.LANGFUSE_HOST);
+    // Registry membership is the honest signal, not the port — the port has a default
+    // whether or not anything is listening on it.
+    const meshWired = Boolean(env.AGENT_REGISTRY_ID);
 
     const run = makeRunContext({
       agentName: env.AGENT_NAME ?? "",
@@ -251,12 +280,14 @@ export class PlaneConfig {
       memoryBaseUrl: `http://localhost:${memoryPort}`,
       discoveryBaseUrl: `http://localhost:${DISCOVERY_PORT}`,
       feedbackBaseUrl: `http://localhost:${feedbackPort}`,
+      meshBaseUrl: `http://localhost:${meshPort}`,
       delegateBaseUrl: `http://127.0.0.1:${DELEGATE_PORT}`,
       toolsJsonPath: env.TOOLS_JSON_PATH || DEFAULT_TOOLS_JSON_PATH,
       run,
       memoryWired,
       longtermWired: isTrue(env.MEMORY_LONGTERM_ENABLED),
       feedbackWired,
+      meshWired,
       knowledgeEnabled: isTrue(env.KNOWLEDGE_BASE_ENABLED),
       delegateEnabled: isTrue(env.DELEGATE_ENABLED),
       modelGatewayUrl,
@@ -277,12 +308,17 @@ export class PlaneConfig {
       memoryBaseUrl: stripTrailingSlash(overrides.memoryBaseUrl ?? "http://localhost:2998"),
       discoveryBaseUrl: stripTrailingSlash(overrides.discoveryBaseUrl ?? "http://localhost:2999"),
       feedbackBaseUrl: stripTrailingSlash(overrides.feedbackBaseUrl ?? "http://localhost:2995"),
+      meshBaseUrl: stripTrailingSlash(overrides.meshBaseUrl ?? "http://localhost:2997"),
       delegateBaseUrl: stripTrailingSlash(overrides.delegateBaseUrl ?? "http://127.0.0.1:2994"),
       toolsJsonPath: overrides.toolsJsonPath ?? DEFAULT_TOOLS_JSON_PATH,
       run: overrides.run ?? makeRunContext({ agentName: "test-agent" }),
       memoryWired: overrides.memoryWired ?? true,
       longtermWired: overrides.longtermWired ?? false,
       feedbackWired: overrides.feedbackWired ?? true,
+      // NOT defaulted true like the others: a test must opt in, because an agent OUTSIDE a
+      // registry is the common production case, and defaulting it on would leave the path
+      // most agents take as the one no test covers.
+      meshWired: overrides.meshWired ?? false,
       knowledgeEnabled: overrides.knowledgeEnabled ?? false,
       delegateEnabled: overrides.delegateEnabled ?? false,
       modelGatewayUrl: stripTrailingSlash(overrides.modelGatewayUrl ?? "http://localhost:2996"),

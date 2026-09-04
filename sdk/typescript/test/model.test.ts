@@ -11,7 +11,7 @@ import * as capMod from "../src/_capability.js";
 import * as recordMod from "../src/_record.js";
 import { ConfigError, EndpointError, GuardrailBlockedError } from "../src/errors.js";
 import { ChatResponse, ModelClient } from "../src/model.js";
-import { GatewayStub, startPlane, type MockPlane } from "./plane.js";
+import { GatewayStub, startPlane, type MockPlane } from "../src/testing.js";
 
 let plane: MockPlane;
 

@@ -82,6 +82,10 @@ class PlaneConfig:
     feedback_base_url: str
     tools_json_path: str
     run: RunContext = field(default_factory=RunContext)
+    #: Launcher-local base for the A2A listener (:2997 by default, A2A_PORT). Named `mesh`
+    #: on the surface because "A2A" now means Google's Agent2Agent spec, which this is not
+    #: (M156); the wire path keeps /a2a.
+    mesh_base_url: str = "http://localhost:2997"
     #: Whether each capability was actually wired by the launcher. A client for
     #: an unwired capability raises ConfigError rather than hitting a dead port.
     memory_wired: bool = False
@@ -89,6 +93,11 @@ class PlaneConfig:
     #: exposes /memory/agent/{remember,search}. Gate: MEMORY_LONGTERM_ENABLED=true.
     longterm_wired: bool = False
     feedback_wired: bool = False
+    #: Whether the agent-to-agent mesh is wired — the launcher starts its :2997 listener
+    #: ONLY for a resolved AgentRegistry member (AGENT_REGISTRY_ID). An agent outside a
+    #: registry has no peers by construction, so client.mesh raises ConfigError rather than
+    #: meeting a connection-refused on a port the author never heard of.
+    mesh_wired: bool = False
     #: Model gateway base URL ($MODEL_GATEWAY_URL) — LiteLLM directly, or the
     #: launcher's in-pod budget proxy when the agent is budgeted (transparent).
     #: Empty when unwired (not in a pod); model.chat then raises ConfigError.
@@ -137,6 +146,10 @@ class PlaneConfig:
         # as always-wired and let the manifest fetch surface an unreachable port.
         memory_wired = bool(env("MEMORY_PORT") or env("MEMORY_BACKEND_ADDR"))
         feedback_wired = bool(env("FEEDBACK_PORT") or env("LANGFUSE_HOST"))
+        # The launcher gates the A2A listener on registry membership, so membership is the
+        # honest signal — not the port, which has a default whether or not anything listens.
+        mesh_wired = bool(env("AGENT_REGISTRY_ID"))
+        mesh_port = env("A2A_PORT") or "2997"
 
         run = RunContext(
             agent_name=env("AGENT_NAME") or "",
@@ -158,11 +171,13 @@ class PlaneConfig:
             memory_base_url=f"http://localhost:{memory_port}",
             discovery_base_url=f"http://localhost:{DISCOVERY_PORT}",
             feedback_base_url=f"http://localhost:{feedback_port}",
+            mesh_base_url=f"http://localhost:{mesh_port}",
             tools_json_path=env("TOOLS_JSON_PATH") or DEFAULT_TOOLS_JSON_PATH,
             run=run,
             memory_wired=memory_wired,
             longterm_wired=(env("MEMORY_LONGTERM_ENABLED") or "").strip().lower() == "true",
             feedback_wired=feedback_wired,
+            mesh_wired=mesh_wired,
             model_gateway_url=model_gateway_url,
             model_gateway_key=model_gateway_key,
             otlp_endpoint=env("OTEL_EXPORTER_OTLP_ENDPOINT") or "",
@@ -175,6 +190,8 @@ class PlaneConfig:
         memory_base_url: str = "http://localhost:2998",
         discovery_base_url: str = "http://localhost:2999",
         feedback_base_url: str = "http://localhost:2995",
+        mesh_base_url: str = "http://localhost:2997",
+        mesh_wired: bool = False,
         model_gateway_url: str = "http://localhost:2996",
         model_gateway_key: str = "",
         otlp_endpoint: str = "",
@@ -192,10 +209,16 @@ class PlaneConfig:
             memory_base_url=memory_base_url.rstrip("/"),
             discovery_base_url=discovery_base_url.rstrip("/"),
             feedback_base_url=feedback_base_url.rstrip("/"),
+            mesh_base_url=mesh_base_url.rstrip("/"),
             tools_json_path=tools_json_path,
             run=run or RunContext(agent_name="test-agent"),
             memory_wired=True,
             feedback_wired=True,
+            # NOT defaulted True like the others: a test must opt in, because the mesh is
+            # the one plane whose absence is the COMMON case in production (an agent outside
+            # a registry). Defaulting it on would make the unwired path — the one most
+            # agents take — the one no test covers.
+            mesh_wired=mesh_wired,
             model_gateway_url=model_gateway_url.rstrip("/"),
             model_gateway_key=model_gateway_key,
             otlp_endpoint=otlp_endpoint,

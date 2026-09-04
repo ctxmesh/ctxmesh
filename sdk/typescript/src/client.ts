@@ -30,6 +30,7 @@ import { PlaneConfig } from "./config.js";
 import { FeedbackClient } from "./feedback.js";
 import { KnowledgeClient } from "./knowledge.js";
 import { MemoryClient } from "./memory.js";
+import { MeshClient } from "./mesh.js";
 import { ModelClient } from "./model.js";
 import { ToolsClient } from "./tools.js";
 import { TraceClient } from "./trace.js";
@@ -39,6 +40,8 @@ export class Client {
   readonly memory: MemoryClient;
   readonly knowledge: KnowledgeClient;
   readonly feedback: FeedbackClient;
+  /** Agent-to-agent calls through the launcher (M6, M156). See mesh.ts for the naming. */
+  readonly mesh: MeshClient;
   readonly model: ModelClient;
   readonly tools: ToolsClient;
   readonly trace: TraceClient;
@@ -50,6 +53,7 @@ export class Client {
     this.memory = new MemoryClient(config);
     this.knowledge = new KnowledgeClient(config);
     this.feedback = new FeedbackClient(config);
+    this.mesh = new MeshClient(config);
     this.model = new ModelClient(config);
     this.tools = new ToolsClient(config, this.knowledge);
     // trace exports over OTLP/gRPC to $OTEL_EXPORTER_OTLP_ENDPOINT in-pod; tests pass a

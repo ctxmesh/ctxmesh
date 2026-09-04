@@ -281,7 +281,7 @@ def test_managed_loop_surfaces_approval_then_resumes(tool_gateway, echo_discover
     config = ManagedConfig(system_prompt="You are a helpful assistant.", model_route="tool-mock")
 
     # Model the bound tool as a sensitive action gated on approval.
-    def gated_call(name, **kwargs):
+    def gated_call(name, args=None, **kwargs):
         pause_for_approval("echo-tool", "Run echo_tool with the given text?")
         return {"content": [{"type": "text", "text": "ok"}]}
 
@@ -1666,7 +1666,7 @@ def _policy_client(gw, disc, monkeypatch):
     client = agent.from_config(plane)
     dispatched: List[str] = []
 
-    def fake_call(name, **kwargs):
+    def fake_call(name, args=None, **kwargs):
         dispatched.append(name)
         return {"content": [{"type": "text", "text": f"{name} ran"}]}
 
@@ -2065,7 +2065,7 @@ def test_tool_not_retried_by_default_safety(monkeypatch):
         client = _resilience_client(gw, disc)
         attempts = {"n": 0}
 
-        def always_fail(name, **kwargs):
+        def always_fail(name, args=None, **kwargs):
             attempts["n"] += 1
             raise EndpointError("tool boom", status=500)
 
@@ -2100,7 +2100,7 @@ def test_tool_retried_when_explicitly_retryable(monkeypatch):
         client = _resilience_client(gw, disc)
         attempts = {"n": 0}
 
-        def fail_once(name, **kwargs):
+        def fail_once(name, args=None, **kwargs):
             attempts["n"] += 1
             if attempts["n"] == 1:
                 raise EndpointError("transient tool blip", status=503)
@@ -2130,7 +2130,7 @@ def test_tool_timeout_is_passed_into_tools_call(monkeypatch):
         client = _resilience_client(gw, disc)
         seen = {"timeout": "unset"}
 
-        def capturing_call(name, **kwargs):
+        def capturing_call(name, args=None, **kwargs):
             seen["timeout"] = kwargs.get("timeout", "unset")
             return {"content": [{"type": "text", "text": "search ran"}]}
 
@@ -2161,7 +2161,7 @@ def test_circuit_breaker_opens_and_short_circuits(monkeypatch):
         client = _resilience_client(gw, disc)
         dispatches = {"n": 0}
 
-        def always_fail(name, **kwargs):
+        def always_fail(name, args=None, **kwargs):
             dispatches["n"] += 1
             raise EndpointError("flaky down", status=500)
 
@@ -2216,7 +2216,7 @@ def test_circuit_breaker_half_open_recovers(monkeypatch):
 
         dispatches = {"n": 0}
 
-        def two_fail_then_ok(name, **kwargs):
+        def two_fail_then_ok(name, args=None, **kwargs):
             dispatches["n"] += 1
             if dispatches["n"] <= 2:
                 raise EndpointError("svc down", status=500)
@@ -2257,7 +2257,7 @@ def test_sub_run_caps_tool_retries(monkeypatch):
         client = _resilience_client(gw, disc)
         attempts = {"n": 0}
 
-        def always_fail(name, **kwargs):
+        def always_fail(name, args=None, **kwargs):
             attempts["n"] += 1
             raise EndpointError("read_doc down", status=500)
 
@@ -2321,7 +2321,7 @@ def test_resilience_none_is_unchanged(monkeypatch):
 
         tool_kwargs_seen: List[Dict[str, Any]] = []
 
-        def capturing_call(name, **kwargs):
+        def capturing_call(name, args=None, **kwargs):
             tool_kwargs_seen.append(dict(kwargs))
             return {"content": [{"type": "text", "text": "search ran"}]}
 
@@ -2330,9 +2330,12 @@ def test_resilience_none_is_unchanged(monkeypatch):
         config = ManagedConfig(system_prompt="sys", model_route="m")  # resilience=None
         result = run_managed_loop(client, config, "go")
 
-    # No timeout override was injected on any chat call, and the tool call carried no timeout.
+    # No timeout override was injected on any chat call, and the tool call carried no
+    # timeout. The tool assertion checks the VALUE rather than the key's absence: since M156
+    # the socket timeout is always passed as an explicit keyword (so a model-produced
+    # argument named "timeout" can never be mistaken for it), and "unset" is None.
     assert all("timeout" not in o for o in chat_opts_seen)
-    assert all("timeout" not in k for k in tool_kwargs_seen)
+    assert all(k.get("timeout") is None for k in tool_kwargs_seen)
     # Exactly one tool dispatch (no retry, no breaker interference).
     assert len(tool_kwargs_seen) == 1
     assert result.tools_called == ["search"]

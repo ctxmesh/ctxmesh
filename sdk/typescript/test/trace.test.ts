@@ -24,7 +24,7 @@ import { currentCapability } from "../src/_capability.js";
 import { Client } from "../src/client.js";
 import { ApprovalRequiredError } from "../src/errors.js";
 import { pauseForApproval } from "../src/_approval.js";
-import { startPlane, type MockPlane } from "./plane.js";
+import { startPlane, type MockPlane } from "../src/testing.js";
 
 // The OpenInference keys/values — read straight from the JS package so the test asserts the
 // SAME source of truth the SDK emits (byte-for-byte the Python `_semconv.py` constants).

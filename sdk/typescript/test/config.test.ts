@@ -12,7 +12,7 @@ import {
   DELEGATE_PORT,
 } from "../src/config.js";
 import { NotInPodError } from "../src/errors.js";
-import { startPlane } from "./plane.js";
+import { startPlane } from "../src/testing.js";
 
 describe("PlaneConfig.fromEnv", () => {
   it("fails fast without a launcher marker (NotInPodError, no silent no-op)", () => {

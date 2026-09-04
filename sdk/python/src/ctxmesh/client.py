@@ -31,6 +31,7 @@ from ctxmesh.config import PlaneConfig, RunContext
 from ctxmesh.feedback import FeedbackClient
 from ctxmesh.knowledge import KnowledgeClient
 from ctxmesh.memory import MemoryClient
+from ctxmesh.mesh import MeshClient
 from ctxmesh.model import ModelClient
 from ctxmesh.tools import ToolsClient
 from ctxmesh.trace import TraceClient
@@ -50,6 +51,7 @@ class Client:
         self.knowledge = KnowledgeClient(config)
         self.tools = ToolsClient(config)
         self.feedback = FeedbackClient(config)
+        self.mesh = MeshClient(config)
         # trace must exist before model: model.chat wraps its round-trip in an
         # LLM span emitted through the trace client. The OTLP endpoint comes from
         # config ($OTEL_EXPORTER_OTLP_ENDPOINT); tests pass an in-memory
