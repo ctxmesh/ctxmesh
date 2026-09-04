@@ -1046,6 +1046,21 @@ function firstTextContent(
   if (!result || typeof result !== "object") {
     throw new EndpointError(`MCP tools/call at ${endpoint} returned no result object`);
   }
+  // isError: true is an EXECUTION FAILURE the server reports in band — MCP does not signal
+  // it at the JSON-RPC layer. Returning its text as an ordinary result told the model, the
+  // TOOL span and the author that a failed call succeeded, and hid it from the managed
+  // loop's resilience machinery, which only counts thrown errors (M156).
+  if (result["isError"] === true) {
+    const c = result["content"];
+    const detail =
+      Array.isArray(c) && c.length > 0 && typeof c[0] === "object" && c[0] !== null
+        ? String((c[0] as Record<string, unknown>)["text"] ?? "").slice(0, 200)
+        : "";
+    throw new EndpointError(
+      `MCP tools/call at ${endpoint} reported a tool execution error` +
+        (detail ? `: ${detail}` : ""),
+    );
+  }
   const content = result["content"];
   if (!Array.isArray(content) || content.length === 0) {
     throw new EndpointError(`MCP tools/call at ${endpoint} returned empty content`);
