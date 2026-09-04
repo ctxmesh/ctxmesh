@@ -21,6 +21,38 @@ rbac_dir = sys.argv[1]
 bad = []
 checked = 0
 
+# ClusterRoles explicitly marked bind-only: a permission TEMPLATE meant to be attached with a
+# per-namespace RoleBinding, never a ClusterRoleBinding. Kubernetes ships `admin` and `edit`
+# this way — both grant secrets create/delete/patch/update and are documented for RoleBinding
+# — so the shape is standard, and the danger the SEC-3 rule names is the BINDING, not the
+# definition (M155, ADR 0136).
+#
+# The exemption is not a hole: everything marked bind-only is checked below against every
+# ClusterRoleBinding we ship, which is a stronger assertion than this file made before.
+bind_only = set()
+cluster_bindings = []  # (file, binding name, referenced ClusterRole)
+for path in sorted(glob.glob(os.path.join(rbac_dir, "*.yaml"))):
+    for doc in yaml.safe_load_all(open(path)):
+        if not doc:
+            continue
+        if doc.get("kind") == "ClusterRole" and (doc["metadata"].get("labels") or {}).get(
+            "rbac.ctxmesh.ai/bind-only"
+        ) == "true":
+            bind_only.add(doc["metadata"]["name"])
+        if doc.get("kind") == "ClusterRoleBinding":
+            cluster_bindings.append(
+                (os.path.basename(path), doc["metadata"]["name"], (doc.get("roleRef") or {}).get("name"))
+            )
+
+# A bind-only ClusterRole that something we ship binds CLUSTER-WIDE is the actual SEC-3
+# hazard, and until now nothing looked for it.
+for f, bname, ref in cluster_bindings:
+    if ref in bind_only:
+        bad.append(
+            f"{f}: ClusterRoleBinding/{bname} binds bind-only ClusterRole/{ref} CLUSTER-WIDE — "
+            f"that grants its Secret writes in every namespace. Use a RoleBinding."
+        )
+
 for path in sorted(glob.glob(os.path.join(rbac_dir, "*.yaml"))):
     for doc in yaml.safe_load_all(open(path)):
         if not doc or doc.get("kind") not in ("Role", "ClusterRole"):
@@ -49,11 +81,29 @@ for path in sorted(glob.glob(os.path.join(rbac_dir, "*.yaml"))):
             #    the Fable audit's SEC-3: a ClusterRole granting create/update on Secrets
             #    cluster-wide, when the only writer (the cert rotator) writes exactly one
             #    Secret into the install namespace.
-            if kind == "ClusterRole" and "secrets" in resources and (writes & set(verbs)):
+            if (
+                kind == "ClusterRole"
+                and name not in bind_only
+                and "secrets" in resources
+                and (writes & set(verbs))
+            ):
                 bad.append(
                     f"{os.path.basename(path)}: ClusterRole/{name} grants Secret WRITES "
-                    f"{sorted(writes & set(verbs))} cluster-wide (SEC-3). Namespace them."
+                    f"{sorted(writes & set(verbs))} cluster-wide (SEC-3). Namespace them, or "
+                    f"mark it rbac.ctxmesh.ai/bind-only if it is a RoleBinding template "
+                    f"(ADR 0136) — bind-only roles are checked against every shipped "
+                    f"ClusterRoleBinding."
                 )
+            # A bind-only role must not quietly acquire READ access to secrets: the console
+            # never reads a key back, and a credential role that can list Secrets is a
+            # credential-exfiltration role.
+            if kind == "ClusterRole" and name in bind_only and "secrets" in resources:
+                reads = {"get", "list", "watch"} & set(verbs)
+                if reads:
+                    bad.append(
+                        f"{os.path.basename(path)}: bind-only ClusterRole/{name} grants Secret "
+                        f"READS {sorted(reads)} — it exists to WRITE credentials, not read them."
+                    )
 
 for b in bad:
     print("  " + b, file=sys.stderr)
@@ -61,4 +111,4 @@ print(f"  checked {checked} rules across {rbac_dir}")
 sys.exit(1 if bad else 0)
 PY
 
-echo "PASS: no verb wildcards, no cluster-scoped Secret writes"
+echo "PASS: no verb wildcards, no cluster-scoped Secret writes, no bind-only role bound cluster-wide"

@@ -5,7 +5,15 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // The "custom" provider is the console's OpenAI-compatible seam: an endpoint the
@@ -114,5 +122,62 @@ func TestChatComplete_CustomDrivesTheSuppliedEndpoint(t *testing.T) {
 	}
 	if gotAuth != "Bearer "+theTestKey {
 		t.Fatalf("auth header %q — the operator's key must reach their own endpoint", gotAuth)
+	}
+}
+
+// --- M155: the upsert must not need `get` -----------------------------------
+
+func TestUpsertObject_RotatesWithoutReadingTheLiveObject(t *testing.T) {
+	// Connecting a provider a second time (a key rotation) used to Get the live object for
+	// its resourceVersion. That made `get secrets` a hidden requirement of the flow — and
+	// `get` on a Secret returns its DATA, so the credential-WRITING role would have had to
+	// be a credential-READING role (ADR 0136). The upsert is unconditional now; this pins
+	// that a client which can Create and Update but NOT Get still completes a rotation.
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "rotate-me", Namespace: "default", ResourceVersion: "7"},
+		Data:       map[string][]byte{"apiKey": []byte("old")},
+	}
+	c := &noGetClient{Client: fake.NewClientBuilder().WithObjects(existing).Build()}
+
+	desired := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "rotate-me", Namespace: "default"},
+		Data:       map[string][]byte{"apiKey": []byte("new")},
+	}
+	verb, err := upsertObject(context.Background(), c, desired)
+	if err != nil {
+		t.Fatalf("rotation failed without get: %v", err)
+	}
+	if verb != "update" {
+		t.Fatalf("verb = %q, want \"update\" — the caller needs the real verb for its error message", verb)
+	}
+	if c.gets != 0 {
+		t.Fatalf("upsertObject issued %d Get(s) — it must not require read access to credentials", c.gets)
+	}
+}
+
+// noGetClient fails every Get, the way the API server does for a principal holding
+// create/update/delete on Secrets and no read verbs.
+type noGetClient struct {
+	client.Client
+	gets int
+}
+
+func (c *noGetClient) Get(_ context.Context, key client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+	c.gets++
+	return apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, key.Name, errors.New("no read verbs"))
+}
+
+func TestClassifyWriteError_NamesTheVerbThatWasDenied(t *testing.T) {
+	// "not allowed to create" on a denied UPDATE sends a user to ask an admin for a grant
+	// they already hold. This cost real time while building M155.
+	e := classifyWriteError(
+		apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "custom", errors.New("nope")),
+		"update", "Secret", "custom",
+	)
+	if e.status != 403 {
+		t.Fatalf("status = %d, want 403", e.status)
+	}
+	if !strings.Contains(e.msg, "not allowed to update") {
+		t.Fatalf("msg = %q, want it to name the UPDATE verb", e.msg)
 	}
 }

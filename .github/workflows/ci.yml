@@ -250,6 +250,15 @@ jobs:
       # served by the launcher and exposed by neither SDK.
       - name: SDK-contract gate (the SDKs track the product)
         run: ./hack/sdk-contract.sh
+      # M155 — every console flow must be completable by at least one shipped role.
+      #
+      # The BFF writes with the CALLER's client (ADR 0011), so a flow is only real if some
+      # shipped role grants the permission it needs. Nothing checked that, and four flows —
+      # provider connect, key-authed MCP registration, MCP OAuth grants, org credentials —
+      # were uncompletable by every persona. They were found one at a time over two months
+      # and carded as separate bugs, because nothing connected them.
+      - name: Flow-completability gate (no flow no role can complete)
+        run: ./hack/flow-completability.sh
 
   envtest:
     name: envtest

@@ -87,6 +87,9 @@ const (
 	// capability exists so the console can ask about what the operation ACTUALLY needs.
 	resSecrets = "secrets"
 	verbCreate = "create"
+	// verbUpdate names the write verb an upsert falls back to; the provider connect path
+	// reports it in a denial message so a user is not told the wrong permission is missing.
+	verbUpdate = "update"
 	// verbList is the read verb the caller-scoped stop list probes with (ADR 0129).
 	verbList = "list"
 )
@@ -113,7 +116,7 @@ var (
 		resAuditLogs,
 		resKnowledgeBases,
 	}
-	goldenVerbs = []string{verbGet, verbList, verbCreate, "update", "delete"}
+	goldenVerbs = []string{verbGet, verbList, verbCreate, verbUpdate, "delete"}
 )
 
 // handleWhoAmI serves GET /api/whoami — the caller's identity (username +
