@@ -200,7 +200,10 @@ export interface AgentDetailResponse {
   scaling: AgentScaling;
   phase: string;
   ready: boolean;
+  /** The CLUSTER-LOCAL address. An in-cluster dispatch needs it; a browser cannot open it. */
   url: string;
+  /** The PUBLIC route. Absent for a cluster-local agent, and before the route is admitted. */
+  externalUrl?: string;
   latestVersion: string;
   conditions: AgentCondition[];
   bindings: AgentBinding[];

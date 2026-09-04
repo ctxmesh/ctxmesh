@@ -170,12 +170,15 @@ type AgentDetailResponse struct {
 	Role           string `json:"role"`
 	// PromptRef / ModelRoute surface the agent's composed resources so the detail
 	// page can link to them (the used-by graph, m18.9). Empty when unset.
-	PromptRef     string           `json:"promptRef"`
-	ModelRoute    string           `json:"modelRoute"`
-	Scaling       AgentScaling     `json:"scaling"`
-	Phase         string           `json:"phase"`
-	Ready         bool             `json:"ready"`
-	URL           string           `json:"url"`
+	PromptRef  string       `json:"promptRef"`
+	ModelRoute string       `json:"modelRoute"`
+	Scaling    AgentScaling `json:"scaling"`
+	Phase      string       `json:"phase"`
+	Ready      bool         `json:"ready"`
+	URL        string       `json:"url"`
+	// ExternalURL is the agent's PUBLIC route. The console links to this one; url is the
+	// cluster-local address an in-cluster dispatch needs and a browser cannot open.
+	ExternalURL   string           `json:"externalUrl,omitempty"`
 	LatestVersion string           `json:"latestVersion"`
 	Conditions    []AgentCondition `json:"conditions"`
 	Bindings      []AgentBinding   `json:"bindings"`
@@ -1494,6 +1497,7 @@ func newAgentDetail(
 		Phase:              phase,
 		Ready:              ready,
 		URL:                ad.Status.URL,
+		ExternalURL:        ad.Status.ExternalURL,
 		LatestVersion:      ad.Status.LatestVersion,
 		Conditions:         conditions,
 		Bindings:           bindings,
