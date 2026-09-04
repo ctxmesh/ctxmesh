@@ -139,6 +139,29 @@ func (s *pgStore) MembersOf(ctx context.Context, tenant string) ([]string, error
 
 // TenantOf returns the tenant that owns the namespace, and whether a row exists. A missing row is
 // NOT an error — it returns ("", false, nil).
+// AllNamespaces returns every mirrored namespace, across all tenants.
+func (s *pgStore) AllNamespaces(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT namespace FROM namespace_tenants ORDER BY namespace ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("namespacetenant: list all namespaces: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []string
+	for rows.Next() {
+		var ns string
+		if err := rows.Scan(&ns); err != nil {
+			return nil, fmt.Errorf("namespacetenant: scan namespace: %w", err)
+		}
+		out = append(out, ns)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("namespacetenant: iterate namespaces: %w", err)
+	}
+	return out, nil
+}
+
 func (s *pgStore) TenantOf(ctx context.Context, namespace string) (string, bool, error) {
 	var tenant string
 	err := s.db.QueryRowContext(ctx,
