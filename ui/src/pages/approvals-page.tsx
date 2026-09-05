@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { mapLimit, NAMESPACE_SCAN_CONCURRENCY } from "@/lib/map-limit";
 import { useNamespace } from "@/lib/namespace";
 import { api, ApiError, type ApprovalQueueItem } from "@/lib/api";
 import { formatRelativeTime, formatDateTime } from "@/lib/format";
@@ -247,8 +248,10 @@ export function ApprovalsPage() {
             // counted rather than swallowed: a 403 turned into `[]` renders as
             // "nothing is waiting on you", which is the one lie this page cannot
             // afford to tell.
-            const scans: Scan[] = await Promise.all(
-              resp.namespaces.map((n) =>
+            const scans: Scan[] = await mapLimit(
+              resp.namespaces,
+              NAMESPACE_SCAN_CONCURRENCY,
+              (n) =>
                 api
                   .listApprovals(n.name, allController.signal)
                   .then((list): Scan => ({ kind: "ok", items: list }))
@@ -263,7 +266,6 @@ export function ApprovalsPage() {
                       message: err instanceof Error ? err.message : "request failed",
                     };
                   }),
-              ),
             );
             if (allController.signal.aborted) return;
             const ok = scans.filter(

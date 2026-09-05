@@ -94,6 +94,28 @@ export interface AgentListResponse {
   nextCursor: string;
 }
 
+// CensusGroup is one distinct status tuple and how many agents carry it. The
+// SERVER does not bucket — it returns the raw inputs to resolveStatus, so the
+// lifecycle heuristic keeps living in exactly one place (ui/src/lib/lifecycle.ts).
+export interface CensusGroup {
+  ready: boolean;
+  phase?: string;
+  reason?: string;
+  isDraft: boolean;
+  count: number;
+}
+
+// CensusResponse mirrors the BFF's GET /api/agents/census. `total` counts every
+// agent scanned, including any whose tuple did not fit `groups`, so the remainder
+// is the unclassified count rather than a silent loss. `complete` false means the
+// scan hit its ceiling and `total` is a LOWER BOUND that must render as one.
+export interface CensusResponse {
+  total: number;
+  complete: boolean;
+  groupsComplete: boolean;
+  groups: CensusGroup[];
+}
+
 // AgentListParams are the list-contract query params (ui-foundation §4):
 //   limit  — page size (BFF defaults + caps it)
 //   cursor — the opaque continue token from a prior page's nextCursor
@@ -828,6 +850,9 @@ export interface AlertSummary {
 // AlertListResponse mirrors the BFF's AlertListResponse: items is non-null on the wire.
 export interface AlertListResponse {
   items: AlertSummary[];
+  // truncated says the store held more than `limit`. Without it the console
+  // printed items.length as the total, so 312 firing alerts read "50 firing".
+  truncated?: boolean;
 }
 
 // AlertListParams are the query params for GET /api/alerts.
@@ -3125,6 +3150,15 @@ export const api = {
   // row count. Pass cursor/namespace/q to page + scope + filter.
   listAgents: (params?: AgentListParams, signal?: AbortSignal) =>
     getJSON<AgentListResponse>(`/api/agents${agentsQuery(params)}`, signal),
+
+  // agentCensus counts the WHOLE fleet the caller can see, which listAgents
+  // cannot: its page cap is the server's own ceiling, so above it the console
+  // used to fall back to "not yet known" and say less the larger the install.
+  agentCensus: (namespace?: string, signal?: AbortSignal) =>
+    getJSON<CensusResponse>(
+      `/api/agents/census${namespace ? `?namespace=${encodeURIComponent(namespace)}` : ""}`,
+      signal,
+    ),
 
   // capabilities probes the caller's RBAC for the golden kinds in one namespace
   // (empty = cluster-wide). DISPLAY-ONLY (ADR 0011). A 500/network error must be

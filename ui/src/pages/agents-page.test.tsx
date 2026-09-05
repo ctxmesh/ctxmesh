@@ -87,6 +87,47 @@ afterEach(() => {
 });
 
 describe("AgentsPage (DataTable + list contract)", () => {
+  it("honours ?view= so Home's fleet bar lands on the stage it linked to", async () => {
+    // Two agents at different stages; the URL asks for drafts only.
+    installFetch({
+      agents: () => ({
+        ok: true,
+        body: {
+          agents: [],
+          items: [
+            { ...agent("live-one"), ready: true, phase: "Ready" },
+            { ...agent("draft-one"), ready: false, phase: "Pending", isDraft: true },
+          ],
+          nextCursor: "",
+        },
+      }),
+    });
+    render(
+      <MemoryRouter initialEntries={["/agents?view=draft"]}>
+        <AgentsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("draft-one")).toBeInTheDocument();
+    expect(screen.queryByText("live-one")).toBeNull();
+  });
+
+  it("falls back to everything when ?view= names a stage that does not exist", async () => {
+    installFetch({
+      agents: () => ({
+        ok: true,
+        body: { agents: [], items: [agent("echo")], nextCursor: "" },
+      }),
+    });
+    render(
+      <MemoryRouter initialEntries={["/agents?view=not-a-stage"]}>
+        <AgentsPage />
+      </MemoryRouter>,
+    );
+    // An unknown filter must not silently hide the fleet.
+    expect(await screen.findByText("echo")).toBeInTheDocument();
+  });
+
   it("renders the teaching empty-state when the BFF returns no items", async () => {
     installFetch({ agents: () => ({ ok: true, body: { agents: [], items: [], nextCursor: "" } }) });
     renderPage(<AgentsPage />);

@@ -3,13 +3,12 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import {
+  needsYouRows,
+  statusLineParts,
   DashboardPage,
   attentionRows,
   bounds,
   census,
-  fleetSentence,
-  greeting,
-  stages,
 } from "@/pages/dashboard-page";
 import { UNKNOWN, isKnown } from "@/components/kit";
 import type { AgentSummary } from "@/lib/api";
@@ -38,6 +37,31 @@ interface Routes {
 }
 
 /** Paths Home fetches that a test did not care to stub. A quiet cluster. */
+// The census is derived from the same fixture the agents list uses, so a test that
+// sets up a fleet gets a consistent count without restating it.
+const censusFrom = (items: AgentSummary[], complete = true) => {
+  const by = new Map<string, { ready: boolean; phase?: string; reason?: string; isDraft: boolean; count: number }>();
+  for (const a of items) {
+    const key = `${a.ready}|${a.phase ?? ""}|${a.reason ?? ""}|${a.isDraft ?? false}`;
+    const hit = by.get(key);
+    if (hit) hit.count += 1;
+    else
+      by.set(key, {
+        ready: a.ready,
+        phase: a.phase,
+        reason: a.reason,
+        isDraft: a.isDraft ?? false,
+        count: 1,
+      });
+  }
+  return {
+    total: items.length,
+    complete,
+    groupsComplete: true,
+    groups: [...by.values()],
+  };
+};
+
 const DEFAULTS: Routes = {
   "/api/kills": [],
   "/api/agents": { agents: [], items: [], nextCursor: "" },
@@ -48,6 +72,7 @@ const DEFAULTS: Routes = {
   "/api/alerts": { items: [] },
   "/api/providers": { providers: [] },
   "/api/runs": { runs: [] },
+  "/api/agents/census": censusFrom([]),
 };
 
 const fetchedPaths: string[] = [];
@@ -59,6 +84,12 @@ const fetchedPaths: string[] = [];
  */
 function routeFetch(routes: Routes = {}, statuses: Record<string, number> = {}) {
   const table = { ...DEFAULTS, ...routes };
+  // A test that supplies a fleet gets its census for free, unless it wants to
+  // say something specific about counting.
+  if (routes["/api/agents"] && !routes["/api/agents/census"]) {
+    const listed = routes["/api/agents"] as { items?: AgentSummary[] };
+    table["/api/agents/census"] = censusFrom(listed.items ?? []);
+  }
   fetchedPaths.length = 0;
   vi.stubGlobal(
     "fetch",
@@ -183,14 +214,117 @@ afterEach(() => {
 // The pure helpers — the page's authority rules, tested without a DOM
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("greeting", () => {
-  it("names the part of the day at each boundary", () => {
-    expect(greeting(new Date(2026, 8, 1, 0, 0))).toBe("Good morning");
-    expect(greeting(new Date(2026, 8, 1, 11, 59))).toBe("Good morning");
-    expect(greeting(new Date(2026, 8, 1, 12, 0))).toBe("Good afternoon");
-    expect(greeting(new Date(2026, 8, 1, 17, 59))).toBe("Good afternoon");
-    expect(greeting(new Date(2026, 8, 1, 18, 0))).toBe("Good evening");
-    expect(greeting(new Date(2026, 8, 1, 23, 59))).toBe("Good evening");
+describe("needsYouRows", () => {
+  const stop = (scope: string) => ({
+    scope,
+    level: "namespace" as const,
+    namespace: scope,
+    reason: "runaway loop",
+    principal: "oncall@acme.example",
+  });
+  const approval = (runId: string, waitingSince?: string) => ({
+    runId,
+    agent: `agent-${runId}`,
+    namespace: "team-a",
+    kind: "approval" as const,
+    waitingSince,
+  });
+
+  it("ranks what is stopped above who is waiting above what is broken", () => {
+    const rows = needsYouRows({
+      stops: [stop("team-b")],
+      approvals: [approval("r1", "2026-09-05T10:00:00Z")],
+      attention: [
+        {
+          key: "team-a/broken",
+          name: "broken",
+          namespace: "team-a",
+          word: "Failing",
+          variant: "crit" as const,
+          why: "CrashLoopBackOff",
+          label: "Inspect",
+          tone: "crit" as const,
+          rank: 0,
+        },
+      ],
+      firing: [],
+    });
+    expect(rows.map((r) => r.kind)).toEqual(["stop", "approval", "failing"]);
+  });
+
+  it("puts the oldest approval first — age is the SLA risk", () => {
+    const rows = needsYouRows({
+      stops: [],
+      approvals: [
+        approval("new", "2026-09-05T12:00:00Z"),
+        approval("old", "2026-09-01T09:00:00Z"),
+        approval("mid", "2026-09-03T09:00:00Z"),
+      ],
+      attention: [],
+      firing: [],
+    });
+    expect(rows.map((r) => r.subject)).toEqual(["agent-old", "agent-mid", "agent-new"]);
+  });
+
+  it("sorts an approval with no age last rather than treating it as new", () => {
+    const rows = needsYouRows({
+      stops: [],
+      approvals: [approval("undated"), approval("dated", "2026-09-05T10:00:00Z")],
+      attention: [],
+      firing: [],
+    });
+    expect(rows[0].subject).toBe("agent-dated");
+  });
+
+  it("takes only the BROKEN attention rows — a drifting agent blocks nobody", () => {
+    const row = (variant: "crit" | "warn" | "open", name: string) => ({
+      key: `team-a/${name}`,
+      name,
+      namespace: "team-a",
+      word: "X",
+      variant,
+      why: "why",
+      label: "Inspect",
+      tone: "crit" as const,
+      rank: 0,
+    });
+    const rows = needsYouRows({
+      stops: [],
+      approvals: [],
+      attention: [row("crit", "broken"), row("warn", "drifting"), row("open", "unused")],
+      firing: [],
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].subject).toBe("team-a/broken");
+  });
+
+  it("renders whatever subset answered — a source that failed contributes nothing", () => {
+    const rows = needsYouRows({ stops: [], approvals: [approval("r1")], attention: [], firing: [] });
+    expect(rows).toHaveLength(1);
+    expect(needsYouRows({ stops: [], approvals: [], attention: [], firing: [] })).toEqual([]);
+  });
+});
+
+describe("statusLineParts", () => {
+  it("names the scope so the size of the numbers is explained", () => {
+    expect(statusLineParts({ namespace: "team-a" }).scope).toBe("team-a");
+    expect(statusLineParts({ namespace: "" }).scope).toBe("all workspaces");
+  });
+
+  it("omits a clause whose backend did not answer, rather than showing a zero", () => {
+    const p = statusLineParts({ namespace: "", serving: 4 });
+    expect(p.clauses).toEqual(["4 serving"]);
+  });
+
+  it("marks a capped total as a bound, never as a number", () => {
+    expect(statusLineParts({ namespace: "", total: 200, totalIsBound: true }).clauses[0]).toBe(
+      "200+ agents",
+    );
+    expect(statusLineParts({ namespace: "", total: 200 }).clauses[0]).toBe("200 agents");
+  });
+
+  it("is grammatical at one", () => {
+    expect(statusLineParts({ namespace: "", total: 1 }).clauses[0]).toBe("1 agent");
   });
 });
 
@@ -207,29 +341,6 @@ describe("census", () => {
 
   it("carries the window's completeness, which is the whole authority story", () => {
     expect(census(FLEET, false).complete).toBe(false);
-  });
-});
-
-describe("stages", () => {
-  it("states a fact per stage when the window IS the fleet", () => {
-    const cells = stages(census(FLEET, true), 2);
-    expect(cells.map((s) => s.name)).toEqual(["Build", "Govern", "Ship", "Improve"]);
-    expect(cells.every((s) => s.fact !== undefined)).toBe(true);
-  });
-
-  it("omits every fleet fact when the window is one page — never a partial count", () => {
-    const cells = stages(census(FLEET, false), 2);
-    for (const cell of cells.slice(0, 3)) expect(cell.fact).toBeUndefined();
-    // No stage may be lit either: a lit stage is a position claim.
-    expect(cells.some((s) => s.active)).toBe(false);
-  });
-
-  it("leaves Improve unanswered when the alert store did not answer", () => {
-    expect(stages(census(FLEET, true), undefined)[3].fact).toBeUndefined();
-  });
-
-  it("never lights Improve — nothing on this page places an agent there", () => {
-    expect(stages(census(FLEET, true), 0)[3].active).toBeFalsy();
   });
 });
 
@@ -315,50 +426,6 @@ describe("bounds", () => {
   });
 });
 
-describe("fleetSentence", () => {
-  it("omits a clause whose backend did not answer, rather than estimating it", () => {
-    const line = fleetSentence({ stopped: 1, serving: 193 });
-    expect(line).toContain("1 scope is stopped");
-    expect(line).not.toContain("waiting on a person");
-    expect(line).toContain("The other 193 agents are serving");
-  });
-
-  it("says the all-clear only when the backends that answered all answered zero", () => {
-    expect(
-      fleetSentence({ waiting: 0, stopped: 0, near: 0, attention: 0, serving: 12 }),
-    ).toBe(
-      "Nothing is waiting on a person, nothing is stopped and nothing is failing. All 12 agents are serving.",
-    );
-  });
-
-  // M151 hardening B1: the all-clear used to be a fixed sentence naming all
-  // three categories, so a console REFUSED the stop list still reassured the
-  // operator that nothing was stopped.
-  it("drops the stops clause from the all-clear when the stop list never answered", () => {
-    expect(fleetSentence({ waiting: 0, attention: 0, serving: 12 })).toBe(
-      "Nothing is waiting on a person and nothing is failing. All 12 agents are serving.",
-    );
-  });
-
-  it("never claims an all-clear over a category no backend answered for", () => {
-    // Only budgets answered, and budgets are not an all-clear category — so
-    // there is no all-clear to give, only the serving count.
-    expect(fleetSentence({ near: 0, serving: 4 })).toBe("All 4 agents are serving.");
-    expect(fleetSentence({ near: 0 })).toBeNull();
-  });
-
-  it("renders nothing at all before any backend has answered", () => {
-    expect(fleetSentence({})).toBeNull();
-  });
-
-  it("is grammatical at one and at many", () => {
-    expect(fleetSentence({ waiting: 1 })).toBe("1 decision is waiting on a person.");
-    expect(fleetSentence({ waiting: 3, attention: 2 })).toBe(
-      "3 decisions are waiting on a person and 2 agents need looking at.",
-    );
-  });
-});
-
 // ─────────────────────────────────────────────────────────────────────────────
 // The page
 // ─────────────────────────────────────────────────────────────────────────────
@@ -376,22 +443,24 @@ describe("Home (render proof)", () => {
     renderHome();
 
     // The sections A11 orders, each driven by its own backend.
-    expect(await screen.findByRole("list", { name: "Fleet lifecycle" })).toBeInTheDocument();
-    expect(await screen.findByTestId("home-waiting")).toBeInTheDocument();
+    expect(await screen.findByTestId("home-fleet-bar")).toBeInTheDocument();
+    expect(await screen.findByTestId("home-needs-you")).toBeInTheDocument();
     expect(await screen.findByTestId("home-spending")).toBeInTheDocument();
-    expect(await screen.findByTestId("home-attention")).toBeInTheDocument();
 
     // The queue shows the ask itself.
-    const waiting = screen.getByTestId("home-waiting");
-    expect(within(waiting).getByText(/Approve create_refund/)).toBeInTheDocument();
+    const queue = screen.getByTestId("home-needs-you");
+    expect(within(queue).getByText(/Approve create_refund/)).toBeInTheDocument();
 
     // Cost is tenant-scoped (ADR 0077): the retired by-model chart is still gone.
     expect(screen.queryByText("Cost by model")).toBeNull();
 
-    // The fleet's blocked agents are named; the serving one is not.
-    const attention = screen.getByTestId("home-attention");
-    expect(within(attention).getByText("support-triage")).toBeInTheDocument();
-    expect(within(attention).queryByText("demo-assistant")).toBeNull();
+    // A BROKEN agent is a queue row now, not a second list to check; the serving
+    // one appears in neither.
+    expect(within(queue).getByText(/support-triage/)).toBeInTheDocument();
+    // The serving agent is in no row: it is not blocked on anyone.
+    expect(
+      within(queue).queryByText((_, el) => el?.textContent === "team-a/demo-assistant"),
+    ).toBeNull();
   });
 
   it("NEVER calls the tenant-less /api/cost, which is a guaranteed 400 (ADR 0077)", async () => {
@@ -401,17 +470,48 @@ describe("Home (render proof)", () => {
     expect(fetchedPaths.some((p) => p.includes("/api/cost"))).toBe(false);
   });
 
-  it("counts the fleet only when the window IS the fleet (a cursor ⇒ no claim)", async () => {
+  it("makes every populated stage a link into the list it counts", async () => {
+    routeFetch({
+      "/api/agents": agentsResponse(FLEET),
+      "/api/providers": providersConnected,
+    });
+    renderHome();
+
+    const bar = await screen.findByTestId("home-fleet-bar");
+    const links = within(bar).getAllByRole("link");
+    expect(links.length).toBeGreaterThan(0);
+    for (const link of links) {
+      // The complaint this replaced: a strip that LOOKED like navigation. Every
+      // stage with agents behind it now opens that stage's list.
+      expect(link.getAttribute("href")).toMatch(/^\/agents\?.*view=/);
+    }
+  });
+
+  it("counts the whole fleet even when the agent LIST is only a window", async () => {
+    // The list is capped and says so with a cursor; the census is not, so the bar
+    // is a real count rather than the old "not yet known".
     routeFetch({
       "/api/agents": agentsResponse(FLEET, "next-page-cursor"),
       "/api/providers": providersConnected,
     });
     renderHome();
 
-    const strip = await screen.findByRole("list", { name: "Fleet lifecycle" });
-    // Every fleet fact reads the §7.1 unknown copy rather than a windowed count.
-    expect(within(strip).getAllByText("not yet known").length).toBeGreaterThan(0);
-    expect(await screen.findByText(/first page of agents, not the fleet/i)).toBeInTheDocument();
+    const bar = await screen.findByTestId("home-fleet-bar");
+    expect(within(bar).queryByText("not yet known")).toBeNull();
+    expect(screen.queryByText(/first page of agents, not the fleet/i)).toBeNull();
+  });
+
+  it("renders a capped census as a BOUND, never as a total", async () => {
+    routeFetch({
+      "/api/agents": agentsResponse(FLEET),
+      "/api/agents/census": censusFrom(FLEET, false),
+      "/api/providers": providersConnected,
+    });
+    renderHome();
+
+    expect(await screen.findByText(/a floor, not a total/i)).toBeInTheDocument();
+    const line = screen.getByTestId("home-status-line");
+    expect(within(line).getByText(new RegExp(`${FLEET.length}\\+ agents`))).toBeInTheDocument();
   });
 
   it("degrades an unwired backend CALMLY (501), never as a red failure", async () => {
@@ -427,7 +527,7 @@ describe("Home (render proof)", () => {
     expect(await screen.findByText(/Alerts aren’t configured/)).toBeInTheDocument();
     expect(screen.queryByText(/Failed to load/)).toBeNull();
     // The panels that DID answer are untouched.
-    expect(screen.getByTestId("home-waiting")).toBeInTheDocument();
+    expect(screen.getByTestId("home-needs-you")).toBeInTheDocument();
   });
 
   it("draws a real cap with an empty track when live spend is unavailable — never a zero", async () => {
@@ -459,8 +559,8 @@ describe("Home (render proof)", () => {
       await screen.findByText("You don't have permission to view tenants"),
     ).toBeInTheDocument();
     // The rest of the page still rendered.
-    expect(screen.getByRole("list", { name: "Fleet lifecycle" })).toBeInTheDocument();
-    expect(screen.getByTestId("home-waiting")).toBeInTheDocument();
+    expect(screen.getByTestId("home-fleet-bar")).toBeInTheDocument();
+    expect(screen.getByTestId("home-needs-you")).toBeInTheDocument();
   });
 
   it("counts the workspaces that refused the queue instead of reading them as empty", async () => {
@@ -497,11 +597,14 @@ describe("Home (render proof)", () => {
     });
     renderHome();
 
-    const notice = await screen.findByTestId("home-stop-ns:team-b");
-    expect(within(notice).getByText("team-b")).toBeInTheDocument();
-    expect(within(notice).getByText(/runaway delegation loop/)).toBeInTheDocument();
-    // The backend reports no impact counts, so the notice says unknown — not 0.
-    expect(within(notice).getByText(/Impact/)).toBeInTheDocument();
+    // A stop is the queue's FIRST row, not a second red surface above it.
+    const queue = await screen.findByTestId("home-needs-you");
+    const row = within(queue).getByTestId("home-need-stop");
+    expect(within(row).getByText("team-b")).toBeInTheDocument();
+    expect(within(row).getByText(/runaway delegation loop/)).toBeInTheDocument();
+    // It outranks everything else in the list.
+    const rows = within(queue).getAllByRole("listitem");
+    expect(rows[0]).toBe(row);
   });
 
   it("summarises a tenant-level stop instead of misstating its reach", async () => {
@@ -520,10 +623,11 @@ describe("Home (render proof)", () => {
     });
     renderHome();
 
+    // A scope this page cannot phrase exactly is named below the queue rather
+    // than given a row that would over- or understate its reach.
     expect(await screen.findByText(/1 further stop is in force/)).toBeInTheDocument();
-    expect(screen.queryByTestId("home-stop-tenant:acme-core")).toBeNull();
-    // …and it is still counted in the lede.
-    expect(screen.getByText(/1 scope is stopped/)).toBeInTheDocument();
+    const queue = screen.getByTestId("home-needs-you");
+    expect(within(queue).queryByTestId("home-need-stop")).toBeNull();
   });
 
   it("says so plainly, and stays short, when nothing needs anyone", async () => {
@@ -534,14 +638,15 @@ describe("Home (render proof)", () => {
     });
     renderHome();
 
+    // The all-clear is stated once, in the status line, and once in the queue —
+    // and only because every backend actually answered.
+    const line = await screen.findByTestId("home-status-line");
+    expect(within(line).getByText(/nothing needs you/)).toBeInTheDocument();
     expect(
-      await screen.findByText(
-        /Nothing is waiting on a person, nothing is stopped and nothing is failing/,
-      ),
+      screen.getByText(/Nothing is waiting on a person\./),
     ).toBeInTheDocument();
     // No "needs looking at" frame at all — an empty card is not an answer.
     await waitFor(() => expect(screen.queryByTestId("home-attention")).toBeNull());
-    expect(screen.getByText(/Nothing needs a person\./)).toBeInTheDocument();
   });
 
   it("does NOT render any Langfuse embedded iframe (m16.11: the iframe stays demoted)", async () => {
@@ -585,8 +690,8 @@ describe("Home (render proof)", () => {
     });
     renderHome();
 
-    const waiting = await screen.findByTestId("home-waiting");
-    expect(within(waiting).getByText(/Open the queue/)).toHaveAttribute("href", "/approvals");
+    const queue = await screen.findByTestId("home-needs-you");
+    expect(within(queue).getByText(/Open the queue/)).toHaveAttribute("href", "/approvals");
 
     const spending = screen.getByTestId("home-spending");
     expect(within(spending).getByText(/Open the cost page/)).toHaveAttribute("href", "/cost");
@@ -614,6 +719,30 @@ describe("Home (render proof)", () => {
 });
 
 describe("Home — the first-run path (the aha entry point)", () => {
+  it("teaches what an unfinished step actually does", async () => {
+    routeFetch({ "/api/providers": { providers: [] } });
+    renderHome();
+
+    const list = await screen.findByTestId("first-run-checklist");
+    // The blurb comes from the IA source, so the checklist and the nav cannot
+    // drift into describing different products.
+    expect(within(list).getByText(/validated server-side/i)).toBeInTheDocument();
+  });
+
+  it("shows how far setup got once the page is more than the checklist", async () => {
+    // A provider is connected and an agent exists, but nothing has run yet — so
+    // the page is a working Home with setup still in progress.
+    routeFetch({
+      "/api/agents": agentsResponse(FLEET),
+      "/api/providers": providersConnected,
+      "/api/runs": { runs: [] },
+    });
+    renderHome();
+
+    const pill = await screen.findByTestId("home-setup-progress");
+    expect(pill).toHaveTextContent(/Setup 2 \/ 3/);
+  });
+
   it("renders the checklist when setup is incomplete (no providers)", async () => {
     routeFetch({ "/api/agents": agentsResponse(FLEET) });
     renderHome();

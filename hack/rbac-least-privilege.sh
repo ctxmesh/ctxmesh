@@ -137,7 +137,10 @@ if command -v helm >/dev/null 2>&1 && [ -d "$CHART" ]; then
     # from stdin, so a piped document would never be read and the check would silently pass.
     offenders="$(python3 - "$rendered_file" <<'PY'
 import sys, yaml
-personas = {"ctxmesh-operator", "ctxmesh-developer", "ctxmesh-viewer", "ctxmesh-admin"}
+# The SHIPPED personas, verified against config/rbac. "ctxmesh-admin" was in this list and
+# does not exist — a name in a security gate that matches nothing implies coverage the gate
+# does not have, which is worse than a shorter list.
+personas = {"ctxmesh-operator", "ctxmesh-developer", "ctxmesh-viewer"}
 bad = []
 with open(sys.argv[1]) as fh:
     for d in yaml.safe_load_all(fh):
