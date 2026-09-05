@@ -66,6 +66,12 @@ type Resolver interface {
 	// Resolve returns the ref with its Version replaced by the digest it names. A ref that is
 	// already a digest resolves to itself without touching the store.
 	Resolve(ctx context.Context, namespace string, r Ref) (Ref, error)
+
+	// Describe returns name → description for the named skills. The controller injects these
+	// so the launcher can answer "what skills do I have?" with no I/O — that call happens on
+	// every run, and a network round-trip there would make progressive disclosure cost more
+	// than it saves.
+	Describe(ctx context.Context, namespace string, names []string) (map[string]string, error)
 }
 
 type storeResolver struct{ s Store }
@@ -119,6 +125,22 @@ func ResolveAll(ctx context.Context, res Resolver, namespace string, refs []stri
 			return nil, err
 		}
 		out = append(out, pinned.String())
+	}
+	return out, nil
+}
+
+func (sr storeResolver) Describe(ctx context.Context, namespace string, names []string) (map[string]string, error) {
+	out := make(map[string]string, len(names))
+	for _, n := range names {
+		sk, ok, err := sr.s.GetSkill(ctx, namespace, n)
+		if err != nil {
+			return nil, err
+		}
+		// A skill with no description is legal — it is simply harder for a model to know when
+		// it applies. Omitting the key rather than storing "" keeps the injected JSON small.
+		if ok && sk.Description != "" {
+			out[n] = sk.Description
+		}
 	}
 	return out, nil
 }
