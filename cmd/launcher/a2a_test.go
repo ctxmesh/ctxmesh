@@ -1319,3 +1319,39 @@ func TestBothOutboundPathsAreServed(t *testing.T) {
 		})
 	}
 }
+
+// TestOutboundStampsBothEnvelopeNames proves a hop carries the envelope under both
+// names with identical content, so a callee at either version runs the guard.
+//
+// The identical-content half matters as much as the presence half: if the two ever
+// disagreed, a callee's verdict would depend on which name it happened to prefer,
+// and the two ends of one call could reach different access-control decisions.
+func TestOutboundStampsBothEnvelopeNames(t *testing.T) {
+	var got http.Header
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(peer.Close)
+
+	_, tp := newTestTracer(t)
+	srv := newA2AServer(baseCfg(), tp.Tracer(tracerName), propagation.TraceContext{}, nil)
+	srv.resolveHost = func(string) string { return peer.URL }
+
+	req := httptest.NewRequest(http.MethodPost, "/amp/analyst", strings.NewReader(`{"q":"hi"}`))
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, req)
+
+	amp := got.Get(ampEnvelopeHeader)
+	legacy := got.Get(legacyEnvelopeHeader)
+	if amp == "" {
+		t.Fatal("the AMP envelope header was not stamped")
+	}
+	if legacy == "" {
+		t.Fatal("the legacy envelope header was not stamped — a peer that predates AMP would skip the guard")
+	}
+	if amp != legacy {
+		t.Fatalf("the two envelope headers disagree:\n  amp    = %s\n  legacy = %s", amp, legacy)
+	}
+}
