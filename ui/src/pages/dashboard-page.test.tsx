@@ -38,6 +38,31 @@ interface Routes {
 }
 
 /** Paths Home fetches that a test did not care to stub. A quiet cluster. */
+// The census is derived from the same fixture the agents list uses, so a test that
+// sets up a fleet gets a consistent count without restating it.
+const censusFrom = (items: AgentSummary[], complete = true) => {
+  const by = new Map<string, { ready: boolean; phase?: string; reason?: string; isDraft: boolean; count: number }>();
+  for (const a of items) {
+    const key = `${a.ready}|${a.phase ?? ""}|${a.reason ?? ""}|${a.isDraft ?? false}`;
+    const hit = by.get(key);
+    if (hit) hit.count += 1;
+    else
+      by.set(key, {
+        ready: a.ready,
+        phase: a.phase,
+        reason: a.reason,
+        isDraft: a.isDraft ?? false,
+        count: 1,
+      });
+  }
+  return {
+    total: items.length,
+    complete,
+    groupsComplete: true,
+    groups: [...by.values()],
+  };
+};
+
 const DEFAULTS: Routes = {
   "/api/kills": [],
   "/api/agents": { agents: [], items: [], nextCursor: "" },
@@ -48,6 +73,7 @@ const DEFAULTS: Routes = {
   "/api/alerts": { items: [] },
   "/api/providers": { providers: [] },
   "/api/runs": { runs: [] },
+  "/api/agents/census": censusFrom([]),
 };
 
 const fetchedPaths: string[] = [];
@@ -59,6 +85,12 @@ const fetchedPaths: string[] = [];
  */
 function routeFetch(routes: Routes = {}, statuses: Record<string, number> = {}) {
   const table = { ...DEFAULTS, ...routes };
+  // A test that supplies a fleet gets its census for free, unless it wants to
+  // say something specific about counting.
+  if (routes["/api/agents"] && !routes["/api/agents/census"]) {
+    const listed = routes["/api/agents"] as { items?: AgentSummary[] };
+    table["/api/agents/census"] = censusFrom(listed.items ?? []);
+  }
   fetchedPaths.length = 0;
   vi.stubGlobal(
     "fetch",
@@ -435,7 +467,7 @@ describe("Home (render proof)", () => {
     renderHome();
 
     // The sections A11 orders, each driven by its own backend.
-    expect(await screen.findByRole("list", { name: "Fleet lifecycle" })).toBeInTheDocument();
+    expect(await screen.findByTestId("home-fleet-bar")).toBeInTheDocument();
     expect(await screen.findByTestId("home-needs-you")).toBeInTheDocument();
     expect(await screen.findByTestId("home-spending")).toBeInTheDocument();
     expect(await screen.findByTestId("home-attention")).toBeInTheDocument();
@@ -460,17 +492,48 @@ describe("Home (render proof)", () => {
     expect(fetchedPaths.some((p) => p.includes("/api/cost"))).toBe(false);
   });
 
-  it("counts the fleet only when the window IS the fleet (a cursor ⇒ no claim)", async () => {
+  it("makes every populated stage a link into the list it counts", async () => {
+    routeFetch({
+      "/api/agents": agentsResponse(FLEET),
+      "/api/providers": providersConnected,
+    });
+    renderHome();
+
+    const bar = await screen.findByTestId("home-fleet-bar");
+    const links = within(bar).getAllByRole("link");
+    expect(links.length).toBeGreaterThan(0);
+    for (const link of links) {
+      // The complaint this replaced: a strip that LOOKED like navigation. Every
+      // stage with agents behind it now opens that stage's list.
+      expect(link.getAttribute("href")).toMatch(/^\/agents\?.*view=/);
+    }
+  });
+
+  it("counts the whole fleet even when the agent LIST is only a window", async () => {
+    // The list is capped and says so with a cursor; the census is not, so the bar
+    // is a real count rather than the old "not yet known".
     routeFetch({
       "/api/agents": agentsResponse(FLEET, "next-page-cursor"),
       "/api/providers": providersConnected,
     });
     renderHome();
 
-    const strip = await screen.findByRole("list", { name: "Fleet lifecycle" });
-    // Every fleet fact reads the §7.1 unknown copy rather than a windowed count.
-    expect(within(strip).getAllByText("not yet known").length).toBeGreaterThan(0);
-    expect(await screen.findByText(/first page of agents, not the fleet/i)).toBeInTheDocument();
+    const bar = await screen.findByTestId("home-fleet-bar");
+    expect(within(bar).queryByText("not yet known")).toBeNull();
+    expect(screen.queryByText(/first page of agents, not the fleet/i)).toBeNull();
+  });
+
+  it("renders a capped census as a BOUND, never as a total", async () => {
+    routeFetch({
+      "/api/agents": agentsResponse(FLEET),
+      "/api/agents/census": censusFrom(FLEET, false),
+      "/api/providers": providersConnected,
+    });
+    renderHome();
+
+    expect(await screen.findByText(/a floor, not a total/i)).toBeInTheDocument();
+    const line = screen.getByTestId("home-status-line");
+    expect(within(line).getByText(new RegExp(`${FLEET.length}\\+ agents`))).toBeInTheDocument();
   });
 
   it("degrades an unwired backend CALMLY (501), never as a red failure", async () => {
@@ -518,7 +581,7 @@ describe("Home (render proof)", () => {
       await screen.findByText("You don't have permission to view tenants"),
     ).toBeInTheDocument();
     // The rest of the page still rendered.
-    expect(screen.getByRole("list", { name: "Fleet lifecycle" })).toBeInTheDocument();
+    expect(screen.getByTestId("home-fleet-bar")).toBeInTheDocument();
     expect(screen.getByTestId("home-needs-you")).toBeInTheDocument();
   });
 

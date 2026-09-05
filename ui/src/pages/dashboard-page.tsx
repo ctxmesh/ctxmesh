@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 
+import { BUCKETS, type Bucket, bucketOf } from "@/lib/lifecycle";
 import { mapLimit, NAMESPACE_SCAN_CONCURRENCY } from "@/lib/map-limit";
 import { CheckCircle2, Circle, RefreshCw, Sparkles } from "lucide-react";
 
@@ -8,7 +9,6 @@ import {
   ClosingNote,
   ErrorState,
   ForbiddenInline,
-  LifecycleStrip,
   Meter,
   NextStepLink,
   PageHeader,
@@ -20,7 +20,6 @@ import {
   isKnown,
   lifecycleFactNumber,
   meterState,
-  resolveStatus,
   resourcePath,
   type LifecycleStage,
   type LifecycleStageCell,
@@ -36,6 +35,7 @@ import {
   ApiError,
   type ActiveStop,
   type AgentSummary,
+  type CensusResponse,
   type AlertSummary,
   type ApprovalQueueItem,
   type TenantSummary,
@@ -152,28 +152,8 @@ function isReady<T>(l: Load<T>): l is { kind: "ready"; data: T } {
 
 // ── The fleet census ────────────────────────────────────────────────────────
 
-/**
- * A stop reaches the agents list only as free-form condition text (`spec.suspend`
- * is not projected into `AgentSummary`), so it is read from the words the
- * backend actually sent — the same regex the fleet list uses. No match, no claim.
- */
-const HALTED = /(^|[^a-z])(suspend(ed)?|stopped|halted|killed)([^a-z]|$)/i;
 
-type Bucket = "halted" | "failing" | "held" | "draft" | "serving" | "coming up";
 
-/**
- * One agent → exactly ONE bucket, most-blocking first. Exclusivity is the point:
- * an agent that is both a draft and failing is counted once, so the buckets sum
- * to the fleet and the lifecycle facts cannot double-count it.
- */
-function bucketOf(a: AgentSummary): Bucket {
-  const { tone } = resolveStatus(a.ready, a.phase, a.reason);
-  if (HALTED.test(`${a.phase ?? ""} ${a.reason ?? ""}`)) return "halted";
-  if (tone === "failed") return "failing";
-  if (tone === "waiting") return "held";
-  if (a.isDraft) return "draft";
-  return tone === "ready" ? "serving" : "coming up";
-}
 
 export interface Census {
   total: number;
@@ -812,6 +792,11 @@ export function DashboardPage() {
   // True when the alert feed held more than we asked for, so every count derived
   // from it is a lower bound and must be rendered as one.
   const [alertsTruncated, setAlertsTruncated] = useState(false);
+  // The whole-fleet census. listAgents can only ever see one page, and its window
+  // IS the server's ceiling, so the counts on this page come from here instead.
+  const [fleetCensus, setFleetCensus] = useState<Load<CensusResponse>>({
+    kind: "loading",
+  });
   // Providers + runs drive ONLY the first-run checklist. They are fetched for
   // that gate and nothing else — this page shows no provider list and no runs.
   const [providers, setProviders] = useState<Load<number>>({ kind: "loading" });
@@ -829,6 +814,7 @@ export function DashboardPage() {
       if (!silent) {
         setStops({ kind: "loading" });
         setFleet({ kind: "loading" });
+        setFleetCensus({ kind: "loading" });
         setQueue({ kind: "loading" });
         setTenants({ kind: "loading" });
         setUsage({ kind: "loading" });
@@ -869,6 +855,15 @@ export function DashboardPage() {
         })
         .catch((err: unknown) => {
           if (live()) setFleet(toFailure(err));
+        });
+
+      api
+        .agentCensus(namespace || undefined, controller.signal)
+        .then((res) => {
+          if (live()) setFleetCensus({ kind: "ready", data: res });
+        })
+        .catch((err: unknown) => {
+          if (live()) setFleetCensus(toFailure(err));
         });
 
       loadQueue(controller, namespace, (q) => {
@@ -953,6 +948,27 @@ export function DashboardPage() {
     () => (fleetData ? census(fleetData.items, fleetData.complete) : null),
     [fleetData],
   );
+  // The bar's counts: bucket each distinct status tuple once, then multiply by
+  // how many agents carry it. Anything the server could not fit in its table is
+  // surfaced as unclassified rather than quietly dropped from the total.
+  const fleetBar = useMemo(() => {
+    if (!isReady(fleetCensus)) return null;
+    const c = fleetCensus.data;
+    const counts = {} as Record<Bucket, number>;
+    for (const b of BUCKETS) counts[b.id] = 0;
+    let classified = 0;
+    for (const g of c.groups) {
+      counts[bucketOf(g)] += g.count;
+      classified += g.count;
+    }
+    return {
+      counts,
+      total: c.total,
+      complete: c.complete,
+      unclassified: Math.max(0, c.total - classified),
+    };
+  }, [fleetCensus]);
+
   const attention = useMemo(
     () => (fleetData ? attentionRows(fleetData.items) : []),
     [fleetData],
@@ -962,9 +978,6 @@ export function DashboardPage() {
     () => (isReady(alerts) ? alerts.data.filter((a) => a.firing) : []),
     [alerts],
   );
-  const regressions = isReady(alerts)
-    ? firing.filter((a) => a.type === "regressionDetected").length
-    : undefined;
 
   const boundRows = useMemo(() => {
     if (!isReady(tenants)) return null;
@@ -1006,8 +1019,9 @@ export function DashboardPage() {
     (isReady(alerts) || alerts.kind === "unavailable");
   const status = statusLineParts({
     namespace,
-    total: facts?.complete ? facts.total : undefined,
-    serving: facts?.complete ? facts.serving : undefined,
+    total: fleetBar?.total,
+    totalIsBound: fleetBar ? !fleetBar.complete : undefined,
+    serving: fleetBar?.counts.serving,
     needs: needs.length > 0 || everySourceAnswered ? needs.length : undefined,
   });
 
@@ -1158,18 +1172,27 @@ export function DashboardPage() {
             onRetry={() => load()}
           />
         )}
-        {facts && (
+        {fleetBar && (
           <>
-            <LifecycleStrip label="Fleet lifecycle" stages={stages(facts, regressions)} />
-            {!facts.complete && (
+            <FleetBar bar={fleetBar} namespace={namespace} />
+            {!fleetBar.complete && (
               <QuietNote
                 className="mt-3"
-                title="These are the first page of agents, not the fleet."
+                title={`These counts are a floor, not a total.`}
               >
-                The registry answered with more pages than this one, so a count
-                taken here would describe a window while looking like a total.
-                The stages above read &ldquo;not yet known&rdquo; instead.{" "}
+                The fleet is larger than one census will walk, so every number
+                above is at least that many and possibly more. It is a bound, not
+                a guess.{" "}
                 <NextStepLink label="Open the fleet" to="/agents" />
+              </QuietNote>
+            )}
+            {fleetBar.unclassified > 0 && (
+              <QuietNote
+                className="mt-3"
+                title={`${plural(fleetBar.unclassified, "agent")} could not be classified.`}
+              >
+                Their status did not fit the census table, so they are counted in
+                the fleet total but sit in no stage above.
               </QuietNote>
             )}
           </>
@@ -1302,6 +1325,75 @@ function loadQueue(
  * The queue everything blocked on a person lands in. Empty is a SUCCESS state and
  * is styled as one — an empty box would read as "not loaded".
  */
+/**
+ * The fleet, as one bar whose every stage opens the list behind it.
+ *
+ * This replaces the BUILD / GOVERN / SHIP / IMPROVE strip, which looked like
+ * navigation and was not — teaching people that things on this page do not
+ * respond, which then applied to everything below it. The lifecycle that is
+ * actually worth a spine is the AGENT's, and it is real data.
+ *
+ * Colour says state, form says clickable (design system §2.3): the pip carries
+ * the semantic hue and the label carries the pine link treatment, so a status
+ * tint is never mistaken for something you can press.
+ */
+function FleetBar({
+  bar,
+  namespace,
+}: {
+  bar: {
+    counts: Record<Bucket, number>;
+    total: number;
+    complete: boolean;
+    unclassified: number;
+  };
+  namespace: string;
+}) {
+  const scope = namespace ? `?namespace=${encodeURIComponent(namespace)}&` : "?";
+  return (
+    <div data-testid="home-fleet-bar">
+      <div
+        className="flex h-2 gap-px overflow-hidden rounded-sm bg-surface-2"
+        role="presentation"
+      >
+        {BUCKETS.filter((b) => bar.counts[b.id] > 0).map((b) => (
+          <span
+            key={b.id}
+            className={b.tint}
+            style={{ width: `${(bar.counts[b.id] / Math.max(1, bar.total)) * 100}%` }}
+          />
+        ))}
+      </div>
+      <ul className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5 text-sm">
+        {BUCKETS.map((b) => {
+          const n = bar.counts[b.id];
+          return (
+            <li key={b.id} className="flex items-center gap-2">
+              <span className={`h-2 w-2 shrink-0 rounded-sm ${b.tint}`} aria-hidden />
+              {n > 0 ? (
+                <Link
+                  to={`/agents${scope}view=${b.view}`}
+                  className="border-b-[1.5px] border-accent text-primary hover:border-primary"
+                  data-testid={`home-fleet-${b.id}`}
+                >
+                  {b.label}
+                </Link>
+              ) : (
+                <span className="text-faint">{b.label}</span>
+              )}
+              <span
+                className={`font-mono ${n > 0 ? "text-foreground" : "text-faint"}`}
+              >
+                {n}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 function NeedsYou({ rows }: { rows: Need[] }) {
   const shown = rows.slice(0, NEEDS_ROWS);
   const more = rows.length - shown.length;
