@@ -22,8 +22,22 @@ export type NamespaceListState =
   | { kind: "error"; message: string };
 
 export interface NamespaceContextValue {
-  /** The selected namespace ("" = all namespaces the caller can see). */
+  /** The selected namespace ("" = all namespaces the caller can see). A READ FILTER only. */
   namespace: string;
+  /**
+   * workingNamespace — the CONCRETE namespace a write would land in, and the only namespace
+   * a capability probe may use. Never "".
+   *
+   * `namespace` overloads one string with two questions: "what should the list show?" and
+   * "where do I write?". Feeding "" to a SelfSubjectAccessReview asks "may I do this in EVERY
+   * namespace at once", which only a ClusterRoleBinding can satisfy — so a caller granted
+   * per-namespace (the binding shape ADR 0136 mandates) was told they could do nothing, and
+   * the console hid controls they in fact had.
+   *
+   * Empty only when the caller has no namespace at all, which is a first-class state the
+   * shell must render rather than silently treat as "denied everywhere".
+   */
+  workingNamespace: string;
   /** Select a namespace (or "" for all). Re-scopes the list + capabilities. */
   setNamespace: (ns: string) => void;
   /** The picker's options + their honest load state. */
@@ -67,9 +81,18 @@ export function NamespaceProvider({ children }: { children: React.ReactNode }) {
     return () => controller.abort();
   }, [reload]);
 
+  // The concrete namespace writes land in. An explicit selection wins; otherwise the first
+  // namespace the caller can actually use. Resolving to a hardcoded "default" would be wrong
+  // in the same way the empty probe was — asserting a namespace the caller may not hold.
+  const workingNamespace = React.useMemo(() => {
+    if (namespace !== "") return namespace;
+    if (list.kind === "ready" && list.namespaces.length > 0) return list.namespaces[0].name;
+    return "";
+  }, [namespace, list]);
+
   const value = React.useMemo<NamespaceContextValue>(
-    () => ({ namespace, setNamespace, list, reload: () => reload() }),
-    [namespace, list, reload],
+    () => ({ namespace, workingNamespace, setNamespace, list, reload: () => reload() }),
+    [namespace, workingNamespace, list, reload],
   );
 
   return (
@@ -90,6 +113,7 @@ export function useNamespace(): NamespaceContextValue {
 
 const FALLBACK: NamespaceContextValue = {
   namespace: "",
+  workingNamespace: "",
   setNamespace: () => {},
   list: { kind: "ready", namespaces: [] },
   reload: () => {},

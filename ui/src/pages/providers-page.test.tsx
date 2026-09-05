@@ -229,3 +229,34 @@ describe("ProvidersPage", () => {
     expect(await screen.findByTestId("providers-disabled")).toBeInTheDocument();
   });
 });
+
+describe("ProvidersPage — an absent control explains itself", () => {
+  it("says why connecting is unavailable, and names the grant that fixes it", async () => {
+    // A viewer: no create on any of the three objects the connect flow writes.
+    renderPage(VIEWER);
+    await screen.findByTestId("providers-page");
+
+    // Absent, not disabled (§7 A7).
+    expect(screen.queryByTestId("connect-provider-button")).toBeNull();
+
+    // But NOT silent. Until M160 this was the one unexplained case on the page: the Helm
+    // kill-switch had a note and RBAC had nothing, so a user saw "Providers" with no way to
+    // add one and no reason given.
+    expect(
+      await screen.findByText(/cannot connect a provider in this namespace/i),
+    ).toBeInTheDocument();
+    // The remedy must be actionable AND per-namespace — a ClusterRoleBinding here is the
+    // posture hack/rbac-least-privilege.sh exists to prevent (ADR 0136).
+    expect(screen.getByText(/create rolebinding/i)).toBeInTheDocument();
+  });
+
+  it("stays quiet when the caller CAN connect", async () => {
+    renderPage(OPERATOR);
+    await screen.findByTestId("providers-page");
+
+    expect(screen.getByTestId("connect-provider-button")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/cannot connect a provider in this namespace/i),
+    ).toBeNull();
+  });
+});

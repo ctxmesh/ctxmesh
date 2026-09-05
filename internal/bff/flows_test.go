@@ -82,25 +82,52 @@ func TestUnprobedCellIsNotAllowed(t *testing.T) {
 		"an empty map means nothing was probed — that is not permission")
 }
 
-// TestEveryFlowNeedIsProbed guards the seam between the registry and the probe: a flow that
-// names a core-group Secret verb the probe never issues would evaluate against a missing cell
-// and silently read as denied, which is safe but invisible. Keeping the probe DERIVED from the
-// registry is what makes them impossible to drift; this asserts that wiring holds.
+// TestEveryFlowNeedIsProbed is the gate Fable's review asked for: a role can satisfy
+// hack/flow-completability.sh and still leave the UI dark, because that script checks what the
+// shipped ROLES grant and says nothing about what the capability probe ASKS.
+//
+// A flow need the probe never issues evaluates against a missing cell. evaluateFlows treats
+// that as denied — safe, but invisible: the control disappears and no amount of granting
+// permission brings it back, which is indistinguishable from the M155 defect this milestone
+// exists to fix. So every need must be covered by a probe that actually runs.
 func TestEveryFlowNeedIsProbed(t *testing.T) {
 	t.Parallel()
 
-	probed := map[string]bool{}
-	for _, v := range flowNeedsCoreSecretVerbs() {
-		probed[v] = true
+	// What the agents-group cross-product covers.
+	agentsResources := map[string]bool{}
+	for _, r := range goldenResources {
+		agentsResources[r] = true
 	}
+	agentsVerbs := map[string]bool{}
+	for _, v := range goldenVerbs {
+		agentsVerbs[v] = true
+	}
+	// What the derived core-group Secret probes cover.
+	coreSecretVerbs := map[string]bool{}
+	for _, v := range flowNeedsCoreSecretVerbs() {
+		coreSecretVerbs[v] = true
+	}
+
+	require.NotEmpty(t, consoleFlows, "an empty registry would make every canFlow() false silently")
+
 	for _, f := range consoleFlows {
+		require.NotEmptyf(t, f.needs, "flow %q declares no writes — it would report completable to everyone", f.name)
 		for _, n := range f.needs {
-			if n.group != "" || n.resource != resSecrets {
-				continue
-			}
+			require.NotEmptyf(t, n.verbs, "flow %q names %q with no verb", f.name, n.resource)
 			for _, v := range n.verbs {
-				require.Truef(t, probed[v],
-					"flow %q needs core secrets %q but the probe never asks for it", f.name, v)
+				switch {
+				case n.group == "" && n.resource == resSecrets:
+					require.Truef(t, coreSecretVerbs[v],
+						"flow %q needs core secrets %q but the probe never asks for it", f.name, v)
+				case n.group == agentsAPIGroup:
+					require.Truef(t, agentsResources[n.resource],
+						"flow %q needs %q, which goldenResources does not probe — the cell would read as denied forever",
+						f.name, n.resource)
+					require.Truef(t, agentsVerbs[v],
+						"flow %q needs %q on %q, which goldenVerbs does not probe", f.name, v, n.resource)
+				default:
+					t.Fatalf("flow %q names group %q, which no probe covers", f.name, n.group)
+				}
 			}
 		}
 	}
