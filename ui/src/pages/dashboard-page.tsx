@@ -778,8 +778,11 @@ function BoundMeter({ bound }: { bound: Bound }) {
 /** Kept as `DashboardPage`: it is the name `App.tsx` mounts at `/`. */
 export function DashboardPage() {
   const { namespace } = useNamespace();
-  const { can } = useCapabilities();
+  const { can, canFlow } = useCapabilities();
   const canCreate = can(RES_AGENTS, "create");
+  // canFlow fails CLOSED: an unprobed or refused flow means the entry point is
+  // ABSENT, never a button that 403s when pressed.
+  const canConnectProvider = canFlow("connectProvider");
 
   const [stops, setStops] = useState<Load<ActiveStop[]>>({ kind: "loading" });
   const [fleet, setFleet] = useState<
@@ -1219,18 +1222,40 @@ export function DashboardPage() {
         </div>
       )}
 
-      {/* 5 ── What needs looking at. */}
+      {/* 5 ── The rest of the fleet's own signal. Anything BLOCKING a person is
+          already a queue row above; these two carry what is merely worth knowing,
+          plus the honest report when a source did not answer at all. */}
       {showAttentionRow && (
         <div className="grid min-w-0 items-start gap-5 lg:grid-cols-2">
-          {attention.length > 0 && (
-            <AttentionPanel rows={attention} complete={facts?.complete ?? false} />
+          {attention.some((a) => a.variant !== "crit") && (
+            <AttentionPanel
+              rows={attention.filter((a) => a.variant !== "crit")}
+              complete={facts?.complete ?? false}
+            />
           )}
-          <AlertsPanel
-            state={alerts}
-            firing={firing}
-            truncated={alertsTruncated}
-            onRetry={() => load()}
-          />
+          {(alerts.kind !== "ready" || firing.some((a) => alertVariant(a) === "warn")) && (
+            <AlertsPanel
+              state={alerts}
+              firing={firing.filter((a) => alertVariant(a) === "warn")}
+              truncated={alertsTruncated}
+              onRetry={() => load()}
+            />
+          )}
+        </div>
+      )}
+
+      {!firstRun && (canCreate || canConnectProvider) && (
+        <div
+          className="flex flex-wrap gap-2 border-t border-border-soft pt-4"
+          data-testid="home-start-rail"
+        >
+          {canCreate && (
+            <StartLink to="/agents/new" label="New agent" />
+          )}
+          {canConnectProvider && (
+            <StartLink to="/providers/connect" label="Connect a provider" />
+          )}
+          <StartLink to="/gallery" label="Browse the gallery" />
         </div>
       )}
 
@@ -1337,6 +1362,19 @@ function loadQueue(
  * the semantic hue and the label carries the pine link treatment, so a status
  * tint is never mistaken for something you can press.
  */
+/** One creation entry point. Present only when the caller can actually complete it. */
+function StartLink({ to, label }: { to: string; label: string }) {
+  return (
+    <Link
+      to={to}
+      className="rounded-sm border border-border-strong px-3 py-1.5 text-sm hover:bg-surface-2"
+    >
+      <span className="mr-2 font-mono text-primary">+</span>
+      {label}
+    </Link>
+  );
+}
+
 function FleetBar({
   bar,
   namespace,

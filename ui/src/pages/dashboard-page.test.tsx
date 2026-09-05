@@ -470,7 +470,6 @@ describe("Home (render proof)", () => {
     expect(await screen.findByTestId("home-fleet-bar")).toBeInTheDocument();
     expect(await screen.findByTestId("home-needs-you")).toBeInTheDocument();
     expect(await screen.findByTestId("home-spending")).toBeInTheDocument();
-    expect(await screen.findByTestId("home-attention")).toBeInTheDocument();
 
     // The queue shows the ask itself.
     const queue = screen.getByTestId("home-needs-you");
@@ -479,10 +478,13 @@ describe("Home (render proof)", () => {
     // Cost is tenant-scoped (ADR 0077): the retired by-model chart is still gone.
     expect(screen.queryByText("Cost by model")).toBeNull();
 
-    // The fleet's blocked agents are named; the serving one is not.
-    const attention = screen.getByTestId("home-attention");
-    expect(within(attention).getByText("support-triage")).toBeInTheDocument();
-    expect(within(attention).queryByText("demo-assistant")).toBeNull();
+    // A BROKEN agent is a queue row now, not a second list to check; the serving
+    // one appears in neither.
+    expect(within(queue).getByText(/support-triage/)).toBeInTheDocument();
+    // The serving agent is in no row: it is not blocked on anyone.
+    expect(
+      within(queue).queryByText((_, el) => el?.textContent === "team-a/demo-assistant"),
+    ).toBeNull();
   });
 
   it("NEVER calls the tenant-less /api/cost, which is a guaranteed 400 (ADR 0077)", async () => {
