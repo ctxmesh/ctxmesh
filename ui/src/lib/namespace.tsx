@@ -48,8 +48,20 @@ export interface NamespaceContextValue {
 
 const NamespaceContext = React.createContext<NamespaceContextValue | null>(null);
 
+const NS_KEY = "ctxmesh.namespace";
+
 export function NamespaceProvider({ children }: { children: React.ReactNode }) {
-  const [namespace, setNamespace] = React.useState("");
+  // Persisted, because on a cluster where the caller cannot list namespaces the value is typed
+  // by hand — losing it on every reload would make the console unusable for exactly the
+  // callers the per-namespace binding model produces.
+  const [namespace, setNamespaceState] = React.useState(
+    () => localStorage.getItem(NS_KEY) ?? "",
+  );
+  const setNamespace = React.useCallback((ns: string) => {
+    setNamespaceState(ns);
+    if (ns) localStorage.setItem(NS_KEY, ns);
+    else localStorage.removeItem(NS_KEY);
+  }, []);
   const [list, setList] = React.useState<NamespaceListState>({ kind: "loading" });
 
   const reload = React.useCallback((signal?: AbortSignal) => {
