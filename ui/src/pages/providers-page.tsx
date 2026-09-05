@@ -28,7 +28,8 @@ import {
 } from "@/components/kit";
 import { api, ApiError, type ProviderSummary } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
-import { canConnectProvider, RES_SECRETS } from "@/lib/nav";
+import { useNamespace } from "@/lib/namespace";
+import { RES_SECRETS } from "@/lib/nav";
 
 // ProvidersPage — the connected-providers admin surface (m18.5, ADR 0018;
 // re-housed on the editorial system in M151, spec §6.2: "Rotate/Disconnect as
@@ -243,9 +244,15 @@ function RowActions({
 
 export function ProvidersPage() {
   const navigate = useNavigate();
-  const { can, reprobe } = useCapabilities();
-  const canConnect = canConnectProvider(can);
-  const canRotate = can(RES_SECRETS, "update");
+  const { can, canFlow, reprobe } = useCapabilities();
+  const { workingNamespace } = useNamespace();
+  // Both of these are now the SERVER's answer about the whole flow, not a conjunction this
+  // page assembles. It got that wrong twice: connect omitted the ModelRoute the handler
+  // writes (and the Secret is written first, so the denial landed after a live credential
+  // was in the cluster), and rotate asked about `secretbindings.update` while the write that
+  // matters is the core Secret. See internal/bff/flows.go.
+  const canConnect = canFlow("connectProvider");
+  const canRotate = canFlow("rotateProviderKey");
   const canDisconnect = can(RES_SECRETS, "delete");
 
   const { toast } = useToast();
@@ -539,6 +546,32 @@ export function ProvidersPage() {
           ) : undefined
         }
       />
+
+      {/* An absent control must say WHY. The page already explains the Helm kill-switch case,
+          so the only SILENT case was the RBAC one — a user saw "Providers" with no way to add
+          one and nothing to act on. §7 A7's absent-not-disabled governs the BUTTON; it says
+          nothing against explaining the absence beside it. The command is spelled out because
+          "ask an admin for permission" is not actionable and this one line is. */}
+      {state.kind === "ready" && !canConnect && (
+        <QuietNote title="You cannot connect a provider in this namespace.">
+          <p>
+            Connecting one writes three objects — a Secret holding the key, a SecretBinding and
+            a ModelRoute — and your account is missing at least one of those writes in{" "}
+            <span className="font-mono text-xs">
+              {workingNamespace || "this namespace"}
+            </span>
+            .
+          </p>
+          <p className="mt-2">
+            An operator can grant it for this namespace only:{" "}
+            <span className="font-mono text-xs">
+              kubectl create rolebinding my-credentials
+              --clusterrole=ctxmesh-credential-admin --user=&lt;you&gt; -n{" "}
+              {workingNamespace || "<namespace>"}
+            </span>
+          </p>
+        </QuietNote>
+      )}
 
       {(state.kind === "loading" || all.length > 0) && (
         <FilterChipRow

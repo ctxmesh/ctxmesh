@@ -10,8 +10,29 @@ import { ToastProvider } from "@/components/kit";
 // shape drift is caught by the Go golden test, not by a stale hand-authored mock.
 import fixtures from "@/test/contract-fixtures.json";
 
-const OPERATOR = { secretbindings: { create: true, update: true, delete: true } };
-const VIEWER = { secretbindings: { create: false, update: false, delete: false } };
+// These now state what connecting a provider ACTUALLY needs. The old fixtures granted only
+// `secretbindings` and still passed the connect gate — because the removed helper asked about
+// `secrets` too, and an unprobed cell read as optimistic-true. A permission fixture that
+// passes by omission is not a permission fixture.
+const OPERATOR = {
+  secretbindings: { create: true, update: true, delete: true },
+  secrets: { create: true, update: true, delete: true },
+  modelroutes: { create: true, update: true, delete: true },
+};
+const VIEWER = {
+  secretbindings: { create: false, update: false, delete: false },
+  secrets: { create: false, update: false, delete: false },
+  modelroutes: { create: false, update: false, delete: false },
+};
+
+// flowsFor mirrors the SERVER's rule (internal/bff/flows.go): a flow is completable only when
+// every object it writes allows the verb it issues. Computed here rather than hardcoded so a
+// test cannot claim a flow the caps it declares would not support.
+function flowsFor(caps: Record<string, Record<string, boolean>>) {
+  const all = (verb: string) =>
+    ["secrets", "secretbindings", "modelroutes"].every((r) => caps[r]?.[verb] === true);
+  return { connectProvider: all("create"), rotateProviderKey: all("update") };
+}
 
 const providerList = fixtures.ProviderListResponse; // { providers:[...], items:[...] }
 
@@ -41,7 +62,11 @@ function installFetch(opts: Setup = {}) {
 
       if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
       if (url.startsWith("/api/capabilities"))
-        return j({ namespace: "", allowed: opts.caps ?? OPERATOR });
+        return j({
+          namespace: "",
+          allowed: opts.caps ?? OPERATOR,
+          flows: flowsFor(opts.caps ?? OPERATOR),
+        });
 
       if (url === "/api/providers" && method === "GET") {
         const status = opts.providersStatus ?? 200;
@@ -202,5 +227,36 @@ describe("ProvidersPage", () => {
   it("shows the disabled state when connect is kill-switched (404)", async () => {
     renderPage(OPERATOR, { providersStatus: 404 });
     expect(await screen.findByTestId("providers-disabled")).toBeInTheDocument();
+  });
+});
+
+describe("ProvidersPage — an absent control explains itself", () => {
+  it("says why connecting is unavailable, and names the grant that fixes it", async () => {
+    // A viewer: no create on any of the three objects the connect flow writes.
+    renderPage(VIEWER);
+    await screen.findByTestId("providers-page");
+
+    // Absent, not disabled (§7 A7).
+    expect(screen.queryByTestId("connect-provider-button")).toBeNull();
+
+    // But NOT silent. Until M160 this was the one unexplained case on the page: the Helm
+    // kill-switch had a note and RBAC had nothing, so a user saw "Providers" with no way to
+    // add one and no reason given.
+    expect(
+      await screen.findByText(/cannot connect a provider in this namespace/i),
+    ).toBeInTheDocument();
+    // The remedy must be actionable AND per-namespace — a ClusterRoleBinding here is the
+    // posture hack/rbac-least-privilege.sh exists to prevent (ADR 0136).
+    expect(screen.getByText(/create rolebinding/i)).toBeInTheDocument();
+  });
+
+  it("stays quiet when the caller CAN connect", async () => {
+    renderPage(OPERATOR);
+    await screen.findByTestId("providers-page");
+
+    expect(screen.getByTestId("connect-provider-button")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/cannot connect a provider in this namespace/i),
+    ).toBeNull();
   });
 });

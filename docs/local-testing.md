@@ -42,6 +42,12 @@ understanding:
   untrusted certificate **fails with no prompt at all**. The login appears to hang or bounce
   back to the sign-in page with no error.
 
+**The one-command way out: `mkcert`.** If `mkcert` is installed (`brew install mkcert`), the
+bring-up uses it automatically and there is nothing to accept — it writes its CA into the
+system trust store *and* into Firefox's own store. That second half matters: Firefox does not
+read the macOS keychain, so trusting a hand-rolled CA there leaves Firefox refusing the issuer
+with no visible reason.
+
 So visit the issuer once and accept the warning, which registers the exception for that
 origin:
 
