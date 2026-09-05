@@ -135,6 +135,11 @@ func (in *AgentDeploymentSpec) DeepCopyInto(out *AgentDeploymentSpec) {
 		*out = new(BudgetSpec)
 		**out = **in
 	}
+	if in.SkillRefs != nil {
+		in, out := &in.SkillRefs, &out.SkillRefs
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.TracePolicy != nil {
 		in, out := &in.TracePolicy, &out.TracePolicy
 		*out = new(TracePolicy)
@@ -191,6 +196,11 @@ func (in *AgentDeploymentStatus) DeepCopyInto(out *AgentDeploymentStatus) {
 		in, out := &in.Rollout, &out.Rollout
 		*out = new(RolloutStatus)
 		(*in).DeepCopyInto(*out)
+	}
+	if in.ResolvedSkills != nil {
+		in, out := &in.ResolvedSkills, &out.ResolvedSkills
+		*out = make([]string, len(*in))
+		copy(*out, *in)
 	}
 }
 
