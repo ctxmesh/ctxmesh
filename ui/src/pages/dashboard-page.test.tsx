@@ -743,6 +743,30 @@ describe("Home (render proof)", () => {
 });
 
 describe("Home — the first-run path (the aha entry point)", () => {
+  it("teaches what an unfinished step actually does", async () => {
+    routeFetch({ "/api/providers": { providers: [] } });
+    renderHome();
+
+    const list = await screen.findByTestId("first-run-checklist");
+    // The blurb comes from the IA source, so the checklist and the nav cannot
+    // drift into describing different products.
+    expect(within(list).getByText(/validated server-side/i)).toBeInTheDocument();
+  });
+
+  it("shows how far setup got once the page is more than the checklist", async () => {
+    // A provider is connected and an agent exists, but nothing has run yet — so
+    // the page is a working Home with setup still in progress.
+    routeFetch({
+      "/api/agents": agentsResponse(FLEET),
+      "/api/providers": providersConnected,
+      "/api/runs": { runs: [] },
+    });
+    renderHome();
+
+    const pill = await screen.findByTestId("home-setup-progress");
+    expect(pill).toHaveTextContent(/Setup 2 \/ 3/);
+  });
+
   it("renders the checklist when setup is incomplete (no providers)", async () => {
     routeFetch({ "/api/agents": agentsResponse(FLEET) });
     renderHome();
