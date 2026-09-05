@@ -312,6 +312,29 @@ type AgentDeploymentSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	PromptRef string `json:"promptRef,omitempty"`
 
+	// skillRefs attaches skills to the agent (ADR 0137). A SKILL is procedural knowledge with
+	// progressive disclosure: its description sits in the agent's context permanently and the
+	// body loads only when the model judges the task relevant. Unlike promptRef, which is
+	// singular and unconditional, an agent may hold several.
+	//
+	// Each entry is "<name>@<version>", where version is a digest (sha256:…) or an alias. An
+	// alias is resolved ONCE, at reconcile time, and the resolved DIGEST is recorded in the
+	// AgentVersion snapshot — a running agent never follows a moving alias, because replay
+	// fixtures and the eval gate both assume a pinned artifact.
+	//
+	// Changing this list rolls a new Knative revision with the image digest unchanged, exactly
+	// as swapping promptRef does.
+	//
+	// Bounded at 16 for the same reason capabilities.tags is: every attached skill's
+	// description is ALWAYS-ON context cost, and progressive disclosure exists precisely
+	// because context is scarce.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=320
+	SkillRefs []string `json:"skillRefs,omitempty"`
+
 	// tracePolicy optionally extends the always-on trace-redaction policy
 	// (PRD §13.3). The built-in detectors (emails, US SSNs, API keys/tokens) are
 	// ALWAYS applied to the sensitive payload attributes at the collector before
@@ -897,6 +920,17 @@ type AgentDeploymentStatus struct {
 	// open; externalURL is.
 	// +optional
 	URL string `json:"url,omitempty"`
+
+	// resolvedSkills records what each spec.skillRefs entry RESOLVED TO at reconcile time —
+	// "<name>@sha256:…", always a digest and never the alias that produced it.
+	//
+	// This is the field that makes a skilled agent reproducible. An alias may be re-pointed at
+	// any moment; if the deployment kept the alias, a replay fixture recorded today would
+	// exercise different content tomorrow and still report green. Recording the digest means
+	// the AgentVersion snapshot describes content that cannot change.
+	// +optional
+	// +listType=atomic
+	ResolvedSkills []string `json:"resolvedSkills,omitempty"`
 
 	// externalURL is the agent's public route — the Knative Service's own status.url,
 	// the address a person reaches the agent at from outside the cluster. Separate from
