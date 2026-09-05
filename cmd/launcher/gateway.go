@@ -618,7 +618,7 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 		attribute.String("gateway.route", route),
 	)
 	if caps.ConversationID != "" {
-		span.SetAttributes(attribute.String("a2a.conversation.id", caps.ConversationID))
+		span.SetAttributes(attribute.String("amp.conversation.id", caps.ConversationID))
 	}
 
 	// ── PRE-CALL hard check ────────────────────────────────────────────────

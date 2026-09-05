@@ -212,7 +212,7 @@ type asyncHandler interface {
 // consumer, when non-nil, handles a CloudEvent-shaped inbound POST (a Trigger
 // delivery to an eventing agent): it is dispatched to the async consumer BEFORE
 // the ordinary /invoke span/proxy path, so an async AMP event is deduped and
-// invoked through its own a2a.async.consume span. An ordinary /invoke (no
+// invoked through its own amp.async.consume span. An ordinary /invoke (no
 // CloudEvent headers) is unaffected. nil disables the async path.
 //
 // tracer and prop are explicit parameters (rather than read from the global
