@@ -83,6 +83,18 @@ func (s *memStore) DeleteTenant(_ context.Context, tenant string) error {
 	return nil
 }
 
+// AllNamespaces returns every mirrored namespace, across all tenants, sorted ascending.
+func (s *memStore) AllNamespaces(_ context.Context) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, 0, len(s.data))
+	for ns := range s.data {
+		out = append(out, ns)
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
 func (s *memStore) MembersOf(_ context.Context, tenant string) ([]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

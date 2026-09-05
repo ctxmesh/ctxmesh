@@ -41,6 +41,16 @@ type Store interface {
 	// MembersOf returns the namespaces currently attributed to the tenant, sorted ascending.
 	MembersOf(ctx context.Context, tenant string) ([]string, error)
 
+	// AllNamespaces returns every namespace the mirror knows about, across all tenants, sorted
+	// ascending. Used by the BFF to enumerate CANDIDATES when the caller cannot `list namespaces`
+	// themselves — the console's namespace picker would otherwise be empty for every persona bound
+	// per-namespace, which is the binding shape the platform actually recommends.
+	//
+	// This is a privileged enumeration and its result MUST NOT reach the wire unfiltered: the caller
+	// gets only the subset a caller-scoped SelfSubjectAccessReview approves. Returning the raw list
+	// would make this a namespace-existence oracle across tenants.
+	AllNamespaces(ctx context.Context) ([]string, error)
+
 	// TenantOf returns the tenant that owns the namespace, and whether a row exists.
 	TenantOf(ctx context.Context, namespace string) (tenant string, ok bool, err error)
 

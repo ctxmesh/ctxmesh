@@ -624,8 +624,10 @@ export function buildCrumbs(pathname: string): ShellCrumb[] {
  * with the user's secret in the request body. The rule lives here so the two
  * pages that gate on it (Providers, Connect a provider) cannot drift apart.
  */
-export function canConnectProvider(
-  can: (resource: string, verb: string) => boolean,
-): boolean {
-  return can(RES_SECRETS, "create") && can(RES_CORE_SECRETS, "create");
-}
+// canConnectProvider was REMOVED (M160). It asked `secretbindings.create && secrets.create`
+// while the connect handler upserts a THIRD object, a ModelRoute, and asked only about
+// `create` against an upsert path — so a caller could see an enabled button and hit a denial
+// after the Secret was already written. The question now lives with the handler that performs
+// the writes (internal/bff/flows.go) and reaches the UI as canFlow("connectProvider"), so a
+// permission conjunction can no longer drift from the operation it describes.
+

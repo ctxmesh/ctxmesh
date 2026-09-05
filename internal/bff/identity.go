@@ -188,6 +188,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, CapabilitiesResponse{
 		Namespace: namespace,
 		Allowed:   allowed,
+		Flows:     evaluateFlows(allowed),
 	})
 }
 
@@ -250,14 +251,16 @@ func probeCapabilities(ctx context.Context, caller client.Client, namespace stri
 	}
 	allowed[resLogs][verbGet] = logsOK
 
-	// The core-group `create secrets` probe. Connect-a-provider needs BOTH this and
-	// secretbindings.create; reporting only the latter is what let the console offer
-	// a flow the API server would refuse.
-	secretsOK, err := reviewCoreAccess(ctx, caller, namespace, resSecrets, "", verbCreate)
-	if err != nil {
-		return nil, err
+	// The core-group Secret probes. Which verbs to ask about is DERIVED from the flow registry
+	// rather than hardcoded, so a flow that starts needing a new verb cannot end up evaluating
+	// against an unprobed cell — which the UI's optimistic default would read as allowed.
+	for _, verb := range flowNeedsCoreSecretVerbs() {
+		ok, err := reviewCoreAccess(ctx, caller, namespace, resSecrets, "", verb)
+		if err != nil {
+			return nil, err
+		}
+		allowed[resSecrets][verb] = ok
 	}
-	allowed[resSecrets][verbCreate] = secretsOK
 	return allowed, nil
 }
 
@@ -326,8 +329,33 @@ func (s *Server) handleNamespaces(w http.ResponseWriter, r *http.Request) {
 
 	var list corev1.NamespaceList
 	if err := caller.List(r.Context(), &list); err != nil {
-		if status, msg, isRBAC := classifyReadError(err); isRBAC {
-			writeError(w, status, msg)
+		if _, _, isRBAC := classifyReadError(err); isRBAC {
+			// The caller cannot `list namespaces` cluster-wide. That is the NORMAL state for
+			// every persona bound per-namespace — which is the binding shape ADR 0136 and
+			// catalog.go's tenant-isolation precondition both require. Returning 403 here left
+			// the picker empty and the console with no namespace to work in, so it fell back to
+			// "" — a cluster-scoped capability probe that no namespaced RoleBinding can satisfy.
+			//
+			// The projects pattern instead (what the OpenShift console does): enumerate
+			// CANDIDATES with the platform's own view, then filter to what THIS caller may use.
+			// Only SSAR-approved names reach the wire, so this is not a namespace-existence
+			// oracle. The BFF gains no Kubernetes privilege — the mirror is its own Postgres
+			// projection, and every allow decision is still the API server's, made as the caller.
+			allowed, learned, ferr := s.callerVisibleNamespaces(r.Context(), caller)
+			if ferr != nil {
+				s.log.Error(ferr, "namespace discovery fallback failed")
+				writeError(w, http.StatusInternalServerError, "failed to determine your namespaces")
+				return
+			}
+			if !learned {
+				// The fallback had nothing to enumerate (no mirror, or no namespace in it), so it
+				// learned NOTHING about this caller. Returning [] here would assert "you have no
+				// namespaces" — a fact we do not have. The honest answer is still the denial.
+				status, msg, _ := classifyReadError(err)
+				writeError(w, status, msg)
+				return
+			}
+			writeJSON(w, http.StatusOK, NamespaceListResponse{Namespaces: allowed})
 			return
 		}
 		s.log.Error(err, "list namespaces failed")
@@ -348,6 +376,45 @@ func (s *Server) handleNamespaces(w http.ResponseWriter, r *http.Request) {
 	slices.SortFunc(summaries, func(a, b NamespaceSummary) int { return strings.Compare(a.Name, b.Name) })
 
 	writeJSON(w, http.StatusOK, NamespaceListResponse{Namespaces: summaries})
+}
+
+// callerVisibleNamespaces is the fallback for a caller who cannot `list namespaces`: the
+// namespaces the mirror knows about, filtered to those where the caller may actually work.
+//
+// Membership is probed with `list agentdeployments` — the one verb every shipped persona
+// grants, so it means "this namespace is usable by you" rather than accidentally selecting for
+// some narrower permission. Fail-closed: a namespace whose probe errors is omitted, never
+// included on the benefit of the doubt.
+//
+// The second return says whether the fallback LEARNED anything: false when there was nothing to
+// enumerate (no mirror configured, or an empty one). That distinction is load-bearing. An empty
+// result with learned=true means "candidates existed and none are yours" — a real, honest state
+// the SPA should render as "ask an operator for a workspace". An empty result with learned=false
+// means "we could not tell", and answering [] there would assert a fact we do not have; the
+// caller's original denial is the honest answer instead.
+func (s *Server) callerVisibleNamespaces(ctx context.Context, caller client.Client) ([]NamespaceSummary, bool, error) {
+	if s.namespaceTenantStore == nil {
+		return nil, false, nil
+	}
+	candidates, err := s.namespaceTenantStore.AllNamespaces(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(candidates) == 0 {
+		return nil, false, nil
+	}
+	out := make([]NamespaceSummary, 0, len(candidates))
+	for _, ns := range candidates {
+		ok, rerr := reviewAccess(ctx, caller, ns, resAgentDeployments, verbList)
+		if rerr != nil {
+			s.log.Error(rerr, "namespace membership probe failed (omitting)", "namespace", ns)
+			continue
+		}
+		if ok {
+			out = append(out, NamespaceSummary{Name: ns})
+		}
+	}
+	return out, true, nil
 }
 
 // handleSetNamespaceDisplayName serves PUT /api/namespaces/{name}/display-name

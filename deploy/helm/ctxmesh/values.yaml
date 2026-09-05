@@ -554,4 +554,14 @@ auth:
     # The prefix MUST match the apiserver --oidc-username-prefix (default below).
     # Set false to manage RBAC out of band (the enterprise path maps IdP groups).
     demoBinding: true
+    # WHERE the demo identity is bound. Per-namespace RoleBindings, never a ClusterRoleBinding:
+    # internal/bff/catalog.go requires persona ClusterRoles to be RoleBound per namespace, or a
+    # tenant-A principal can pass tenant-B's ?namespace= and enumerate B's catalog — "the binding
+    # is the control". This shipped as a ClusterRoleBinding and violated that on every install
+    # with the demo login on.
+    demoBindingNamespaces:
+      - default
+    # OPT-IN escape hatch for a single-tenant demo where cluster-wide is understood and accepted.
+    # Leaving this false is what keeps the tenant-isolation precondition true.
+    demoBindingClusterWide: false
     usernamePrefix: "oidc:"

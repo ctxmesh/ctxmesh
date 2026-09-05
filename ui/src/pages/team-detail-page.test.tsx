@@ -353,7 +353,12 @@ describe("TeamDetailPage — the delegation tree at both sizes", () => {
     renderPage();
     const grid = await screen.findByRole("treegrid", { name: "Delegation tree" });
 
-    fireEvent.click(within(grid).getByText("Show all →"));
+    // findByText, not getByText: findByRole("treegrid") resolves as soon as the grid EXISTS,
+    // which is before the 400 rows arrive, and the "Show all" affordance only appears once
+    // there are enough rows to collapse. The synchronous getByText raced that and failed
+    // intermittently under full-suite parallelism with `aria-rowcount="2"` — the header row
+    // alone — which reads like a windowing bug and is really a missing await.
+    fireEvent.click(await within(grid).findByText("Show all →"));
 
     await waitFor(() =>
       // 401 nodes + the header row — the TRUE total, always.
@@ -369,7 +374,12 @@ describe("TeamDetailPage — the delegation tree at both sizes", () => {
     installFetch({ ...READY_BACKEND, tree: wideTree(400) });
     renderPage();
     const grid = await screen.findByRole("treegrid", { name: "Delegation tree" });
-    fireEvent.click(within(grid).getByText("Show all →"));
+    // findByText, not getByText: findByRole("treegrid") resolves as soon as the grid EXISTS,
+    // which is before the 400 rows arrive, and the "Show all" affordance only appears once
+    // there are enough rows to collapse. The synchronous getByText raced that and failed
+    // intermittently under full-suite parallelism with `aria-rowcount="2"` — the header row
+    // alone — which reads like a windowing bug and is really a missing await.
+    fireEvent.click(await within(grid).findByText("Show all →"));
     await waitFor(() => expect(grid).toHaveAttribute("aria-rowcount", "402"));
 
     const first = within(grid).getAllByRole("row")[1]; // row 0 is the header

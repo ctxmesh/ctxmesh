@@ -38,6 +38,11 @@ RBAC="$ROOT/config/rbac"
 # PodLogOptions and IPBlock are request/field types, not resources, and are excluded below.
 declare -a FLOWS=(
   "secrets:create"
+  # Rotating a provider key UPDATES the Secret — upsertObject creates, then falls back to
+  # Update when the object exists. Added when the registry-drift check below found it: the
+  # rotate path's completability had never been checked against any shipped role, and the
+  # console gated rotation on `secretbindings.update`, which is a different object entirely.
+  "secrets:update"
   "networkpolicies:create"
 )
 
@@ -104,5 +109,47 @@ while read -r kind; do
     || bad "the BFF writes '$p' with the caller's client and it is not in FLOWS — a new flow whose completability nobody checked"
 done <<< "$found"
 
+# ── 3. the Go flow registry and this allowlist describe the SAME flows ───────
+# This script checks what shipped ROLES grant. internal/bff/flows.go declares what each console
+# flow WRITES, and the UI now asks it directly (canFlow). Two lists describing one truth drift,
+# and the drift is silent in the direction that matters: a flow whose core-group need is absent
+# here is a flow whose completability nobody verified against any role.
+#
+# The probe-scope half of this — "is every declared need actually PROBED?" — is asserted in Go
+# by TestEveryFlowNeedIsProbed, which has the golden lists in scope. A role can satisfy this
+# script and still leave the UI dark, which is exactly how M155 shipped.
+FLOWS_GO="$BFF/flows.go"
+if [ -f "$FLOWS_GO" ]; then
+  # Core-group needs in the registry, as resource:verb. resSecrets is the only core resource a
+  # flow names today; a new one shows up as an unmapped constant and fails loudly below.
+  registry="$(python3 - "$FLOWS_GO" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+# {group: "", resource: resSecrets, verbs: []string{verbCreate, verbUpdate}},
+for m in re.finditer(r'\{group:\s*""\s*,\s*resource:\s*(\w+)\s*,\s*verbs:\s*\[\]string\{([^}]*)\}', src):
+    res, verbs = m.group(1), m.group(2)
+    resmap = {"resSecrets": "secrets"}
+    plural = resmap.get(res, "")
+    if not plural:
+        print(f"UNMAPPED:{res}")
+        continue
+    for v in re.findall(r'verb(\w+)', verbs):
+        print(f"{plural}:{v.lower()}")
+PY
+)"
+  while read -r entry; do
+    [ -n "$entry" ] || continue
+    case "$entry" in
+      UNMAPPED:*)
+        bad "flows.go names core resource ${entry#UNMAPPED:} and this gate has no plural mapping — add it deliberately"
+        continue ;;
+    esac
+    printf '%s\n' "${FLOWS[@]}" | grep -q "^$entry\$" \
+      || bad "flows.go declares a flow needing '$entry' and FLOWS does not list it — no role was checked for that write"
+  done <<< "$registry"
+else
+  bad "internal/bff/flows.go is missing — the console flow registry is what the UI gates on"
+fi
+
 [ "$rc" = "0" ] || exit 1
-echo "PASS: every caller-scoped BFF write is completable by a shipped role"
+echo "PASS: every caller-scoped BFF write is completable by a shipped role, and the flow registry agrees"

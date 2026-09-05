@@ -25,8 +25,11 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
 	authnv1 "k8s.io/api/authentication/v1"
 	authzv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -223,14 +226,22 @@ func TestCapabilitiesBatchesTheMatrix(t *testing.T) {
 			want[probe{res, verb, "prod", agentsAPIGroup}] = true
 		}
 	}
-	want[probe{"pods", "get", "prod", ""}] = true       // the logs subresource probe (core group)
-	want[probe{"secrets", "create", "prod", ""}] = true // the connect-a-provider probe (core group)
-	require.Len(t, got, len(want), "one SSAR per golden resource×verb, plus the two core-group probes")
+	want[probe{"pods", "get", "prod", ""}] = true // the logs subresource probe (core group)
+	// The core-group Secret verbs are DERIVED from the flow registry, not hardcoded: connect
+	// needs create, and rotate needs update because upsertObject falls back to Update when the
+	// object exists. Gating rotation on `secretbindings.update` — as the console did — asks
+	// about the wrong object entirely; the write that matters is the Secret.
+	for _, verb := range flowNeedsCoreSecretVerbs() {
+		want[probe{"secrets", verb, "prod", ""}] = true
+	}
+	require.Contains(t, flowNeedsCoreSecretVerbs(), verbUpdate,
+		"rotate must contribute a core-secret update probe, or the flow evaluates an unprobed cell")
+	require.Len(t, got, len(want), "one SSAR per golden resource×verb, plus the core-group probes")
 	for _, p := range got {
 		assert.Contains(t, want, p, "unexpected SSAR probe: %+v", p)
 		delete(want, p)
 	}
-	assert.Empty(t, want, "every golden resource×verb + both core-group probes must be probed exactly once")
+	assert.Empty(t, want, "every golden resource×verb + every core-group probe must be probed exactly once")
 
 	// The response echoes the namespace and carries the full flat matrix + both core cells.
 	var body CapabilitiesResponse
@@ -598,4 +609,59 @@ func TestSetNamespaceDisplayNameForbiddenIs403(t *testing.T) {
 	var errBody errorBody
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errBody))
 	assert.NotEmpty(t, errBody.Error)
+}
+
+// TestCallerVisibleNamespacesFiltersToTheCaller covers the discovery fallback for a caller who
+// cannot `list namespaces` — the normal state for every persona bound per-namespace, which is
+// the binding shape ADR 0136 requires. The security property under test is that the privileged
+// enumeration is never emitted unfiltered: a candidate the caller cannot use must not appear,
+// or the endpoint becomes a namespace-existence oracle across tenants.
+func TestCallerVisibleNamespacesFiltersToTheCaller(t *testing.T) {
+	ctx := context.Background()
+	store := namespacetenant.NewMemStore()
+	require.NoError(t, store.SetMembers(ctx, "tenant-a", []string{"team-a"}))
+	require.NoError(t, store.SetMembers(ctx, "tenant-b", []string{"team-b", "team-c"}))
+
+	all, err := store.AllNamespaces(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []string{"team-a", "team-b", "team-c"}, all,
+		"the mirror must enumerate every tenant's namespaces — filtering is the caller's job")
+
+	// The caller may work in team-b only.
+	caller := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithInterceptorFuncs(ssarInterceptor(func(_, _, ns string) bool { return ns == "team-b" })).
+		Build()
+
+	srv := &Server{namespaceTenantStore: store, log: logr.Discard()}
+	got, learned, err := srv.callerVisibleNamespaces(ctx, caller)
+	require.NoError(t, err)
+	require.True(t, learned, "candidates existed, so the fallback learned an answer")
+
+	names := make([]string, 0, len(got))
+	for _, n := range got {
+		names = append(names, n.Name)
+	}
+	assert.Equal(t, []string{"team-b"}, names,
+		"only SSAR-approved namespaces may reach the wire — anything else is an existence oracle")
+}
+
+// TestCallerVisibleNamespacesEmptyIsNotAnError: no granted namespace is an honest state the SPA
+// must render as such ("ask an operator for a workspace"). Collapsing it into an error, or into
+// an all-false capability map, is what made the original defect unreadable.
+func TestCallerVisibleNamespacesEmptyIsNotAnError(t *testing.T) {
+	ctx := context.Background()
+	store := namespacetenant.NewMemStore()
+	require.NoError(t, store.SetMembers(ctx, "tenant-a", []string{"team-a"}))
+
+	caller := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithInterceptorFuncs(ssarInterceptor(func(_, _, _ string) bool { return false })).
+		Build()
+
+	srv := &Server{namespaceTenantStore: store, log: logr.Discard()}
+	got, learned, err := srv.callerVisibleNamespaces(ctx, caller)
+	require.NoError(t, err)
+	assert.True(t, learned, "a candidate existed and was denied — that IS an answer")
+	assert.Empty(t, got)
 }

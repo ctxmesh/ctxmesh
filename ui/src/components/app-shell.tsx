@@ -226,6 +226,39 @@ function WorkspaceSwitcher({
   const forbidden = list.kind === "forbidden";
   const namespaces = list.kind === "ready" ? list.namespaces : [];
 
+  // The escape hatch, and the ONLY way some callers get a usable console. When the caller
+  // cannot list namespaces and the platform's own discovery finds none either (no Tenant
+  // covers them yet), there is nothing to put in a dropdown — and "" is not a safe default,
+  // because a capability probe on "" asks a cluster-scoped question no namespaced RoleBinding
+  // can satisfy, so every write control silently disappears. A free-text field is what
+  // Headlamp and Lens do in exactly this situation, and it is honest: we do not know your
+  // namespaces, so tell us one.
+  if (forbidden && namespaces.length === 0) {
+    return (
+      <div className={cn("flex min-w-0 items-center gap-2", className)}>
+        <label
+          htmlFor={id}
+          className="shrink-0 font-mono text-2xs uppercase text-faint"
+        >
+          Workspace
+        </label>
+        <input
+          id={id}
+          aria-label="Workspace"
+          data-testid="namespace-manual-entry"
+          defaultValue={namespace}
+          onBlur={(e) => setNamespace(e.target.value.trim())}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") setNamespace(e.currentTarget.value.trim());
+          }}
+          placeholder="namespace…"
+          title="You can't list namespaces on this cluster, so type the one you work in. Everything the console shows and writes is scoped to it."
+          className="h-8 w-40 min-w-0 rounded-md border border-border bg-background px-2 text-xs"
+        />
+      </div>
+    );
+  }
+
   return (
     <div className={cn("flex min-w-0 items-center gap-2", className)}>
       <label
