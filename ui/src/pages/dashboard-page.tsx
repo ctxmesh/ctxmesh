@@ -1045,6 +1045,10 @@ export function DashboardPage() {
   // look at, so Home IS the checklist rather than four empty frames.
   const firstRun = showChecklist && fleetData !== null && fleetData.items.length === 0;
 
+  const setupDone = [hasProvider, hasProvider && hasAgent, hasProvider && hasAgent && hasRun].filter(
+    Boolean,
+  ).length;
+
   const scopeWord = namespace || "all workspaces";
   const meta = facts
     ? `${scopeWord} · ${
@@ -1067,7 +1071,15 @@ export function DashboardPage() {
           fleet.kind === "loading" && queue.kind === "loading" ? (
             <Skeleton className="mt-1 h-4 w-[28rem] max-w-full" />
           ) : (
-            <StatusLine parts={status} tone={needsTone} />
+            <StatusLine
+              parts={status}
+              tone={needsTone}
+              setup={
+                showChecklist && !firstRun
+                  ? { done: setupDone, of: FIRST_RUN_CHECKLIST.length }
+                  : undefined
+              }
+            />
           )
         }
         actionsSlot={
@@ -1497,9 +1509,12 @@ function NeedsYou({ rows }: { rows: Need[] }) {
 function StatusLine({
   parts,
   tone,
+  setup,
 }: {
   parts: ReturnType<typeof statusLineParts>;
   tone: "crit" | "hold";
+  /** Shown only while the install is part-way set up — never on a finished one. */
+  setup?: { done: number; of: number };
 }) {
   return (
     <span
@@ -1513,6 +1528,14 @@ function StatusLine({
           <span className="font-mono text-foreground">{c}</span>
         </span>
       ))}
+      {setup && (
+        <span
+          className="rounded-sm bg-warning-surface px-2 py-0.5 font-mono text-2xs uppercase tracking-wide text-warning"
+          data-testid="home-setup-progress"
+        >
+          Setup {setup.done} / {setup.of}
+        </span>
+      )}
       {parts.needs !== undefined && (
         <span className="flex items-baseline gap-2">
           <span className="text-ghost">·</span>
@@ -2009,6 +2032,7 @@ function FirstRun({
   const steps = FIRST_RUN_CHECKLIST.map((s) => ({
     label: s.label,
     to: s.to,
+    blurb: s.blurb,
     done: done[s.doneKey],
   }));
   const next = steps.find((s) => !s.done);
@@ -2025,7 +2049,7 @@ function FirstRun({
           {steps.map((s, i) => (
             <li
               key={s.label}
-              className="flex items-center gap-2 text-sm"
+              className="flex items-start gap-2 text-sm"
               data-testid={`first-run-step-${i}`}
             >
               {s.done ? (
@@ -2033,8 +2057,13 @@ function FirstRun({
               ) : (
                 <Circle className="h-4 w-4 shrink-0 text-faint" />
               )}
-              <span className={s.done ? "text-faint line-through" : undefined}>
-                {s.label}
+              <span className="min-w-0">
+                <span className={s.done ? "text-faint line-through" : "font-medium"}>
+                  {s.label}
+                </span>
+                {!s.done && (
+                  <span className="block text-sm text-faint">{s.blurb}</span>
+                )}
               </span>
             </li>
           ))}

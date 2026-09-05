@@ -520,6 +520,8 @@ export interface FirstRunStep {
   label: string;
   to: string;
   doneKey: "provider" | "agent" | "run";
+  /** What the step actually does, for someone who has never done it. */
+  blurb: string;
 }
 
 // FIRST_RUN_CHECKLIST — Home's guided "get started" steps (m18.10), co-located
@@ -528,11 +530,26 @@ export interface FirstRunStep {
 // connect/new suffixes are the action affordances ON those surfaces) — a nav route
 // change follows automatically instead of leaving a stale hardcoded path.
 export const FIRST_RUN_CHECKLIST: FirstRunStep[] = [
-  { label: "Connect a provider", to: `${navRoute("providers")}/connect`, doneKey: "provider" },
-  { label: "Create an agent", to: `${navRoute("agents")}/new`, doneKey: "agent" },
+  {
+    label: "Connect a provider",
+    to: `${navRoute("providers")}/connect`,
+    doneKey: "provider",
+    blurb: "Paste a key once. It is validated server-side and never reaches the browser.",
+  },
+  {
+    label: "Create an agent",
+    to: `${navRoute("agents")}/new`,
+    doneKey: "agent",
+    blurb: "Describe what you want in a sentence, then review the config before it applies.",
+  },
   // The Playground — the taught run surface. Was /agents (a list, not a run
   // affordance); m49.4 UX-review P1.
-  { label: "Run your agent", to: navRoute("playground"), doneKey: "run" },
+  {
+    label: "Run your agent",
+    to: navRoute("playground"),
+    doneKey: "run",
+    blurb: "Send it a message and watch the trace, before anything reaches production.",
+  },
 ];
 
 // ── The breadcrumb trail (M151 §4.2) ────────────────────────────────────────
