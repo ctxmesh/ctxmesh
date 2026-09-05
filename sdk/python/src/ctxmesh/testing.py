@@ -162,8 +162,11 @@ def _normalise(path: str) -> str:
     if len(parts) >= 2 and parts[0] == "memory":
         tail = "/" + "/".join(parts[2:]) if len(parts) > 2 else ""
         return "/memory/{id}" + tail
-    # /a2a/research -> /a2a/{target} (the mesh listener, M156)
-    if len(parts) == 2 and parts[0] == "a2a":
+    # /amp/research and /a2a/research both -> /a2a/{target} (the mesh listener).
+    # They collapse to the LEGACY key on purpose: customer test suites already assert
+    # on it, and a rename that silently stops matching their stubs is exactly what
+    # this fake exists to prevent (ADR 0138).
+    if len(parts) == 2 and parts[0] in ("amp", "a2a"):
         return "/a2a/{target}"
     return path
 

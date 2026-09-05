@@ -1,22 +1,18 @@
 /**
  * `client.mesh` — synchronous agent-to-agent calls through the launcher (M6, M156).
  *
- * WHY THIS IS CALLED `mesh` AND NOT `a2a`
- * ---------------------------------------
- * The launcher serves this on `POST /a2a/{targetAgent}`, and the platform has called it A2A
- * since M6. But "A2A" now unambiguously names Google's Agent2Agent protocol (v1.0.0,
- * Agentic AI Foundation) — a very different thing: an INTEROP protocol for agents from
- * different organisations, with Agent Cards, JSON-RPC, a task lifecycle and declared
- * security schemes.
+ * WHY THIS IS CALLED `mesh`
+ * --------------------------
+ * The call surface is AMP (ADR 0138) and the boundary it runs inside is the MESH — the closed
+ * communication scope of an AgentRegistry. `client.mesh` is operations over that boundary,
+ * which is why the API keeps this name while the protocol got its own.
  *
- * Ours is a MEDIATION protocol for agents the platform already owns: the launcher stamps an
- * envelope carrying hop depth, the traversal path and a spend budget, so it can enforce
- * registry isolation, cycle detection and fan-out limits. Neither is a worse version of the
- * other; they solve different problems.
- *
- * Naming this `client.a2a()` would tell every reader we speak a specification we do not, and
- * a published API name cannot be withdrawn. Internal code and the wire header keep A2A; the
- * surface a user touches says what it is.
+ * AMP is not Google's Agent2Agent, which the platform's old name (A2A, since M6) collided
+ * with. Theirs is an INTEROP protocol for agents from different organisations — Agent Cards,
+ * JSON-RPC, a task lifecycle, declared security schemes. Ours is MEDIATION for agents the
+ * platform already owns: the launcher stamps an envelope carrying hop depth, the traversal
+ * path and a spend budget, so it can enforce registry isolation, cycle detection and fan-out
+ * limits. Neither is a worse version of the other; they solve different problems.
  *
  * WHAT THE LAUNCHER DOES FOR YOU
  * ------------------------------
@@ -51,7 +47,7 @@ export class MeshClient {
     // connection-refused on a port they never heard of.
     if (!this.config.meshWired) {
       throw new ConfigError(
-        "the mesh is not wired for this agent: the launcher starts its A2A listener only " +
+        "the mesh is not wired for this agent: the launcher starts its AMP listener only " +
           "for a resolved AgentRegistry member (AGENT_REGISTRY_ID). Add this agent to an " +
           "AgentRegistry to call peers.",
       );
@@ -89,6 +85,10 @@ export class MeshClient {
       throw new ConfigError(`invalid target agent name: ${JSON.stringify(name)}`);
     }
 
+    // Deliberately the legacy path. The SDK ships in the customer's image and can be
+    // upgraded BEFORE the platform, so posting /amp/ would 404 against a launcher that
+    // predates ADR 0138. Launchers serve both; this moves to /amp/ once the both-paths
+    // release is everywhere. Mirror of the header ordering.
     const url = `${this.config.meshBaseUrl}/a2a/${encodeURIComponent(name)}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 30_000);

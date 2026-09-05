@@ -70,8 +70,11 @@ export function normalisePath(path: string): string {
     const tail = parts.length > 2 ? "/" + parts.slice(2).join("/") : "";
     return "/memory/{id}" + tail;
   }
-  // /a2a/research -> /a2a/{target} (the mesh listener, M156)
-  if (parts.length === 2 && parts[0] === "a2a") {
+  // /amp/research and /a2a/research both -> /a2a/{target} (the mesh listener).
+  // They collapse to the LEGACY key on purpose: customer test suites already assert
+  // on it, and a rename that silently stops matching their stubs is exactly what
+  // this fake exists to prevent (ADR 0138).
+  if (parts.length === 2 && (parts[0] === "amp" || parts[0] === "a2a")) {
     return "/a2a/{target}";
   }
   return path;
@@ -422,7 +425,8 @@ export class FeedbackStub extends BaseStub {
 }
 
 /**
- * Fake of the launcher A2A listener (`POST /a2a/{targetAgent}`, :2997) — the fake behind
+ * Fake of the launcher's AMP listener (`POST /amp/{targetAgent}`, also served as
+ * `/a2a/{targetAgent}`, :2997) — the fake behind
  * `client.mesh`.
  *
  * The real launcher stamps the platform envelope, resolves the target over DNS and forwards.
