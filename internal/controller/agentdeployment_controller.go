@@ -1815,6 +1815,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// move. A failure is returned rather than skipped: an agent deployed with its skills
 	// silently missing is worse than one that refuses to deploy.
 	var resolvedSkills []string
+	var skillDescriptions map[string]string
 	if len(deploy.Spec.SkillRefs) > 0 {
 		if r.Skills == nil {
 			return podTemplate{}, fmt.Errorf(
@@ -1824,6 +1825,21 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		resolvedSkills, err = skill.ResolveAll(ctx, r.Skills, deploy.Namespace, deploy.Spec.SkillRefs)
 		if err != nil {
 			return podTemplate{}, fmt.Errorf("resolve skillRefs: %w", err)
+		}
+		names := make([]string, 0, len(resolvedSkills))
+		for _, ref := range resolvedSkills {
+			if n, _, ok := strings.Cut(ref, "@"); ok {
+				names = append(names, n)
+			}
+		}
+		// A description lookup failure is NOT fatal. The refs are what make the agent correct;
+		// descriptions only make its skills easier for the model to choose between. Failing the
+		// deploy over a missing description would trade a working agent for a cosmetic gap.
+		if d, derr := r.Skills.Describe(ctx, deploy.Namespace, names); derr == nil {
+			skillDescriptions = d
+		} else {
+			logf.FromContext(ctx).Error(derr, "reading skill descriptions failed; agent deploys without them",
+				"agent", deploy.Name)
 		}
 	}
 	memDigest := memoryDigest(hasMemory, memAddr)
@@ -1908,6 +1924,11 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// `default` SA with an unused auto-mounted kube-API token co-resident with user code). The digest fold
 	// (identityDig, above) rolls a plain agent onto the SA once without re-rolling the proxy fleet.
 	saName := agentIdentitySAName(deploy.Name)
+
+	// Only the REFS reach the pod, never the bodies — that is progressive disclosure made
+	// concrete. Mounting every attached body would defeat the whole reason skills exist rather
+	// than a longer prompt.
+	containers = injectSkills(containers, resolvedSkills, skillDescriptions, false)
 
 	// Attached skills fold in AFTER the combined digest rather than as an eleventh component, the
 	// same shape the launcher image uses below. An agent with NO skills is left byte-identical,
