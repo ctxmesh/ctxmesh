@@ -16,7 +16,6 @@ import {
   SectionHeader,
   Skeleton,
   SkeletonCard,
-  StopNotice,
   UNKNOWN,
   isKnown,
   lifecycleFactNumber,
@@ -39,7 +38,6 @@ import {
   type AgentSummary,
   type AlertSummary,
   type ApprovalQueueItem,
-  type StopScopeRequest,
   type TenantSummary,
   type TenantUsageItem,
 } from "@/lib/api";
@@ -109,8 +107,6 @@ const FLEET_WINDOW = 200;
 /** Rows a Home panel shows before it defers to its own full surface. */
 const PANEL_ROWS = 3;
 
-/** Stop notices rendered in full before the rest collapse to one line. */
-const STOP_NOTICES = 2;
 
 /**
  * The fraction of a cap at which this console calls a bound "near" and draws
@@ -153,18 +149,6 @@ function isReady<T>(l: Load<T>): l is { kind: "ready"; data: T } {
 
 // ── The greeting ────────────────────────────────────────────────────────────
 
-/**
- * The serif greeting. It is a fact about the READER'S CLOCK, not a claim about
- * the cluster — which is the only reason a page this strict about authority may
- * render it at all. Exported so it is tested at each boundary rather than at
- * whatever hour CI happens to run.
- */
-export function greeting(now: Date): string {
-  const h = now.getHours();
-  if (h < 12) return "Good morning";
-  if (h < 18) return "Good afternoon";
-  return "Good evening";
-}
 
 // ── The fleet census ────────────────────────────────────────────────────────
 
@@ -239,6 +223,159 @@ export function census(items: AgentSummary[], complete: boolean): Census {
     }
   }
   return c;
+}
+
+// ── "Needs you": the one queue everything blocked on a person lands in ───────
+//
+// Home used to carry four surfaces for this — a red stop banner, a waiting queue,
+// a "needs looking at" panel and an alerts panel — which is four places to look
+// before knowing whether anything wants you. They are one kind of thing: work the
+// platform cannot move without a human. Ranked in one list, the top row is the
+// answer.
+//
+// Warning-level alerts deliberately do NOT get rows. Activity owns alerts; Home
+// borrows only the critical ones, and the rest are counted in a single quiet line.
+
+/** How many rows the queue shows before it defers to the page that owns them. */
+const NEEDS_ROWS = 7;
+
+type NeedKind = "stop" | "approval" | "failing" | "alert";
+
+interface Need {
+  key: string;
+  kind: NeedKind;
+  /** The tag word. Uppercased by the Badge recipe, so written sentence-case. */
+  word: string;
+  variant: "crit" | "hold" | "warn";
+  /** The resource this is about — machine-owned, so rendered mono. */
+  subject: string;
+  why: string;
+  /** The scope line, machine-owned: who stopped it, or which workspace it is in. */
+  where: string;
+  /** RFC3339, when known. Absent is absent: no row invents an age. */
+  since?: string;
+  action: { label: string; to: string; tone: NextStepTone; testId?: string };
+  rank: number;
+}
+
+/**
+ * The ranking, in the order a person can act on it: what is stopped, then who is
+ * waiting (oldest first — age is the SLA risk), then what is broken, then what is
+ * alarming. Every input is optional; a source that did not answer contributes
+ * nothing rather than a zero, so the queue renders whatever subset succeeded.
+ */
+export function needsYouRows(input: {
+  stops: ActiveStop[];
+  approvals: ApprovalQueueItem[];
+  attention: Attention[];
+  firing: AlertSummary[];
+}): Need[] {
+  const rows: Need[] = [];
+
+  for (const s of input.stops) {
+    rows.push({
+      key: `stop:${s.scope}`,
+      kind: "stop",
+      word: "Stop",
+      variant: "crit",
+      subject: stopName(s),
+      why: s.reason,
+      where: `by ${s.principal}`,
+      action: { label: "Review the stop", to: "/stops", tone: "crit" },
+      rank: 0,
+    });
+  }
+
+  for (const a of input.approvals) {
+    rows.push({
+      key: `approval:${a.namespace}/${a.runId}`,
+      kind: "approval",
+      word: "Approval",
+      variant: "hold",
+      subject: a.agent,
+      why: a.message?.trim() || "a decision is waiting on a person",
+      where: a.namespace,
+      since: a.waitingSince,
+      action: {
+        label: "Review",
+        to: `/runs/${a.runId}`,
+        tone: "default",
+        testId: `home-review-${a.runId}`,
+      },
+      rank: 1,
+    });
+  }
+
+  // Only the broken ones. A drifting or never-called agent is worth knowing about
+  // but is not blocking anyone, so it stays in the quiet remainder.
+  for (const a of input.attention) {
+    if (a.variant !== "crit") continue;
+    rows.push({
+      key: `agent:${a.key}`,
+      kind: "failing",
+      word: a.word,
+      variant: "crit",
+      subject: `${a.namespace}/${a.name}`,
+      why: a.why,
+      where: a.namespace,
+      action: { label: "Inspect", to: a.to ?? "/agents", tone: a.tone },
+      rank: 2,
+    });
+  }
+
+  for (const a of input.firing) {
+    if (alertVariant(a) !== "crit") continue;
+    rows.push({
+      key: `alert:${a.id}`,
+      kind: "alert",
+      word: "Alert",
+      variant: "crit",
+      subject: a.agent || a.namespace,
+      why: a.message?.trim() || alertWord(a),
+      where: a.namespace,
+      since: a.firedAt,
+      action: { label: "View alert", to: "/alerts", tone: "default" },
+      rank: 3,
+    });
+  }
+
+  return rows.sort((x, y) => {
+    if (x.rank !== y.rank) return x.rank - y.rank;
+    // Within approvals, the oldest is the most urgent. Rows with no age sort last
+    // rather than pretending to be new.
+    if (x.since && y.since) return x.since.localeCompare(y.since);
+    if (x.since) return -1;
+    if (y.since) return 1;
+    return x.subject.localeCompare(y.subject);
+  });
+}
+
+/**
+ * The status line — scope, size, and the page's whole point, in one line.
+ *
+ * Composed only from the clauses that answered, the same rule the old greeting
+ * followed: a console refused the agent list says nothing about agent counts
+ * rather than reassuring anyone with a zero.
+ */
+export function statusLineParts(input: {
+  namespace: string;
+  total?: number;
+  serving?: number;
+  totalIsBound?: boolean;
+  needs?: number;
+}): { scope: string; clauses: string[]; needs?: number } {
+  const clauses: string[] = [];
+  if (input.total !== undefined) {
+    // Not plural(): the bound has to sit between the number and the noun.
+    const word = input.total === 1 ? "agent" : "agents";
+    clauses.push(`${input.total}${input.totalIsBound ? "+" : ""} ${word}`);
+  }
+  if (input.serving !== undefined) clauses.push(`${input.serving} serving`);
+  return {
+    scope: input.namespace || "all workspaces",
+    clauses,
+    needs: input.needs,
+  };
 }
 
 // ── "Needs looking at": the fleet's own attention rows ──────────────────────
@@ -410,16 +547,6 @@ export function bounds(
   return rows;
 }
 
-/** Bounds at or past the console's near-cap line. Known figures only. */
-function nearCap(rows: Bound[]): number {
-  return rows.filter(
-    (b) =>
-      isKnown(b.used) &&
-      isKnown(b.cap) &&
-      b.cap > 0 &&
-      b.used >= b.cap * NEAR_CAP_RATIO,
-  ).length;
-}
 
 // ── The fleet sentence (§6.1 A11: the lede IS the answer) ───────────────────
 
@@ -432,85 +559,11 @@ export interface Clauses {
   serving?: number;
 }
 
-function join(parts: string[]): string {
-  if (parts.length === 1) return parts[0];
-  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
-}
 
 function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
 
-/**
- * The lede: what needs a person, in one sentence, composed ONLY from counts a
- * backend answered. A clause whose backend was silent is omitted — never
- * estimated, and never rendered as "0 decisions are waiting", which reads as an
- * all-clear the console was never told to give.
- *
- * Returns null while nothing has answered; the header renders a bar instead of
- * placeholder prose (§7 A11).
- */
-export function fleetSentence(c: Clauses): string | null {
-  const answered = [c.waiting, c.stopped, c.near, c.attention].filter(
-    (v): v is number => v !== undefined,
-  );
-  const serving =
-    c.serving !== undefined && c.serving > 0
-      ? `${answered.some((v) => v > 0) ? "The other " : "All "}${plural(
-          c.serving,
-          "agent",
-        )} ${c.serving === 1 ? "is" : "are"} serving.`
-      : "";
-
-  if (answered.length === 0) return serving || null;
-
-  const parts: string[] = [];
-  if (c.waiting) {
-    parts.push(
-      `${plural(c.waiting, "decision")} ${c.waiting === 1 ? "is" : "are"} waiting on a person`,
-    );
-  }
-  if (c.stopped) {
-    parts.push(
-      `${plural(c.stopped, "scope")} ${c.stopped === 1 ? "is" : "are"} stopped`,
-    );
-  }
-  if (c.near) {
-    parts.push(
-      `${plural(c.near, "tenant")} ${
-        c.near === 1 ? "is close to its budget cap" : "are close to their budget caps"
-      }`,
-    );
-  }
-  if (c.attention) {
-    parts.push(
-      `${plural(c.attention, "agent")} need${c.attention === 1 ? "s" : ""} looking at`,
-    );
-  }
-
-  if (parts.length === 0) {
-    // Everything that answered answered zero. That IS an all-clear — but only
-    // over the ground the console actually covered. The all-clear used to be a
-    // fixed sentence naming all three categories, so a console that had been
-    // REFUSED the stop list still told the operator "nothing is stopped"
-    // (M151 hardening, B1). Compose it from the answered clauses instead, so a
-    // silent backend drops its claim rather than turning into a reassurance.
-    // Budget proximity is deliberately not named here: "near a cap" is not a
-    // thing an operator is relieved to hear nothing about, and a four-clause
-    // all-clear reads as padding. The three named are the ones that mean
-    // someone has to act.
-    const clear: string[] = [];
-    if (c.waiting !== undefined) clear.push("nothing is waiting on a person");
-    if (c.stopped !== undefined) clear.push("nothing is stopped");
-    if (c.attention !== undefined) clear.push("nothing is failing");
-    if (clear.length === 0) return serving || null;
-    const head = `${join(clear).replace(/^./, (ch) => ch.toUpperCase())}.`;
-    return serving ? `${head} ${serving}` : head;
-  }
-
-  const head = `${join(parts).replace(/^./, (ch) => ch.toUpperCase())}.`;
-  return serving ? `${head} ${serving}` : head;
-}
 
 // ── Stops: the level vocabulary, and what Home may say about it ─────────────
 
@@ -552,15 +605,6 @@ function stopName(s: ActiveStop): string {
   }
 }
 
-/** The lift body, built from the wire fields — never re-parsed from the key. */
-function liftRequest(s: ActiveStop): StopScopeRequest {
-  return {
-    level: s.level,
-    ...(s.namespace ? { namespace: s.namespace } : {}),
-    ...(s.agent ? { agent: s.agent } : {}),
-    ...(s.tenant ? { tenant: s.tenant } : {}),
-  };
-}
 
 // ── The lifecycle facts ─────────────────────────────────────────────────────
 
@@ -939,19 +983,34 @@ export function DashboardPage() {
       (a, b) => STOP_RANK[a.level] - STOP_RANK[b.level] || a.scope.localeCompare(b.scope),
     );
   }, [stops]);
-  const shownStops = orderedStops
-    .filter((s) => SCOPE_KIND[s.level] !== undefined)
-    .slice(0, STOP_NOTICES);
+  // Every stop whose reach this page can phrase becomes a queue row; the queue
+  // caps itself, so there is no second cap here. A stop whose scope cannot be
+  // stated exactly is still counted and named below, never silently dropped.
+  const shownStops = orderedStops.filter((s) => SCOPE_KIND[s.level] !== undefined);
   const unshownStops = orderedStops.length - shownStops.length;
 
-  // The lede. Every clause is undefined unless its backend actually answered.
-  const lede = fleetSentence({
-    waiting: queue.kind === "ready" ? queue.data.items.length : undefined,
-    stopped: isReady(stops) ? stops.data.length : undefined,
-    near: boundRows ? nearCap(boundRows) : undefined,
-    attention: facts?.complete ? attention.length : undefined,
-    serving: facts?.complete ? facts.serving : undefined,
+  const needs = needsYouRows({
+    stops: isReady(stops) ? shownStops : [],
+    approvals: queueItems,
+    attention,
+    firing,
   });
+  const needsTone = needs.some((n) => n.variant === "crit") ? "crit" : "hold";
+  // "Nothing needs you" is a claim about four backends. It may only be made when
+  // all four answered — a zero standing in for a refusal is the one thing this
+  // line must never do. A non-zero count is safe either way: it is a floor.
+  const everySourceAnswered =
+    isReady(stops) &&
+    queue.kind === "ready" &&
+    fleet.kind === "ready" &&
+    (isReady(alerts) || alerts.kind === "unavailable");
+  const status = statusLineParts({
+    namespace,
+    total: facts?.complete ? facts.total : undefined,
+    serving: facts?.complete ? facts.serving : undefined,
+    needs: needs.length > 0 || everySourceAnswered ? needs.length : undefined,
+  });
+
 
   // ── The first-run gate (DX-4 semantics, carried forward unchanged) ───────
   //
@@ -984,12 +1043,14 @@ export function DashboardPage() {
   return (
     <div className="min-w-0 space-y-6" data-testid="home-page">
       <PageHeader
-        title={greeting(new Date())}
+        title="Home"
         meta={meta}
         lede={
-          lede ?? (
-            // §7 A11: while it loads the lede is a BAR, never placeholder prose.
+          // §7 A11: while it loads the lede is a BAR, never placeholder prose.
+          fleet.kind === "loading" && queue.kind === "loading" ? (
             <Skeleton className="mt-1 h-4 w-[28rem] max-w-full" />
+          ) : (
+            <StatusLine parts={status} tone={needsTone} />
           )
         }
         actionsSlot={
@@ -1017,21 +1078,17 @@ export function DashboardPage() {
         }
       />
 
-      {/* 1 ── What is stopped. Nothing on this page outranks it. */}
-      {shownStops.map((s) => (
-        <div key={s.scope} data-testid={`home-stop-${s.scope}`}>
-          <StopNotice
-            scope={SCOPE_KIND[s.level] as StopScopeKind}
-            scopeName={stopName(s)}
-            reason={s.reason}
-            by={s.principal}
-            // `GET /api/kills` reports neither a timestamp nor an impact count,
-            // so neither is passed: the notice renders its honest unknown
-            // rather than "just now" and "0 held".
-            onLift={() => api.liftStop(liftRequest(s)).then(() => load(true))}
-          />
-        </div>
-      ))}
+      {/* 1 ── Everything blocked on a person, in one ranked list. Stops are its
+          first rows rather than a second red surface above it; lifting one is a
+          destructive act and lives on the page that owns it. */}
+      <NeedsYou rows={needs} />
+      {queue.kind === "ready" && queue.data.unreadable > 0 && (
+        <QuietNote title="Some workspaces did not answer.">
+          {plural(queue.data.unreadable, "workspace")} refused the queue read, so
+          anything waiting in {queue.data.unreadable === 1 ? "it" : "them"} is not
+          counted above. This is what the account can see, not what exists.
+        </QuietNote>
+      )}
       {unshownStops > 0 && (
         <QuietNote
           title={`${plural(unshownStops, "further stop")} ${unshownStops === 1 ? "is" : "are"} in force.`}
@@ -1127,7 +1184,9 @@ export function DashboardPage() {
       {/* 3 + 4 ── What is waiting on a person · what it is spending. */}
       {!firstRun && (
         <div className="grid min-w-0 items-start gap-5 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
-          <WaitingPanel state={queue} items={queueItems} onRetry={() => load()} />
+          {queue.kind !== "ready" && (
+            <WaitingPanel state={queue} items={queueItems} onRetry={() => load()} />
+          )}
           <SpendingPanel
             tenants={tenants}
             usage={usage}
@@ -1237,6 +1296,113 @@ function loadQueue(
       }
       set(toFailure(err));
     });
+}
+
+/**
+ * The queue everything blocked on a person lands in. Empty is a SUCCESS state and
+ * is styled as one — an empty box would read as "not loaded".
+ */
+function NeedsYou({ rows }: { rows: Need[] }) {
+  const shown = rows.slice(0, NEEDS_ROWS);
+  const more = rows.length - shown.length;
+
+  return (
+    <Panel
+      title="Needs you"
+      testId="home-needs-you"
+      meta={
+        rows.length > 0 ? (
+          <span className="font-mono">{rows.length} waiting</span>
+        ) : undefined
+      }
+      foot={
+        rows.length > 0 ? (
+          <MoreLine
+            text={
+              more > 0
+                ? `${plural(more, "more decision")} ${more === 1 ? "is" : "are"} waiting.`
+                : "Everything waiting on a person is listed above."
+            }
+            label="Open the queue"
+            to="/approvals"
+          />
+        ) : undefined
+      }
+    >
+      {rows.length === 0 ? (
+        <p className="px-5 py-4 font-serif text-md italic text-muted-foreground">
+          Nothing is waiting on a person.
+        </p>
+      ) : (
+        <ul>
+          {shown.map((n) => (
+            <Item
+              key={n.key}
+              word={n.word}
+              variant={n.variant}
+              headline={
+                <>
+                  <span className="font-mono">{n.subject}</span> — {n.why}
+                </>
+              }
+              sub={n.since ? `${n.where} · ${formatRelativeTime(n.since)}` : n.where}
+              next={
+                <NextStepLink
+                  label={n.action.label}
+                  to={n.action.to}
+                  tone={n.action.tone}
+                  testId={n.action.testId}
+                />
+              }
+              testId={`home-need-${n.kind}`}
+            />
+          ))}
+        </ul>
+      )}
+    </Panel>
+  );
+}
+
+/** Scope, size, and the page's whole point, in one line. */
+function StatusLine({
+  parts,
+  tone,
+}: {
+  parts: ReturnType<typeof statusLineParts>;
+  tone: "crit" | "hold";
+}) {
+  return (
+    <span
+      className="flex flex-wrap items-baseline gap-x-2 gap-y-1"
+      data-testid="home-status-line"
+    >
+      <span className="font-mono font-medium text-foreground">{parts.scope}</span>
+      {parts.clauses.map((c) => (
+        <span key={c} className="flex items-baseline gap-2">
+          <span className="text-ghost">·</span>
+          <span className="font-mono text-foreground">{c}</span>
+        </span>
+      ))}
+      {parts.needs !== undefined && (
+        <span className="flex items-baseline gap-2">
+          <span className="text-ghost">·</span>
+          {parts.needs > 0 ? (
+            <span
+              className={
+                tone === "crit"
+                  ? "font-semibold text-destructive"
+                  : "font-semibold text-info"
+              }
+            >
+              {parts.needs} {parts.needs === 1 ? "needs" : "need"} you
+            </span>
+          ) : (
+            <span className="font-semibold text-success">nothing needs you</span>
+          )}
+        </span>
+      )}
+    </span>
+  );
 }
 
 function WaitingPanel({
@@ -1368,17 +1534,6 @@ function WaitingPanel({
             />
           ))}
         </ul>
-      )}
-
-      {state.kind === "ready" && state.data.unreadable > 0 && (
-        <div className="px-5 pb-4 pt-4">
-          <QuietNote title="Some workspaces did not answer.">
-            {plural(state.data.unreadable, "workspace")} refused the queue read,
-            so anything waiting in {state.data.unreadable === 1 ? "it" : "them"}{" "}
-            is not counted here. This is what the account can see, not what
-            exists.
-          </QuietNote>
-        </div>
       )}
 
     </Panel>
