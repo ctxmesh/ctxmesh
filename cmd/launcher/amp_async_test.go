@@ -36,25 +36,25 @@ func newAsyncEdge(t *testing.T, status int) *asyncEdge {
 	return e
 }
 
-// newAsyncA2A builds an A2A server whose async mode targets the fake edge.
-func newAsyncA2A(t *testing.T, edge *asyncEdge) *a2aServer {
+// newAsyncAMP builds an AMP server whose async mode targets the fake edge.
+func newAsyncAMP(t *testing.T, edge *asyncEdge) *ampServer {
 	t.Helper()
 	cfg := baseCfg()
 	if edge != nil {
 		cfg.AsyncPublishURL = edge.srv.URL
 	}
-	return newA2AServer(cfg, noop.NewTracerProvider().Tracer("x"), propagation.TraceContext{}, nil)
+	return newAMPServer(cfg, noop.NewTracerProvider().Tracer("x"), propagation.TraceContext{}, nil)
 }
 
 // asyncTarget is the peer every case in this file hops to — one name keeps the assertions about the
-// async MODE rather than about routing, which a2a_test.go already covers.
+// async MODE rather than about routing, which amp_test.go already covers.
 const asyncTarget = "reviewer"
 
 // asyncCapToken is the invoking user's run capability, relayed on every hop — the edge derives the
 // sender's registry from the run it names, so a call without one has no routing context at all.
 const asyncCapToken = "cap-token"
 
-func postA2A(t *testing.T, s *a2aServer, query, body string) *httptest.ResponseRecorder {
+func postAMP(t *testing.T, s *ampServer, query, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/a2a/"+asyncTarget+query, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -66,11 +66,11 @@ func postA2A(t *testing.T, s *a2aServer, query, body string) *httptest.ResponseR
 
 // mode=async publishes the SAME envelope the synchronous path would send — as a CloudEvent, to the
 // platform's publish edge, with the run capability relayed so the edge can derive the sender's registry.
-func TestA2AAsync_PublishesTheEnvelopeAsACloudEvent(t *testing.T) {
+func TestAMPAsync_PublishesTheEnvelopeAsACloudEvent(t *testing.T) {
 	edge := newAsyncEdge(t, http.StatusAccepted)
-	s := newAsyncA2A(t, edge)
+	s := newAsyncAMP(t, edge)
 
-	rec := postA2A(t, s, "?mode=async", `{"task":"review this"}`)
+	rec := postAMP(t, s, "?mode=async", `{"task":"review this"}`)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 
 	// The caller gets "durably accepted" + the messageId — never an answer: the callee may not even be
@@ -99,9 +99,9 @@ func TestA2AAsync_PublishesTheEnvelopeAsACloudEvent(t *testing.T) {
 
 // THE PROPERTY THAT MATTERS: async is not a way around the conversation guards. A hop that the
 // synchronous path refuses must be refused here too — otherwise `?mode=async` would launder it.
-func TestA2AAsync_IsSubjectToTheSameConversationGuards(t *testing.T) {
+func TestAMPAsync_IsSubjectToTheSameConversationGuards(t *testing.T) {
 	edge := newAsyncEdge(t, http.StatusAccepted)
-	s := newAsyncA2A(t, edge)
+	s := newAsyncAMP(t, edge)
 
 	// An incoming envelope already at the depth limit: the next hop trips maxDepth.
 	deep := envelope{
@@ -124,29 +124,29 @@ func TestA2AAsync_IsSubjectToTheSameConversationGuards(t *testing.T) {
 
 // Without an async backend configured the mode says so honestly rather than silently falling back to a
 // synchronous call the caller did not ask for.
-func TestA2AAsync_UnconfiguredIs501(t *testing.T) {
-	s := newAsyncA2A(t, nil)
-	rec := postA2A(t, s, "?mode=async", `{"t":1}`)
+func TestAMPAsync_UnconfiguredIs501(t *testing.T) {
+	s := newAsyncAMP(t, nil)
+	rec := postAMP(t, s, "?mode=async", `{"t":1}`)
 	assert.Equal(t, http.StatusNotImplemented, rec.Code)
 }
 
 // A publish the edge refuses is reported as a failure — an agent that believes it dispatched work when
 // it did not is the worst outcome available here.
-func TestA2AAsync_PublishFailureIsSurfaced(t *testing.T) {
+func TestAMPAsync_PublishFailureIsSurfaced(t *testing.T) {
 	edge := newAsyncEdge(t, http.StatusServiceUnavailable)
-	s := newAsyncA2A(t, edge)
+	s := newAsyncAMP(t, edge)
 
-	rec := postA2A(t, s, "?mode=async", `{"t":1}`)
+	rec := postAMP(t, s, "?mode=async", `{"t":1}`)
 	assert.Equal(t, http.StatusBadGateway, rec.Code, "a failed publish must never look like acceptance")
 }
 
 // The default path is untouched: no mode ⇒ the synchronous forward, unchanged.
-func TestA2AAsync_DefaultModeStaysSynchronous(t *testing.T) {
+func TestAMPAsync_DefaultModeStaysSynchronous(t *testing.T) {
 	edge := newAsyncEdge(t, http.StatusAccepted)
-	s, _, _, peerCh := newTestA2AServer(t, baseCfg(), http.StatusOK, `{"ok":true}`)
+	s, _, _, peerCh := newTestAMPServer(t, baseCfg(), http.StatusOK, `{"ok":true}`)
 	s.cfg.AsyncPublishURL = edge.srv.URL
 
-	rec := postA2A(t, s, "", `{"t":1}`)
+	rec := postAMP(t, s, "", `{"t":1}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Nil(t, edge.body, "a call with no mode never touches the async edge")
 	select {

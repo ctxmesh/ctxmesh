@@ -167,7 +167,7 @@ func (r *AgentDeploymentReconciler) scheduleForAgent(
 // per-registry broker by name (`<registryName>-broker`) — the Broker itself is
 // created by the AgentRegistry controller (m7.6), NOT here. The filter matches
 // the CloudEvent `type` attribute against the agent name so the agent receives
-// only its own async A2A events from the shared registry broker
+// only its own async AMP events from the shared registry broker
 // (specs/eventing-scaling.md §12.6). The subscriber is the agent's plain
 // Service (the eventing workload is a Deployment + Service, not a ksvc).
 func (r *AgentDeploymentReconciler) reconcileTrigger(
@@ -189,7 +189,7 @@ func (r *AgentDeploymentReconciler) reconcileTrigger(
 			Broker: brokerName,
 			Filter: &eventingv1.TriggerFilter{
 				// Exact-match the CloudEvent `type` against the agent name: an
-				// async A2A CloudEvent carries the target agent as its `type`, so
+				// async AMP CloudEvent carries the target agent as its `type`, so
 				// this Trigger admits only events addressed to this agent.
 				Attributes: eventingv1.TriggerFilterAttributes{
 					ceTypeAttribute: deploy.Name,

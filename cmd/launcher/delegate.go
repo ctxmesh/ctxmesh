@@ -269,7 +269,7 @@ func (s *delegateServer) resolveByCapability(ctx context.Context, capToken, capa
 	return names[0], nil
 }
 
-// delegateConfig is the delegate endpoint's config (parsed from env alongside the A2A config).
+// delegateConfig is the delegate endpoint's config (parsed from env alongside the AMP config).
 type delegateConfig struct {
 	SelfName  string
 	Namespace string
@@ -294,7 +294,7 @@ type delegateRuntime struct {
 	cfg       delegateConfig
 }
 
-// defaultDelegatePort is the launcher-local port the delegate listener binds (A2A :2997, gateway :2996,
+// defaultDelegatePort is the launcher-local port the delegate listener binds (AMP :2997, gateway :2996,
 // feedback :2995 are taken — delegate takes :2994).
 const defaultDelegatePort = 2994
 
@@ -403,7 +403,7 @@ func (s *delegateServer) selfRunID(capToken string) string {
 	return verified.RunID
 }
 
-// targetURL resolves a roster member's cluster-local ksvc URL (the A2A convention).
+// targetURL resolves a roster member's cluster-local ksvc URL (the AMP convention).
 func (s *delegateServer) targetURL(subAgent string) string {
 	return fmt.Sprintf("http://%s.%s.svc.cluster.local", subAgent, s.cfg.Namespace)
 }

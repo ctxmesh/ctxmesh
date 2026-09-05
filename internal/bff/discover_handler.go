@@ -97,7 +97,7 @@ func (s *Server) registerDiscoverRoute(api *http.ServeMux) {
 //  4. rank only that registry's described agents, minus the caller itself.
 //
 // The result is not a grant. Discovery is scoped INSIDE a fence the callee already enforces (the
-// launcher hard-denies a cross-registry A2A envelope at layer 1), and a peer's own allowedCallers can
+// launcher hard-denies a cross-registry AMP envelope at layer 1), and a peer's own allowedCallers can
 // still refuse a discovered caller. This edge answers "who here can do X"; authorization stays the
 // callee's.
 func (s *Server) handleDiscoverAgents(w http.ResponseWriter, r *http.Request) {

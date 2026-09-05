@@ -264,7 +264,7 @@ type agentYAML struct {
 	// Tools is the list of tool catalog names to bind (each → one MCPToolBinding,
 	// the same binding path a custom agent uses). Managed runtime only.
 	Tools []string `yaml:"tools"`
-	// Role is the agent's within-registry A2A role (orchestrator/worker/reviewer/
+	// Role is the agent's within-registry AMP role (orchestrator/worker/reviewer/
 	// custom); empty leaves it unset. Maps to AgentDeployment.spec.role.
 	Role string `yaml:"role"`
 	// AllowedCallers restricts which agents may call this one (per-agent allowlist);
@@ -769,7 +769,7 @@ func buildOutput(ay *agentYAML) *agentDeploymentOut {
 		spec.PromptRef = ay.PromptRef
 	}
 
-	// role + allowedCallers → the within-registry A2A fields (both optional; empty
+	// role + allowedCallers → the within-registry AMP fields (both optional; empty
 	// leaves them unset so the registry default applies).
 	spec.Role = ay.Role
 	spec.AllowedCallers = ay.AllowedCallers

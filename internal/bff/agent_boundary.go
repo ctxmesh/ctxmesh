@@ -29,7 +29,7 @@ import (
 
 // agentBoundary returns the trust boundary (ADR 0033) a personal OBO grant is scoped to for a run
 // of the named agent: the agent's REGISTRY when it belongs to one — agents in a registry
-// collaborate over A2A and share the invoking user's credential — else the AGENT itself
+// collaborate over AMP and share the invoking user's credential — else the AGENT itself
 // (standalone). It mirrors the controller's resolveAgentRegistry membership rule (an agent is in AT
 // MOST ONE registry; on a multi-match the first by name wins; terminating registries are excluded).
 //
@@ -75,7 +75,7 @@ func agentBoundary(ctx context.Context, c client.Client, ns, agentName string) s
 // End-users have NO caller-scoped K8s client, so — unlike agentBoundary — it does NOT read the
 // AgentDeployment/AgentRegistry (which would force a new BFF-SA read grant). It returns the per-agent
 // STANDALONE boundary: an end-user of a standalone /chat agent gets per-agent OBO grant scoping, which
-// is both correct (registry-sharing is a console/A2A collaboration concept) and MORE isolated. Because
+// is both correct (registry-sharing is a console/AMP collaboration concept) and MORE isolated. Because
 // the end-user mint AND the end-user consent grant-write both use THIS boundary, a stored grant resolves
 // (the invariant agentBoundary documents). Registry-scoped end-user OBO — if ever needed — is the reopen
 // trigger that would justify a bounded BFF-SA agent read; carded, not built (no gate need).

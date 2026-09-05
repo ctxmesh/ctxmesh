@@ -72,7 +72,7 @@ func runCapabilityFromContext(ctx context.Context) string {
 
 // hdrConversationID is the header the agent reads to scope memory to a conversation
 // thread (`mem:{ns}/{agent}:{conversationId}`) — the same convention the launcher's
-// memory/gateway/A2A paths already use (cmd/launcher). The console's chat sends one
+// memory/gateway/AMP paths already use (cmd/launcher). The console's chat sends one
 // stable id per session so the stock managed loop can thread context across turns.
 const hdrConversationID = "X-Conversation-Id"
 

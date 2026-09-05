@@ -52,7 +52,7 @@ func (s *Server) handleDedup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Bind the VERIFIED per-agent identity (m79.2): the seen-set stays NAMESPACE-scoped
-	// (an intentional shared per-namespace dedup so sibling agents dedup a shared A2A
+	// (an intentional shared per-namespace dedup so sibling agents dedup a shared AMP
 	// message together — ADR 0050 §6), so the ns is still what keys the space. The
 	// agent binding only gates WHO may act — a verified but non-agent SA (e.g. the
 	// namespace default) is now 403'd instead of being let in to poison the seen-set,

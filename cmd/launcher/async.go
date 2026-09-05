@@ -16,7 +16,7 @@ limitations under the License.
 
 package main
 
-// The async A2A consumer + publisher (M7, specs/eventing-scaling.md).
+// The async AMP consumer + publisher (M7, specs/eventing-scaling.md).
 //
 // A Knative Trigger delivers a CloudEvent to the agent's ksvc; the launcher recognises it,
 // decodes the platform envelope, dedupes on the envelope's messageId against a short-TTL
@@ -72,7 +72,7 @@ const (
 	dedupeKeyPrefix = "a2a:seen:"
 
 	// maxAsyncBody caps the inbound CloudEvent body (and the agent's response we
-	// relay), matching the sync A2A / memory 1MiB bound. Oversize async payloads
+	// relay), matching the sync AMP / memory 1MiB bound. Oversize async payloads
 	// are the blob-offload concern (m7.6b), not this path.
 	maxAsyncBody = 1 << 20
 )
@@ -195,7 +195,7 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(attribute.String("a2a.async.agent", c.cfg.SelfName))
 
 	// Cap the inbound CloudEvent body before decoding — every other launcher
-	// inbound path (readA2ABody, readCappedBody) enforces this. Blob offload
+	// inbound path (readAMPBody, readCappedBody) enforces this. Blob offload
 	// keeps event bodies small (a $ref, not the payload), so 1MiB is ample.
 	r.Body = http.MaxBytesReader(w, r.Body, maxAsyncBody)
 	// Decode the CloudEvent from the HTTP request (handles both content modes).
@@ -215,9 +215,9 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	span.SetAttributes(
-		attribute.String("a2a.message.id", env.MessageID),
-		attribute.String("a2a.sender", env.SenderAgentID),
-		attribute.String("a2a.receiver", env.ReceiverAgentID),
+		attribute.String("amp.message.id", env.MessageID),
+		attribute.String("amp.sender", env.SenderAgentID),
+		attribute.String("amp.receiver", env.ReceiverAgentID),
 		attribute.String("a2a.conversation.id", env.ConversationID),
 	)
 
@@ -231,18 +231,18 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 	if seenErr != nil {
 		// Fail-closed: do NOT process — NACK so the broker retries.
 		span.SetStatus(codes.Error, "dedupe store error: "+seenErr.Error())
-		span.SetAttributes(attribute.Bool("a2a.dedup_fail_closed", true))
+		span.SetAttributes(attribute.Bool("amp.dedup_fail_closed", true))
 		writeJSONError(w, http.StatusServiceUnavailable, "dedupe store unavailable: "+seenErr.Error())
 		return
 	}
 	if !firstSeen {
-		span.SetAttributes(attribute.Bool("a2a.dedup_hit", true))
+		span.SetAttributes(attribute.Bool("amp.dedup_hit", true))
 		span.AddEvent("a2a.async.dedup_hit")
 		// 204: acked, not re-processed.
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	span.SetAttributes(attribute.Bool("a2a.dedup_hit", false))
+	span.SetAttributes(attribute.Bool("amp.dedup_hit", false))
 
 	// Blob rehydrate (m7.6b): if the payload is a $ref (offloaded on publish
 	// because it was >256KiB), GET the original bytes from the object store BEFORE
@@ -263,8 +263,8 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 		}
 		if wasRef {
 			span.SetAttributes(
-				attribute.Bool("a2a.blob.rehydrated", true),
-				attribute.Int("a2a.blob.size", len(rehydrated)),
+				attribute.Bool("amp.blob.rehydrated", true),
+				attribute.Int("amp.blob.size", len(rehydrated)),
 			)
 			env.Payload = rehydrated
 		}
@@ -281,7 +281,7 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadGateway, "agent invoke failed: "+err.Error())
 		return
 	}
-	span.SetAttributes(attribute.Int("a2a.agent.status", status))
+	span.SetAttributes(attribute.Int("amp.agent.status", status))
 	if status >= http.StatusInternalServerError {
 		// The agent processed but failed (5xx): NACK so the broker retries/DLQs.
 		// A poison message that fails every time lands in the DLQ after the retry
@@ -304,7 +304,7 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 // decision are recorded on the span for observability.
 func (c *asyncConsumer) markSeen(ctx context.Context, span trace.Span, messageID string) (bool, error) {
 	if c.seen == nil {
-		span.SetAttributes(attribute.Bool("a2a.dedup_enabled", false))
+		span.SetAttributes(attribute.Bool("amp.dedup_enabled", false))
 		return true, nil
 	}
 	opCtx, cancel := context.WithTimeout(ctx, dedupeOpTimeout)
@@ -347,7 +347,7 @@ func newProxyInvoker(proxyPort int, client *http.Client) func(context.Context, e
 		if env.ConversationID != "" {
 			req.Header.Set("X-Conversation-Id", env.ConversationID)
 		}
-		// Carry the full envelope so the callee's inbound guard (a2a.go) can
+		// Carry the full envelope so the callee's inbound guard (amp.go) can
 		// enforce registry isolation / allowedCallers on the async path too.
 		if envJSON, mErr := json.Marshal(env); mErr == nil {
 			// Both names, identical content (ADR 0138) — the async path carries the
@@ -370,7 +370,7 @@ func newProxyInvoker(proxyPort int, client *http.Client) func(context.Context, e
 
 // publishEnvelope encodes env as a CloudEvent (cloudevent.go) and POSTs it to
 // brokerURL — the registry broker's addressable URL. It is the minimal producer
-// path: enough for the e2e (and a producer example, m7.7) to emit an async A2A
+// path: enough for the e2e (and a producer example, m7.7) to emit an async AMP
 // event that the broker routes to the target agent's Trigger.
 //
 // Blob offload (m7.6b): when off is non-nil and env's serialized payload exceeds

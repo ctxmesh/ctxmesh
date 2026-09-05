@@ -170,7 +170,7 @@ func canonicalHTU(raw string) string {
 // The replay set is in-memory and per-process, which is a real limitation worth naming: with several BFF
 // replicas a proof spent on one could be replayed on another inside its freshness window. That narrows
 // the window from "forever" to "under a minute, on a different replica" — a large reduction that stops
-// short of elimination. Closing it needs a shared seen-set (the state layer already has one for A2A
+// short of elimination. Closing it needs a shared seen-set (the state layer already has one for AMP
 // message ids); carded rather than pretended.
 // ProofSpender records a proof id exactly once. It exists so the seen-set can be SHARED
 // across BFF replicas (M149 m149.4).
