@@ -43,8 +43,14 @@ type AlertSummary struct {
 // AlertListResponse is the GET /api/alerts body — a flat list, newest-first.
 // No keyset cursor: the alertstore.List returns a bounded newest-first slice
 // (limit-capped), matching the simpler store contract (no pagination for now).
+//
+// Truncated says the store held more than the caller asked for. Without it the
+// console printed len(items) as the total, so 312 firing alerts rendered as
+// "50 firing" — an undercount, in the one direction that makes a fleet look
+// calmer than it is. A count that is a page size must be shown as a bound.
 type AlertListResponse struct {
-	Items []AlertSummary `json:"items"`
+	Items     []AlertSummary `json:"items"`
+	Truncated bool           `json:"truncated"`
 }
 
 // handleListAlerts serves GET /api/alerts?namespace=&limit= — the fired-alert
@@ -75,11 +81,19 @@ func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	limit := parseListLimit(r.URL.Query().Get("limit"))
-	alerts, err := s.alertStore.List(r.Context(), namespace, limit)
+	// Ask for one more than we will return: the store contract carries no
+	// has-more flag, and an over-fetch of one row is how we learn there is more
+	// without changing it.
+	alerts, err := s.alertStore.List(r.Context(), namespace, limit+1)
 	if err != nil {
 		s.log.Error(err, "list alerts from store failed")
 		writeError(w, http.StatusInternalServerError, "failed to read the alerts feed")
 		return
+	}
+
+	truncated := len(alerts) > limit
+	if truncated {
+		alerts = alerts[:limit]
 	}
 
 	items := make([]AlertSummary, 0, len(alerts))
@@ -104,5 +118,5 @@ func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 			Firing:     a.ResolvedAt == nil,
 		})
 	}
-	writeJSON(w, http.StatusOK, AlertListResponse{Items: items})
+	writeJSON(w, http.StatusOK, AlertListResponse{Items: items, Truncated: truncated})
 }
