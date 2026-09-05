@@ -248,7 +248,7 @@ func buildFeedbackServer(cfg Config) *http.Server {
 	}
 	logf := func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
 	return &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Feedback.Port),
+		Addr:    loopbackAddr(cfg.Feedback.Port),
 		Handler: newFeedbackServer(cfg.Feedback, logf).handler(),
 	}
 }

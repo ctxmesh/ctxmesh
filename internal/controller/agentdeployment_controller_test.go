@@ -43,8 +43,10 @@ import (
 // after C7b (ADR 0090): even a "bare" agent (no bindings/overrides) runs its own per-agent identity SA
 // (agent-<name>), a structural pod-spec element folded into the digest. Appended to the spec-hash base
 // (`{name}-{specHash}` → `{name}-{specHash}-h<digest>`).
-var bareIdentitySuffix = "-h" + combinedBindingDigest("", "", "", "", "", "",
-	universalIdentitySADigest(false), "", "", "")
+// Uses the production hardeningFold rather than repeating it, so the expected revision name
+// cannot drift from the one the controller produces.
+var bareIdentitySuffix = "-h" + hardeningFold(combinedBindingDigest("", "", "", "", "", "",
+	universalIdentitySADigest(false), "", "", ""), false)
 
 // newReconciler constructs an AgentDeploymentReconciler backed by the envtest
 // API server.

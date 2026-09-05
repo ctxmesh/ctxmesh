@@ -940,6 +940,24 @@ spec:
                     type: array
                     x-kubernetes-list-type: atomic
                 type: object
+              unconfined:
+                description: |-
+                  unconfined disables the hardened securityContext the platform otherwise applies to the
+                  agent's own container (nonroot, no added capabilities, no privilege escalation,
+                  RuntimeDefault seccomp).
+
+                  The default is HARDENED. Before M162 the user container carried no securityContext at
+                  all — only the launcher-inject initContainer did — so every agent image ran with whatever
+                  the runtime default allowed. That is a containment story that was never there, and it is
+                  the floor any future sandboxing has to stand on.
+
+                  Set true ONLY for an image that genuinely needs root or added capabilities. It is a
+                  per-agent, declared exception rather than a cluster-wide switch, so the decision is
+                  visible in the spec and in review — the ADR 0136 lesson about bindings applied to pod
+                  security. The read-only root filesystem is deliberately NOT part of the default profile:
+                  far too many agent images write to /tmp, and a default that breaks most images is a
+                  default people disable wholesale, which is worse than a narrower one they keep.
+                type: boolean
             required:
             - image
             type: object
@@ -2145,6 +2163,24 @@ spec:
                     type: array
                     x-kubernetes-list-type: atomic
                 type: object
+              unconfined:
+                description: |-
+                  unconfined disables the hardened securityContext the platform otherwise applies to the
+                  agent's own container (nonroot, no added capabilities, no privilege escalation,
+                  RuntimeDefault seccomp).
+
+                  The default is HARDENED. Before M162 the user container carried no securityContext at
+                  all — only the launcher-inject initContainer did — so every agent image ran with whatever
+                  the runtime default allowed. That is a containment story that was never there, and it is
+                  the floor any future sandboxing has to stand on.
+
+                  Set true ONLY for an image that genuinely needs root or added capabilities. It is a
+                  per-agent, declared exception rather than a cluster-wide switch, so the decision is
+                  visible in the spec and in review — the ADR 0136 lesson about bindings applied to pod
+                  security. The read-only root filesystem is deliberately NOT part of the default profile:
+                  far too many agent images write to /tmp, and a default that breaks most images is a
+                  default people disable wholesale, which is worse than a narrower one they keep.
+                type: boolean
             required:
             - image
             type: object

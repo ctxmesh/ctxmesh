@@ -56,10 +56,23 @@ const (
 	egressRedirectInitName = "egress-redirect-init"
 
 	// egressSidecarUID is the UID the egress sidecar image runs as (Dockerfile.egress-sidecar:
-	// `USER 65532:65532`). Netfilter exempts traffic owned by this UID so the sidecar's forwarded calls
+	// `USER 64535:64535`). Netfilter exempts traffic owned by this UID so the sidecar's forwarded calls
 	// reach the real tool instead of being redirected back into itself — an infinite loop, and the reason
 	// a UID exemption is required rather than optional.
-	egressSidecarUID = 65532
+	//
+	// DEDICATED, and deliberately NOT 65532. That is the standard distroless `nonroot` uid, and the
+	// agent's own container uid is unconstrained by design — the hardened profile enforces RunAsNonRoot
+	// without dictating WHICH non-root uid, so images keep their own. While the exemption sat on 65532,
+	// any agent image following that near-universal convention was exempt from the redirect entirely and
+	// still passed every check: ADR 0123's structural tool-deny was conditional on the user image not
+	// using the most common nonroot uid in existence. A dedicated uid makes the collision improbable
+	// rather than likely.
+	egressSidecarUID = 64535
+
+	// commonNonRootUIDs are uids a base image is LIKELY to use. egressSidecarUID must never be one of
+	// them, and a test asserts it — the failure mode is silent (egress control simply stops applying),
+	// so the guard has to be mechanical rather than a comment.
+	distrolessNonRootUID = 65532
 
 	// egressRedirectPort is where redirected traffic lands: the sidecar's listener.
 	egressRedirectPort = 8899
@@ -106,8 +119,30 @@ func egressRedirectRules(excludeCIDRs []string) []string {
 			rules = append(rules, fmt.Sprintf("iptables -t nat -A CTXMESH_OUT -d %s -j RETURN", c))
 		}
 	}
-	return append(rules,
+	rules = append(rules,
 		fmt.Sprintf("iptables -t nat -A CTXMESH_OUT -p tcp -j REDIRECT --to-ports %d", egressRedirectPort))
+
+	// UDP, in the FILTER table — because a nat REDIRECT cannot help here. The sidecar speaks HTTP;
+	// there is nothing to bend UDP into, so the only honest options are "allow" or "deny", and
+	// allowing it leaves two real holes:
+	//
+	//   QUIC. HTTP/3 rides UDP 443. A client that negotiates it bypasses the TCP redirect
+	//   completely — the structural deny simply does not apply to the connection.
+	//
+	//   DNS tunnelling. Arbitrary UDP to any host is a data channel that never touches the sidecar.
+	//
+	// So everything is dropped except DNS to the cluster resolver, which the pod genuinely needs.
+	// DNS to CoreDNS can still be tunnelled by an attacker willing to encode data in query names —
+	// closing THAT needs resolver policy, not netfilter, and is out of scope here. This removes the
+	// arbitrary-destination channel, which is the one netfilter can actually close.
+	rules = append(rules,
+		"iptables -N CTXMESH_UDP",
+		"iptables -A OUTPUT -p udp -j CTXMESH_UDP",
+		fmt.Sprintf("iptables -A CTXMESH_UDP -m owner --uid-owner %d -j RETURN", egressSidecarUID),
+		"iptables -A CTXMESH_UDP -o lo -j RETURN",
+		"iptables -A CTXMESH_UDP -p udp --dport 53 -j RETURN",
+		"iptables -A CTXMESH_UDP -j DROP")
+	return rules
 }
 
 // egressRedirectInitContainer builds the initContainer that installs the rules.
