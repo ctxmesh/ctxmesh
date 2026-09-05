@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
+
+import { mapLimit, NAMESPACE_SCAN_CONCURRENCY } from "@/lib/map-limit";
 import { CheckCircle2, Circle, RefreshCw, Sparkles } from "lucide-react";
 
 import {
@@ -1185,13 +1187,16 @@ function loadQueue(
   api
     .namespaces(controller.signal)
     .then(async (resp) => {
-      const outcomes = await Promise.all(
-        resp.namespaces.map((ns) =>
+      // Bounded: this runs on the landing page, and an install with sixty
+      // workspaces used to open sixty concurrent requests on every load.
+      const outcomes = await mapLimit(
+        resp.namespaces,
+        NAMESPACE_SCAN_CONCURRENCY,
+        (ns) =>
           api
             .listApprovals(ns.name, controller.signal)
             .then((items) => ({ ok: true as const, items }))
             .catch((err: unknown) => ({ ok: false as const, failure: toFailure(err) })),
-        ),
       );
       if (controller.signal.aborted) return;
       const answered = outcomes.filter(
