@@ -80,7 +80,7 @@ func TestReconcile_RegistersCapabilityDescriptor(t *testing.T) {
 		"the descriptor is stored verbatim — it is the text discovery embeds")
 	assert.Equal(t, []string{"summarization", "pdf"}, got[0].Tags)
 	assert.Equal(t, "cap-registry", got[0].RegistryID,
-		"registration is scoped by AgentRegistry membership (the A2A trust boundary), not by namespace alone")
+		"registration is scoped by AgentRegistry membership (the AMP trust boundary), not by namespace alone")
 }
 
 // An agent with NO descriptor is never registered — it stays reachable by name but is not semantically

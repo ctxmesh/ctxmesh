@@ -25,7 +25,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
-// The async A2A PUBLISH edge (M141.4, ADR 0121) — where an agent hands a durable hop to the platform.
+// The async AMP PUBLISH edge (M141.4, ADR 0121) — where an agent hands a durable hop to the platform.
 //
 // An agent pod never holds a broker connection: credentials live in the control plane, the same rule that
 // put provider keys behind the token-service and Valkey behind the state-layer proxy. So the launcher
@@ -62,11 +62,11 @@ func (s *Server) registerAsyncPublishRoute(api *http.ServeMux) {
 	}
 }
 
-// handleAsyncPublish serves POST /api/internal/async/publish — durably enqueue one async A2A hop.
+// handleAsyncPublish serves POST /api/internal/async/publish — durably enqueue one async AMP hop.
 //
 // The request body is the encoded CloudEvent and the request headers are its binding headers, moved
-// through unchanged: the platform does not parse the A2A envelope here, so the wire format stays owned by
-// the A2A layer (ADR 0121).
+// through unchanged: the platform does not parse the AMP envelope here, so the wire format stays owned by
+// the AMP layer (ADR 0121).
 //
 // Authorization mirrors the discovery edge: verify the capability, load the run it scopes to, and take the
 // caller's namespace + registry from the CONTROL PLANE — its own capability-registry row — rather than
@@ -95,7 +95,7 @@ func (s *Server) handleAsyncPublish(w http.ResponseWriter, r *http.Request) {
 	if !ok || self.RegistryID == "" {
 		// No registry ⇒ no async peers. Refusing beats publishing into a subject nobody serves, which
 		// would look like success and lose the hop.
-		writeError(w, http.StatusForbidden, "this agent belongs to no registry — async A2A is registry-scoped")
+		writeError(w, http.StatusForbidden, "this agent belongs to no registry — async AMP is registry-scoped")
 		return
 	}
 
@@ -105,7 +105,7 @@ func (s *Server) handleAsyncPublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(body) == 0 {
-		writeError(w, http.StatusBadRequest, "an async A2A publish carries a CloudEvent body")
+		writeError(w, http.StatusBadRequest, "an async AMP publish carries a CloudEvent body")
 		return
 	}
 	messageID := strings.TrimSpace(r.Header.Get(ceIDHeader))
@@ -137,7 +137,7 @@ func (s *Server) handleAsyncPublish(w http.ResponseWriter, r *http.Request) {
 }
 
 // asyncPublishHeaders copies the CloudEvent binding headers and stamps the platform's authoritative
-// namespace + registry over the top. Copying rather than filtering keeps the wire format the A2A layer's
+// namespace + registry over the top. Copying rather than filtering keeps the wire format the AMP layer's
 // business; overwriting the two platform headers is what stops a pod choosing its own routing context.
 func asyncPublishHeaders(in http.Header, namespace, registryID string) map[string]string {
 	out := make(map[string]string, len(in)+2)

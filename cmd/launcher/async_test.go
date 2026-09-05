@@ -16,7 +16,7 @@ limitations under the License.
 
 package main
 
-// Unit tests for the async A2A path (cloudevent.go + async.go). Two surfaces:
+// Unit tests for the async AMP path (cloudevent.go + async.go). Two surfaces:
 //
 //  1. envelope↔CloudEvent round-trip (the M6 envelope carried as a CloudEvent):
 //     id=messageId, type=receiverAgentId, source=senderAgentId, data=envelope

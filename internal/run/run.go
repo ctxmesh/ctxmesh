@@ -50,7 +50,7 @@ func HandoffRunID(sourceRunID, targetAgent string) string {
 	return "hand-" + hex.EncodeToString(sum[:16])
 }
 
-// Status is the run's lifecycle state. The set + transitions mirror the A2A task states and the
+// Status is the run's lifecycle state. The set + transitions mirror the AMP task states and the
 // OpenAI Assistants run statuses (ADR 0034), so external clients and the mesh interoperate.
 type Status string
 
@@ -62,7 +62,7 @@ const (
 	// StatusRequiresAction — paused pending an out-of-band action, then a resume: an OBO
 	// consent (the m25.9 consent_required, generalised) or a human-in-the-loop approval (M32).
 	// It is the ONE HUMAN-INPUT pause state (ADR 0034 as amended by ADR 0060): a human resolves
-	// it — the console banner, A2A input-required, ops alerts. Distinct from StatusWaiting, which
+	// it — the console banner, AMP input-required, ops alerts. Distinct from StatusWaiting, which
 	// is machine-woken.
 	StatusRequiresAction Status = "requires_action"
 	// StatusWaiting — paused parked on one or more CHILD RUNS, MACHINE-woken (vs requires_action =

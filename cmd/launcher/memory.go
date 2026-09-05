@@ -735,7 +735,7 @@ func (m *memoryServer) handleAppend(
 		return
 	}
 	// Stamp server-authoritative attribution on a message entry (m33.1): the per-hop messageId
-	// (ADR 0035) rides X-Message-Id when the caller/A2A sets it, else the launcher mints one.
+	// (ADR 0035) rides X-Message-Id when the caller/AMP sets it, else the launcher mints one.
 	messageID := strings.TrimSpace(r.Header.Get(messageIDHeader))
 	if messageID == "" {
 		messageID = newMessageID()

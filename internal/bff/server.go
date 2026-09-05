@@ -188,7 +188,7 @@ type Server struct {
 	// offline embedder, ADR 0116). Empty ⇒ discovery cannot embed and the edge serves an honest 501.
 	discoveryEmbeddingRoute string
 
-	// asyncPublisher is the durable async-backend publisher the A2A publish edge hands hops to (M141.4,
+	// asyncPublisher is the durable async-backend publisher the AMP publish edge hands hops to (M141.4,
 	// ADR 0121). An agent pod never holds a broker connection — the control plane does — so this is how
 	// an async hop becomes durable. nil ⇒ the publish edge is not wired at all.
 	asyncPublisher asyncbus.Publisher
@@ -643,7 +643,7 @@ type Options struct {
 	// DiscoveryEmbeddingRoute names the ModelRoute discovery embeds through (DISCOVERY_EMBEDDING_ROUTE).
 	// Empty ⇒ the discovery edge answers 501 rather than guessing a model.
 	DiscoveryEmbeddingRoute string
-	// AsyncPublisher is the durable async backend for A2A hops (M141.4, ADR 0121). Optional — nil ⇒
+	// AsyncPublisher is the durable async backend for AMP hops (M141.4, ADR 0121). Optional — nil ⇒
 	// POST /api/internal/async/publish is not registered. Constructed in cmd/bff/main.go.
 	AsyncPublisher asyncbus.Publisher
 	// RequireProofOfPossession refuses a legacy BEARER run capability at the internal edges (M142.5,
@@ -897,7 +897,7 @@ func (s *Server) Handler() http.Handler {
 	// Capability discovery (M141, ADR 0120): the same internal, capability-authenticated class as spawn —
 	// the caller is a launcher relaying its run capability, not a browser bearer token.
 	s.registerDiscoverRoute(api)
-	// Async A2A publish (M141.4, ADR 0121): the same capability-authenticated class — an agent hands a
+	// Async AMP publish (M141.4, ADR 0121): the same capability-authenticated class — an agent hands a
 	// durable hop to the platform because it holds no broker connection of its own.
 	s.registerAsyncPublishRoute(api)
 	// The capability BIND exchange (M142.5, ADR 0124): where a launcher trades its bearer capability for

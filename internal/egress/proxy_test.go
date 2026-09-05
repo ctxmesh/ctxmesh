@@ -193,7 +193,7 @@ func TestEgressRejectsAgentMismatch(t *testing.T) {
 
 // TestEgressBoundaryMatch: the ADR 0033 / m30.3 scoping gate. When the sidecar serves a boundary
 // (a registry), a capability whose `bnd` matches is redeemable even from a DIFFERENT agent (a
-// teammate's capability relayed across A2A — team-OBO), while a capability scoped to a different
+// teammate's capability relayed across AMP — team-OBO), while a capability scoped to a different
 // boundary is rejected. The boundary gate supersedes the exact-agent gate.
 func TestEgressBoundaryMatch(t *testing.T) {
 	pub, priv, err := runcap.GenerateKeyPair()

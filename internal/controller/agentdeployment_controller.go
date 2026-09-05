@@ -87,7 +87,7 @@ const (
 const brokerNameSuffix = "-broker"
 
 // ceTypeAttribute is the CloudEvent context attribute the eventing Trigger
-// filters on. An async A2A CloudEvent carries the target agent name as its
+// filters on. An async AMP CloudEvent carries the target agent name as its
 // `type` (specs/eventing-scaling.md §12.6: CloudEvent attributes mirror
 // routing, `type` = the target/topic), so a Trigger filtered to
 // `type == <agentName>` subscribes exactly this agent's events from the
@@ -166,7 +166,7 @@ const (
 
 	// envPodNamespace is the POD_NAMESPACE env var — the agent's namespace. Injected
 	// unconditionally in the base env so the launcher can form the UNAMBIGUOUS
-	// `<namespace>/<name>` trace identity; also consumed by the A2A path (cluster
+	// `<namespace>/<name>` trace identity; also consumed by the AMP path (cluster
 	// host resolution) and the memory key namespace. STATIC (deploy.Namespace),
 	// NEVER a downward-API valueFrom (the m5.7 Knative ksvc landmine).
 	envPodNamespace = "POD_NAMESPACE"
@@ -1126,7 +1126,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// Knative ksvc landmine / tier1 no-valueFrom guard), user-override-wins, and
 	// BEFORE the budget/memory/registry blocks so they observe it present (their own
 	// double-injection guards then no-op). These same vars also key per-agent spend
-	// (budget proxy), the Valkey memory prefix, and the A2A envelope identity — one
+	// (budget proxy), the Valkey memory prefix, and the AMP envelope identity — one
 	// injection now serves all of them.
 	if !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
 		env = append(env, corev1.EnvVar{Name: envAgentName, Value: deploy.Name})
@@ -1478,7 +1478,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	}
 
 	// Registry membership (M6): resolve the agent's AgentRegistry (if any). When a
-	// member, inject the STATIC mesh env the launcher's /a2a server reads
+	// member, inject the STATIC mesh env the launcher's /amp server reads
 	// (AGENT_REGISTRY_ID gates the endpoint; AGENT_ROLE / AGENT_ALLOWED_CALLERS
 	// feed the L7 access-control checks; A2A_MAX_DEPTH / A2A_HOP_BUDGET seed the
 	// conversation guards) and stamp the membership pod label the generated
@@ -1511,7 +1511,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		if hasMemory && memScope == memoryScopeShared {
 			env = append(env, corev1.EnvVar{Name: "MEMORY_SCOPE", Value: memoryScopeShared})
 		}
-		// POD_NAMESPACE: the namespace A2A targets resolve in — the launcher's
+		// POD_NAMESPACE: the namespace AMP targets resolve in — the launcher's
 		// clusterHost() builds http://{target}.{POD_NAMESPACE}.svc.cluster.local.
 		// STATIC (deploy.Namespace, known here), never a downward-API fieldRef:
 		// Knative's webhook rejects valueFrom in a ksvc pod template (the m5.7
@@ -1527,7 +1527,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// the user may have overridden it in spec.env — inject exactly ONCE. Check
 		// the ACCUMULATED env slice (covers the memory path) AND spec.env (user
 		// override wins) so a member with BOTH memory and registry gets AGENT_NAME
-		// once, and a member without memory still gets it (the A2A path needs it).
+		// once, and a member without memory still gets it (the AMP path needs it).
 		if !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
 			env = append(env, corev1.EnvVar{Name: envAgentName, Value: deploy.Name})
 		}
@@ -1595,14 +1595,14 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			}
 		}
 
-		// Blob offload (m7.6b): a registry member participates in the async A2A
+		// Blob offload (m7.6b): a registry member participates in the async AMP
 		// path — as a publisher (offload a >256KiB payload) and/or a consumer
 		// (rehydrate a $ref before invoke). Inject the dedicated dev object store's
 		// address + the deterministic DEV-ONLY credentials so the launcher's
 		// publish/consume path can reach MinIO. Scope: EVERY registry member, not
 		// only executionModel=eventing — a member's launcher wires offload on the
 		// same gate the async consumer/publisher use (registry membership /
-		// A2AEnabled), independent of its own workload KIND, so a producer that
+		// AMPEnabled), independent of its own workload KIND, so a producer that
 		// publishes and a Trigger-backed consumer both get it. All three are known
 		// constants → STATIC env, NEVER valueFrom (Knative ksvc webhook rejects it;
 		// the m5.7 landmine + tier1 no-valueFrom guard). The launcher gate is

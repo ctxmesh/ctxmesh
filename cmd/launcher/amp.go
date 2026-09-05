@@ -16,11 +16,11 @@ limitations under the License.
 
 package main
 
-// The synchronous agent-to-agent (A2A) mesh surface (M6, spec agent-mesh.md).
+// The synchronous agent-to-agent (AMP) mesh surface (M6, spec agent-mesh.md).
 //
-// NOTE ON THE NAME: this predates and is unrelated to Google's Agent2Agent specification.
-// Ours is a MEDIATION protocol — the launcher governs calls between agents the platform
-// already owns. The SDK exposes it as `client.mesh` for exactly that reason (M156).
+// AMP is mediation, not interop: the launcher governs calls between agents the platform
+// already owns (ADR 0138). The SDK exposes it as `client.mesh` — mesh is the boundary,
+// AMP is the call surface within it.
 //
 // Two surfaces live here:
 //
@@ -36,7 +36,7 @@ package main
 //      envelope is an ordinary /invoke and passes through.
 //
 // The envelope's depth/path grow per hop: no incoming envelope means a FIRST hop (depth 1,
-// path [self]); an incoming one means this agent was itself reached via A2A and is
+// path [self]); an incoming one means this agent was itself reached via AMP and is
 // forwarding, so depth and path extend while traceId/registryId/conversationId are
 // inherited and immutable downstream. checkGuards runs against the OUTGOING envelope.
 import (
@@ -72,31 +72,31 @@ func refuseRedirect(_ *http.Request, _ []*http.Request) error {
 }
 
 const (
-	// defaultA2APort is the localhost port the outbound A2A listener binds when
+	// defaultAMPPort is the localhost port the outbound AMP listener binds when
 	// A2A_PORT is unset. The launcher-local ports are :2998 memory, :2999 the
 	// MCP discovery sidecar (internal/controller/toolinject.go discoveryPort;
 	// injected whenever the agent has tool bindings, orthogonal to registry
-	// membership) — so A2A takes :2997. A registry member that ALSO has tool
+	// membership) — so AMP takes :2997. A registry member that ALSO has tool
 	// bindings (a mesh orchestrator with tools) shares one pod netns with the
 	// sidecar; binding :2999 would EADDRINUSE and fail silently on the
-	// best-effort listener path, so A2A must not collide with the sidecar.
-	defaultA2APort = 2997
+	// best-effort listener path, so AMP must not collide with the sidecar.
+	defaultAMPPort = 2997
 
-	// a2aDialTimeout bounds the TCP dial to a peer. A cross-registry target is
+	// ampDialTimeout bounds the TCP dial to a peer. A cross-registry target is
 	// refused at the NetworkPolicy layer (connection refused / timeout); this
 	// bound guarantees the caller fast-fails with a typed error instead of
 	// hanging (agent-mesh.md §"Edge cases": bounded dial timeout).
-	a2aDialTimeout = 2 * time.Second
+	ampDialTimeout = 2 * time.Second
 
-	// a2aRequestTimeout bounds the whole outbound A2A round-trip (dial + headers
+	// ampRequestTimeout bounds the whole outbound AMP round-trip (dial + headers
 	// + body). A callee that is up but wedged must not block the caller's
-	// request path indefinitely — the agent treats A2A as best-effort.
-	a2aRequestTimeout = 30 * time.Second
+	// request path indefinitely — the agent treats AMP as best-effort.
+	ampRequestTimeout = 30 * time.Second
 
-	// maxA2ABody caps the caller's payload (and the peer's response we relay) at
+	// maxAMPBody caps the caller's payload (and the peer's response we relay) at
 	// 1MiB, matching the memory endpoint's bound. Larger payloads are an M7
 	// (async + blob offload) concern.
-	maxA2ABody = 1 << 20
+	maxAMPBody = 1 << 20
 
 	// maxTargetLen bounds the {targetAgent} path segment. It becomes a DNS label
 	// and a span attribute, so it must be short and DNS-safe.
@@ -140,7 +140,7 @@ func envelopeHeader(h http.Header) (raw string, conflict bool) {
 	return legacy, false
 }
 
-// A2A typed error codes (agent-mesh.md §"The A2A call contract",
+// AMP typed error codes (agent-mesh.md §"The AMP call contract",
 // §"Edge cases"). Each is surfaced to the calling agent as a JSON body
 // {"error":<code>,"detail":...} and recorded as a span error — never swallowed,
 // never a bare network hang.
@@ -148,11 +148,11 @@ const (
 	errUnknownTarget    = "unknown_target"     // DNS NXDOMAIN — target not in the registry namespace.
 	errCallerNotAllowed = "caller_not_allowed" // access control: caller not on the callee's allowlist / role-denied.
 	// errCrossRegistry: access control — the inbound envelope names a foreign
-	// registryId; a hard app-layer deny (NetworkPolicy cannot isolate Knative A2A).
+	// registryId; a hard app-layer deny (NetworkPolicy cannot isolate Knative AMP).
 	errCrossRegistry   = "cross_registry_denied"
 	errBlocked         = "blocked"          // network-layer refusal (cross-registry NetworkPolicy) or dial timeout.
 	errUpstreamFailure = "upstream_failure" // peer reachable but returned a transport error mid-request.
-	errBadRequest      = "bad_request"      // malformed /a2a request (bad target, unreadable body, bad envelope).
+	errBadRequest      = "bad_request"      // malformed /amp request (bad target, unreadable body, bad envelope).
 
 	// Conversation guard codes (agent-mesh.md §12.7, added in m6.6).
 	errDepthExceeded  = "depth_exceeded"  // depth > maxDepth: call chain is too deep.
@@ -165,14 +165,14 @@ const (
 // env vars are absent (non-registry agent, or a registry that omits the fields)
 // the launcher falls back to these values so the guards are always active.
 const (
-	defaultMaxDepth  = 8  // reject A2A beyond this hop depth (CRD: guards.maxDepth).
+	defaultMaxDepth  = 8  // reject AMP beyond this hop depth (CRD: guards.maxDepth).
 	defaultHopBudget = 32 // per-conversation hop budget (CRD: guards.hopBudget).
 )
 
-// a2aConfig is the subset of configuration the A2A surface needs, parsed from
-// env alongside the launcher Config (see loadA2AConfig / A2AEnabled). Every
+// ampConfig is the subset of configuration the AMP surface needs, parsed from
+// env alongside the launcher Config (see loadAMPConfig / AMPEnabled). Every
 // field is read-only after construction.
-type a2aConfig struct {
+type ampConfig struct {
 	// RegistryID is AGENT_REGISTRY_ID — the stable registry id carried in every
 	// envelope. Empty ⇒ the outbound listener is not started at all (the agent
 	// is not a registry member) and inbound access control is a no-op.
@@ -191,7 +191,7 @@ type a2aConfig struct {
 	// AllowedCallers is the callee-side allowlist (AGENT_ALLOWED_CALLERS,
 	// comma-list of sender agent names). Empty ⇒ allow any SAME-registry caller
 	// (cross-registry isolation is enforced app-layer by enforceInbound's
-	// registryId check — NetworkPolicy cannot isolate Knative-routed A2A because
+	// registryId check — NetworkPolicy cannot isolate Knative-routed AMP because
 	// kourier fronts every hop; it is defense-in-depth only). A non-empty list
 	// rejects any senderAgentId not on it with caller_not_allowed.
 	AllowedCallers []string
@@ -214,19 +214,19 @@ type a2aConfig struct {
 	AsyncPublishURL string
 }
 
-// A2AEnabled reports whether the outbound /a2a listener should be started —
+// AMPEnabled reports whether the outbound /amp listener should be started —
 // true iff a registry id was injected (the agent is a registry member).
-func (c Config) A2AEnabled() bool {
-	return c.A2A.RegistryID != ""
+func (c Config) AMPEnabled() bool {
+	return c.AMP.RegistryID != ""
 }
 
-// loadA2AConfig parses the A2A surface configuration from env.
+// loadAMPConfig parses the AMP surface configuration from env.
 //
 // Environment variables:
 //
-//	AGENT_REGISTRY_ID (gate): the resolved registry id. Empty ⇒ the /a2a
+//	AGENT_REGISTRY_ID (gate): the resolved registry id. Empty ⇒ the /amp
 //	  listener is NOT started and inbound access control is inert — every other
-//	  A2A env is then irrelevant.
+//	  AMP env is then irrelevant.
 //	A2A_PORT (optional): outbound listener port (default 2997).
 //	AGENT_NAME: this agent's name (senderAgentId / path identity). Reused from
 //	  the shared launcher config.
@@ -243,29 +243,29 @@ func (c Config) A2AEnabled() bool {
 // Like loadMemoryConfig, it does NOT hard-fail on a missing name/namespace when
 // the feature is on — the controller injects them; an empty segment is a
 // visible-but-non-fatal misconfiguration, not a crash, on a best-effort path.
-func loadA2AConfig(lookup func(string) string, agentName string) (a2aConfig, error) {
+func loadAMPConfig(lookup func(string) string, agentName string) (ampConfig, error) {
 	regID := lookup("AGENT_REGISTRY_ID")
 	if regID == "" {
 		// Not gated on: the listener is skipped entirely.
-		return a2aConfig{}, nil
+		return ampConfig{}, nil
 	}
 
-	port, err := parsePort(lookup("A2A_PORT"), defaultA2APort)
+	port, err := parsePort(lookup("A2A_PORT"), defaultAMPPort)
 	if err != nil {
-		return a2aConfig{}, fmt.Errorf("A2A_PORT: %w", err)
+		return ampConfig{}, fmt.Errorf("A2A_PORT: %w", err)
 	}
 
 	maxDepth, err := parseGuardInt(lookup("A2A_MAX_DEPTH"), defaultMaxDepth)
 	if err != nil {
-		return a2aConfig{}, fmt.Errorf("A2A_MAX_DEPTH: %w", err)
+		return ampConfig{}, fmt.Errorf("A2A_MAX_DEPTH: %w", err)
 	}
 
 	hopBudget, err := parseGuardInt(lookup("A2A_HOP_BUDGET"), defaultHopBudget)
 	if err != nil {
-		return a2aConfig{}, fmt.Errorf("A2A_HOP_BUDGET: %w", err)
+		return ampConfig{}, fmt.Errorf("A2A_HOP_BUDGET: %w", err)
 	}
 
-	return a2aConfig{
+	return ampConfig{
 		RegistryID:      regID,
 		Port:            port,
 		SelfName:        agentName,
@@ -297,7 +297,7 @@ func parseCallerList(raw string) []string {
 	return out
 }
 
-// envelope is the platform-owned A2A message envelope (agent-mesh.md §12.5).
+// envelope is the platform-owned AMP message envelope (agent-mesh.md §12.5).
 // It is stamped by the caller's launcher and immutable downstream EXCEPT depth,
 // path, and budgetRemaining, which each hop extends/decrements.
 // payload is the caller's opaque JSON.
@@ -324,10 +324,10 @@ type envelope struct {
 	Payload         json.RawMessage `json:"payload,omitempty"`
 }
 
-// a2aMessageIDFromEnvelope extracts just the per-hop messageId from a serialized A2A envelope
-// header (m33.4). Empty (no header / malformed / no id) ⇒ "" — a non-A2A /invoke, handled by the
+// ampMessageIDFromEnvelope extracts just the per-hop messageId from a serialized AMP envelope
+// header (m33.4). Empty (no header / malformed / no id) ⇒ "" — a non-AMP /invoke, handled by the
 // caller. Kept tolerant: a parse failure never breaks the proxy path.
-func a2aMessageIDFromEnvelope(envJSON string) string {
+func ampMessageIDFromEnvelope(envJSON string) string {
 	if envJSON == "" {
 		return ""
 	}
@@ -340,11 +340,11 @@ func a2aMessageIDFromEnvelope(envJSON string) string {
 	return env.MessageID
 }
 
-// a2aServer holds the outbound-listener dependencies. Every field is read-only
+// ampServer holds the outbound-listener dependencies. Every field is read-only
 // after construction and http.Client is safe for concurrent use, so the whole
 // struct is safe to share across the listener's goroutines.
-type a2aServer struct {
-	cfg    a2aConfig
+type ampServer struct {
+	cfg    ampConfig
 	client *http.Client // reused across all outbound calls — never per-request.
 	// offload replaces an oversize async payload with a content-addressed $ref before publishing, so a
 	// big task rides the bus as a small event. nil (no object store) ⇒ payloads publish inline.
@@ -356,30 +356,30 @@ type a2aServer struct {
 	resolveHost func(target string) string
 }
 
-func newA2AServer(
-	cfg a2aConfig, tracer trace.Tracer, prop propagation.TextMapPropagator, off *offloader,
-) *a2aServer {
-	s := &a2aServer{
+func newAMPServer(
+	cfg ampConfig, tracer trace.Tracer, prop propagation.TextMapPropagator, off *offloader,
+) *ampServer {
+	s := &ampServer{
 		offload: off,
 		cfg:     cfg,
 		tracer:  tracer,
 		prop:    prop,
 		// One shared client with bounded dial + overall timeout. The Transport
-		// pools connections; a per-request context deadline (a2aRequestTimeout)
+		// pools connections; a per-request context deadline (ampRequestTimeout)
 		// is the primary bound, Timeout is belt-and-braces.
 		client: &http.Client{
-			Timeout: a2aRequestTimeout,
+			Timeout: ampRequestTimeout,
 			// NEVER follow redirects (audit P2): this client relays the invoking user's run capability
-			// (runcap.HeaderName, below) on A2A hops. Go's default policy would follow a callee's 3xx to
+			// (runcap.HeaderName, below) on AMP hops. Go's default policy would follow a callee's 3xx to
 			// an off-allowlist host — re-sending that capability to an attacker-influenced target and
-			// bypassing the egress chokepoint. A2A targets are internal cluster agents (clusterHost); a
+			// bypassing the egress chokepoint. AMP targets are internal cluster agents (clusterHost); a
 			// redirect is never legitimate here, so refuse it.
 			CheckRedirect: refuseRedirect,
 			Transport: &http.Transport{
-				DialContext: (&net.Dialer{Timeout: a2aDialTimeout}).DialContext,
+				DialContext: (&net.Dialer{Timeout: ampDialTimeout}).DialContext,
 				// A dead / cross-registry TLS-less peer must not hang the
 				// handshake; keep every phase bounded.
-				ResponseHeaderTimeout: a2aRequestTimeout,
+				ResponseHeaderTimeout: ampRequestTimeout,
 				MaxIdleConnsPerHost:   16,
 			},
 		},
@@ -391,20 +391,20 @@ func newA2AServer(
 // clusterHost is the production DNS discovery (agent-mesh.md §12.3, "DNS
 // named"): a target resolves to its Knative route in the caller's namespace.
 // No capability discovery (phase 2).
-func (s *a2aServer) clusterHost(target string) string {
+func (s *ampServer) clusterHost(target string) string {
 	return fmt.Sprintf("http://%s.%s.svc.cluster.local", target, s.cfg.Namespace)
 }
 
-// handler builds the outbound A2A mux. Go 1.22+ pattern routing gives us the
+// handler builds the outbound AMP mux. Go 1.22+ pattern routing gives us the
 // {targetAgent} path variable and per-method matching for free.
-func (s *a2aServer) handler() http.Handler {
+func (s *ampServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	// /healthz reports only that the listener is up (no peer is probed) — a
 	// cheap, dependency-free liveness signal, matching the memory endpoint.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	// Both paths, same handler. /a2a is the pre-ADR-0138 name and stays served:
+	// Both paths, same handler. /amp is the pre-ADR-0138 name and stays served:
 	// the SDK ships inside the customer's agent image and is versioned
 	// independently of the launcher, so an older SDK must keep working.
 	mux.HandleFunc("POST /amp/{targetAgent}", s.handleCall)
@@ -414,7 +414,7 @@ func (s *a2aServer) handler() http.Handler {
 
 // handleCall stamps the envelope, resolves the target, propagates the trace,
 // forwards the payload, and relays the peer's response — or a typed error.
-func (s *a2aServer) handleCall(w http.ResponseWriter, r *http.Request) {
+func (s *ampServer) handleCall(w http.ResponseWriter, r *http.Request) {
 	target := r.PathValue("targetAgent")
 
 	// The a2a.call span is the parent of the outbound request: its context,
@@ -430,9 +430,9 @@ func (s *a2aServer) handleCall(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	span.SetAttributes(
-		attribute.String("a2a.registry.id", s.cfg.RegistryID),
-		attribute.String("a2a.sender", s.cfg.SelfName),
-		attribute.String("a2a.receiver", target),
+		attribute.String("amp.registry.id", s.cfg.RegistryID),
+		attribute.String("amp.sender", s.cfg.SelfName),
+		attribute.String("amp.receiver", target),
 	)
 
 	if err := validateTarget(target); err != nil {
@@ -440,7 +440,7 @@ func (s *a2aServer) handleCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload, err := readA2ABody(w, r)
+	payload, err := readAMPBody(w, r)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, errBodyTooLarge) {
@@ -451,17 +451,17 @@ func (s *a2aServer) handleCall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build the OUTGOING envelope: first-hop vs chained-hop turns on whether the
-	// user container echoed an incoming envelope on this /a2a request.
+	// user container echoed an incoming envelope on this /amp request.
 	env, err := s.buildEnvelope(ctx, r, target, payload)
 	if err != nil {
 		s.fail(w, span, http.StatusBadRequest, errBadRequest, err.Error())
 		return
 	}
 	span.SetAttributes(
-		attribute.Int("a2a.depth", env.Depth),
-		attribute.Int("a2a.budget_remaining", env.BudgetRemaining),
+		attribute.Int("amp.depth", env.Depth),
+		attribute.Int("amp.budget_remaining", env.BudgetRemaining),
 		attribute.String("a2a.conversation.id", env.ConversationID),
-		attribute.String("a2a.message.id", env.MessageID),
+		attribute.String("amp.message.id", env.MessageID),
 	)
 
 	// m6.6: conversation guards (max depth / cycle / hop budget) run here
@@ -477,7 +477,7 @@ func (s *a2aServer) handleCall(w http.ResponseWriter, r *http.Request) {
 
 	// Relay the invoking user's run capability across the hop (ADR 0033, m30.3) so the callee's
 	// egress can act on-behalf-of the same user. The capability is boundary-scoped (its `bnd` is
-	// the registry), and A2A only reaches same-registry peers (a foreign-registry hop is already
+	// the registry), and AMP only reaches same-registry peers (a foreign-registry hop is already
 	// a hard deny), so relaying it to a teammate agent is in-boundary by construction. Absent ⇒
 	// an unattended/dev run (the callee resolves org/public only).
 	capToken := r.Header.Get(runcap.HeaderName)
@@ -485,7 +485,7 @@ func (s *a2aServer) handleCall(w http.ResponseWriter, r *http.Request) {
 	// ASYNC mode (M141.4, ADR 0121): the same envelope, the same guards, but handed to the durable bus
 	// instead of forwarded now. Deliberately the same code path down to here — an async hop that skipped
 	// the depth/cycle/hop-budget guards would be a way to launder a call the synchronous path refuses.
-	if strings.EqualFold(r.URL.Query().Get("mode"), a2aModeAsync) {
+	if strings.EqualFold(r.URL.Query().Get("mode"), ampModeAsync) {
 		s.publishAsync(ctx, w, span, env, capToken)
 		return
 	}
@@ -493,20 +493,20 @@ func (s *a2aServer) handleCall(w http.ResponseWriter, r *http.Request) {
 	s.forward(ctx, w, span, env, capToken)
 }
 
-// a2aModeAsync selects the durable fire-and-forget hop on the A2A surface.
-const a2aModeAsync = "async"
+// ampModeAsync selects the durable fire-and-forget hop on the AMP surface.
+const ampModeAsync = "async"
 
 // publishAsync hands the envelope to the platform's async publish edge and answers 202.
 //
 // It is fire-and-forget by contract: the caller gets "durably accepted", NOT an answer, because the
 // callee may not even be running yet. A publish failure is surfaced as an error rather than swallowed —
 // an agent that believes it dispatched work when it did not is the worst outcome available here.
-func (s *a2aServer) publishAsync(
+func (s *ampServer) publishAsync(
 	ctx context.Context, w http.ResponseWriter, span trace.Span, env envelope, capToken string,
 ) {
 	if s.cfg.AsyncPublishURL == "" {
 		s.fail(w, span, http.StatusNotImplemented, errBadRequest,
-			"async A2A is not configured on this cluster (no async backend)")
+			"async AMP is not configured on this cluster (no async backend)")
 		return
 	}
 	span.SetAttributes(attribute.Bool("a2a.async", true))
@@ -532,7 +532,7 @@ func (s *a2aServer) publishAsync(
 //     traceId/registryId/conversationId INHERITED (immutable downstream, §12.5).
 //
 // messageId is ALWAYS fresh (unique per hop — the M7 idempotency key).
-func (s *a2aServer) buildEnvelope(
+func (s *ampServer) buildEnvelope(
 	ctx context.Context, r *http.Request, target string, payload json.RawMessage,
 ) (envelope, error) {
 	self := s.cfg.SelfName
@@ -590,7 +590,7 @@ func (s *a2aServer) buildEnvelope(
 // forward resolves the target, injects the envelope + traceparent, sends the
 // request, and relays the peer's response — mapping transport failures to typed
 // errors so the caller never sees a bare hang.
-func (s *a2aServer) forward(
+func (s *ampServer) forward(
 	ctx context.Context, w http.ResponseWriter, span trace.Span, env envelope, capToken string,
 ) {
 	base := s.resolveHost(env.ReceiverAgentID)
@@ -606,7 +606,7 @@ func (s *a2aServer) forward(
 
 	// Bound the whole round-trip with a context deadline (primary bound; the
 	// client Timeout is belt-and-braces).
-	reqCtx, cancel := context.WithTimeout(ctx, a2aRequestTimeout)
+	reqCtx, cancel := context.WithTimeout(ctx, ampRequestTimeout)
 	defer cancel()
 
 	// The peer is a normal agent: it receives the call on its own /invoke route,
@@ -639,15 +639,15 @@ func (s *a2aServer) forward(
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// Relay the peer's response verbatim (status + capped body). A2A is
+	// Relay the peer's response verbatim (status + capped body). AMP is
 	// best-effort: even a peer 5xx is the agent's to handle, not a launcher
 	// crash — we surface it as-is and mark the span.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxA2ABody))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAMPBody))
 	if err != nil {
 		s.fail(w, span, http.StatusBadGateway, errUpstreamFailure, "read peer response: "+err.Error())
 		return
 	}
-	span.SetAttributes(attribute.Int("a2a.peer.status", resp.StatusCode))
+	span.SetAttributes(attribute.Int("amp.peer.status", resp.StatusCode))
 	if resp.StatusCode >= http.StatusInternalServerError {
 		span.SetStatus(codes.Error, "peer status "+resp.Status)
 	}
@@ -659,11 +659,11 @@ func (s *a2aServer) forward(
 	_, _ = w.Write(body)
 }
 
-// failDial maps an outbound transport error to a typed A2A error. A
+// failDial maps an outbound transport error to a typed AMP error. A
 // cross-registry target refused at the NetworkPolicy layer, or a dial timeout,
 // is "blocked" (fast-fail); an NXDOMAIN target is "unknown_target"; anything
 // else mid-flight is "upstream_failure". Each is a span error — surfaced.
-func (s *a2aServer) failDial(w http.ResponseWriter, span trace.Span, err error) {
+func (s *ampServer) failDial(w http.ResponseWriter, span trace.Span, err error) {
 	var dnsErr *net.DNSError
 	switch {
 	case errors.As(err, &dnsErr) && dnsErr.IsNotFound:
@@ -681,28 +681,28 @@ func (s *a2aServer) failDial(w http.ResponseWriter, span trace.Span, err error) 
 // fail records a typed error on the span and writes the typed JSON body. It is
 // the single failure shape of the outbound endpoint — never a bare hang, never
 // a swallowed error (agent-mesh.md §"Edge cases": best-effort, typed).
-func (s *a2aServer) fail(w http.ResponseWriter, span trace.Span, status int, code, detail string) {
+func (s *ampServer) fail(w http.ResponseWriter, span trace.Span, status int, code, detail string) {
 	span.SetStatus(codes.Error, code)
-	span.SetAttributes(attribute.String("a2a.error", code))
-	writeA2AError(w, status, code, detail)
+	span.SetAttributes(attribute.String("amp.error", code))
+	writeAMPError(w, status, code, detail)
 }
 
 // ── inbound access control (callee side) ────────────────────────────────────
 
-// a2aGuard holds the callee-side access-control policy. It is the inbound
-// counterpart to a2aServer, injected into the /invoke proxy middleware.
-type a2aGuard struct {
-	cfg    a2aConfig
+// ampGuard holds the callee-side access-control policy. It is the inbound
+// counterpart to ampServer, injected into the /invoke proxy middleware.
+type ampGuard struct {
+	cfg    ampConfig
 	tracer trace.Tracer
 }
 
-func newA2AGuard(cfg a2aConfig, tracer trace.Tracer) *a2aGuard {
-	return &a2aGuard{cfg: cfg, tracer: tracer}
+func newAMPGuard(cfg ampConfig, tracer trace.Tracer) *ampGuard {
+	return &ampGuard{cfg: cfg, tracer: tracer}
 }
 
 // enforceInbound is the callee-side access-control check the /invoke proxy runs
 // BEFORE forwarding to the user container. It returns true when the request may
-// proceed. If the request carries an A2A envelope, it enforces (in order)
+// proceed. If the request carries an AMP envelope, it enforces (in order)
 // cross-registry isolation, then the allowlist + role rules; a rejected caller
 // is denied here (typed 403, traced) and the function returns false, having
 // already written the response.
@@ -712,11 +712,11 @@ func newA2AGuard(cfg a2aConfig, tracer trace.Tracer) *a2aGuard {
 // passes through untouched.
 //
 // Cross-registry isolation is enforced HERE, at the app layer, NOT by
-// NetworkPolicy: agents are Knative Services, so an A2A call routes
+// NetworkPolicy: agents are Knative Services, so an AMP call routes
 // caller → kourier → callee, and at the callee's pod the source appears as
 // kourier-system — which the generated per-registry NetworkPolicy ALLOWS as
 // platform ingress. The per-registry podSelector therefore cannot isolate
-// Knative-routed A2A traffic; kourier defeats it. NetworkPolicy remains as
+// Knative-routed AMP traffic; kourier defeats it. NetworkPolicy remains as
 // defense-in-depth for any DIRECT pod-to-pod traffic, but the ACTUAL
 // cross-registry deny is this app-layer check on the envelope's registryId
 // (agent-mesh.md §"Design" layer 1; the live-cluster m6.8 e2e proved a
@@ -724,7 +724,7 @@ func newA2AGuard(cfg a2aConfig, tracer trace.Tracer) *a2aGuard {
 //
 // It is wired as a wrapper INSIDE the agent.invoke span (ctx already carries the
 // server span) so a denial is a child event of the invoke, not an orphan.
-func (g *a2aGuard) enforceInbound(ctx context.Context, w http.ResponseWriter, r *http.Request) bool {
+func (g *ampGuard) enforceInbound(ctx context.Context, w http.ResponseWriter, r *http.Request) bool {
 	raw, conflict := envelopeHeader(r.Header)
 	if conflict {
 		// Two envelopes that disagree. Fail closed: see envelopeHeader.
@@ -739,14 +739,14 @@ func (g *a2aGuard) enforceInbound(ctx context.Context, w http.ResponseWriter, r 
 	if err != nil || env == nil {
 		// A malformed envelope on the inbound path is a protocol error: reject
 		// rather than silently treat it as a plain call (fail closed).
-		g.deny(ctx, w, "", "malformed A2A envelope")
+		g.deny(ctx, w, "", "malformed AMP envelope")
 		return false
 	}
 
 	// Layer 1 (registry isolation), app-layer: a hard deny BEFORE the
 	// allowedCallers/role checks. An envelope whose registryId does not match this
 	// agent's own registry is a cross-registry call — reject it. NetworkPolicy
-	// cannot enforce this under Knative (kourier fronts every A2A hop), so this is
+	// cannot enforce this under Knative (kourier fronts every AMP hop), so this is
 	// the authoritative check. A same-registry envelope falls through to the
 	// allowedCallers/role checks unchanged.
 	if env.RegistryID != g.cfg.RegistryID {
@@ -769,7 +769,7 @@ func (g *a2aGuard) enforceInbound(ctx context.Context, w http.ResponseWriter, r 
 // this (app-layer registryId check — kourier defeats the per-registry
 // NetworkPolicy podSelector under Knative), so any envelope reaching here is
 // already known to be same-registry.
-func (g *a2aGuard) allowCaller(env *envelope) (bool, string) {
+func (g *ampGuard) allowCaller(env *envelope) (bool, string) {
 	if !isKnownRole(env.Role) {
 		return false, fmt.Sprintf("sender role %q is not a valid registry role", env.Role)
 	}
@@ -786,14 +786,14 @@ func (g *a2aGuard) allowCaller(env *envelope) (bool, string) {
 
 // deny writes the typed 403 caller_not_allowed and records a span event under
 // the active agent.invoke span, so the denial is visible in the trace tree.
-func (g *a2aGuard) deny(ctx context.Context, w http.ResponseWriter, caller, reason string) {
+func (g *ampGuard) deny(ctx context.Context, w http.ResponseWriter, caller, reason string) {
 	span := trace.SpanFromContext(ctx)
 	span.AddEvent("a2a.caller_denied", trace.WithAttributes(
-		attribute.String("a2a.sender", caller),
-		attribute.String("a2a.deny_reason", reason),
+		attribute.String("amp.sender", caller),
+		attribute.String("amp.deny_reason", reason),
 	))
-	span.SetAttributes(attribute.String("a2a.error", errCallerNotAllowed))
-	writeA2AError(w, http.StatusForbidden, errCallerNotAllowed, reason)
+	span.SetAttributes(attribute.String("amp.error", errCallerNotAllowed))
+	writeAMPError(w, http.StatusForbidden, errCallerNotAllowed, reason)
 }
 
 // denyCrossRegistry writes the typed 403 cross_registry_denied (layer-1 isolation
@@ -801,16 +801,16 @@ func (g *a2aGuard) deny(ctx context.Context, w http.ResponseWriter, caller, reas
 // podSelector under Knative) and records a span event under the active
 // agent.invoke span, so the cross-registry deny is visible in the trace tree.
 // gotRegistryID is the foreign registryId the caller's envelope named.
-func (g *a2aGuard) denyCrossRegistry(ctx context.Context, w http.ResponseWriter, caller, gotRegistryID string) {
+func (g *ampGuard) denyCrossRegistry(ctx context.Context, w http.ResponseWriter, caller, gotRegistryID string) {
 	reason := fmt.Sprintf("caller %q is in registry %q, not %q", caller, gotRegistryID, g.cfg.RegistryID)
 	span := trace.SpanFromContext(ctx)
 	span.AddEvent("a2a.cross_registry_denied", trace.WithAttributes(
-		attribute.String("a2a.sender", caller),
+		attribute.String("amp.sender", caller),
 		attribute.String("a2a.caller.registry.id", gotRegistryID),
-		attribute.String("a2a.registry.id", g.cfg.RegistryID),
+		attribute.String("amp.registry.id", g.cfg.RegistryID),
 	))
-	span.SetAttributes(attribute.String("a2a.error", errCrossRegistry))
-	writeA2AError(w, http.StatusForbidden, errCrossRegistry, reason)
+	span.SetAttributes(attribute.String("amp.error", errCrossRegistry))
+	writeAMPError(w, http.StatusForbidden, errCrossRegistry, reason)
 }
 
 // ── conversation-guard seam (m6.6) ──────────────────────────────────────────
@@ -956,7 +956,7 @@ func traceIDFromContext(ctx context.Context) string {
 
 // conversationIDFromRequest resolves the first-hop conversation id from the
 // X-Conversation-Id header (documented contract: the agent stamps its
-// conversation id there when it opens an A2A call), else a fresh UUID (a first
+// conversation id there when it opens an AMP call), else a fresh UUID (a first
 // hop with no id starts a new conversation). Chained hops inherit the id from
 // the incoming envelope and never reach here. Reading a body field is avoided
 // deliberately: the payload is opaque to the platform (§12.5) and must not be
@@ -992,17 +992,17 @@ func validateTarget(target string) error {
 // can distinguish it (413) from a malformed-JSON payload (400).
 var errBodyTooLarge = errors.New("request body exceeds size limit")
 
-// readA2ABody reads the caller's payload under the 1MiB cap. An empty body is
+// readAMPBody reads the caller's payload under the 1MiB cap. An empty body is
 // allowed (a call with no payload) and yields a JSON null so the envelope's
 // payload is always valid JSON. An oversize body returns errBodyTooLarge; a
 // non-JSON body returns a plain error — the handler maps them to 413 vs 400.
-func readA2ABody(w http.ResponseWriter, r *http.Request) (json.RawMessage, error) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxA2ABody)
+func readAMPBody(w http.ResponseWriter, r *http.Request) (json.RawMessage, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAMPBody)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			return nil, fmt.Errorf("%w (%d bytes)", errBodyTooLarge, maxA2ABody)
+			return nil, fmt.Errorf("%w (%d bytes)", errBodyTooLarge, maxAMPBody)
 		}
 		return nil, fmt.Errorf("read body: %w", err)
 	}
@@ -1018,9 +1018,9 @@ func readA2ABody(w http.ResponseWriter, r *http.Request) (json.RawMessage, error
 	return json.RawMessage(compact.Bytes()), nil
 }
 
-// writeA2AError writes the typed error body {"error":<code>,"detail":<detail>}
-// with the given status — the single error shape across the A2A surface.
-func writeA2AError(w http.ResponseWriter, status int, code, detail string) {
+// writeAMPError writes the typed error body {"error":<code>,"detail":<detail>}
+// with the given status — the single error shape across the AMP surface.
+func writeAMPError(w http.ResponseWriter, status int, code, detail string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(struct {
@@ -1068,15 +1068,15 @@ func isConnRefused(err error) bool {
 	return false
 }
 
-// a2aMessageIDFromEnvelopeHeader is the header-level wrapper the /invoke proxy uses
+// ampMessageIDFromEnvelopeHeader is the header-level wrapper the /invoke proxy uses
 // for span annotation. A conflicting pair yields no id rather than a guessed one —
 // the guard rejects that request anyway.
-func a2aMessageIDFromEnvelopeHeader(h http.Header) string {
+func ampMessageIDFromEnvelopeHeader(h http.Header) string {
 	raw, conflict := envelopeHeader(h)
 	if conflict {
 		return ""
 	}
-	return a2aMessageIDFromEnvelope(raw)
+	return ampMessageIDFromEnvelope(raw)
 }
 
 // errConflictingEnvelopes is returned when a request carries both envelope header

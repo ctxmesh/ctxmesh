@@ -388,7 +388,7 @@ func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *a
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(tokenServicePort)},
 					},
 				},
-				{ // intra-tenant A2A (+ peerTenants east-west) + the knative data plane it egresses through
+				{ // intra-tenant AMP (+ peerTenants east-west) + the knative data plane it egresses through
 					To: append([]networkingv1.NetworkPolicyPeer{
 						{NamespaceSelector: sameTenant},
 						platformNS(knativeServingNamespace),

@@ -182,13 +182,13 @@ func setupOTel(ctx context.Context, endpoint string) (func(context.Context) erro
 // already written the typed error response and returns false. nil ⇒ no guard
 // (the agent is not a registry member), and every request proceeds.
 //
-// It is an interface (not a concrete *a2aGuard) so buildHandler stays decoupled
-// from the A2A surface and unit tests can inject a stub.
+// It is an interface (not a concrete *ampGuard) so buildHandler stays decoupled
+// from the AMP surface and unit tests can inject a stub.
 type inboundGuard interface {
 	enforceInbound(ctx context.Context, w http.ResponseWriter, r *http.Request) bool
 }
 
-// asyncHandler is the async A2A consumer hook the proxy runs when an inbound
+// asyncHandler is the async AMP consumer hook the proxy runs when an inbound
 // request is a CloudEvent (an eventing agent's Trigger delivery). It decodes the
 // envelope, dedupes on messageId, and invokes the agent — acking or NACKing the
 // event. nil ⇒ the agent is not an eventing consumer, and a CloudEvent-shaped
@@ -205,13 +205,13 @@ type asyncHandler interface {
 // in an agent.invoke server span with W3C context propagation; all other
 // requests pass through without any tracing overhead.
 //
-// guard, when non-nil, enforces A2A access control on the inbound path inside
+// guard, when non-nil, enforces AMP access control on the inbound path inside
 // the span (a denied caller is rejected before the request reaches the user
 // container). nil disables it.
 //
 // consumer, when non-nil, handles a CloudEvent-shaped inbound POST (a Trigger
 // delivery to an eventing agent): it is dispatched to the async consumer BEFORE
-// the ordinary /invoke span/proxy path, so an async A2A event is deduped and
+// the ordinary /invoke span/proxy path, so an async AMP event is deduped and
 // invoked through its own a2a.async.consume span. An ordinary /invoke (no
 // CloudEvent headers) is unaffected. nil disables the async path.
 //
@@ -235,7 +235,7 @@ func buildHandler(
 			return
 		}
 
-		// Async A2A: a CloudEvent-shaped POST (Trigger delivery) is handled by the
+		// Async AMP: a CloudEvent-shaped POST (Trigger delivery) is handled by the
 		// async consumer — decode → dedupe → invoke — on its own span, not the
 		// sync /invoke path. Checked before the agent.invoke span so a redelivered
 		// duplicate is acked without ever opening an invoke span.
@@ -245,7 +245,7 @@ func buildHandler(
 		}
 
 		// Extract the caller's W3C traceparent/tracestate (continues an
-		// existing trace for A2A calls; starts a new root if absent).
+		// existing trace for AMP calls; starts a new root if absent).
 		ctx := prop.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
 
 		ctx, span := tracer.Start(
@@ -261,8 +261,8 @@ func buildHandler(
 		// Capture the HTTP status code written by the upstream.
 		rw := &statusWriter{ResponseWriter: w, code: http.StatusOK}
 
-		// A2A inbound access control (callee side): if this /invoke carries an
-		// A2A envelope, enforce the callee's allowlist/role rules INSIDE the
+		// AMP inbound access control (callee side): if this /invoke carries an
+		// AMP envelope, enforce the callee's allowlist/role rules INSIDE the
 		// span before the request reaches the user container. A denial is
 		// written here and short-circuits — but the span still records the
 		// (denied) status and latency via the deferred End + attribute block.
@@ -284,12 +284,12 @@ func buildHandler(
 		outReq := r.Clone(ctx)
 		prop.Inject(ctx, propagation.HeaderCarrier(outReq.Header))
 
-		// Per-hop messageId (ADR 0035, m33.4): when this /invoke arrived via A2A, surface the
+		// Per-hop messageId (ADR 0035, m33.4): when this /invoke arrived via AMP, surface the
 		// envelope's messageId to the user container as X-Message-Id, so the agent's memory writes
 		// attribute to THIS hop (the :2998 endpoint stamps it, m33.1) and "who said what to whom"
 		// is addressable. A top-level /invoke (no envelope) sets nothing — the memory endpoint mints
-		// one. The messageId also already rides the trace (a2a.message.id).
-		if mid := a2aMessageIDFromEnvelopeHeader(r.Header); mid != "" {
+		// one. The messageId also already rides the trace (amp.message.id).
+		if mid := ampMessageIDFromEnvelopeHeader(r.Header); mid != "" {
 			outReq.Header.Set(messageIDHeader, mid)
 		}
 

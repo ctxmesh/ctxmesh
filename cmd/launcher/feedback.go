@@ -34,7 +34,7 @@ limitations under the License.
 // Langfuse; unit tests inject a mock. Same swap-at-interface pattern as the m9.3
 // prompt resolver and m9.4 scorer.
 //
-// Lifecycle discipline: same as the memory/:2998, A2A/:2997, and budget/:2996
+// Lifecycle discipline: same as the memory/:2998, AMP/:2997, and budget/:2996
 // listeners — goroutine ListenAndServe, graceful Shutdown on child exit, the
 // child-exit code still decides the process exit (this listener NEVER overrides
 // it). nil when disabled (no LANGFUSE_HOST → unbudgeted / trace-only agents are
@@ -95,7 +95,7 @@ type feedbackConfig struct {
 //	LANGFUSE_SCORES_PUBLIC_KEY: Langfuse public key for basic auth.
 //	LANGFUSE_SCORES_SECRET_KEY: Langfuse secret key for basic auth.
 //
-// Like the memory/A2A/gateway loaders, it does NOT hard-fail on missing creds
+// Like the memory/AMP/gateway loaders, it does NOT hard-fail on missing creds
 // when the gate is set — a misconfigured credential degrades to an auth failure
 // on the first Langfuse POST (a visible non-fatal error) rather than crashing
 // the launcher.
