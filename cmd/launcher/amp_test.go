@@ -361,7 +361,7 @@ func TestAMPChainedHopDoesNotAliasIncomingPath(t *testing.T) {
 // ── trace propagation (THE CRUX) ────────────────────────────────────────────
 
 // TestAMPTracePropagation asserts the child request to the peer carries the
-// SAME trace-id as the caller's active span, AND that the a2a.call span the
+// SAME trace-id as the caller's active span, AND that the amp.call span the
 // launcher emits is a child of that caller span. This is the property that
 // makes one trace tree span both agents.
 func TestAMPTracePropagation(t *testing.T) {
@@ -398,29 +398,29 @@ func TestAMPTracePropagation(t *testing.T) {
 		t.Errorf("envelope traceId = %q, want %q", cap.envelope.TraceID, parentTraceID)
 	}
 
-	// (3) The a2a.call span exists, is a child of the caller span, and carries
+	// (3) The amp.call span exists, is a child of the caller span, and carries
 	// the peer's span-id as ITS outbound parent (i.e. the peer nests under it).
 	var callSpan sdktrace.ReadOnlySpan
 	for _, sp := range rec.Ended() {
-		if sp.Name() == "a2a.call" {
+		if sp.Name() == "amp.call" {
 			callSpan = sp
 		}
 	}
 	if callSpan == nil {
-		t.Fatal("no a2a.call span recorded")
+		t.Fatal("no amp.call span recorded")
 	}
 	if callSpan.SpanContext().TraceID().String() != parentTraceID {
-		t.Errorf("a2a.call trace-id = %q, want same as caller %q",
+		t.Errorf("amp.call trace-id = %q, want same as caller %q",
 			callSpan.SpanContext().TraceID(), parentTraceID)
 	}
 	if callSpan.Parent().SpanID() != parentSC.SpanID() {
-		t.Errorf("a2a.call parent span-id = %q, want caller span-id %q — a2a.call is not nested under agent.invoke",
+		t.Errorf("amp.call parent span-id = %q, want caller span-id %q — amp.call is not nested under agent.invoke",
 			callSpan.Parent().SpanID(), parentSC.SpanID())
 	}
-	// (4) The traceparent the peer received names the a2a.call span as its
-	// parent span-id — so the peer's server span becomes a2a.call's child.
+	// (4) The traceparent the peer received names the amp.call span as its
+	// parent span-id — so the peer's server span becomes amp.call's child.
 	if fields[2] != callSpan.SpanContext().SpanID().String() {
-		t.Errorf("peer parent span-id = %q, want a2a.call span-id %q — peer will not nest under a2a.call",
+		t.Errorf("peer parent span-id = %q, want amp.call span-id %q — peer will not nest under amp.call",
 			fields[2], callSpan.SpanContext().SpanID())
 	}
 }
@@ -473,7 +473,7 @@ func newTestProxyWithGuard(t *testing.T, cfg ampConfig) (http.Handler, chan bool
 }
 
 // newTestProxyWithGuardRec is newTestProxyWithGuard plus the span recorder, so a
-// test can assert the deny span event (e.g. a2a.cross_registry_denied) the guard
+// test can assert the deny span event (e.g. amp.cross_registry_denied) the guard
 // records on the agent.invoke span.
 func newTestProxyWithGuardRec(t *testing.T, cfg ampConfig) (http.Handler, chan bool, *tracetest.SpanRecorder) {
 	t.Helper()
@@ -658,7 +658,7 @@ func TestAMPInboundDeniesMalformedEnvelope(t *testing.T) {
 // TestAMPInboundDeniesCrossRegistry verifies the app-layer registry-isolation
 // check: an inbound envelope whose registryId does NOT match the callee's own
 // registry is a hard deny with a typed cross_registry_denied (403), the upstream
-// (user container) is NOT reached, and the a2a.cross_registry_denied span event
+// (user container) is NOT reached, and the amp.cross_registry_denied span event
 // is recorded. This is layer 1 enforced app-layer — NetworkPolicy cannot isolate
 // Knative-routed AMP (kourier fronts every hop), which the m6.8 live e2e proved.
 func TestAMPInboundDeniesCrossRegistry(t *testing.T) {
@@ -676,7 +676,7 @@ func TestAMPInboundDeniesCrossRegistry(t *testing.T) {
 		t.Fatalf("cross-registry status = %d, want 403; body=%s", rr.Code, rr.Body.String())
 	}
 	assertAMPError(t, rr.Body.Bytes(), errCrossRegistry)
-	assertSpanEvent(t, rec, "agent.invoke", "a2a.cross_registry_denied")
+	assertSpanEvent(t, rec, "agent.invoke", "amp.cross_registry_denied")
 
 	// The upstream (user container) must NOT have been reached.
 	select {
@@ -706,7 +706,7 @@ func TestAMPCrossRegistryCheckedBeforeAllowlist(t *testing.T) {
 		t.Fatalf("status = %d, want 403", rr.Code)
 	}
 	assertAMPError(t, rr.Body.Bytes(), errCrossRegistry)
-	assertSpanEvent(t, rec, "agent.invoke", "a2a.cross_registry_denied")
+	assertSpanEvent(t, rec, "agent.invoke", "amp.cross_registry_denied")
 	select {
 	case <-reached:
 		t.Error("upstream reached despite a cross-registry caller on the allowlist")
@@ -827,7 +827,7 @@ func TestAMPEmptyPayloadIsNull(t *testing.T) {
 
 // TestCheckGuardsDepth verifies the max-depth guard: a chain at exactly
 // maxDepth passes; one beyond trips depth_exceeded with a typed 403 +
-// a2a.guard_tripped span event.
+// amp.guard_tripped span event.
 func TestCheckGuardsDepth(t *testing.T) {
 	t.Parallel()
 	const maxDepth = 4
@@ -876,7 +876,7 @@ func TestCheckGuardsDepth(t *testing.T) {
 		}
 		assertAMPError(t, rr.Body.Bytes(), errDepthExceeded)
 
-		// The a2a.guard_tripped span event must be recorded.
+		// The amp.guard_tripped span event must be recorded.
 		assertGuardTripped(t, rec, errDepthExceeded)
 	})
 }
@@ -1052,26 +1052,26 @@ func pathOf(n int) []string {
 	return path
 }
 
-// assertGuardTripped asserts that the span recorder captured an a2a.guard_tripped
-// event with the expected guard code on the a2a.call span.
+// assertGuardTripped asserts that the span recorder captured an amp.guard_tripped
+// event with the expected guard code on the amp.call span.
 func assertGuardTripped(t *testing.T, rec *tracetest.SpanRecorder, wantCode string) {
 	t.Helper()
 	for _, sp := range rec.Ended() {
-		if sp.Name() != "a2a.call" {
+		if sp.Name() != "amp.call" {
 			continue
 		}
 		for _, ev := range sp.Events() {
-			if ev.Name != "a2a.guard_tripped" {
+			if ev.Name != "amp.guard_tripped" {
 				continue
 			}
 			for _, attr := range ev.Attributes {
-				if string(attr.Key) == "a2a.guard" && attr.Value.AsString() == wantCode {
+				if string(attr.Key) == "amp.guard" && attr.Value.AsString() == wantCode {
 					return // found.
 				}
 			}
 		}
 	}
-	t.Errorf("no a2a.guard_tripped event with a2a.guard=%q found on a2a.call span", wantCode)
+	t.Errorf("no amp.guard_tripped event with amp.guard=%q found on amp.call span", wantCode)
 }
 
 // ── concurrency (-race) ─────────────────────────────────────────────────────

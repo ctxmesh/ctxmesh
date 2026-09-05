@@ -79,7 +79,7 @@ jobs:
         # Reuses the same M=1 cluster. Deploys two AgentRegistries + three
         # agents (orchestrator-a, worker-a in team-a; outsider-b in team-b) via
         # the slice. Asserts intra-registry A2A delegation, cross-registry
-        # BLOCKED, a cycle guard trip, and the a2a.call child span. NOTE: the
+        # BLOCKED, a cycle guard trip, and the amp.call child span. NOTE: the
         # cross-registry block is enforced APP-LAYER (the callee launcher's
         # registryId check — ADR 0007 addendum), which is CNI-agnostic, so this
         # registryId check — ADR 0007 addendum). On the M=7 stack Calico also

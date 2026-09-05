@@ -417,12 +417,12 @@ func (s *ampServer) handler() http.Handler {
 func (s *ampServer) handleCall(w http.ResponseWriter, r *http.Request) {
 	target := r.PathValue("targetAgent")
 
-	// The a2a.call span is the parent of the outbound request: its context,
+	// The amp.call span is the parent of the outbound request: its context,
 	// injected as traceparent, makes the callee's server span a child (§Design,
 	// "Tracing"). Extract the caller's inbound context first so a chained hop
 	// nests under the same trace, then start the child span under it.
 	ctx := s.prop.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
-	ctx, span := s.tracer.Start(ctx, "a2a.call", trace.WithSpanKind(trace.SpanKindClient))
+	ctx, span := s.tracer.Start(ctx, "amp.call", trace.WithSpanKind(trace.SpanKindClient))
 	defer span.End()
 	start := time.Now()
 	defer func() {
@@ -460,16 +460,16 @@ func (s *ampServer) handleCall(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(
 		attribute.Int("amp.depth", env.Depth),
 		attribute.Int("amp.budget_remaining", env.BudgetRemaining),
-		attribute.String("a2a.conversation.id", env.ConversationID),
+		attribute.String("amp.conversation.id", env.ConversationID),
 		attribute.String("amp.message.id", env.MessageID),
 	)
 
 	// m6.6: conversation guards (max depth / cycle / hop budget) run here
 	// against the OUTGOING envelope, before we forward. A non-nil guardError
-	// maps to a typed 403 + a2a.guard_tripped span event.
+	// maps to a typed 403 + amp.guard_tripped span event.
 	if guardErr := checkGuards(env, s.cfg.MaxDepth); guardErr != nil {
-		span.AddEvent("a2a.guard_tripped", trace.WithAttributes(
-			attribute.String("a2a.guard", guardErr.code),
+		span.AddEvent("amp.guard_tripped", trace.WithAttributes(
+			attribute.String("amp.guard", guardErr.code),
 		))
 		s.fail(w, span, http.StatusForbidden, guardErr.code, guardErr.detail)
 		return
@@ -509,7 +509,7 @@ func (s *ampServer) publishAsync(
 			"async AMP is not configured on this cluster (no async backend)")
 		return
 	}
-	span.SetAttributes(attribute.Bool("a2a.async", true))
+	span.SetAttributes(attribute.Bool("amp.async", true))
 	if err := publishEnvelope(ctx, s.client, s.cfg.AsyncPublishURL, capToken, env, s.offload); err != nil {
 		span.RecordError(err)
 		s.fail(w, span, http.StatusBadGateway, errUpstreamFailure, "async publish failed: "+err.Error())
@@ -627,7 +627,7 @@ func (s *ampServer) forward(
 	if capToken != "" {
 		outReq.Header.Set(runcap.HeaderName, capToken)
 	}
-	// Inject W3C traceparent from the a2a.call span's context so the callee
+	// Inject W3C traceparent from the amp.call span's context so the callee
 	// CONTINUES this trace (its agent.invoke becomes our child). THIS is what
 	// makes one trace tree span both agents.
 	s.prop.Inject(reqCtx, propagation.HeaderCarrier(outReq.Header))
@@ -788,7 +788,7 @@ func (g *ampGuard) allowCaller(env *envelope) (bool, string) {
 // the active agent.invoke span, so the denial is visible in the trace tree.
 func (g *ampGuard) deny(ctx context.Context, w http.ResponseWriter, caller, reason string) {
 	span := trace.SpanFromContext(ctx)
-	span.AddEvent("a2a.caller_denied", trace.WithAttributes(
+	span.AddEvent("amp.caller_denied", trace.WithAttributes(
 		attribute.String("amp.sender", caller),
 		attribute.String("amp.deny_reason", reason),
 	))
@@ -804,9 +804,9 @@ func (g *ampGuard) deny(ctx context.Context, w http.ResponseWriter, caller, reas
 func (g *ampGuard) denyCrossRegistry(ctx context.Context, w http.ResponseWriter, caller, gotRegistryID string) {
 	reason := fmt.Sprintf("caller %q is in registry %q, not %q", caller, gotRegistryID, g.cfg.RegistryID)
 	span := trace.SpanFromContext(ctx)
-	span.AddEvent("a2a.cross_registry_denied", trace.WithAttributes(
+	span.AddEvent("amp.cross_registry_denied", trace.WithAttributes(
 		attribute.String("amp.sender", caller),
-		attribute.String("a2a.caller.registry.id", gotRegistryID),
+		attribute.String("amp.caller.registry.id", gotRegistryID),
 		attribute.String("amp.registry.id", g.cfg.RegistryID),
 	))
 	span.SetAttributes(attribute.String("amp.error", errCrossRegistry))
@@ -852,7 +852,7 @@ type guardError struct {
 //     CostBudget at M8 — do NOT add shared cross-pod budget state here.
 //
 // A tripped guard is a typed best-effort denial: handleCall maps a non-nil
-// return to a 403 + a2a.guard_tripped span event; it never panics or crashes.
+// return to a 403 + amp.guard_tripped span event; it never panics or crashes.
 func checkGuards(env envelope, maxDepth int) *guardError {
 	// Guard 1: max depth.
 	if env.Depth > maxDepth {

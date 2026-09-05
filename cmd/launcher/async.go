@@ -21,7 +21,7 @@ package main
 // A Knative Trigger delivers a CloudEvent to the agent's ksvc; the launcher recognises it,
 // decodes the platform envelope, dedupes on the envelope's messageId against a short-TTL
 // Valkey seen-set, invokes the user container with the payload, and emits an
-// a2a.async.consume span recording the dedupe hit or miss.
+// amp.async.consume span recording the dedupe hit or miss.
 //
 // FAIL-CLOSED on the dedupe store: if it is unreachable or the per-op timeout fires, the
 // message is NOT processed — the consumer NACKs so the broker retries. A blip means the
@@ -185,14 +185,14 @@ func isCloudEventRequest(r *http.Request) bool {
 // blip the retry's dedupe check succeeds → exactly-once; persistent outage →
 // bounded retries exhaust → DLQ, no infinite block).
 func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
-	ctx, span := c.tracer.Start(r.Context(), "a2a.async.consume",
+	ctx, span := c.tracer.Start(r.Context(), "amp.async.consume",
 		trace.WithSpanKind(trace.SpanKindConsumer))
 	defer span.End()
 	start := time.Now()
 	defer func() {
 		span.SetAttributes(attribute.Int64("latency_ms", time.Since(start).Milliseconds()))
 	}()
-	span.SetAttributes(attribute.String("a2a.async.agent", c.cfg.SelfName))
+	span.SetAttributes(attribute.String("amp.async.agent", c.cfg.SelfName))
 
 	// Cap the inbound CloudEvent body before decoding — every other launcher
 	// inbound path (readAMPBody, readCappedBody) enforces this. Blob offload
@@ -202,7 +202,7 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 	evt, err := cloudevents.NewEventFromHTTPRequest(r)
 	if err != nil {
 		span.SetStatus(codes.Error, "decode CloudEvent: "+err.Error())
-		span.SetAttributes(attribute.String("a2a.async.error", "bad_cloudevent"))
+		span.SetAttributes(attribute.String("amp.async.error", "bad_cloudevent"))
 		writeJSONError(w, http.StatusBadRequest, "invalid CloudEvent: "+err.Error())
 		return
 	}
@@ -210,7 +210,7 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 	env, err := cloudEventToEnvelope(*evt)
 	if err != nil {
 		span.SetStatus(codes.Error, "decode envelope: "+err.Error())
-		span.SetAttributes(attribute.String("a2a.async.error", "bad_envelope"))
+		span.SetAttributes(attribute.String("amp.async.error", "bad_envelope"))
 		writeJSONError(w, http.StatusBadRequest, "invalid async envelope: "+err.Error())
 		return
 	}
@@ -218,7 +218,7 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 		attribute.String("amp.message.id", env.MessageID),
 		attribute.String("amp.sender", env.SenderAgentID),
 		attribute.String("amp.receiver", env.ReceiverAgentID),
-		attribute.String("a2a.conversation.id", env.ConversationID),
+		attribute.String("amp.conversation.id", env.ConversationID),
 	)
 
 	// Dedupe on messageId (fail-closed, M11). Three outcomes from markSeen:
@@ -237,7 +237,7 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 	}
 	if !firstSeen {
 		span.SetAttributes(attribute.Bool("amp.dedup_hit", true))
-		span.AddEvent("a2a.async.dedup_hit")
+		span.AddEvent("amp.async.dedup_hit")
 		// 204: acked, not re-processed.
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -256,7 +256,7 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 		rehydrated, wasRef, rErr := c.offload.rehydrate(ctx, env.Payload)
 		if rErr != nil {
 			span.SetStatus(codes.Error, "rehydrate payload: "+rErr.Error())
-			span.SetAttributes(attribute.String("a2a.async.error", "rehydrate_failed"))
+			span.SetAttributes(attribute.String("amp.async.error", "rehydrate_failed"))
 			// NACK (502): a $ref we cannot resolve must DLQ, not reach the agent.
 			writeJSONError(w, http.StatusBadGateway, "rehydrate payload failed: "+rErr.Error())
 			return
@@ -277,7 +277,7 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 		// retries, then DLQs after the retry budget. NOT an ack — the message was
 		// not processed.
 		span.SetStatus(codes.Error, "agent invoke: "+err.Error())
-		span.SetAttributes(attribute.String("a2a.async.error", "agent_unreachable"))
+		span.SetAttributes(attribute.String("amp.async.error", "agent_unreachable"))
 		writeJSONError(w, http.StatusBadGateway, "agent invoke failed: "+err.Error())
 		return
 	}
@@ -314,7 +314,7 @@ func (c *asyncConsumer) markSeen(ctx context.Context, span trace.Span, messageID
 	if err != nil {
 		// Fail CLOSED: surface the error so consume NACKs. Record it on the span
 		// so the operator can observe the fail-closed decision and error detail.
-		span.AddEvent("a2a.async.dedup_fail_closed", trace.WithAttributes(
+		span.AddEvent("amp.async.dedup_fail_closed", trace.WithAttributes(
 			attribute.String("error", err.Error()),
 		))
 		return false, err
