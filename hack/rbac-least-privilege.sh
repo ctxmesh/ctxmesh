@@ -122,6 +122,13 @@ PY
 # question is what an install actually gets.
 chart_bad=0
 CHART="$(cd "$(dirname "$0")/.." && pwd)/deploy/helm/ctxmesh"
+# A missing pyyaml must not look like a pass. Without this the python below tracebacks, the
+# `if` treats it as a failed render, and the whole chart check is silently skipped — a gate
+# that stops checking when its dependency goes missing is worse than no gate.
+if ! python3 -c "import yaml" >/dev/null 2>&1; then
+  echo "FAIL: python3 has no pyyaml — this gate cannot inspect the rendered chart (pip install pyyaml)" >&2
+  exit 1
+fi
 if command -v helm >/dev/null 2>&1 && [ -d "$CHART" ]; then
   rendered_file="$(mktemp)"
   trap 'rm -f "$rendered_file"' EXIT
