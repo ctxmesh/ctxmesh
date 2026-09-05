@@ -511,7 +511,7 @@ func (r *AgentDeploymentReconciler) setCanaryTraffic(
 	// Build the candidate revision template exactly as the promote path does. This
 	// applies the candidate pod spec (creating the candidate revision) and leaves
 	// ksvc.Spec.Template with the candidate's name.
-	ksvc, err := r.reconcileKnativeService(ctx, deploy, hash)
+	ksvc, _, err := r.reconcileKnativeService(ctx, deploy, hash)
 	if err != nil {
 		return fmt.Errorf("reconciling Knative Service for canary: %w", err)
 	}

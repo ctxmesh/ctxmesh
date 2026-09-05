@@ -33,6 +33,7 @@ from ctxmesh.knowledge import KnowledgeClient
 from ctxmesh.memory import MemoryClient
 from ctxmesh.mesh import MeshClient
 from ctxmesh.model import ModelClient
+from ctxmesh.skills import SkillsClient
 from ctxmesh.tools import ToolsClient
 from ctxmesh.trace import TraceClient
 
@@ -49,6 +50,7 @@ class Client:
         self._config = config
         self.memory = MemoryClient(config)
         self.knowledge = KnowledgeClient(config)
+        self.skills = SkillsClient(config)
         self.tools = ToolsClient(config)
         self.feedback = FeedbackClient(config)
         self.mesh = MeshClient(config)

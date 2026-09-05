@@ -51,6 +51,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/enduseragent"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/killscope"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/skill"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/spawnbudget"
 	"github.com/ctxmesh/ctxmesh/internal/eval"
 	"github.com/ctxmesh/ctxmesh/internal/gateway"
@@ -245,6 +246,11 @@ const jobBackoffLimit int32 = 2
 type AgentDeploymentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// Skills resolves spec.skillRefs to pinned digests (ADR 0137). Nil when the install has no
+	// control-plane database — an agent that attaches no skills is unaffected, and one that
+	// does is failed honestly rather than deployed with them silently missing.
+	Skills skill.Resolver
 
 	// APIReader is an UNCACHED reader (the manager's API reader). The collector's
 	// Langfuse telemetry Secret is read through it, NOT the cache: a cached read is
@@ -664,11 +670,11 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 		return r.recordHeldGate(ctx, deploy, versionName, outcome)
 	}
 
-	ksvc, err := r.reconcileKnativeService(ctx, deploy, hash)
+	ksvc, resolvedSkills, err := r.reconcileKnativeService(ctx, deploy, hash)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling Knative Service: %w", err)
 	}
-	if err = r.syncStatus(ctx, deploy, ksvc, versionName); err != nil {
+	if err = r.syncStatus(ctx, deploy, ksvc, versionName, resolvedSkills); err != nil {
 		return ctrl.Result{}, fmt.Errorf("syncing status: %w", err)
 	}
 	// Promoted/warned: record the terminal gate status (+ annotations) alongside the
@@ -929,6 +935,10 @@ type podTemplate struct {
 	// digest is the combined structural digest ("" when no binding/membership
 	// resolves), used as the "-h<digest>" revision/name suffix.
 	digest string
+	// resolvedSkills is what spec.skillRefs resolved to — "<name>@sha256:…", always digests.
+	// Carried out so the reconciler can record it in status and in the AgentVersion snapshot:
+	// an alias may move, and the snapshot must describe content that cannot.
+	resolvedSkills []string
 	// membership is the resolved M6 registry context (used by the eventing
 	// Trigger for the broker name and the CloudEvent filter).
 	membership registryMembership
@@ -1799,6 +1809,39 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	if toolPolicyMount != nil {
 		toolDigest += "p" + toolPolicyPresenceDigest()
 	}
+	// Resolve the attached skills to PINNED digests before anything else uses them. An alias is
+	// followed exactly once, here, and what the agent carries is the digest — so re-pointing an
+	// alias cannot change a running agent, and a replay fixture describes content that cannot
+	// move. A failure is returned rather than skipped: an agent deployed with its skills
+	// silently missing is worse than one that refuses to deploy.
+	var resolvedSkills []string
+	var skillDescriptions map[string]string
+	if len(deploy.Spec.SkillRefs) > 0 {
+		if r.Skills == nil {
+			return podTemplate{}, fmt.Errorf(
+				"agent attaches %d skill(s) but this install has no skill store", len(deploy.Spec.SkillRefs))
+		}
+		var err error
+		resolvedSkills, err = skill.ResolveAll(ctx, r.Skills, deploy.Namespace, deploy.Spec.SkillRefs)
+		if err != nil {
+			return podTemplate{}, fmt.Errorf("resolve skillRefs: %w", err)
+		}
+		names := make([]string, 0, len(resolvedSkills))
+		for _, ref := range resolvedSkills {
+			if n, _, ok := strings.Cut(ref, "@"); ok {
+				names = append(names, n)
+			}
+		}
+		// A description lookup failure is NOT fatal. The refs are what make the agent correct;
+		// descriptions only make its skills easier for the model to choose between. Failing the
+		// deploy over a missing description would trade a working agent for a cosmetic gap.
+		if d, derr := r.Skills.Describe(ctx, deploy.Namespace, names); derr == nil {
+			skillDescriptions = d
+		} else {
+			logf.FromContext(ctx).Error(derr, "reading skill descriptions failed; agent deploys without them",
+				"agent", deploy.Name)
+		}
+	}
 	memDigest := memoryDigest(hasMemory, memAddr)
 	// Long-term memory (M46, ADR 0045) is a structural pod change (env injected) → fold it into the
 	// memory digest so enabling/disabling it or changing perUser/embeddingRoute rolls a new revision
@@ -1882,6 +1925,25 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// (identityDig, above) rolls a plain agent onto the SA once without re-rolling the proxy fleet.
 	saName := agentIdentitySAName(deploy.Name)
 
+	// Only the REFS reach the pod, never the bodies — that is progressive disclosure made
+	// concrete. Mounting every attached body would defeat the whole reason skills exist rather
+	// than a longer prompt.
+	containers = injectSkills(containers, resolvedSkills, skillDescriptions, false)
+
+	// Attached skills fold in AFTER the combined digest rather than as an eleventh component, the
+	// same shape the launcher image uses below. An agent with NO skills is left byte-identical,
+	// so upgrading the platform does not re-roll every existing agent for a feature it does not
+	// use — the pre-M161 revision name is preserved exactly.
+	//
+	// What is hashed is the RESOLVED refs, not the spec's strings. Two specs both saying
+	// "summarise@stable" are the same spec, but if the alias moved between them they are
+	// different agents — so an alias move rolls a revision, and a re-resolution to the same
+	// digests does not.
+	if d := skillDigest(resolvedSkills); d != "" {
+		sum := sha256.Sum256([]byte(combinedDigest + "|skills:" + d))
+		combinedDigest = fmt.Sprintf("%x", sum[:])[:8]
+	}
+
 	// C8 launcher injection (ADR 0079): when LAUNCHER_IMAGE is configured, inject the launcher-inject
 	// initContainer + shared emptyDir and override the user container's Command. Fold the launcher image
 	// into the structural digest so a LAUNCHER_IMAGE change ROLLS A NEW REVISION — initContainers run only
@@ -1916,6 +1978,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		membership:         membership,
 		port:               port,
 		serviceAccountName: saName,
+		resolvedSkills:     resolvedSkills,
 	}, nil
 }
 
@@ -2226,13 +2289,13 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	ctx context.Context,
 	deploy *agentsv1alpha1.AgentDeployment,
 	hash string,
-) (*servingv1.Service, error) {
+) (*servingv1.Service, []string, error) {
 	pod, err := r.buildPodTemplate(ctx, deploy)
 	if err != nil {
-		return nil, fmt.Errorf("building pod template: %w", err)
+		return nil, nil, fmt.Errorf("building pod template: %w", err)
 	}
 	if err = r.ensureAgentIdentitySA(ctx, deploy, pod.serviceAccountName, pod.membership.RegistryID); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	revName := deploy.Name + "-" + hash
@@ -2242,7 +2305,7 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 
 	annotations, err := r.autoscalingAnnotations(ctx, deploy)
 	if err != nil {
-		return nil, fmt.Errorf("resolving autoscaling annotations: %w", err)
+		return nil, nil, fmt.Errorf("resolving autoscaling annotations: %w", err)
 	}
 	// C8d auditability: when the launcher was injected, stamp its image on the revision so an operator can
 	// query "which agents still run launcher X" (the injected image is also on the initContainer, but the
@@ -2296,10 +2359,10 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 		return ctrl.SetControllerReference(deploy, ksvc, r.Scheme)
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return ksvc, nil
+	return ksvc, pod.resolvedSkills, nil
 }
 
 // autoscalingAnnotations returns the Knative autoscaling annotations for the
@@ -2472,6 +2535,7 @@ func (r *AgentDeploymentReconciler) syncStatus(
 	deploy *agentsv1alpha1.AgentDeployment,
 	ksvc *servingv1.Service,
 	latestVersion string,
+	resolvedSkills []string,
 ) error {
 	readyStatus := metav1.ConditionUnknown
 	readyReason := "AwaitingKnativeController"
@@ -2508,6 +2572,11 @@ func (r *AgentDeploymentReconciler) syncStatus(
 		deploy.Status.ExternalURL = ksvc.Status.URL.String()
 	}
 	deploy.Status.LatestVersion = latestVersion
+	// What the refs RESOLVED TO — digests, never the aliases that produced them. This is the
+	// record that makes a skilled agent reproducible: an alias can be re-pointed at any moment,
+	// and a snapshot holding the alias would describe different content tomorrow while still
+	// reporting green.
+	deploy.Status.ResolvedSkills = resolvedSkills
 	deploy.Status.ObservedGeneration = deploy.Generation
 
 	// M137/EU1b (ADR 0107): mirror end-user exposure. Endpoint = the agent URL only when Ready, so the
@@ -2765,6 +2834,24 @@ func combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDigest, promp
 	h := sha256.Sum256([]byte("b=" + toolDigest + ";m=" + memDigest + ";r=" + regDigest +
 		";g=" + budgetDigest + ";p=" + promptDigest + ";t=" + tenantDigest + ";x=" + proxyDigest +
 		";rt=" + runtimeDigest + ";gr=" + guardrailDigest + ";kb=" + kbDigest))
+	return fmt.Sprintf("%x", h[:])[:8]
+}
+
+// skillDigest folds the RESOLVED skill refs into the revision digest.
+//
+// Resolved, not the spec's own strings, and that distinction is the whole point: two specs
+// naming "summarise@stable" are the same spec, but if the alias moved between them they are
+// different agents. Digesting what the refs resolved TO makes an alias move roll a new revision,
+// exactly as editing the list does — while re-resolving to the same digests changes nothing and
+// causes no needless roll.
+//
+// Empty when no skills are attached, so an agent without them keeps a byte-identical revision
+// name (the pre-M161 value) and does not roll on upgrade.
+func skillDigest(resolved []string) string {
+	if len(resolved) == 0 {
+		return ""
+	}
+	h := sha256.Sum256([]byte(strings.Join(resolved, ",")))
 	return fmt.Sprintf("%x", h[:])[:8]
 }
 

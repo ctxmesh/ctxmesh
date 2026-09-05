@@ -48,6 +48,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/publishedartifact"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/sharedrun"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/skill"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/spawnbudget"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/ctxmesh/internal/credplane"
@@ -114,6 +115,11 @@ type Server struct {
 	// m73.3). Used by GET /api/catalog to resolve tenant membership without BFF RBAC on namespaces
 	// (ADR 0011). nil ⇒ the catalog degrades to own-ns + public only (fail-closed, never a panic).
 	namespaceTenantStore namespacetenant.Store
+	// skillStore is the control-plane store for Skills (ADR 0137). nil when the install has no
+	// control-plane database — the skills endpoints then return an honest 501 rather than an
+	// empty list, because "no skills exist" and "skills are not available here" are different
+	// facts and must not collapse into one.
+	skillStore skill.Store
 
 	// publishedArtifactStore is the control-plane Postgres store for published_artifacts — the
 	// immutable, versioned snapshot-at-publish table (M74, m74.1, ADR 0068 §1). POST /api/templates
@@ -550,6 +556,7 @@ type Options struct {
 	// m73.3). Wired from CONTROLPLANE_DSN in cmd/bff/main.go alongside ToolRegistryStore. nil ⇒
 	// GET /api/catalog degrades to own-ns + public only (fail-closed), never a panic.
 	NamespaceTenantStore namespacetenant.Store
+	SkillStore           skill.Store
 
 	// KillScopes records active emergency stops (M146, ADR 0126). Optional: nil leaves the kill switch
 	// inert rather than failing closed on every claim, so an install that never provisions it is
@@ -692,6 +699,7 @@ func NewServer(opts Options) *Server {
 		promptStore:              opts.PromptStore,
 		toolRegistryStore:        opts.ToolRegistryStore,
 		namespaceTenantStore:     opts.NamespaceTenantStore,
+		skillStore:               opts.SkillStore,
 		endUserVerifier:          opts.EndUserVerifier,
 		saIssuer:                 strings.TrimSpace(opts.SAIssuer),
 		endUserAgentStore:        opts.EndUserAgentStore,
@@ -1277,6 +1285,15 @@ func (s *Server) Handler() http.Handler {
 			authed.Handle("PUT /api/promptversions/{ns}/{name}", notImplemented("prompt version update"))
 		}
 		authed.HandleFunc("DELETE /api/promptversions/{ns}/{name}", s.handleDeletePromptVersion)
+
+		// Skills (ADR 0137). Postgres-authoritative like promptversions, and authorized the
+		// same way: a caller-scoped SSAR on `skills`, so the BFF gains no privilege and the
+		// decision is exactly the one the API server would have made for a CRD.
+		authed.HandleFunc("GET /api/skills", s.handleListSkills)
+		authed.HandleFunc("GET /api/skills/{ns}/{name}", s.handleGetSkill)
+		authed.HandleFunc("POST /api/skills", s.handleUpsertSkill)
+		authed.HandleFunc("POST /api/skills/{ns}/{name}/versions", s.handleAddSkillVersion)
+		authed.HandleFunc("DELETE /api/skills/{ns}/{name}", s.handleDeleteSkill)
 		// RBAC-aware chrome (ADR 0012, ui-foundation §3). All three run through the
 		// CALLER-SCOPED client — whoami/capabilities are DISPLAY-ONLY (they gate
 		// nothing server-side; enforcement stays with K8s, ADR 0011), and namespaces
@@ -1346,6 +1363,11 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("POST /api/promptversions", notImplemented("caller-scoped prompt version create"))
 		authed.Handle("PUT /api/promptversions/{ns}/{name}", notImplemented("caller-scoped prompt version update"))
 		authed.Handle("DELETE /api/promptversions/{ns}/{name}", notImplemented("caller-scoped prompt version delete"))
+		authed.Handle("GET /api/skills", notImplemented("caller-scoped skill list"))
+		authed.Handle("GET /api/skills/{ns}/{name}", notImplemented("caller-scoped skill detail"))
+		authed.Handle("POST /api/skills", notImplemented("caller-scoped skill create"))
+		authed.Handle("POST /api/skills/{ns}/{name}/versions", notImplemented("caller-scoped skill version add"))
+		authed.Handle("DELETE /api/skills/{ns}/{name}", notImplemented("caller-scoped skill delete"))
 		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
 		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
 		authed.Handle("GET /api/namespaces", notImplemented("caller-scoped namespaces"))

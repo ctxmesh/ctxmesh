@@ -516,6 +516,13 @@ func (m *memoryServer) handler() http.Handler {
 	if m.knowledge != nil {
 		m.knowledge.register(mux)
 	}
+	// Attached skills (ADR 0137) — served entirely from injected env and a mounted directory,
+	// so neither endpoint makes a network call. Registered only when skills are attached: an
+	// agent without them 404s, which is the honest answer, rather than returning an empty list
+	// that reads as "none are configured".
+	if sk := newSkillServer(); sk != nil {
+		sk.register(mux)
+	}
 	return mux
 }
 
