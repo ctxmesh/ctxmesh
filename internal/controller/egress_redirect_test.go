@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -39,22 +40,70 @@ func TestEgressRedirect_RuleOrderExemptsBeforeRedirecting(t *testing.T) {
 	assert.Less(t, idx("--uid-owner"), redirect, "the sidecar exemption must precede the catch-all")
 	assert.Less(t, idx("-o lo"), redirect, "loopback must precede the catch-all")
 	assert.Less(t, idx("10.96.0.0/16"), redirect, "excluded destinations must precede the catch-all")
-	assert.Equal(t, len(rules)-1, redirect, "REDIRECT is the LAST rule — everything unexempted falls into it")
+	// REDIRECT is the last rule IN THE NAT TABLE — everything unexempted falls into it. The UDP
+	// rules that follow live in the filter table and cannot catch TCP, so they do not weaken this.
+	natRules := 0
+	for _, r := range rules {
+		if strings.Contains(r, "-t nat") {
+			natRules++
+		}
+	}
+	assert.Equal(t, natRules-1, redirect, "REDIRECT is the last NAT rule — everything unexempted falls into it")
 }
 
 // The sidecar is exempted by its UID, which must match the UID its image actually runs as
-// (Dockerfile.egress-sidecar: USER 65532:65532). Exempting the wrong UID would loop the sidecar's own
-// forwarded call straight back into itself.
+// (Dockerfile.egress-sidecar). Exempting the wrong UID would loop the sidecar's own forwarded call
+// straight back into itself.
+//
+// Asserted against the CONSTANT, not a literal. The literal is how this drifted: the exemption sat
+// on 65532 — the standard distroless `nonroot` uid — while the agent's own container uid is
+// deliberately unconstrained, so any agent image following that near-universal convention was
+// exempt from egress control entirely and still passed every check.
 func TestEgressRedirect_ExemptsTheSidecarByItsRealUID(t *testing.T) {
 	rules := egressRedirectRules(nil)
-	assert.Contains(t, strings.Join(rules, "\n"), "--uid-owner 65532",
+	assert.Contains(t, strings.Join(rules, "\n"), fmt.Sprintf("--uid-owner %d", egressSidecarUID),
 		"the exempted UID must be the one Dockerfile.egress-sidecar runs as")
+}
+
+// The exempted UID must NOT be a uid a base image is likely to pick, because anything running as it
+// bypasses the redirect silently — egress control simply stops applying, with no error anywhere.
+func TestEgressRedirect_ExemptedUIDIsNotACommonConvention(t *testing.T) {
+	assert.NotEqual(t, distrolessNonRootUID, egressSidecarUID,
+		"65532 is the distroless nonroot default; an agent image using it would bypass the redirect")
+	for _, common := range []int{0, 1000, 1001, 999, 100} {
+		assert.NotEqual(t, common, egressSidecarUID, "uid %d is a common base-image default", common)
+	}
+}
+
+// UDP is DENIED rather than redirected, because there is nothing to redirect it into — the sidecar
+// speaks HTTP. Leaving it open left two real holes: QUIC (HTTP/3 on UDP 443) bypasses the TCP
+// redirect completely, and arbitrary UDP is an exfiltration channel that never touches the sidecar.
+// DNS to the cluster resolver is kept, because the pod genuinely needs it.
+func TestEgressRedirect_DeniesUDPExceptDNS(t *testing.T) {
+	joined := strings.Join(egressRedirectRules(nil), "\n")
+	assert.Contains(t, joined, "-A CTXMESH_UDP -p udp --dport 53 -j RETURN", "DNS must still work")
+	assert.Contains(t, joined, "-A CTXMESH_UDP -j DROP", "everything else UDP is denied")
+
+	udp := egressRedirectRules(nil)
+	dnsIdx, dropIdx := -1, -1
+	for i, r := range udp {
+		if strings.Contains(r, "--dport 53") {
+			dnsIdx = i
+		}
+		if strings.Contains(r, "CTXMESH_UDP -j DROP") {
+			dropIdx = i
+		}
+	}
+	require.NotEqual(t, -1, dnsIdx)
+	require.NotEqual(t, -1, dropIdx)
+	assert.Less(t, dnsIdx, dropIdx, "the DNS exemption must precede the catch-all DROP or DNS breaks")
 }
 
 // Redirected traffic must land on the sidecar's actual listener port.
 func TestEgressRedirect_RedirectsToTheSidecarPort(t *testing.T) {
 	rules := egressRedirectRules(nil)
-	assert.Contains(t, rules[len(rules)-1], "--to-ports 8899",
+	joined := strings.Join(rules, "\n")
+	assert.Contains(t, joined, "--to-ports 8899",
 		"the redirect target is the egress sidecar's listen port")
 	assert.Contains(t, egressSidecarListenAddr, "8899",
 		"and that port is the one the sidecar is configured to bind — if these drift, egress black-holes")

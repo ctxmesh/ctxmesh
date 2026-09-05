@@ -21,5 +21,10 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
 
 FROM gcr.io/distroless/static:nonroot
 COPY --from=builder /workspace/egress-sidecar /egress-sidecar
-USER 65532:65532
+# 64535, NOT the distroless 65532 default. The L4 redirect exempts this UID from netfilter so
+# the sidecar's forwarded calls reach the real tool instead of looping back into itself — which
+# means ANY process running as this UID bypasses the redirect entirely. 65532 is the standard
+# distroless `nonroot` uid, so an agent image using that near-universal convention was exempt
+# from egress control by coincidence. A dedicated uid makes the collision improbable instead.
+USER 64535:64535
 ENTRYPOINT ["/egress-sidecar"]
