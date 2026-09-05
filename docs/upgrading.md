@@ -76,3 +76,72 @@ before upgrading, not after.
 Upgrade one minor version at a time. Skipping versions is untested, and a schema
 migration that assumes the immediately previous shape has no way to tell you it was
 skipped.
+
+## M162 — the agent container is hardened by default (BREAKING for root images)
+
+**What changed.** The agent's own container now gets a `securityContext`: `runAsNonRoot`, no
+privilege escalation, all capabilities dropped, `RuntimeDefault` seccomp. Before this release it
+had **none** — the controller applied one only to the launcher-inject initContainer, so every
+agent image ran with whatever the container runtime allowed.
+
+**What breaks.** An image whose process runs as **root** will not start. The kubelet refuses it
+with:
+
+```
+Error: container has runAsNonRoot and image will run as root
+```
+
+That failure is deliberate and loud. The alternative — silently leaving the container
+unhardened — is the shape of bug this platform has spent several releases removing: a control
+that appears configured and protects nothing.
+
+**Two ways forward.**
+
+Rebuild the image to run as a non-root user (preferred). Any non-root uid works; the platform
+enforces "not root" without dictating which:
+
+```dockerfile
+USER 1000:1000
+```
+
+Or declare the exception on the agent, per agent, so the decision is visible in the spec and in
+review:
+
+```yaml
+spec:
+  unconfined: true   # this image genuinely needs root
+```
+
+**What is deliberately NOT enforced.** A read-only root filesystem and a pinned uid. Both break a
+large fraction of real images — anything writing to `/tmp`, anything with a baked-in uid — and a
+default that breaks most images is one operators disable wholesale, leaving them with less
+protection than a narrower default they keep.
+
+**Every agent takes one new revision** on upgrade, because the hardening is folded into the
+revision digest. It has to be: a pod-spec change that does not move the revision name is dropped
+by the reconciler's update guard, so a securityContext that did not roll the revision would never
+reach a running pod.
+
+## M162 — the launcher plane is bound to loopback
+
+The five pod-internal launcher listeners (`:2994` delegate, `:2995` feedback, `:2996` budget /
+guardrail proxy, `:2997` A2A, `:2998` memory / knowledge) now bind `127.0.0.1` instead of every
+interface. They were always documented as localhost listeners; binding `:port` exposed them on
+the **pod IP**, where any same-tenant pod could reach them — and the launcher attaches the pod's
+own projected ServiceAccount token to whatever arrives, spending the victim's identity for the
+caller.
+
+No action is required unless something outside the agent pod was calling those ports, which was
+never a supported arrangement. The agent's own serving port is unchanged: the kubelet dials the
+pod IP for the readiness and liveness probes.
+
+## M162 — egress: a dedicated sidecar uid, and UDP is denied
+
+The L4 egress redirect exempted uid **65532** so the sidecar's forwarded calls would not loop back
+into itself. That is also the standard distroless `nonroot` uid, so an agent image using that
+convention was exempt from egress control entirely. The sidecar now runs as **64535**.
+
+UDP was not redirected at all — every rule was `-p tcp`. QUIC (HTTP/3 on UDP 443) therefore
+bypassed the redirect completely, and arbitrary UDP was an open channel. UDP is now dropped except
+DNS to the cluster resolver. **If an agent relies on HTTP/3 or on non-DNS UDP, it will now fail**;
+route it over TCP.

@@ -306,7 +306,7 @@ func buildMemoryHTTPServer(
 		store = newRedisStore(cfg.Memory.BackendAddr)
 	}
 	return &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Memory.Port),
+		Addr:    loopbackAddr(cfg.Memory.Port),
 		Handler: newMemoryServer(store, cfg.Memory, tracer, ltProxy, kbProxy).handler(),
 	}
 }
@@ -584,6 +584,19 @@ func validateConversationID(id string) error {
 	}
 	return nil
 }
+
+// loopbackAddr binds a pod-internal listener to 127.0.0.1 rather than every interface.
+//
+// These listeners are documented as "localhost" throughout and are only ever called by the agent
+// process beside them — but binding ":%d" exposed them on the POD IP. The tenant isolation
+// NetworkPolicy's intra-tenant ingress rule carries no port restriction, so any same-tenant pod
+// could reach another agent's :2994/:2996/:2997/:2998 — and the launcher attaches the VICTIM
+// pod's projected SA token to whatever arrives, spending the victim's identity for the caller.
+// Cross-agent memory read/write, with no skills involved.
+//
+// The agent's own serving port is deliberately NOT changed: the kubelet dials the pod IP for the
+// readiness and liveness probes, so that one must stay reachable.
+func loopbackAddr(port int) string { return fmt.Sprintf("127.0.0.1:%d", port) }
 
 // writeJSONError writes a JSON {"error": msg} body with the given status. It is
 // the single error shape across the endpoint (best-effort contract).

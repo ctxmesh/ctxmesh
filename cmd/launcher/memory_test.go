@@ -1206,7 +1206,12 @@ func TestBuildMemoryHTTPServer_KnowledgeOnlyBindsDefaultPort(t *testing.T) {
 	if srv == nil {
 		t.Fatal("buildMemoryHTTPServer returned nil for a knowledge-only agent (kbProxy set)")
 	}
-	if want := fmt.Sprintf(":%d", defaultMemoryPort); srv.Addr != want {
-		t.Errorf("Addr = %q, want %q (the knowledge listener must bind the default memory port)", srv.Addr, want)
+	// LOOPBACK, not every interface. Binding ":2998" exposed the plane on the POD IP, and the
+	// tenant NetworkPolicy's intra-tenant ingress rule carries no port restriction — so any
+	// same-tenant pod could call it and have this launcher attach OUR projected SA token to
+	// their request.
+	if want := loopbackAddr(defaultMemoryPort); srv.Addr != want {
+		t.Errorf("Addr = %q, want %q (the knowledge listener must bind the default memory port, on loopback)",
+			srv.Addr, want)
 	}
 }
