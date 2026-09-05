@@ -9,7 +9,6 @@ import {
   attentionRows,
   bounds,
   census,
-  stages,
 } from "@/pages/dashboard-page";
 import { UNKNOWN, isKnown } from "@/components/kit";
 import type { AgentSummary } from "@/lib/api";
@@ -342,29 +341,6 @@ describe("census", () => {
 
   it("carries the window's completeness, which is the whole authority story", () => {
     expect(census(FLEET, false).complete).toBe(false);
-  });
-});
-
-describe("stages", () => {
-  it("states a fact per stage when the window IS the fleet", () => {
-    const cells = stages(census(FLEET, true), 2);
-    expect(cells.map((s) => s.name)).toEqual(["Build", "Govern", "Ship", "Improve"]);
-    expect(cells.every((s) => s.fact !== undefined)).toBe(true);
-  });
-
-  it("omits every fleet fact when the window is one page — never a partial count", () => {
-    const cells = stages(census(FLEET, false), 2);
-    for (const cell of cells.slice(0, 3)) expect(cell.fact).toBeUndefined();
-    // No stage may be lit either: a lit stage is a position claim.
-    expect(cells.some((s) => s.active)).toBe(false);
-  });
-
-  it("leaves Improve unanswered when the alert store did not answer", () => {
-    expect(stages(census(FLEET, true), undefined)[3].fact).toBeUndefined();
-  });
-
-  it("never lights Improve — nothing on this page places an agent there", () => {
-    expect(stages(census(FLEET, true), 0)[3].active).toBeFalsy();
   });
 });
 

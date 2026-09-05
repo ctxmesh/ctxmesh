@@ -29,7 +29,7 @@ import {
   type StatusTone,
 } from "@/components/kit";
 import { api, ApiError, type AgentSummary } from "@/lib/api";
-import { BUCKETS, type Bucket, bucketOf } from "@/lib/lifecycle";
+import { BUCKETS, HALTED, type Bucket, bucketOf } from "@/lib/lifecycle";
 import { useCapabilities } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_AGENTS } from "@/lib/nav";
@@ -107,7 +107,6 @@ const ATTENTION: Record<StatusTone, number> = {
  * not projected into `AgentSummary` — so it is read the same way `resolveStatus`
  * reads a phase: from the words the backend actually sent. No match, no claim.
  */
-const HALTED = /(^|[^a-z])(suspend(ed)?|stopped|halted|killed)([^a-z]|$)/i;
 
 /** Reasons that name a promotion gate, which gets the more specific next step. */
 const PROMOTION = /promot/i;

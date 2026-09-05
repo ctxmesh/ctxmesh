@@ -18,11 +18,8 @@ import {
   SkeletonCard,
   UNKNOWN,
   isKnown,
-  lifecycleFactNumber,
   meterState,
   resourcePath,
-  type LifecycleStage,
-  type LifecycleStageCell,
   type NextStepTone,
   type Quantity,
   type StopScopeKind,
@@ -53,11 +50,15 @@ import { FIRST_RUN_CHECKLIST, RES_AGENTS } from "@/lib/nav";
 // Everything on it is ordered by how loudly the answer is "you", and nothing is
 // here for any other reason:
 //
-//   1. StopNotice     — work is halted right now. Nothing outranks that.
-//   2. LifecycleStrip — the fleet census: where every agent sits, Build → Improve.
-//   3. Waiting on a person — the decisions blocked ON A HUMAN.
-//   4. Spending       — the bounds, and how close each is to refusing work.
-//   5. Needs looking at · Alerts — what is broken or drifting but not blocking.
+//   1. Status line — the scope, the size, and whether anything wants you.
+//   2. Needs you   — ONE ranked list of everything blocked on a human: what is
+//      stopped, who is waiting (oldest first), what is broken, what is alarming.
+//      These were four separate surfaces, which meant four places to look.
+//   3. Fleet · Spending — where every agent sits, and how close each bound is to
+//      refusing work. Every stage of the fleet bar opens the list it counts.
+//   4. Needs looking at · Alerts — what is worth knowing but blocks nobody, plus
+//      the honest report when a source did not answer at all.
+//   5. Start rail  — the creation entry points, present only when usable.
 //
 // It is deliberately NOT the old dashboard. Live topology and the recent-runs
 // table were a picture of the system rather than a list of what it needs; §6.1
@@ -68,10 +69,10 @@ import { FIRST_RUN_CHECKLIST, RES_AGENTS } from "@/lib/nav";
 // an absence, and it looks better. So:
 //
 //   • Every count is COUNTED FROM ROWS IN HAND, never inferred.
-//   • `/api/agents` is cursor-paged, so a count of the loaded window is a fact
-//     ONLY when nothing follows it (`nextCursor === ""` on the first page).
-//     Otherwise the lifecycle facts are absent — LifecycleStrip renders its own
-//     "not yet known" — and the fleet sentence drops the clause.
+//   • The fleet is COUNTED by /api/agents/census, which walks every page the
+//     caller can see. The list endpoint cannot answer this: its cap IS the
+//     server's ceiling, so a count taken from it describes a window. Past the
+//     census ceiling the page renders a declared bound, never a flat number.
 //   • A 501 (not part of this install) renders a QuietNote saying what is
 //     missing and why. Never an empty chart, never a zero.
 //   • A 403 collapses ONE panel to a ForbiddenInline; the page never fully 403s
@@ -588,80 +589,7 @@ function stopName(s: ActiveStop): string {
 
 // ── The lifecycle facts ─────────────────────────────────────────────────────
 
-function fig(value: number): ReactNode {
-  return <span className={lifecycleFactNumber}>{value}</span>;
-}
 
-/**
- * Build → Govern → Ship → Improve, from the census.
- *
- * A stage whose fact is not a fact gets NO fact: `LifecycleStrip` renders its
- * own "not yet known" (§5.20), which is the whole reason the prop is optional.
- * Improve is answered by the alert store — the only backend on this page that
- * knows whether quality moved — and stays silent when that store is absent.
- *
- * `active` is a POSITION claim, so it is made only when the window is the whole
- * fleet, and Improve is never lit: nothing here places an agent there.
- */
-export function stages(
-  c: Census,
-  regressions: number | undefined,
-): LifecycleStageCell[] {
-  const known = c.complete;
-  const shipping = c.serving + c.comingUp + c.failing + c.halted;
-  const sizes: [LifecycleStage, number][] = [
-    ["Build", c.draft],
-    ["Govern", c.held],
-    ["Ship", shipping],
-  ];
-  const top =
-    known && c.total > 0 ? sizes.reduce((a, b) => (b[1] > a[1] ? b : a))[0] : null;
-
-  return [
-    {
-      name: "Build",
-      active: top === "Build",
-      fact: known
-        ? c.draft === 0
-          ? "no drafts"
-          : <>{fig(c.draft)} drafts</>
-        : undefined,
-    },
-    {
-      name: "Govern",
-      active: top === "Govern",
-      fact: known
-        ? c.held === 0
-          ? "nothing held"
-          : <>{fig(c.held)} held for a decision</>
-        : undefined,
-    },
-    {
-      name: "Ship",
-      active: top === "Ship",
-      fact: known ? (
-        <>
-          {fig(c.serving)} serving
-          {c.failing + c.halted > 0 ? <> · {fig(c.failing + c.halted)} not</> : null}
-        </>
-      ) : undefined,
-    },
-    {
-      name: "Improve",
-      fact:
-        regressions === undefined
-          ? undefined
-          : regressions === 0
-            ? "no regressions flagged"
-            : (
-                <>
-                  {fig(regressions)} regression{regressions === 1 ? "" : "s"}{" "}
-                  flagged
-                </>
-              ),
-    },
-  ];
-}
 
 // ── Small shared pieces ─────────────────────────────────────────────────────
 
