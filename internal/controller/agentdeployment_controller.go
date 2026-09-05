@@ -1668,9 +1668,10 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			Ports: []corev1.ContainerPort{
 				{ContainerPort: port},
 			},
-			Env:          env,
-			Resources:    resources,
-			VolumeMounts: userMounts,
+			Env:             env,
+			Resources:       resources,
+			VolumeMounts:    userMounts,
+			SecurityContext: agentSecurityContext(deploy.Spec.Unconfined),
 			ReadinessProbe: &corev1.Probe{
 				// SuccessThreshold=1 explicitly: Knative defaults it on
 				// create and rejects a re-applied 0 (must be >= 1).
@@ -1930,6 +1931,17 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// than a longer prompt.
 	containers = injectSkills(containers, resolvedSkills, skillDescriptions, false)
 
+	// The hardened securityContext MUST move the revision name, or it never reaches a running
+	// pod. This is the M4 silent-loss landmine the file warns about elsewhere: the controller
+	// derives a deterministic revision name, and a pod-spec change that leaves that name
+	// unchanged is dropped by the CreateOrUpdate guard — observed directly here, with the ksvc
+	// template still carrying no securityContext after the field was added.
+	//
+	// Folding it in means every existing agent takes ONE new revision on upgrade. That is churn
+	// worth paying exactly once: the alternative is a security control that appears in the spec,
+	// reports success, and protects nothing — the failure mode this whole arc exists to kill.
+	combinedDigest = hardeningFold(combinedDigest, deploy.Spec.Unconfined)
+
 	// Attached skills fold in AFTER the combined digest rather than as an eleventh component, the
 	// same shape the launcher image uses below. An agent with NO skills is left byte-identical,
 	// so upgrading the platform does not re-roll every existing agent for a feature it does not
@@ -1980,6 +1992,55 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		serviceAccountName: saName,
 		resolvedSkills:     resolvedSkills,
 	}, nil
+}
+
+// hardeningFold folds the hardened-securityContext decision into the revision digest.
+//
+// It MUST move the revision name, or the securityContext never reaches a running pod. This is
+// the M4 silent-loss landmine this file warns about elsewhere: the controller derives a
+// deterministic revision name, and a pod-spec change leaving that name unchanged is dropped by
+// the CreateOrUpdate guard. Observed directly during M162 — the field was added, the controller
+// reconciled, and the ksvc template still carried no securityContext.
+//
+// Folding it in costs every existing agent ONE new revision on upgrade. That is churn worth
+// paying exactly once; the alternative is a security control that appears in the spec, reports
+// success, and protects nothing.
+//
+// Shared with the tests rather than reimplemented there, so the expected revision name cannot
+// drift from the produced one.
+func hardeningFold(digest string, unconfined bool) string {
+	if unconfined {
+		return digest
+	}
+	sum := sha256.Sum256([]byte(digest + "|hardened:v1"))
+	return fmt.Sprintf("%x", sum[:])[:8]
+}
+
+// agentSecurityContext is the hardened profile applied to the agent's own container.
+//
+// Before M162 the user container had NO securityContext — the controller set exactly one, on
+// the launcher-inject initContainer, whose comment advertised it as hardened. So every agent
+// image ran with whatever the container runtime allowed by default, and the platform's
+// containment story stopped at the pod boundary.
+//
+// What is deliberately NOT here: ReadOnlyRootFilesystem and a pinned RunAsUser. Both break a
+// large fraction of real images (anything writing to /tmp, anything with a baked-in uid), and a
+// default that breaks most images is one operators disable wholesale — leaving them with less
+// protection than a narrower default they keep. RunAsNonRoot is enforced without dictating
+// WHICH non-root uid, so an image that already declares one keeps it.
+func agentSecurityContext(unconfined bool) *corev1.SecurityContext {
+	if unconfined {
+		// A declared exception. Returning nil rather than a permissive context keeps the pod
+		// spec byte-identical to the pre-M162 shape, so opting out cannot itself roll a
+		// revision differently than doing nothing did.
+		return nil
+	}
+	return &corev1.SecurityContext{
+		RunAsNonRoot:             ptr.To(true),
+		AllowPrivilegeEscalation: ptr.To(false),
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{capabilityAll}},
+		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
 }
 
 // agentIdentitySAName is the per-agent identity ServiceAccount name for an

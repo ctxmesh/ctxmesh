@@ -352,7 +352,7 @@ func (dr delegateRuntime) buildServer() *http.Server {
 	// absent/bad ⇒ the advisory guard degrades to the scope bucket, never failing a delegation.
 	verifier := buildCapVerifier(func(f string, a ...any) { log.Printf(f, a...) })
 	return &http.Server{
-		Addr:    fmt.Sprintf(":%d", dr.Port),
+		Addr:    loopbackAddr(dr.Port),
 		Handler: newDelegateServer(dr.cfg, guard, client, verifier).handler(),
 	}
 }
