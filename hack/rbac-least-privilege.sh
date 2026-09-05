@@ -111,4 +111,48 @@ print(f"  checked {checked} rules across {rbac_dir}")
 sys.exit(1 if bad else 0)
 PY
 
-echo "PASS: no verb wildcards, no cluster-scoped Secret writes, no bind-only role bound cluster-wide"
+# ── the CHART must not cluster-bind a persona role by default ────────────────
+# config/rbac is not the only place a binding ships. The Helm chart rendered a
+# ClusterRoleBinding of ctxmesh-operator for the demo login, ON BY DEFAULT — which
+# internal/bff/catalog.go explicitly forbids: persona ClusterRoles must be RoleBound per
+# namespace or "a tenant-A principal could pass tenant-B's ?namespace= and enumerate B's team
+# catalog — the binding is the control".
+#
+# Checked by RENDERING the chart at its defaults rather than reading the template, because the
+# question is what an install actually gets.
+chart_bad=0
+CHART="$(cd "$(dirname "$0")/.." && pwd)/deploy/helm/ctxmesh"
+if command -v helm >/dev/null 2>&1 && [ -d "$CHART" ]; then
+  rendered_file="$(mktemp)"
+  trap 'rm -f "$rendered_file"' EXIT
+  if helm template gate "$CHART" --set auth.oidc.enabled=true > "$rendered_file" 2>/dev/null; then
+    # The rendered YAML is passed as a FILE, not on stdin: `python3 - <<EOF` reads the PROGRAM
+    # from stdin, so a piped document would never be read and the check would silently pass.
+    offenders="$(python3 - "$rendered_file" <<'PY'
+import sys, yaml
+personas = {"ctxmesh-operator", "ctxmesh-developer", "ctxmesh-viewer", "ctxmesh-admin"}
+bad = []
+with open(sys.argv[1]) as fh:
+    for d in yaml.safe_load_all(fh):
+        if not d or d.get("kind") != "ClusterRoleBinding":
+            continue
+        ref = (d.get("roleRef") or {}).get("name", "")
+        if ref in personas:
+            bad.append(f"{d['metadata']['name']} -> {ref}")
+print("\n".join(bad))
+PY
+)"
+    if [ -n "$offenders" ]; then
+      while read -r o; do
+        [ -n "$o" ] || continue
+        echo "  FAIL: the chart renders ClusterRoleBinding/$o AT DEFAULTS — persona roles must be RoleBound per namespace (internal/bff/catalog.go); a cluster-wide default breaks tenant isolation" >&2
+        chart_bad=1
+      done <<< "$offenders"
+    else
+      echo "  ok: the chart cluster-binds no persona role at defaults"
+    fi
+  fi
+fi
+
+[ "$chart_bad" = "0" ] || exit 1
+echo "PASS: no verb wildcards, no cluster-scoped Secret writes, no bind-only role bound cluster-wide, no persona cluster-bound by chart default"

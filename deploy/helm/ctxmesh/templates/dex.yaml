@@ -132,19 +132,32 @@ spec:
           configMap:
             name: ctxmesh-dex-config
 {{- if and $oidc.staticUser.enabled $oidc.demoBinding }}
+# EXAMPLE binding (demo): map the static demo user's OIDC identity to the operator persona so
+# the zero-config login is immediately usable. The subject username MUST match what the API
+# server derives — <--oidc-username-prefix><email> (default prefix "oidc:", see NOTES.txt).
+# The enterprise path maps real IdP groups instead.
+#
+# PER-NAMESPACE BY DEFAULT, AND THAT IS A SECURITY DECISION.
+# This used to render a ClusterRoleBinding, which the code itself forbids: internal/bff/catalog.go
+# states that persona ClusterRoles must be RoleBound per namespace or "a tenant-A principal could
+# pass tenant-B's ?namespace= and enumerate B's team catalog — the binding is the control". A
+# default-on ClusterRoleBinding of ctxmesh-operator violated that precondition on every install
+# that enabled the demo login.
+#
+# It also hid the M160 capability defect: a cluster-wide binding made the console's
+# cluster-scoped access review answer "yes", so the one binding shape that masked the bug was
+# also the one shipped by default.
+{{- range $ns := $oidc.demoBindingNamespaces }}
 ---
-# EXAMPLE binding (demo): map the static demo user's OIDC identity to the operator
-# persona so the zero-config login is immediately usable. The subject username MUST
-# match what the API server derives — <--oidc-username-prefix><email> (default
-# prefix "oidc:", see NOTES.txt). The enterprise path maps real IdP groups instead.
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   labels:
-    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/managed-by: {{ $.Release.Service }}
     app.kubernetes.io/name: ctxmesh
     control-plane: dex
   name: ctxmesh-dex-demo-operator
+  namespace: {{ $ns }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -153,5 +166,28 @@ subjects:
   - apiGroup: rbac.authorization.k8s.io
     kind: User
     name: "{{ $oidc.usernamePrefix }}{{ $oidc.staticUser.email }}"
+{{- end }}
+{{- if $oidc.demoBindingClusterWide }}
+---
+# OPT-IN ONLY. Grants the operator persona across EVERY namespace, which breaks the
+# tenant-isolation precondition above. Provided for single-tenant demos where that is
+# understood and accepted; never a default.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/name: ctxmesh
+    control-plane: dex
+  name: ctxmesh-dex-demo-operator-clusterwide
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ctxmesh-operator
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: "{{ $oidc.usernamePrefix }}{{ $oidc.staticUser.email }}"
+{{- end }}
 {{- end }}
 {{- end }}

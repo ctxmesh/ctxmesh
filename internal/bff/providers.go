@@ -362,15 +362,32 @@ func createProviderObjects(ctx context.Context, w client.Client, spec providerCr
 		},
 	}
 
-	created := make([]createdObject, 0, 3)
-	for _, obj := range []struct {
+	writes := []struct {
 		kind string
 		o    client.Object
 	}{
 		{secretKind, secret},
 		{secretBindingKind, binding},
 		{modelRouteKind, route},
-	} {
+	}
+
+	// PRE-FLIGHT the whole set before persisting any of it. The sequence is not transactional
+	// and the Secret is written FIRST, so a denial on the third object used to leave a live
+	// credential in the cluster with no route that can use it — the caller is told the connect
+	// failed while their key sits there.
+	//
+	// A dry-run also answers what no SelfSubjectAccessReview can. An SSAR answers RBAC only;
+	// this asks the API server whether the write would actually SUCCEED, which additionally
+	// covers admission webhooks, ResourceQuota on Secret counts, and policy engines. The
+	// capability probe gates the button; this gates the write.
+	for _, obj := range writes {
+		if err := dryRunUpsert(ctx, w, obj.o); err != nil {
+			return nil, classifyWriteError(err, verbCreate, obj.kind, obj.o.GetName())
+		}
+	}
+
+	created := make([]createdObject, 0, 3)
+	for _, obj := range writes {
 		if verb, err := upsertObject(ctx, w, obj.o); err != nil {
 			return created, classifyWriteError(err, verb, obj.kind, obj.o.GetName())
 		}
@@ -381,6 +398,24 @@ func createProviderObjects(ctx context.Context, w client.Client, spec providerCr
 		})
 	}
 	return created, nil
+}
+
+// dryRunUpsert asks the API server whether the upsert would succeed, persisting nothing.
+//
+// Create-then-Update mirrors upsertObject: a dry-run Create of an object that already exists
+// returns AlreadyExists, which is not a denial — it is the signal that the real call would take
+// the Update path, so the dry-run follows it there.
+//
+// A dry-run mutates the object's ResourceVersion/UID on some paths, so the caller must not
+// depend on those afterwards; the real upsert clears ResourceVersion itself before Update.
+func dryRunUpsert(ctx context.Context, w client.Client, obj client.Object) error {
+	err := w.Create(ctx, obj.DeepCopyObject().(client.Object), client.DryRunAll)
+	if err == nil || !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	updated := obj.DeepCopyObject().(client.Object)
+	updated.SetResourceVersion("")
+	return w.Update(ctx, updated, client.DryRunAll)
 }
 
 // upsertObject creates obj, or — if it already exists — updates it in place (the
