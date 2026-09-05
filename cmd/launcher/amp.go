@@ -129,15 +129,34 @@ const (
 // Empty (with no conflict) means the request carries no envelope at all, which the
 // callers treat as "not a mediated call" — so that answer must stay exact.
 func envelopeHeader(h http.Header) (raw string, conflict bool) {
+	raw, conflict, _ = envelopeHeaderWithSource(h)
+	return raw, conflict
+}
+
+// Which name(s) a caller used. Recorded on the guard's span so the question the
+// deprecation depends on — "is anything still sending ONLY the legacy header?" —
+// is answered by evidence rather than assumed. The launcher has no metrics
+// surface, so the trace is where this has to live.
+const (
+	envelopeSourceAMP    = "amp"
+	envelopeSourceLegacy = "legacy"
+	envelopeSourceBoth   = "both"
+)
+
+func envelopeHeaderWithSource(h http.Header) (raw string, conflict bool, source string) {
 	amp := h.Get(ampEnvelopeHeader)
 	legacy := h.Get(legacyEnvelopeHeader)
-	if amp != "" && legacy != "" && amp != legacy {
-		return "", true
+	switch {
+	case amp != "" && legacy != "" && amp != legacy:
+		return "", true, envelopeSourceBoth
+	case amp != "" && legacy != "":
+		return amp, false, envelopeSourceBoth
+	case amp != "":
+		return amp, false, envelopeSourceAMP
+	case legacy != "":
+		return legacy, false, envelopeSourceLegacy
 	}
-	if amp != "" {
-		return amp, false
-	}
-	return legacy, false
+	return "", false, ""
 }
 
 // AMP typed error codes (agent-mesh.md §"The AMP call contract",
@@ -725,7 +744,15 @@ func newAMPGuard(cfg ampConfig, tracer trace.Tracer) *ampGuard {
 // It is wired as a wrapper INSIDE the agent.invoke span (ctx already carries the
 // server span) so a denial is a child event of the invoke, not an orphan.
 func (g *ampGuard) enforceInbound(ctx context.Context, w http.ResponseWriter, r *http.Request) bool {
-	raw, conflict := envelopeHeader(r.Header)
+	raw, conflict, source := envelopeHeaderWithSource(r.Header)
+	if source != "" {
+		// Recorded BEFORE any denial, so a refused call still reports which name it
+		// used — otherwise the legacy-usage evidence would be biased toward callers
+		// that happened to pass.
+		trace.SpanFromContext(ctx).SetAttributes(
+			attribute.String("amp.envelope.source", source),
+		)
+	}
 	if conflict {
 		// Two envelopes that disagree. Fail closed: see envelopeHeader.
 		g.deny(ctx, w, "", "conflicting envelope headers")

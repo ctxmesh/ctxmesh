@@ -1399,3 +1399,45 @@ func TestGuardDeniesConflictingEnvelopes(t *testing.T) {
 		t.Fatalf("got %d, want 403", rec.Code)
 	}
 }
+
+// TestEnvelopeSourceIsRecorded proves the guard reports WHICH envelope name a caller
+// used. The deprecation exit depends on this: legacy emission may only stop once
+// nothing is sending legacy-only, and that has to be evidence rather than a guess.
+func TestEnvelopeSourceIsRecorded(t *testing.T) {
+	body, err := json.Marshal(envelope{RegistryID: "r1", SenderAgentID: "caller"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name    string
+		headers map[string]string
+		want    string
+	}{
+		{"amp only", map[string]string{ampEnvelopeHeader: string(body)}, envelopeSourceAMP},
+		{"legacy only", map[string]string{legacyEnvelopeHeader: string(body)}, envelopeSourceLegacy},
+		{"both", map[string]string{
+			ampEnvelopeHeader:    string(body),
+			legacyEnvelopeHeader: string(body),
+		}, envelopeSourceBoth},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := http.Header{}
+			for k, v := range c.headers {
+				h.Set(k, v)
+			}
+			_, _, source := envelopeHeaderWithSource(h)
+			if source != c.want {
+				t.Fatalf("got source %q, want %q", source, c.want)
+			}
+		})
+	}
+
+	t.Run("no envelope reports no source", func(t *testing.T) {
+		if _, _, source := envelopeHeaderWithSource(http.Header{}); source != "" {
+			t.Fatalf("got source %q, want empty — plain external traffic is not a mediated call", source)
+		}
+	})
+}
