@@ -29,7 +29,7 @@ export const DEFAULT_TOOLS_JSON_PATH = "/etc/agent/tools.json";
 
 export const DEFAULT_MEMORY_PORT = 2998;
 export const DEFAULT_FEEDBACK_PORT = 2995;
-/** The launcher A2A listener port (M6); overridable via A2A_PORT. */
+/** The launcher AMP listener port (M6); overridable via A2A_PORT. */
 export const DEFAULT_MESH_PORT = 2997;
 export const DEFAULT_OTLP_ENDPOINT = "localhost:4317";
 
@@ -136,11 +136,11 @@ export class PlaneConfig {
   /**
    * agent-to-agent mesh (:2997, A2A_PORT) base URL.
    *
-   * Named `mesh` on the surface because "A2A" now unambiguously means Google's Agent2Agent
+   * Named `mesh` on the surface because "AMP" now unambiguously means Google's Agent2Agent
    * spec, which this is not: theirs is an INTEROP protocol for agents from different
    * organisations; ours is a MEDIATION protocol the launcher uses to govern calls between
    * agents the platform already owns (envelope, hop depth, traversal path, spend budget).
-   * The wire path keeps /a2a (M156).
+   * The wire path keeps /amp (M156).
    */
   readonly meshBaseUrl: string;
   /** synthetic delegate/handoff (:2994) base URL (127.0.0.1). */

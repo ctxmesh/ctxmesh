@@ -108,7 +108,7 @@ class MemoryClient:
 
         message_id (m33.4): the per-hop id to attribute a message entry to. When set it rides
         X-Message-Id, which the launcher's :2998 endpoint stamps onto the entry (ADR 0035); absent,
-        the endpoint mints one. Relayed by the managed loop from the inbound A2A hop's messageId.
+        the endpoint mints one. Relayed by the managed loop from the inbound AMP hop's messageId.
         """
         self._require_wired()
         extra = {"Content-Type": "application/json"}

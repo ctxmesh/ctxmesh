@@ -14,7 +14,7 @@ Ports (spec table):
 Run context: AGENT_NAME (+ version/role/registry id) and the conversationId.
 conversationId is NOT a launcher env — the agent extracts it from its inbound
 request payload and stamps it on outbound calls via the ``X-Conversation-Id``
-header (the same convention the memory/gateway/A2A paths already use). So it is
+header (the same convention the memory/gateway/AMP paths already use). So it is
 supplied per-call or set once on the client via ``with_conversation(...)``.
 """
 
@@ -82,9 +82,9 @@ class PlaneConfig:
     feedback_base_url: str
     tools_json_path: str
     run: RunContext = field(default_factory=RunContext)
-    #: Launcher-local base for the A2A listener (:2997 by default, A2A_PORT). Named `mesh`
-    #: on the surface because "A2A" now means Google's Agent2Agent spec, which this is not
-    #: (M156); the wire path keeps /a2a.
+    #: Launcher-local base for the AMP listener (:2997 by default, A2A_PORT). Named `mesh`
+    #: on the surface because "AMP" now means Google's Agent2Agent spec, which this is not
+    #: (M156); the wire path keeps /amp.
     mesh_base_url: str = "http://localhost:2997"
     #: Whether each capability was actually wired by the launcher. A client for
     #: an unwired capability raises ConfigError rather than hitting a dead port.
@@ -146,7 +146,7 @@ class PlaneConfig:
         # as always-wired and let the manifest fetch surface an unreachable port.
         memory_wired = bool(env("MEMORY_PORT") or env("MEMORY_BACKEND_ADDR"))
         feedback_wired = bool(env("FEEDBACK_PORT") or env("LANGFUSE_HOST"))
-        # The launcher gates the A2A listener on registry membership, so membership is the
+        # The launcher gates the AMP listener on registry membership, so membership is the
         # honest signal — not the port, which has a default whether or not anything listens.
         mesh_wired = bool(env("AGENT_REGISTRY_ID"))
         mesh_port = env("A2A_PORT") or "2997"
