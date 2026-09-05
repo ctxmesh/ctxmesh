@@ -3,6 +3,7 @@ package bff
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -171,4 +172,68 @@ func TestListAlerts_NamespaceFilterIsForwarded(t *testing.T) {
 	require.Equal(t, http.StatusOK, code)
 	require.Len(t, body.Items, 1, "namespace filter limits to ns1")
 	assert.Equal(t, "pol-a", body.Items[0].Policy)
+}
+
+// TestListAlerts_TruncationIsDeclared proves a store holding more than the caller asked
+// for comes back flagged, and that exactly `limit` rows are returned.
+//
+// Without the flag the console printed len(items) as the total, so a fleet with 312
+// firing alerts rendered "50 firing" — an undercount, in the one direction that makes
+// things look calmer than they are.
+func TestListAlerts_TruncationIsDeclared(t *testing.T) {
+	seed := make([]alertstore.Alert, 0, 60)
+	for i := range 60 {
+		seed = append(seed, alertstore.Alert{
+			Namespace:  "ns1",
+			PolicyName: fmt.Sprintf("p%02d", i),
+			Condition:  "c1",
+			CondType:   "budgetSoft",
+		})
+	}
+	s := newAlertsServer(t, nil, seed...)
+
+	body, code := getAlerts(t, s, "limit=25")
+	require.Equal(t, http.StatusOK, code)
+	assert.Len(t, body.Items, 25, "the caller must get exactly the limit it asked for")
+	assert.True(t, body.Truncated, "a store with more rows than the limit must say so")
+}
+
+// The flag must be false when everything fits — otherwise the console would render a
+// bound on a complete answer, which is its own kind of lie.
+func TestListAlerts_NotTruncatedWhenEverythingFits(t *testing.T) {
+	seed := make([]alertstore.Alert, 0, 5)
+	for i := range 5 {
+		seed = append(seed, alertstore.Alert{
+			Namespace:  "ns1",
+			PolicyName: fmt.Sprintf("p%d", i),
+			Condition:  "c1",
+			CondType:   "budgetSoft",
+		})
+	}
+	s := newAlertsServer(t, nil, seed...)
+
+	body, code := getAlerts(t, s, "limit=25")
+	require.Equal(t, http.StatusOK, code)
+	assert.Len(t, body.Items, 5)
+	assert.False(t, body.Truncated, "a complete answer must not be shown as a bound")
+}
+
+// The boundary: exactly limit rows in the store is complete, not truncated. The
+// over-fetch of one is what tells them apart.
+func TestListAlerts_ExactlyLimitIsNotTruncated(t *testing.T) {
+	seed := make([]alertstore.Alert, 0, 10)
+	for i := range 10 {
+		seed = append(seed, alertstore.Alert{
+			Namespace:  "ns1",
+			PolicyName: fmt.Sprintf("p%d", i),
+			Condition:  "c1",
+			CondType:   "budgetSoft",
+		})
+	}
+	s := newAlertsServer(t, nil, seed...)
+
+	body, code := getAlerts(t, s, "limit=10")
+	require.Equal(t, http.StatusOK, code)
+	assert.Len(t, body.Items, 10)
+	assert.False(t, body.Truncated, "a store holding exactly the limit is a complete answer")
 }

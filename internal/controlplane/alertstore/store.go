@@ -98,7 +98,7 @@ func (s *pgStore) List(ctx context.Context, namespace string, limit int) ([]Aler
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, namespace, policy_name, condition, agent, cond_type, value, message, fired_at, resolved_at
 		FROM alerts
-		WHERE namespace = $1
+		WHERE ($1::text = '' OR namespace = $1::text)
 		ORDER BY fired_at DESC, id DESC
 		LIMIT $2`,
 		namespace, limit,

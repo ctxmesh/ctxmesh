@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Boxes, Filter, Pencil, Sparkles, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -29,6 +29,7 @@ import {
   type StatusTone,
 } from "@/components/kit";
 import { api, ApiError, type AgentSummary } from "@/lib/api";
+import { BUCKETS, HALTED, type Bucket, bucketOf } from "@/lib/lifecycle";
 import { useCapabilities } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_AGENTS } from "@/lib/nav";
@@ -106,7 +107,6 @@ const ATTENTION: Record<StatusTone, number> = {
  * not projected into `AgentSummary` — so it is read the same way `resolveStatus`
  * reads a phase: from the words the backend actually sent. No match, no claim.
  */
-const HALTED = /(^|[^a-z])(suspend(ed)?|stopped|halted|killed)([^a-z]|$)/i;
 
 /** Reasons that name a promotion gate, which gets the more specific next step. */
 const PROMOTION = /promot/i;
@@ -176,7 +176,7 @@ function attention(t: Triaged): number {
 
 // ── The chip views (§5.28): one question, one answer at a time ──────────────
 
-type ViewId = "needs-you" | "failing" | "serving" | "all";
+type ViewId = "needs-you" | "failing" | "serving" | "all" | Bucket;
 
 const VIEWS: { id: ViewId; label: string; match: (t: Triaged) => boolean }[] = [
   { id: "needs-you", label: "Needs you", match: (t) => t.next.tone !== "none" },
@@ -189,7 +189,34 @@ const VIEWS: { id: ViewId; label: string; match: (t: Triaged) => boolean }[] = [
   { id: "all", label: "Everything", match: () => true },
 ];
 
-const VIEW_EMPTY: Record<Exclude<ViewId, "all">, { title: string; description: string }> = {
+/**
+ * The lifecycle stages Home's fleet bar links into. They are matched with the SAME
+ * bucketOf the bar counts with, so a segment and the list it opens can never
+ * disagree — the bar would otherwise be able to say "3 draft" and hand over a
+ * list of none.
+ *
+ * They are not chips: the chip row stays one short question. These views exist
+ * only when arrived at by ?view=, and the row then shows the stage as its answer.
+ */
+const STAGE_VIEWS: { id: Bucket; label: string }[] = BUCKETS.map((b) => ({
+  id: b.id,
+  label: b.label,
+}));
+
+function viewMatch(id: ViewId): (t: Triaged) => boolean {
+  const chip = VIEWS.find((v) => v.id === id);
+  if (chip) return chip.match;
+  return (t) => bucketOf(t.agent) === id;
+}
+
+function isViewId(v: string | null): v is ViewId {
+  return (
+    v !== null &&
+    (VIEWS.some((x) => x.id === v) || STAGE_VIEWS.some((x) => x.id === v))
+  );
+}
+
+const VIEW_EMPTY: Record<"needs-you" | "failing" | "serving", { title: string; description: string }> = {
   "needs-you": {
     title: "Nothing needs a person",
     description:
@@ -329,7 +356,25 @@ export function AgentsPage() {
   const [includeDrafts, setIncludeDrafts] = useState(false);
   // Fleet triage: the chip row is a set of VIEWS over the loaded window — one
   // question with one answer at a time (§5.28), never an AND of checkboxes.
-  const [view, setView] = useState<ViewId>("all");
+  // The view lives in the URL: Home's fleet bar links straight into a stage, and
+  // a filter that only exists in component state would drop that on arrival.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlView = searchParams.get("view");
+  const view: ViewId = isViewId(urlView) ? urlView : "all";
+  const setView = useCallback(
+    (next: ViewId) => {
+      setSearchParams(
+        (prev) => {
+          const out = new URLSearchParams(prev);
+          if (next === "all") out.delete("view");
+          else out.set("view", next);
+          return out;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
   // The page stack: the cursor used to fetch each page. [""] = we're on page 0.
   const [pageStack, setPageStack] = useState<string[]>([""]);
   const [state, setState] = useState<Load>({ kind: "loading" });
@@ -414,20 +459,32 @@ export function AgentsPage() {
     return rows;
   }, [items]);
 
-  const activeView = VIEWS.find((v) => v.id === view) ?? VIEWS[VIEWS.length - 1];
-  const visible = useMemo(
-    () => sorted.filter(activeView.match),
-    [sorted, activeView],
-  );
+  const match = useMemo(() => viewMatch(view), [view]);
+  const visible = useMemo(() => sorted.filter(match), [sorted, match]);
 
-  const chips: FilterChip[] = VIEWS.map((v) => ({
-    id: v.id,
-    label: v.label,
-    // No number unless it is the whole fleet's number (kit FilterChipRow
-    // contract). A count that describes one page while looking like a total is
-    // the failure mode that hides work.
-    count: fleetComplete ? sorted.filter(v.match).length : undefined,
-  }));
+  // The chip row stays one short question. A lifecycle stage arrived at from
+  // Home's fleet bar joins it as the current answer, so the page shows what it is
+  // filtered to instead of silently reading "Everything" over a filtered list.
+  const stageChip = STAGE_VIEWS.find((v) => v.id === view);
+  const chips: FilterChip[] = [
+    ...VIEWS.map((v) => ({
+      id: v.id as string,
+      label: v.label,
+      // No number unless it is the whole fleet's number (kit FilterChipRow
+      // contract). A count that describes one page while looking like a total is
+      // the failure mode that hides work.
+      count: fleetComplete ? sorted.filter(v.match).length : undefined,
+    })),
+    ...(stageChip
+      ? [
+          {
+            id: stageChip.id as string,
+            label: stageChip.label,
+            count: fleetComplete ? visible.length : undefined,
+          },
+        ]
+      : []),
+  ];
 
   function onNext() {
     if (!hasNext) return;
@@ -587,12 +644,23 @@ export function AgentsPage() {
   // "empty-filtered" truth (§7), not the first-run one: it offers a way back
   // out instead of teaching a user with 13 agents how to make their first.
   const chipEmptied = items.length > 0 && visible.length === 0;
+  // A stage arrived at from Home composes its own line: naming the stage is more
+  // useful than a generic "nothing matches", and it is the one case where the
+  // fleet bar and this list can look like they disagree.
+  const emptyCopy =
+    view in VIEW_EMPTY
+      ? VIEW_EMPTY[view as keyof typeof VIEW_EMPTY]
+      : {
+          title: `No agent is ${(stageChip?.label ?? view).toLowerCase()}`,
+          description:
+            "Nothing in this workspace sits at that stage right now. Show everything to see the fleet.",
+        };
   const empty: EmptyStateProps = chipEmptied
     ? {
         intent: "filtered",
         icon: Filter,
-        title: VIEW_EMPTY[activeView.id as Exclude<ViewId, "all">].title,
-        description: VIEW_EMPTY[activeView.id as Exclude<ViewId, "all">].description,
+        title: emptyCopy.title,
+        description: emptyCopy.description,
         action: {
           label: "Show everything",
           variant: "outline",

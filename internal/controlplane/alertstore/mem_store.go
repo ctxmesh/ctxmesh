@@ -57,10 +57,13 @@ func (m *memStore) List(_ context.Context, namespace string, limit int) ([]Alert
 
 	limit = clampLimit(limit)
 
-	// Collect matching rows.
-	var matching []Alert
+	// Collect matching rows. An empty namespace is a CLUSTER-WIDE read, not a
+	// literal match on "": the console's "all workspaces" scope sends no
+	// namespace, and matching it literally returned nothing while reporting a
+	// healthy 200 — a zero that looked like calm.
+	matching := make([]Alert, 0, len(m.rows))
 	for _, r := range m.rows {
-		if r.Namespace == namespace {
+		if namespace == "" || r.Namespace == namespace {
 			matching = append(matching, r)
 		}
 	}
