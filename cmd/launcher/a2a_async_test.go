@@ -114,7 +114,7 @@ func TestA2AAsync_IsSubjectToTheSameConversationGuards(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/a2a/reviewer?mode=async", strings.NewReader(`{"t":1}`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(a2aEnvelopeHeader, string(raw))
+	req.Header.Set(legacyEnvelopeHeader, string(raw))
 	rec := httptest.NewRecorder()
 	s.handler().ServeHTTP(rec, req)
 

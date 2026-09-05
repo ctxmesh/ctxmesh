@@ -102,12 +102,31 @@ const (
 	// and a span attribute, so it must be short and DNS-safe.
 	maxTargetLen = 63
 
-	// a2aEnvelopeHeader carries the platform envelope (JSON) between launchers:
+	// ampEnvelopeHeader carries the platform envelope (JSON) between launchers:
 	// the caller's launcher stamps it and injects it here; the callee's launcher
 	// reads it for access control. It is ALSO how a chained hop learns the
-	// incoming envelope (the user container echoes it back on its /a2a call).
-	a2aEnvelopeHeader = "X-A2A-Envelope"
+	// incoming envelope (the user container echoes it back on its /amp call).
+	ampEnvelopeHeader = "X-AMP-Envelope"
+
+	// legacyEnvelopeHeader is the pre-ADR-0138 name for the same header. It is
+	// still ACCEPTED, and dropping that acceptance is a security decision, not a
+	// tidy-up: the inbound guard fires only on a RECOGNISED envelope, and a request
+	// with none is treated as ordinary external /invoke traffic where access
+	// control does not apply. A launcher that stopped understanding the old header
+	// would therefore wave through cross-registry calls from any peer that had not
+	// yet been upgraded — silently. Accept-both ships everywhere before emit-new.
+	legacyEnvelopeHeader = "X-A2A-Envelope"
 )
+
+// envelopeHeader returns the raw envelope a request carries, under either name,
+// preferring the current one. Empty means the request carries no envelope at all —
+// which the callers treat as "not a mediated call", so it must stay exact.
+func envelopeHeader(h http.Header) string {
+	if v := h.Get(ampEnvelopeHeader); v != "" {
+		return v
+	}
+	return h.Get(legacyEnvelopeHeader)
+}
 
 // A2A typed error codes (agent-mesh.md §"The A2A call contract",
 // §"Edge cases"). Each is surfaced to the calling agent as a JSON body
@@ -373,6 +392,10 @@ func (s *a2aServer) handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+	// Both paths, same handler. /a2a is the pre-ADR-0138 name and stays served:
+	// the SDK ships inside the customer's agent image and is versioned
+	// independently of the launcher, so an older SDK must keep working.
+	mux.HandleFunc("POST /amp/{targetAgent}", s.handleCall)
 	mux.HandleFunc("POST /a2a/{targetAgent}", s.handleCall)
 	return mux
 }
@@ -502,7 +525,7 @@ func (s *a2aServer) buildEnvelope(
 ) (envelope, error) {
 	self := s.cfg.SelfName
 
-	incoming, err := parseIncomingEnvelope(r.Header.Get(a2aEnvelopeHeader))
+	incoming, err := parseIncomingEnvelope(envelopeHeader(r.Header))
 	if err != nil {
 		return envelope{}, err
 	}
@@ -576,7 +599,7 @@ func (s *a2aServer) forward(
 		return
 	}
 	outReq.Header.Set("Content-Type", "application/json")
-	outReq.Header.Set(a2aEnvelopeHeader, string(envJSON))
+	outReq.Header.Set(legacyEnvelopeHeader, string(envJSON))
 	// Relay the invoking user's run capability (ADR 0033, m30.3) so the callee acts on-behalf-of
 	// the same user; the callee's egress verifies it against the platform key + its own boundary.
 	if capToken != "" {
@@ -680,7 +703,7 @@ func newA2AGuard(cfg a2aConfig, tracer trace.Tracer) *a2aGuard {
 // It is wired as a wrapper INSIDE the agent.invoke span (ctx already carries the
 // server span) so a denial is a child event of the invoke, not an orphan.
 func (g *a2aGuard) enforceInbound(ctx context.Context, w http.ResponseWriter, r *http.Request) bool {
-	raw := r.Header.Get(a2aEnvelopeHeader)
+	raw := envelopeHeader(r.Header)
 	if raw == "" {
 		return true // not an A2A call — nothing to enforce.
 	}

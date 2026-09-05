@@ -483,7 +483,7 @@ func TestProxyRouting(t *testing.T) {
 	t.Run("A2A envelope messageId is forwarded as X-Message-Id", func(t *testing.T) {
 		// NOTE: not run in parallel — shares capturedCh
 		req := httptest.NewRequest(http.MethodPost, "/invoke", nil)
-		req.Header.Set(a2aEnvelopeHeader, `{"messageId":"m-hop-7","conversationId":"c1"}`)
+		req.Header.Set(legacyEnvelopeHeader, `{"messageId":"m-hop-7","conversationId":"c1"}`)
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
 
