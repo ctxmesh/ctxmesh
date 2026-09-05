@@ -350,6 +350,9 @@ func newProxyInvoker(proxyPort int, client *http.Client) func(context.Context, e
 		// Carry the full envelope so the callee's inbound guard (a2a.go) can
 		// enforce registry isolation / allowedCallers on the async path too.
 		if envJSON, mErr := json.Marshal(env); mErr == nil {
+			// Both names, identical content (ADR 0138) — the async path carries the
+			// same envelope the sync path does, so it must carry both too.
+			req.Header.Set(ampEnvelopeHeader, string(envJSON))
 			req.Header.Set(legacyEnvelopeHeader, string(envJSON))
 		}
 		resp, err := client.Do(req)

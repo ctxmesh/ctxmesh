@@ -599,6 +599,10 @@ func (s *a2aServer) forward(
 		return
 	}
 	outReq.Header.Set("Content-Type", "application/json")
+	// Both names, identical content. A callee that understands AMP prefers it; one
+	// that does not still finds the legacy header and runs the guard. Dropping the
+	// legacy emission is a separate, later decision — see ADR 0138.
+	outReq.Header.Set(ampEnvelopeHeader, string(envJSON))
 	outReq.Header.Set(legacyEnvelopeHeader, string(envJSON))
 	// Relay the invoking user's run capability (ADR 0033, m30.3) so the callee acts on-behalf-of
 	// the same user; the callee's egress verifies it against the platform key + its own boundary.
