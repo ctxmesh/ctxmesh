@@ -28,7 +28,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
 )
 
-// The async A2A DISPATCHER (M141.4, ADR 0121) — the half that turns a durable message back into a call.
+// The async AMP DISPATCHER (M141.4, ADR 0121) — the half that turns a durable message back into a call.
 //
 // Knative Eventing PUSHES: its Broker delivers over HTTP, so a ksvc can scale to zero and be woken by
 // traffic. JetStream is PULLED: something must hold a connection and consume. A ksvc cannot, and putting
@@ -54,7 +54,7 @@ const (
 
 	// asyncAllRegistries is the subject filter covering every registry's traffic. One dispatcher serves
 	// them all; isolation is not weakened by that, because the callee still hard-denies a cross-registry
-	// envelope at A2A layer 1, and this dispatcher independently refuses to cross a registry boundary
+	// envelope at AMP layer 1, and this dispatcher independently refuses to cross a registry boundary
 	// (see deliver).
 	asyncAllRegistries = "ctxmesh.a2a.>"
 )
@@ -67,7 +67,7 @@ type AsyncDispatcherConfig struct {
 	Client *http.Client
 }
 
-// StartAsyncDispatcher consumes async A2A hops and delivers them to their target agents until ctx is
+// StartAsyncDispatcher consumes async AMP hops and delivers them to their target agents until ctx is
 // done. It returns immediately; the loop runs in a goroutine, like the other BFF workers.
 func (s *Server) StartAsyncDispatcher(ctx context.Context, cfg AsyncDispatcherConfig) {
 	if cfg.Subscriber == nil {
@@ -86,7 +86,7 @@ func (s *Server) StartAsyncDispatcher(ctx context.Context, cfg AsyncDispatcherCo
 				return s.deliverAsyncHop(hctx, client, msg)
 			},
 		); err != nil && ctx.Err() == nil {
-			s.log.Error(err, "async dispatcher stopped; async A2A hops are queuing undelivered")
+			s.log.Error(err, "async dispatcher stopped; async AMP hops are queuing undelivered")
 		}
 	}()
 }
@@ -113,7 +113,7 @@ func (s *Server) deliverAsyncHop(ctx context.Context, client *http.Client, msg a
 	}
 
 	// Registry isolation, enforced here as well as at the callee. The callee's launcher hard-denies a
-	// cross-registry envelope at A2A layer 1, but that check reads the envelope's OWN registryId — which
+	// cross-registry envelope at AMP layer 1, but that check reads the envelope's OWN registryId — which
 	// the producer wrote. Checking the TARGET's real registry against the registry the message was
 	// published into (stamped by the edge, not the pod) closes the gap where a crafted envelope claims a
 	// registry its sender does not belong to.

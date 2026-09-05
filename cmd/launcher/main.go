@@ -68,15 +68,15 @@ func main() {
 	tracer := otel.Tracer(tracerName)
 	prop := otel.GetTextMapPropagator()
 
-	// A2A inbound access control (callee side): only wired when the agent is a
+	// AMP inbound access control (callee side): only wired when the agent is a
 	// registry member (AGENT_REGISTRY_ID injected). nil otherwise, so a
 	// non-mesh agent's /invoke path is unchanged.
 	var guard inboundGuard
-	if cfg.A2AEnabled() {
-		guard = newA2AGuard(cfg.A2A, tracer)
+	if cfg.AMPEnabled() {
+		guard = newAMPGuard(cfg.AMP, tracer)
 	}
 
-	// Async A2A consumer (eventing path): wired when the agent is a registry
+	// Async AMP consumer (eventing path): wired when the agent is a registry
 	// member (a Trigger can deliver CloudEvents to it). The seen-set reuses the
 	// M5 Valkey (MEMORY_BACKEND_ADDR); when that is absent the consumer still
 	// runs but dedupe is fail-open by construction (no store to consult). The
@@ -88,7 +88,7 @@ func main() {
 	// invoking the agent, and the M141.4 async PRODUCER offloads an oversize payload before publishing —
 	// so a big task rides the bus as a small event either way. Declared out here so both can see it.
 	var off *offloader
-	if cfg.A2AEnabled() {
+	if cfg.AMPEnabled() {
 		// The seen-set prefers the state-layer proxy (M53, ADR 0050 §6): it presents
 		// the pod token and the proxy scopes the seen-key by namespace + holds the
 		// Valkey credential. Falls back to the direct Valkey until the m53.7 cutover.
@@ -117,7 +117,7 @@ func main() {
 			seen:    seen,
 			tracer:  tracer,
 			offload: off,
-			invoke:  newProxyInvoker(cfg.ProxyPort, &http.Client{Timeout: a2aRequestTimeout, CheckRedirect: refuseRedirect}),
+			invoke:  newProxyInvoker(cfg.ProxyPort, &http.Client{Timeout: ampRequestTimeout, CheckRedirect: refuseRedirect}),
 		}
 	}
 	handler := buildHandler(tracer, prop, upstreamURL, cfg, guard, consumer)
@@ -139,17 +139,17 @@ func main() {
 	ltLogf := func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
 	memSrv := buildMemoryHTTPServer(cfg, tracer, newLongTermProxy(ltLogf, tracer), newKnowledgeProxy(ltLogf, tracer))
 
-	// ── A2A outbound endpoint (:2997) ─────────────────────────────────────
+	// ── AMP outbound endpoint (:2997) ─────────────────────────────────────
 	// Started ONLY when the agent is a resolved AgentRegistry member
 	// (AGENT_REGISTRY_ID injected). Same lifecycle discipline as the memory
 	// listener: a goroutine ListenAndServe, graceful Shutdown on child exit,
 	// and it NEVER overrides the child-driven process exit code. nil when the
 	// agent is not in a registry.
-	var a2aSrv *http.Server
-	if cfg.A2AEnabled() {
-		a2aSrv = &http.Server{
-			Addr:    loopbackAddr(cfg.A2A.Port),
-			Handler: newA2AServer(cfg.A2A, tracer, prop, off).handler(),
+	var ampSrv *http.Server
+	if cfg.AMPEnabled() {
+		ampSrv = &http.Server{
+			Addr:    loopbackAddr(cfg.AMP.Port),
+			Handler: newAMPServer(cfg.AMP, tracer, prop, off).handler(),
 		}
 	}
 
@@ -164,7 +164,7 @@ func main() {
 	// Started ONLY when spec.budget is set (GATEWAY_UPSTREAM_URL injected AND a
 	// cap present). It sits between the agent and LiteLLM to enforce the cost
 	// budget; MODEL_GATEWAY_URL is repointed here by the controller. Same
-	// lifecycle discipline as the memory/A2A listeners: goroutine ListenAndServe,
+	// lifecycle discipline as the memory/AMP listeners: goroutine ListenAndServe,
 	// graceful Shutdown on child exit, never overrides the child exit code. A
 	// construction error (bad upstream URL / cap) is logged and the listener is
 	// skipped — the agent's MODEL_GATEWAY_URL then 502s, a visible misconfig, not
@@ -210,9 +210,9 @@ func main() {
 	}()
 
 	// Start the optional listeners best-effort (a bind failure is logged, never takes the agent down —
-	// each is a best-effort side path). memory / A2A / delegate / gateway / feedback; nil ones are skipped.
+	// each is a best-effort side path). memory / AMP / delegate / gateway / feedback; nil ones are skipped.
 	startBestEffort(memSrv, "memory")
-	startBestEffort(a2aSrv, "a2a")
+	startBestEffort(ampSrv, "amp")
 	startBestEffort(delSrv, "delegate")
 	startBestEffort(gwSrv, "gateway")
 	startBestEffort(fbSrv, "feedback")
@@ -223,7 +223,7 @@ func main() {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	for _, listener := range []*http.Server{srv, memSrv, a2aSrv, delSrv, gwSrv, fbSrv} {
+	for _, listener := range []*http.Server{srv, memSrv, ampSrv, delSrv, gwSrv, fbSrv} {
 		if listener != nil {
 			_ = listener.Shutdown(shutCtx)
 		}
@@ -234,7 +234,7 @@ func main() {
 }
 
 // startBestEffort runs an optional listener in a goroutine, logging a real bind failure without taking
-// the agent down (each side listener — memory / A2A / delegate / gateway / feedback — is best-effort). A
+// the agent down (each side listener — memory / AMP / delegate / gateway / feedback — is best-effort). A
 // nil server is a no-op (the feature is disabled).
 func startBestEffort(srv *http.Server, name string) {
 	if srv == nil {

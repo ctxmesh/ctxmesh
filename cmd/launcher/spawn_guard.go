@@ -27,10 +27,10 @@ import (
 
 // Spawn guards (M64, ADR 0057 Door 2) bound a supervisor's on-demand delegation. Two kinds:
 //   - DEPTH + CYCLE are per-PATH (a property of the spawn ancestry) → evaluated from the envelope, no
-//     shared state, race-free (like the A2A depth/path guards).
+//     shared state, race-free (like the AMP depth/path guards).
 //   - FAN-OUT (concurrent) + TOTAL (lifetime) are AGGREGATE across the whole spawn tree → a shared Valkey
 //     counter keyed by the tree ROOT, so every replica of every agent in the tree coordinates on ONE
-//     bucket. Putting these in the per-branch envelope (like the A2A hop budget) would let two branches
+//     bucket. Putting these in the per-branch envelope (like the AMP hop budget) would let two branches
 //     each read "budget remaining" and double-spend — a race bug. The counter is the M47 tenant-quota
 //     AcquireSlot pattern (Incr → check → Decr-rollback), on the same shared-Valkey seam.
 //

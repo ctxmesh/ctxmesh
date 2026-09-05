@@ -253,7 +253,7 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 }
 
 // agentInvokeTraceName is the launcher's per-invocation boundary span name — the one
-// trace that represents a RUN (cmd/launcher; see a2a.go / proxy.go).
+// trace that represents a RUN (cmd/launcher; see amp.go / proxy.go).
 const agentInvokeTraceName = "agent.invoke"
 
 // modelUnknownLabel is the cost-attribution bucket for a usage row whose Langfuse `model` field is empty

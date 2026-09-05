@@ -16,7 +16,7 @@ limitations under the License.
 
 package main
 
-// Blob offload / rehydrate for the async A2A path (M7,
+// Blob offload / rehydrate for the async AMP path (M7,
 // specs/eventing-scaling.md §"Large payloads", §"Blob offload"). The M6
 // platform envelope carried as a CloudEvent (cloudevent.go) must stay small: a
 // broker/channel that has to buffer multi-hundred-KB events is a memory hazard,

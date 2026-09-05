@@ -241,14 +241,14 @@ func TestRegistry_TwoMembers_NetworkPolicyAndStatus(t *testing.T) {
 	assert.True(t, egressTCPPorts[tokenServicePort],
 		"egress must allow the token-service :8443 (long-term-memory OBO)")
 
-	// Intra-registry A2A: same-registry pods (pod-to-pod) AND the Knative data
-	// plane (activator + kourier) the A2A route egresses through.
+	// Intra-registry AMP: same-registry pods (pod-to-pod) AND the Knative data
+	// plane (activator + kourier) the AMP route egresses through.
 	assert.Equal(t, registryID, egressPodLabel[registryIDLabel],
-		"egress must allow intra-registry A2A (same registry-id pods)")
+		"egress must allow intra-registry AMP (same registry-id pods)")
 	assert.True(t, egressNS[knativeServingNamespace],
-		"egress must allow the Knative activator (A2A route path)")
+		"egress must allow the Knative activator (AMP route path)")
 	assert.True(t, egressNS[kourierSystemNamespace],
-		"egress must allow the kourier ingress (A2A route path)")
+		"egress must allow the kourier ingress (AMP route path)")
 
 	// Lockdown: NO catch-all egress rule (an empty To with no ports = allow-all,
 	// which would defeat the exfiltration guard). Every rule must scope its
@@ -302,16 +302,16 @@ func TestRegistry_MemberEnvInjected(t *testing.T) {
 	assert.Equal(t, "worker-a,worker-b", envMap["AGENT_ALLOWED_CALLERS"], "comma-joined allowedCallers")
 	assert.Equal(t, "8", envMap["A2A_MAX_DEPTH"], "guard default maxDepth=8")
 	assert.Equal(t, "32", envMap["A2A_HOP_BUDGET"], "guard default hopBudget=32")
-	// A2A DNS discovery needs POD_NAMESPACE + AGENT_NAME on EVERY member (a member
+	// AMP DNS discovery needs POD_NAMESPACE + AGENT_NAME on EVERY member (a member
 	// without session memory gets them here, not via the memory path). Without
 	// POD_NAMESPACE the launcher builds {target}..svc.cluster.local → NXDOMAIN.
-	assert.Equal(t, namespace, envMap["POD_NAMESPACE"], "POD_NAMESPACE must be the agent's namespace (A2A DNS)")
-	assert.Equal(t, agentName, envMap["AGENT_NAME"], "AGENT_NAME must be the agent name (A2A senderAgentId)")
+	assert.Equal(t, namespace, envMap["POD_NAMESPACE"], "POD_NAMESPACE must be the agent's namespace (AMP DNS)")
+	assert.Equal(t, agentName, envMap["AGENT_NAME"], "AGENT_NAME must be the agent name (AMP senderAgentId)")
 	// AGENT_NAME injected exactly once (no memory here, but assert the count is
 	// robust regardless).
 	assert.Equal(t, 1, countEnv(userContainer.Env, "AGENT_NAME"), "AGENT_NAME must appear exactly once")
 	// POD_NAMESPACE exactly once too: m15.9 injects it UNCONDITIONALLY in the base
-	// env for the trace identity, and the A2A path guards against re-adding it — a
+	// env for the trace identity, and the AMP path guards against re-adding it — a
 	// duplicate container env var name is invalid.
 	assert.Equal(t, 1, countEnv(userContainer.Env, "POD_NAMESPACE"), "POD_NAMESPACE must appear exactly once")
 
@@ -346,7 +346,7 @@ func TestRegistry_MemberEnvInjected(t *testing.T) {
 // BOTH a registry member AND has session memory gets AGENT_NAME injected exactly
 // ONCE (the memory path injects it first; the registry path must not duplicate
 // it) and still gets POD_NAMESPACE (the memory path does NOT set POD_NAMESPACE,
-// so the registry path must add it for A2A DNS discovery).
+// so the registry path must add it for AMP DNS discovery).
 func TestRegistry_MemberWithMemory_AgentNameOnce(t *testing.T) {
 	const (
 		namespace  = "default"
@@ -394,7 +394,7 @@ func TestRegistry_MemberWithMemory_AgentNameOnce(t *testing.T) {
 
 	// POD_NAMESPACE comes from the registry path (memory path does NOT set it) —
 	// exactly once, and static.
-	assert.Equal(t, namespace, envMap["POD_NAMESPACE"], "POD_NAMESPACE must be set for A2A DNS")
+	assert.Equal(t, namespace, envMap["POD_NAMESPACE"], "POD_NAMESPACE must be set for AMP DNS")
 	assert.Equal(t, 1, countEnv(userContainer.Env, "POD_NAMESPACE"), "POD_NAMESPACE exactly once")
 
 	// The no-valueFrom Knative-webhook guard still holds for the combined path.

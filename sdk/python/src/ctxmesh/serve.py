@@ -85,7 +85,7 @@ class InvokeRequest:
     #: instead of starting fresh. ``None`` on every ordinary run. A custom handler may ignore it.
     checkpoint: Optional[Any] = None
     #: The conversation/thread id for this run: the inbound ``X-Conversation-Id`` (a console
-    #: chat / A2A hop) or, for an autonomous run with no session, a freshly minted per-run id.
+    #: chat / AMP hop) or, for an autonomous run with no session, a freshly minted per-run id.
     conversation_id: Optional[str] = None
     #: The SDK client — its capability + approvals are already bound for the life of the handler
     #: call (``request_scope``), so ``client.tools.call``/``client.memory`` relay the user's grant.
@@ -119,7 +119,7 @@ def _parse_body(raw: bytes) -> tuple:
 
 def _autonomous_conversation_id(headers: Mapping[str, str]) -> Optional[str]:
     """Return a minted per-run conversation id (m33.5) when the caller supplied NO session, else
-    None — so an inbound ``X-Conversation-Id`` (console chat / A2A hop) takes precedence. Each
+    None — so an inbound ``X-Conversation-Id`` (console chat / AMP hop) takes precedence. Each
     autonomous run is thus its own thread/trace. Case-insensitive."""
     for key, value in headers.items():
         if key.lower() == "x-conversation-id" and (value or "").strip():

@@ -30,7 +30,7 @@ package main
 //     record-capable agent carries no header ⇒ nothing is captured (zero fixture writes).
 //
 // The fixture is a DURABLE object-store blob keyed fixtures/{runId}/{digest}.json (m78.1
-// FixtureStore over internal/objectstore — never the launcher's ephemeral A2A store). The gateway
+// FixtureStore over internal/objectstore — never the launcher's ephemeral AMP store). The gateway
 // accumulates a run's MODEL-channel interactions in memory and re-Puts the per-run fixture after
 // each model call: the Put is content-addressed + idempotent (store.go), so the LAST call's Put
 // carries the complete model channel, and no cross-listener run-terminal signal is needed. The

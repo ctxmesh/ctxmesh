@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package asyncbus is the pluggable ASYNC-BACKEND seam for A2A hops (M141, ADR 0121).
+// Package asyncbus is the pluggable ASYNC-BACKEND seam for AMP hops (M141, ADR 0121).
 //
 // Before it, the only asynchronous path was Knative Eventing: an agent published a CloudEvent to its
 // per-registry Broker and a Trigger pushed it to the callee's ksvc. That works, but it makes durable
@@ -22,7 +22,7 @@ limitations under the License.
 // put the platform's async traffic on the broker they already run.
 //
 // The seam is deliberately narrow — publish, and consume durably — because that is the whole of what an
-// A2A hop needs and the whole of what every candidate backend agrees on. Everything richer (partitions,
+// AMP hop needs and the whole of what every candidate backend agrees on. Everything richer (partitions,
 // consumer groups, replay semantics) differs enough between brokers that putting it in the interface
 // would mean picking a winner, which is the opposite of the point.
 //
@@ -54,10 +54,10 @@ import (
 // ErrClosed is returned by a bus whose Close has already run.
 var ErrClosed = errors.New("asyncbus: closed")
 
-// Message is one async A2A hop in transit.
+// Message is one async AMP hop in transit.
 //
 // Data is the encoded CloudEvent carrying the platform envelope, and Headers are its binding headers.
-// The seam moves them OPAQUELY: it never parses the envelope, so the wire format stays owned by the A2A
+// The seam moves them OPAQUELY: it never parses the envelope, so the wire format stays owned by the AMP
 // layer and a backend swap can never change what an agent receives.
 type Message struct {
 	// ID is the envelope's messageId — the idempotency key. Backends that support native deduplication
@@ -73,7 +73,7 @@ type Message struct {
 	Headers map[string]string
 }
 
-// Publisher durably enqueues async A2A hops.
+// Publisher durably enqueues async AMP hops.
 type Publisher interface {
 	// Publish returns nil only once the backend has DURABLY accepted the message. A backend that can only
 	// confirm receipt-into-memory does not satisfy this and must return an error instead of lying.
@@ -85,7 +85,7 @@ type Publisher interface {
 // Handler processes one delivered message. nil ⇒ ack; an error ⇒ nack + redelivery.
 type Handler func(ctx context.Context, msg Message) error
 
-// Subscriber durably consumes async A2A hops.
+// Subscriber durably consumes async AMP hops.
 //
 // Not every backend implements it: with Knative Eventing the consumer is the Trigger, which pushes over
 // HTTP from outside this process, so its Subscriber returns ErrPushDelivered rather than pretending. That

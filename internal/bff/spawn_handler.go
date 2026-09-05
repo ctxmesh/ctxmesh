@@ -149,7 +149,7 @@ func (s *Server) declaredSpawnBudget(ctx context.Context, namespace, agent strin
 }
 
 // enforceDelegateFence rejects a spawn whose target is outside the caller's AgentRegistry (M142.1,
-// ADR 0122). It is the same rule the launcher's A2A guard applies at layer 1 and the async dispatcher
+// ADR 0122). It is the same rule the launcher's AMP guard applies at layer 1 and the async dispatcher
 // applies before delivery — one boundary, enforced at every edge that can cross it.
 //
 // Fail-closed, including when either party has no membership row: "I cannot verify this" is not a reason

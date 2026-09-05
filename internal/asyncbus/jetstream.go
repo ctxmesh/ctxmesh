@@ -36,7 +36,7 @@ import (
 // runnable offline — the same de-risk the M140 model services gave the retrieval bar.
 
 const (
-	// streamName is the single stream carrying every registry's async A2A traffic. One stream with
+	// streamName is the single stream carrying every registry's async AMP traffic. One stream with
 	// per-registry SUBJECTS (rather than a stream per registry) keeps provisioning static: adding a
 	// registry adds a subject, not a broker object, so nothing has to reconcile stream lifecycle against
 	// AgentRegistry lifecycle. Consumers still bind per-registry via a subject filter.
@@ -45,7 +45,7 @@ const (
 	// workloads. The wildcard CTXMESH_A2A.> is what the stream captures.
 	subjectPrefix = "ctxmesh.a2a"
 
-	// publishTimeout bounds a publish. It must be a real bound: a publish that hangs would stall the A2A
+	// publishTimeout bounds a publish. It must be a real bound: a publish that hangs would stall the AMP
 	// hop that triggered it, and the caller has its own deadline to honour.
 	publishTimeout = 10 * time.Second
 

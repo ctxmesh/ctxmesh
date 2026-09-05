@@ -78,7 +78,7 @@ type ProxyConfig struct {
 	// ExpectedBoundary, when non-empty, is the trust boundary (ADR 0033) this sidecar serves —
 	// the agent's registry. It SUPERSEDES the ExpectedAgent gate: a capability is redeemable
 	// here iff its `bnd` matches, so teammates in the same registry can act on-behalf-of the
-	// user (relayed across A2A, m30.3) while a different registry's capability is rejected. A
+	// user (relayed across AMP, m30.3) while a different registry's capability is rejected. A
 	// standalone agent's boundary is unique to it, so this reduces to the per-agent check.
 	ExpectedBoundary string
 	// Routes maps a server name (the first path segment) to its real upstream + auth type. It is the
