@@ -853,6 +853,31 @@ spec:
                         - shared
                         type: string
                     type: object
+                  skillRefs:
+                    description: |-
+                      skillRefs attaches skills to the agent (ADR 0137). A SKILL is procedural knowledge with
+                      progressive disclosure: its description sits in the agent's context permanently and the
+                      body loads only when the model judges the task relevant. Unlike promptRef, which is
+                      singular and unconditional, an agent may hold several.
+
+                      Each entry is "<name>@<version>", where version is a digest (sha256:…) or an alias. An
+                      alias is resolved ONCE, at reconcile time, and the resolved DIGEST is recorded in the
+                      AgentVersion snapshot — a running agent never follows a moving alias, because replay
+                      fixtures and the eval gate both assume a pinned artifact.
+
+                      Changing this list rolls a new Knative revision with the image digest unchanged, exactly
+                      as swapping promptRef does.
+
+                      Bounded at 16 for the same reason capabilities.tags is: every attached skill's
+                      description is ALWAYS-ON context cost, and progressive disclosure exists precisely
+                      because context is scarce.
+                    items:
+                      maxLength: 320
+                      minLength: 1
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: atomic
                   suspend:
                     description: |-
                       suspend stops this agent DECLARATIVELY (M146, ADR 0126 §4). A suspended agent accepts no new
@@ -1763,6 +1788,31 @@ spec:
                         - shared
                         type: string
                     type: object
+                  skillRefs:
+                    description: |-
+                      skillRefs attaches skills to the agent (ADR 0137). A SKILL is procedural knowledge with
+                      progressive disclosure: its description sits in the agent's context permanently and the
+                      body loads only when the model judges the task relevant. Unlike promptRef, which is
+                      singular and unconditional, an agent may hold several.
+
+                      Each entry is "<name>@<version>", where version is a digest (sha256:…) or an alias. An
+                      alias is resolved ONCE, at reconcile time, and the resolved DIGEST is recorded in the
+                      AgentVersion snapshot — a running agent never follows a moving alias, because replay
+                      fixtures and the eval gate both assume a pinned artifact.
+
+                      Changing this list rolls a new Knative revision with the image digest unchanged, exactly
+                      as swapping promptRef does.
+
+                      Bounded at 16 for the same reason capabilities.tags is: every attached skill's
+                      description is ALWAYS-ON context cost, and progressive disclosure exists precisely
+                      because context is scarce.
+                    items:
+                      maxLength: 320
+                      minLength: 1
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: atomic
                   suspend:
                     description: |-
                       suspend stops this agent DECLARATIVELY (M146, ADR 0126 §4). A suspended agent accepts no new

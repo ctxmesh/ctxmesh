@@ -7,6 +7,7 @@
  *
  *     client.memory     -> :2998               (M5)
  *     client.knowledge  -> :2998               (M68) — knowledge-base retrieval
+ *     client.skills     -> :2998               (M161) — attached skills, loaded on demand
  *     client.feedback   -> :2995               (M9)
  *     client.model      -> $MODEL_GATEWAY_URL   (M2/M8)
  *     client.tools      -> :2999 (discovery) + MCP endpoints (M4/M77.3)
@@ -29,6 +30,7 @@ import { recordScope } from "./_record.js";
 import { PlaneConfig } from "./config.js";
 import { FeedbackClient } from "./feedback.js";
 import { KnowledgeClient } from "./knowledge.js";
+import { SkillsClient } from "./skills.js";
 import { MemoryClient } from "./memory.js";
 import { MeshClient } from "./mesh.js";
 import { ModelClient } from "./model.js";
@@ -39,6 +41,7 @@ import type { SpanProcessor } from "@opentelemetry/sdk-trace-base";
 export class Client {
   readonly memory: MemoryClient;
   readonly knowledge: KnowledgeClient;
+  readonly skills: SkillsClient;
   readonly feedback: FeedbackClient;
   /** Agent-to-agent calls through the launcher (M6, M156). See mesh.ts for the naming. */
   readonly mesh: MeshClient;
@@ -52,6 +55,7 @@ export class Client {
     this._config = config;
     this.memory = new MemoryClient(config);
     this.knowledge = new KnowledgeClient(config);
+    this.skills = new SkillsClient(config);
     this.feedback = new FeedbackClient(config);
     this.mesh = new MeshClient(config);
     this.model = new ModelClient(config);

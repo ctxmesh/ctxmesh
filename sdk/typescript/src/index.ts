@@ -37,6 +37,8 @@ export { CAPABILITY_HEADER, currentCapability, capabilityScope } from "./_capabi
 
 export { MemoryClient } from "./memory.js";
 export { KnowledgeClient } from "./knowledge.js";
+export { SkillsClient, attached as attachedSkills } from "./skills.js";
+export type { Skill } from "./skills.js";
 export type { KnowledgeResult } from "./knowledge.js";
 export { FeedbackClient } from "./feedback.js";
 export { ModelClient, ChatResponse } from "./model.js";

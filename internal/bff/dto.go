@@ -1656,3 +1656,64 @@ func healthFromConditions(conds []metav1.Condition) string {
 		return healthPending
 	}
 }
+
+// --- Skills (ADR 0137) ------------------------------------------------------
+// A skill is procedural knowledge with progressive disclosure: Description is ALWAYS in the
+// agent's context and is what the model matches against to decide whether the body is worth
+// loading, so it is the field that carries the whole contract.
+
+// SkillSummary is the list projection.
+type SkillSummary struct {
+	Namespace   string `json:"namespace"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// SkillListResponse is GET /api/skills.
+type SkillListResponse struct {
+	Skills []SkillSummary `json:"skills"`
+}
+
+// SkillVersionSummary is one IMMUTABLE version. Digest is its identity — not an index, not a
+// name — so a client that records anything else has recorded something that can move.
+type SkillVersionSummary struct {
+	Digest    string `json:"digest"`
+	Source    string `json:"source"`
+	Repo      string `json:"repo,omitempty"`
+	Ref       string `json:"ref,omitempty"`
+	Path      string `json:"path,omitempty"`
+	SizeBytes int64  `json:"sizeBytes"`
+	CreatedBy string `json:"createdBy,omitempty"`
+}
+
+// SkillDetailResponse is GET /api/skills/{ns}/{name} — the skill and its append-only history.
+type SkillDetailResponse struct {
+	Namespace   string                `json:"namespace"`
+	Name        string                `json:"name"`
+	Description string                `json:"description"`
+	Versions    []SkillVersionSummary `json:"versions"`
+}
+
+// UpsertSkillRequest is POST /api/skills. Metadata only: versions are appended through their
+// own endpoint so a description edit can never rewrite what an agent already pinned.
+type UpsertSkillRequest struct {
+	Namespace   string `json:"namespace"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// AddSkillVersionRequest is POST /api/skills/{ns}/{name}/versions.
+type AddSkillVersionRequest struct {
+	// Digest is the content hash and the version's identity.
+	Digest string `json:"digest"`
+	// Source is "git" or "upload".
+	Source string `json:"source"`
+	// Git pin. Ref must be immutable — a full SHA or refs/tags/…; a branch is refused.
+	Repo string `json:"repo,omitempty"`
+	Ref  string `json:"ref,omitempty"`
+	Path string `json:"path,omitempty"`
+	// ObjectKey locates an uploaded bundle in the object store. The bytes never live in
+	// Postgres — this carries a ref, the rule KnowledgeBaseSource already states.
+	ObjectKey string `json:"objectKey,omitempty"`
+	SizeBytes int64  `json:"sizeBytes,omitempty"`
+}

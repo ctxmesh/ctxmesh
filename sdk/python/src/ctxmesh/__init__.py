@@ -65,6 +65,7 @@ from ctxmesh.managed import (
 from ctxmesh.model import ChatResponse, ModelClient
 from ctxmesh.runs import Run, RunEvent, RunsClient
 from ctxmesh.serve import InvokeRequest, serve
+from ctxmesh.skills import Skill
 from ctxmesh.trace import SpanHandle, TraceClient
 
 __all__ = [
@@ -78,6 +79,7 @@ __all__ = [
     "GuardrailBlockedError",
     "ModelClient",
     "ChatResponse",
+    "Skill",
     "TraceClient",
     "SpanHandle",
     "run_managed_loop",
