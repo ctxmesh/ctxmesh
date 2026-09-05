@@ -289,7 +289,7 @@ func buildHandler(
 		// attribute to THIS hop (the :2998 endpoint stamps it, m33.1) and "who said what to whom"
 		// is addressable. A top-level /invoke (no envelope) sets nothing — the memory endpoint mints
 		// one. The messageId also already rides the trace (a2a.message.id).
-		if mid := a2aMessageIDFromEnvelope(envelopeHeader(r.Header)); mid != "" {
+		if mid := a2aMessageIDFromEnvelopeHeader(r.Header); mid != "" {
 			outReq.Header.Set(messageIDHeader, mid)
 		}
 

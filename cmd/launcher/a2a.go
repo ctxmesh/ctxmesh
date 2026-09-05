@@ -118,14 +118,26 @@ const (
 	legacyEnvelopeHeader = "X-A2A-Envelope"
 )
 
-// envelopeHeader returns the raw envelope a request carries, under either name,
-// preferring the current one. Empty means the request carries no envelope at all —
-// which the callers treat as "not a mediated call", so it must stay exact.
-func envelopeHeader(h http.Header) string {
-	if v := h.Get(ampEnvelopeHeader); v != "" {
-		return v
+// envelopeHeader returns the raw envelope a request carries, under either name.
+//
+// `conflict` is true when BOTH names are present and their contents differ. That is
+// never legitimate — a caller stamps one envelope under two names — so it is either
+// a bug or someone probing which header the guard trusts. Preferring one silently
+// would let an attacker put a benign envelope under the name we read and a hostile
+// one under the name we ignore. The guard fails closed on it.
+//
+// Empty (with no conflict) means the request carries no envelope at all, which the
+// callers treat as "not a mediated call" — so that answer must stay exact.
+func envelopeHeader(h http.Header) (raw string, conflict bool) {
+	amp := h.Get(ampEnvelopeHeader)
+	legacy := h.Get(legacyEnvelopeHeader)
+	if amp != "" && legacy != "" && amp != legacy {
+		return "", true
 	}
-	return h.Get(legacyEnvelopeHeader)
+	if amp != "" {
+		return amp, false
+	}
+	return legacy, false
 }
 
 // A2A typed error codes (agent-mesh.md §"The A2A call contract",
@@ -525,7 +537,13 @@ func (s *a2aServer) buildEnvelope(
 ) (envelope, error) {
 	self := s.cfg.SelfName
 
-	incoming, err := parseIncomingEnvelope(envelopeHeader(r.Header))
+	incomingRaw, incomingConflict := envelopeHeader(r.Header)
+	if incomingConflict {
+		// Two envelopes that disagree — see envelopeHeader. Refuse to chain from
+		// either rather than pick one.
+		return envelope{}, errConflictingEnvelopes
+	}
+	incoming, err := parseIncomingEnvelope(incomingRaw)
 	if err != nil {
 		return envelope{}, err
 	}
@@ -707,9 +725,14 @@ func newA2AGuard(cfg a2aConfig, tracer trace.Tracer) *a2aGuard {
 // It is wired as a wrapper INSIDE the agent.invoke span (ctx already carries the
 // server span) so a denial is a child event of the invoke, not an orphan.
 func (g *a2aGuard) enforceInbound(ctx context.Context, w http.ResponseWriter, r *http.Request) bool {
-	raw := envelopeHeader(r.Header)
+	raw, conflict := envelopeHeader(r.Header)
+	if conflict {
+		// Two envelopes that disagree. Fail closed: see envelopeHeader.
+		g.deny(ctx, w, "", "conflicting envelope headers")
+		return false
+	}
 	if raw == "" {
-		return true // not an A2A call — nothing to enforce.
+		return true // not a mediated call — nothing to enforce.
 	}
 
 	env, err := parseIncomingEnvelope(raw)
@@ -1044,3 +1067,18 @@ func isConnRefused(err error) bool {
 	}
 	return false
 }
+
+// a2aMessageIDFromEnvelopeHeader is the header-level wrapper the /invoke proxy uses
+// for span annotation. A conflicting pair yields no id rather than a guessed one —
+// the guard rejects that request anyway.
+func a2aMessageIDFromEnvelopeHeader(h http.Header) string {
+	raw, conflict := envelopeHeader(h)
+	if conflict {
+		return ""
+	}
+	return a2aMessageIDFromEnvelope(raw)
+}
+
+// errConflictingEnvelopes is returned when a request carries both envelope header
+// names with different contents. Never legitimate; the caller fails closed.
+var errConflictingEnvelopes = errors.New("conflicting envelope headers")

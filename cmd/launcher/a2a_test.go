@@ -1232,31 +1232,45 @@ func TestEnvelopeHeaderAcceptsEitherName(t *testing.T) {
 			t.Fatalf("got %q, want %q — %s", got, want, why)
 		}
 	}
+	read := func(h http.Header) string { raw, _ := envelopeHeader(h); return raw }
 
 	t.Run("current name is read", func(t *testing.T) {
 		h := http.Header{}
 		h.Set(ampEnvelopeHeader, `{"registryId":"r1"}`)
-		eq(t, envelopeHeader(h), `{"registryId":"r1"}`, "the current header must be read")
+		eq(t, read(h), `{"registryId":"r1"}`, "the current header must be read")
 	})
 
 	t.Run("legacy name is still read", func(t *testing.T) {
 		h := http.Header{}
 		h.Set(legacyEnvelopeHeader, `{"registryId":"r1"}`)
-		eq(t, envelopeHeader(h), `{"registryId":"r1"}`,
+		eq(t, read(h), `{"registryId":"r1"}`,
 			"a peer that has not been upgraded must still be understood")
 	})
 
-	t.Run("current wins when both are present", func(t *testing.T) {
+	t.Run("identical pair reads cleanly", func(t *testing.T) {
 		h := http.Header{}
-		h.Set(legacyEnvelopeHeader, `{"registryId":"old"}`)
-		h.Set(ampEnvelopeHeader, `{"registryId":"new"}`)
-		eq(t, envelopeHeader(h), `{"registryId":"new"}`, "the current header wins")
+		h.Set(legacyEnvelopeHeader, `{"registryId":"r1"}`)
+		h.Set(ampEnvelopeHeader, `{"registryId":"r1"}`)
+		eq(t, read(h), `{"registryId":"r1"}`, "a matching pair is the normal dual-emit case")
+	})
+
+	t.Run("a DISAGREEING pair is a conflict, not a preference", func(t *testing.T) {
+		// Preferring one silently would let a caller put a benign envelope under the
+		// name we read and a hostile one under the name we ignore.
+		h := http.Header{}
+		h.Set(legacyEnvelopeHeader, `{"registryId":"theirs"}`)
+		h.Set(ampEnvelopeHeader, `{"registryId":"mine"}`)
+		raw, conflict := envelopeHeader(h)
+		if !conflict {
+			t.Fatal("disagreeing envelopes were not flagged as a conflict")
+		}
+		eq(t, raw, "", "a conflict must yield no envelope at all")
 	})
 
 	t.Run("no envelope stays no envelope", func(t *testing.T) {
 		// Must stay exact: empty means "not a mediated call", and the guard
 		// deliberately does not apply to ordinary external /invoke traffic.
-		eq(t, envelopeHeader(http.Header{}), "", "absence must remain absence")
+		eq(t, read(http.Header{}), "", "absence must remain absence")
 	})
 }
 
@@ -1353,5 +1367,35 @@ func TestOutboundStampsBothEnvelopeNames(t *testing.T) {
 	}
 	if amp != legacy {
 		t.Fatalf("the two envelope headers disagree:\n  amp    = %s\n  legacy = %s", amp, legacy)
+	}
+}
+
+// TestGuardDeniesConflictingEnvelopes proves the guard fails CLOSED when the two
+// header names disagree — it must not pick one.
+func TestGuardDeniesConflictingEnvelopes(t *testing.T) {
+	_, tp := newTestTracer(t)
+	guard := newA2AGuard(a2aConfig{RegistryID: "mine", SelfName: "callee"}, tp.Tracer(tracerName))
+
+	// The AMP copy claims the callee's own registry (would be ALLOWED alone); the
+	// legacy copy claims another (would be DENIED alone). Neither may win.
+	sameRegistry, err := json.Marshal(envelope{RegistryID: "mine", SenderAgentID: "caller"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRegistry, err := json.Marshal(envelope{RegistryID: "theirs", SenderAgentID: "caller"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/invoke", nil)
+	req.Header.Set(ampEnvelopeHeader, string(sameRegistry))
+	req.Header.Set(legacyEnvelopeHeader, string(otherRegistry))
+	rec := httptest.NewRecorder()
+
+	if guard.enforceInbound(context.Background(), rec, req) {
+		t.Fatal("a conflicting envelope pair was ALLOWED — the guard picked one instead of failing closed")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("got %d, want 403", rec.Code)
 	}
 }
