@@ -917,6 +917,7 @@ func (s *Server) Handler() http.Handler {
 	authed := http.NewServeMux()
 	if s.callerClients != nil {
 		authed.HandleFunc("GET /api/agents", s.handleListAgents)
+		authed.HandleFunc("GET /api/agents/census", s.handleAgentCensus)
 		// Eval-gated deploys metric (M69, ADR 0062 governance #2): the PRD §5
 		// ">50% of production deploys gated by an EvalSuite" counter. Caller-scoped
 		// (ADR 0011): reads AgentDeployments through the caller's own token — the K8s
