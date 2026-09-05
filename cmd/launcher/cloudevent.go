@@ -16,9 +16,9 @@ limitations under the License.
 
 package main
 
-// Async A2A over Knative Eventing (M7, specs/eventing-scaling.md §"Async A2A
+// Async AMP over Knative Eventing (M7, specs/eventing-scaling.md §"Async AMP
 // envelope = the M6 envelope as a CloudEvent"). The SAME platform envelope
-// (a2a.go, §12.5) that carries a synchronous A2A call is carried on the async
+// (amp.go, §12.5) that carries a synchronous AMP call is carried on the async
 // path as a CloudEvent whose attributes MIRROR the envelope's routing fields:
 //
 //	CloudEvent id     = envelope.MessageID      (the idempotency key, §12.6)
@@ -88,7 +88,7 @@ func envelopeToCloudEvent(env envelope) (cloudevents.Event, error) {
 // mismatched id/type/source is a producer bug, but the data is the contract the
 // agent path already understands).
 //
-// A missing or non-JSON data body is an error: an async A2A CloudEvent MUST
+// A missing or non-JSON data body is an error: an async AMP CloudEvent MUST
 // carry an envelope, and a consumer that cannot decode one has nothing to invoke
 // the agent with (the caller DLQs it rather than invoking blindly).
 func cloudEventToEnvelope(evt event.Event) (envelope, error) {

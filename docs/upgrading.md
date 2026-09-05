@@ -145,3 +145,49 @@ UDP was not redirected at all — every rule was `-p tcp`. QUIC (HTTP/3 on UDP 4
 bypassed the redirect completely, and arbitrary UDP was an open channel. UDP is now dropped except
 DNS to the cluster resolver. **If an agent relies on HTTP/3 or on non-DNS UDP, it will now fail**;
 route it over TCP.
+
+## M164 — the inter-agent call surface is renamed to AMP (BREAKING for saved trace queries)
+
+The surface agents use to call each other was called **A2A**. That name predates Google's
+Agent2Agent specification by years and now collides with it, while meaning something
+materially different: Google's A2A is *interop* between agents run by different parties;
+ctxmesh's is *mediation* between agents the platform already owns — an agent never dials
+another agent, it asks its own launcher, which stamps identity, enforces registry isolation
+and trips the guards. It is now called **AMP**.
+
+**Almost nothing about this is breaking.** The wire and the API keep working:
+
+| | Status |
+|---|---|
+| `client.mesh.call(...)` — the SDK API you write | **unchanged** |
+| `POST /a2a/{target}` — the launcher's loopback endpoint | still served, alongside `/amp/{target}` |
+| `X-A2A-Envelope` — the launcher↔launcher header | still sent **and** accepted, alongside `X-AMP-Envelope` |
+| Agent specs, CRDs, `A2A_*` env vars | **unchanged** |
+
+**The one thing that breaks: trace and metric names.** Spans, span events and attributes move
+from the `a2a.*` namespace to `amp.*`:
+
+```
+a2a.call                    →  amp.call
+a2a.guard                   →  amp.guard
+a2a.guard_tripped           →  amp.guard_tripped
+a2a.cross_registry_denied   →  amp.cross_registry_denied
+a2a.conversation.id         →  amp.conversation.id
+a2a.caller.registry.id      →  amp.caller.registry.id
+a2a.caller_denied           →  amp.caller_denied
+a2a.budget_remaining        →  amp.budget_remaining
+a2a.async, a2a.async.*      →  amp.async, amp.async.*
+```
+
+A span name cannot be emitted under two names at once, so this is a single deliberate cut
+rather than a deprecation window. **Any saved dashboard, alert or trace query keyed on `a2a.*`
+will silently return nothing** — it will not error, it will just go quiet, which is the worst
+way for a rename to reach you. Grep your Grafana/Langfuse/Honeycomb saved queries for `a2a.`
+before upgrading.
+
+**What is deliberately NOT renamed**, because renaming it would break running installs with no
+user-visible benefit: the `A2A_MAX_DEPTH` / `A2A_HOP_BUDGET` / `A2A_PORT` pod env vars (running
+pods keep their env until rolled, so renaming the read side would quietly revert every agent's
+guard limits to defaults), the JetStream stream `CTXMESH_A2A` and subject `ctxmesh.a2a`
+(in-flight durable hops would be stranded), and the `a2a:seen:` dedup keyspace and its Valkey
+ACL. See [ADR 0138](https://github.com/ctxmesh/ctxmesh) for the reasoning.

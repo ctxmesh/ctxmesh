@@ -17,7 +17,7 @@ limitations under the License.
 package main
 
 // The launcher's OUTBOUND gateway proxy (M8, specs/cost-governance.md). A third
-// launcher listener — beside the :2998 memory endpoint and the :2997 A2A
+// launcher listener — beside the :2998 memory endpoint and the :2997 AMP
 // endpoint — started ONLY when the controller injected a budget (a BUDGET_* env
 // var is present). When wired, the controller repoints the agent's
 // MODEL_GATEWAY_URL at this listener and sets GATEWAY_UPSTREAM_URL to the real
@@ -83,7 +83,7 @@ const (
 	hdrBudgetSoftPct  = "X-Budget-Soft-Pct"
 
 	// errBudgetExceededCost is the typed error code for a hard-cap circuit-break
-	// on the COST dimension (§14). It is deliberately the same string the A2A hop
+	// on the COST dimension (§14). It is deliberately the same string the AMP hop
 	// guard uses (agent-mesh.md errBudgetExceeded) — both are "budget_exceeded",
 	// the response's "dimension" field distinguishes cost (conversation|agent)
 	// from the hop guard.
@@ -209,7 +209,7 @@ func (c Config) GatewayProxyEnabled() bool {
 //	BUDGET_SOFT_PCT: soft-alert percentage (default 80 when blank/invalid).
 //	AGENT_NAME: keys per-agent spend (shared launcher config).
 //
-// Like the memory/A2A loaders it does not hard-fail on a blank cap or name when
+// Like the memory/AMP loaders it does not hard-fail on a blank cap or name when
 // the gate is set — a misconfiguration degrades to "that dimension unenforced"
 // rather than crashing the launcher on a best-effort path.
 func loadGatewayConfig(lookup func(string) string, agentName string) (gatewayConfig, error) {
@@ -578,7 +578,7 @@ func (gp *gatewayProxy) handler() http.Handler {
 //
 //   - ConversationID is read from the X-Conversation-Id header the AGENT stamps
 //     on its outbound LLM call — the SAME documented platform convention the
-//     memory (:2998) and A2A (:2997) paths already use (conversationIDFromRequest).
+//     memory (:2998) and AMP (:2997) paths already use (conversationIDFromRequest).
 //     Absent ⇒ per-conversation enforcement is simply skipped for this call
 //     (the agent chose not to identify a conversation); the per-agent cap, if
 //     set, still applies.
@@ -618,7 +618,7 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 		attribute.String("gateway.route", route),
 	)
 	if caps.ConversationID != "" {
-		span.SetAttributes(attribute.String("a2a.conversation.id", caps.ConversationID))
+		span.SetAttributes(attribute.String("amp.conversation.id", caps.ConversationID))
 	}
 
 	// ── PRE-CALL hard check ────────────────────────────────────────────────

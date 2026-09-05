@@ -100,12 +100,12 @@ type Config struct {
 	// is injected by the controller for an agent with spec.sessionMemory).
 	Memory memoryConfig
 
-	// A2A holds the agent-to-agent mesh configuration. The outbound /a2a
-	// listener is started ONLY when A2A.RegistryID is non-empty (i.e.
+	// AMP holds the agent-to-agent mesh configuration. The outbound /amp
+	// listener is started ONLY when AMP.RegistryID is non-empty (i.e.
 	// AGENT_REGISTRY_ID is injected because the agent is a resolved
 	// AgentRegistry member); inbound access control is likewise a no-op without
 	// it.
-	A2A a2aConfig
+	AMP ampConfig
 
 	// ObjectStore holds the blob-offload configuration for the async path. The
 	// offloader is constructed ONLY when ObjectStore.Addr is non-empty (i.e.
@@ -177,7 +177,7 @@ func loadConfig(lookup func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
-	a2a, err := loadA2AConfig(lookup, agentName)
+	amp, err := loadAMPConfig(lookup, agentName)
 	if err != nil {
 		return Config{}, err
 	}
@@ -206,7 +206,7 @@ func loadConfig(lookup func(string) string) (Config, error) {
 		TenantID:       lookup("TENANT_ID"),
 		PromptVersion:  lookup("PROMPT_VERSION"),
 		Memory:         mem,
-		A2A:            a2a,
+		AMP:            amp,
 		ObjectStore:    objStore,
 		Gateway:        gw,
 		Feedback:       fb,
@@ -236,7 +236,7 @@ type objectStoreConfig struct {
 //	  (no offloader is built); every other object-store env is then irrelevant.
 //	OBJECT_STORE_ACCESS_KEY / OBJECT_STORE_SECRET_KEY: the dev credentials.
 //
-// Like loadMemoryConfig / loadA2AConfig, it does NOT hard-fail on missing
+// Like loadMemoryConfig / loadAMPConfig, it does NOT hard-fail on missing
 // credentials when the gate is set — an empty credential is a
 // visible-but-non-fatal misconfiguration (the first PUT/GET surfaces the auth
 // error) rather than a crash on a best-effort path.

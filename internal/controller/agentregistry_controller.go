@@ -61,13 +61,13 @@ const (
 	// namespaceNameLabel is the well-known label the kubelet/apiserver stamps on
 	// every Namespace (NamespaceDefaultLabelName). We select the platform
 	// namespaces (knative-serving activator, kourier-system ingress) by it in the
-	// NetworkPolicy ingress rules so cold-start A2A and external /invoke are not
+	// NetworkPolicy ingress rules so cold-start AMP and external /invoke are not
 	// blocked (ADR 0007 consequences).
 	namespaceNameLabel = "kubernetes.io/metadata.name"
 
 	// knativeServingNamespace hosts the Knative activator, which buffers requests
 	// to scaled-to-zero revisions and initiates the pod. Under a default-deny
-	// ingress policy, omitting an allow rule for it wedges cold-start A2A.
+	// ingress policy, omitting an allow rule for it wedges cold-start AMP.
 	knativeServingNamespace = "knative-serving"
 
 	// kourierSystemNamespace hosts the kourier ingress gateway, the entry point
@@ -190,10 +190,10 @@ const (
 //  2. CreateOrUpdate's a single NetworkPolicy (owned by the registry) that
 //     enforces registry isolation at L3/L4 (ADR 0007): default-deny ingress for
 //     member pods, allow intra-registry ingress, allow the Knative activator +
-//     kourier ingress (so scale-from-zero A2A and external /invoke work); PLUS
+//     kourier ingress (so scale-from-zero AMP and external /invoke work); PLUS
 //     (m11.3) default-deny EGRESS with a backend allowlist — DNS, the
 //     collector→Langfuse export, the model gateway / memory / object store, and
-//     the intra-registry A2A route path — everything else denied (exfiltration
+//     the intra-registry AMP route path — everything else denied (exfiltration
 //     lockdown, spec §3), without re-severing the Langfuse export (the M6.4
 //     landmine).
 //
@@ -262,7 +262,7 @@ func (r *AgentRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// ── Step 3: converge the async-eventing plane (DLQ sink + Broker) ─────────
-	// The per-registry Broker is the async A2A transport (specs/eventing-scaling.md
+	// The per-registry Broker is the async AMP transport (specs/eventing-scaling.md
 	// §"Broker per registry"); an eventing-model agent's Trigger (m7.5) subscribes
 	// its ksvc to `<registryName>-broker`. The Broker's deadLetterSink points at
 	// the per-registry DLQ ksvc created here — the DLQ must exist BEFORE the Broker
@@ -323,9 +323,9 @@ func (r *AgentRegistryReconciler) resolveMembers(
 //     with only the explicit allow rules below; a NetworkPolicy that selects a
 //     pod and lists Ingress denies everything else to it);
 //   - Ingress allow from pods carrying the same registryId label (intra-registry
-//     A2A);
+//     AMP);
 //   - Ingress allow from the knative-serving (activator) and kourier-system
-//     (ingress) namespaces — REQUIRED or scale-from-zero A2A and external
+//     (ingress) namespaces — REQUIRED or scale-from-zero AMP and external
 //     /invoke break (ADR 0007 consequences).
 //
 // Egress (m11.3, spec §3 "Egress lockdown"): the policy now ALSO lists Egress,
@@ -334,7 +334,7 @@ func (r *AgentRegistryReconciler) resolveMembers(
 // The allowlist is the complete backend inventory the M6.4 review demanded,
 // derived peer-by-peer from what the pod actually talks to (the injected
 // LANGFUSE_OTLP_ENDPOINT / MODEL_GATEWAY_URL / MEMORY_BACKEND_ADDR /
-// OBJECT_STORE_ADDR and the A2A Knative-route path):
+// OBJECT_STORE_ADDR and the AMP Knative-route path):
 //
 //   - DNS (:53 UDP+TCP → kube-dns in kube-system) — FIRST, or all name
 //     resolution dies and every other peer becomes unreachable by name;
@@ -342,11 +342,11 @@ func (r *AgentRegistryReconciler) resolveMembers(
 //     OTLP export is egress from the agent pod; THE M6.4 LANDMINE, must stay open;
 //   - model gateway / memory backend / object store (ctxmesh :4000 /
 //     :6379 / :9000) — the launcher's LLM, M5 memory, and blob-offload paths;
-//   - intra-registry A2A (pods carrying the same registry-id label) AND the
+//   - intra-registry AMP (pods carrying the same registry-id label) AND the
 //     Knative data plane (activator in knative-serving, kourier ingress in
-//     kourier-system): A2A resolves to a Knative route
+//     kourier-system): AMP resolves to a Knative route
 //     (http://{target}.{ns}.svc.cluster.local), so the outbound hop egresses to
-//     kourier/activator, NOT pod-to-pod — omitting them severs A2A (M6/M7).
+//     kourier/activator, NOT pod-to-pod — omitting them severs AMP (M6/M7).
 //
 // Everything else is denied. This satisfies the M11 zero-trust backlog (ADR 0007)
 // WITHOUT re-severing the collector→Langfuse export that made M6 ship ingress-only.
@@ -480,17 +480,17 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 					},
 				},
 				{
-					// Intra-registry A2A. Two peer shapes, both required:
+					// Intra-registry AMP. Two peer shapes, both required:
 					//   - same-registry pods (pod-to-pod, if a target is addressed
 					//     directly), selected by the registry-id label;
 					//   - the Knative data plane — the activator (knative-serving,
 					//     scale-from-zero buffer) and the kourier ingress
-					//     (kourier-system): A2A resolves to a Knative route
+					//     (kourier-system): AMP resolves to a Knative route
 					//     (http://{target}.{ns}.svc.cluster.local), so the outbound
 					//     hop egresses THROUGH kourier/activator, not straight to the
-					//     callee pod. Omitting them severs A2A (M6/M7) even though the
+					//     callee pod. Omitting them severs AMP (M6/M7) even though the
 					//     intra-registry pod peer is present. No port restriction:
-					//     A2A/HTTP hits arbitrary ksvc ports via the route.
+					//     AMP/HTTP hits arbitrary ksvc ports via the route.
 					To: []networkingv1.NetworkPolicyPeer{
 						{PodSelector: &metav1.LabelSelector{
 							MatchLabels: map[string]string{registryIDLabel: registryID},
@@ -578,7 +578,7 @@ func (r *AgentRegistryReconciler) reconcileDLQSink(
 }
 
 // reconcileBroker CreateOrUpdate's the per-registry Knative Eventing Broker
-// (<registryName>-broker) — the async A2A transport for the registry's mesh
+// (<registryName>-broker) — the async AMP transport for the registry's mesh
 // (specs/eventing-scaling.md §"Broker per registry"). Its name MUST match the
 // one the m7.5 AgentDeployment reconciler stamps on an eventing agent's Trigger
 // (`membership.RegistryName + brokerNameSuffix`) or delivery silently breaks.

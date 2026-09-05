@@ -44,7 +44,7 @@ type KnativeBus struct {
 }
 
 // NewKnative returns the Knative-Eventing Publisher for a Broker URL. A nil client gets a bounded default
-// — an unbounded publish would stall the A2A hop that triggered it.
+// — an unbounded publish would stall the AMP hop that triggered it.
 func NewKnative(brokerURL string, client *http.Client) (*KnativeBus, error) {
 	if strings.TrimSpace(brokerURL) == "" {
 		return nil, fmt.Errorf("asyncbus: a Knative Broker URL is required")

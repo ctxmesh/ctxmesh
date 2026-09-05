@@ -38,7 +38,7 @@ var ErrNoFixture = errors.New("replay: no fixture recorded for this run")
 
 // FixtureStore assembles a recorded Fixture into the DURABLE object store and reads it back (ADR
 // 0071 §2). It reuses the durable KB object-store SPI (internal/objectstore.ObjectStore — the
-// never-GC'd durable store, NOT the launcher's ephemeral/GC'd A2A blob store): a fixture is a
+// never-GC'd durable store, NOT the launcher's ephemeral/GC'd AMP blob store): a fixture is a
 // durable, shareable artifact, not an in-flight payload, so the durable store is the right sink and
 // mirrors the objectstore precedent (same OBJECT_STORE_ADDR gate via objectstore.NewMinioStore).
 //

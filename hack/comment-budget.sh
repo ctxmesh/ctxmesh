@@ -39,7 +39,6 @@ GRANDFATHERED = {
     "cmd/launcher/guardrail_judge.go",
     "internal/gateway/render.go",
     "internal/asyncbus/asyncbus.go",
-    "cmd/launcher/a2a.go",
     "internal/bff/handlers.go",
     "internal/bff/promptversions.go",
     "internal/bff/evalsuites.go",

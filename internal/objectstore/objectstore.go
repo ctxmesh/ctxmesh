@@ -17,7 +17,7 @@ limitations under the License.
 // Package objectstore provides the durable object-store SPI for the
 // Knowledge-Base feature (M68, ADR 0061 Fork 4). It is DISTINCT from the
 // launcher's ephemeral blob-offload store (cmd/launcher/objectstore.go): the
-// launcher store is content-addressed, GC'd, and carries async A2A payloads;
+// launcher store is content-addressed, GC'd, and carries async AMP payloads;
 // this store is durable, never-GC'd, and carries KB source documents.
 //
 // M13 (ADR 0085): the two stores share the MinIO CLIENT boilerplate (NewMinioClient
@@ -190,7 +190,7 @@ type minioKBStore struct {
 
 // NewMinioClient builds a MinIO client for the in-cluster dev object store: plain HTTP (Secure:false —
 // the same no-TLS posture as the dev Valkey) with static V4 credentials. It is the SHARED construction both
-// object stores use — the durable KB store here (NewMinioStore) AND the launcher's ephemeral A2A-offload store
+// object stores use — the durable KB store here (NewMinioStore) AND the launcher's ephemeral AMP-offload store
 // (cmd/launcher/minioStore) — so the client config lives in ONE place (M13). minio.New does not dial, so a bad
 // addr is the only error. The two stores keep SEPARATE Put/Get SPIs by design (see the package doc + ADR 0085):
 // the launcher's is buffered byte-blobs (small, memory-bounded async payloads), this one's is streamed objects

@@ -32,7 +32,7 @@ limitations under the License.
 // advertising is opt-in and additive, while membership is recorded for every member.
 //
 // Candidates are always listed within ONE registry (List takes a non-empty registryID): AgentRegistry
-// membership is already the A2A trust boundary — the launcher denies a cross-registry envelope at layer 1
+// membership is already the AMP trust boundary — the launcher denies a cross-registry envelope at layer 1
 // — so discovery deliberately reuses it instead of minting a second, wider one.
 package agentcapability
 

@@ -108,7 +108,7 @@ prompt:
 	}
 }
 
-// TestExpandRoleAllowedCallers proves the within-registry A2A fields round-trip:
+// TestExpandRoleAllowedCallers proves the within-registry AMP fields round-trip:
 // role + allowedCallers on the agent.yaml land on the AgentDeployment spec (m18.3).
 func TestExpandRoleAllowedCallers(t *testing.T) {
 	in := []byte(`name: worker-agent

@@ -78,11 +78,11 @@ DEFAULT_MAX_STEPS = 8
 
 #: The inbound header that scopes a run to a conversation thread — the same
 #: X-Conversation-Id convention the launcher (cmd/launcher) and the memory/gateway/
-#: A2A paths use. When present AND the agent is bound to memory, the loop replays the
+#: AMP paths use. When present AND the agent is bound to memory, the loop replays the
 #: recent turns so the stock agent is context-aware across a chat.
 CONVERSATION_HEADER = "X-Conversation-Id"
 
-#: X-Message-Id — the per-hop message id (ADR 0035, m33.4). The launcher sets it on an A2A-invoked
+#: X-Message-Id — the per-hop message id (ADR 0035, m33.4). The launcher sets it on an AMP-invoked
 #: /invoke from the envelope; the loop relays it to memory writes so entries attribute to THIS hop.
 MESSAGE_HEADER = "X-Message-Id"
 
@@ -334,8 +334,8 @@ def _persist_turn(
     so the next turn replays them. Intermediate tool-call scratchpad messages are NOT stored
     — only the clean user↔assistant exchange, which is what a later turn should see.
 
-    message_id (m33.4) attributes both entries to the inbound A2A hop when this turn was reached
-    via A2A, so the shared/private log records which hop each message belongs to."""
+    message_id (m33.4) attributes both entries to the inbound AMP hop when this turn was reached
+    via AMP, so the shared/private log records which hop each message belongs to."""
     mid = message_id or None
     client.memory.append({"role": "user", "content": user_input}, conversation_id, message_id=mid)
     client.memory.append({"role": "assistant", "content": answer}, conversation_id, message_id=mid)
@@ -863,7 +863,7 @@ def run_managed_loop(
     # run" default is applied at the deployment boundary (the managed-agent entrypoint), which
     # passes a minted id here — keeping this library call free of ambient I/O.
     conversation_id = _conversation_id_from_headers(headers) or conversation_id or ""
-    # Per-hop message id (m33.4): when this turn was reached via A2A, the launcher stamped the hop's
+    # Per-hop message id (m33.4): when this turn was reached via AMP, the launcher stamped the hop's
     # messageId onto the inbound headers; relay it so persisted turns attribute to this hop.
     message_id = _message_id_from_headers(headers)
     # Delegation depth (m65.6): computed ONCE per run from the inbound headers and threaded into
