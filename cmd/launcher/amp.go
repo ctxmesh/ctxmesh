@@ -850,36 +850,22 @@ type guardError struct {
 	detail string
 }
 
-// checkGuards enforces the three conversation guards (agent-mesh.md §12.7)
-// against the OUTGOING envelope, just before the hop is forwarded. It is called
-// by handleCall with the envelope already stamped (depth incremented, path
-// extended, budgetRemaining decremented). Returns nil when all guards pass.
+// checkGuards enforces the three conversation guards (agent-mesh.md §12.7) against
+// the OUTGOING envelope, just before the hop is forwarded. First trip wins.
 //
-// Guards (evaluated in order; first trip wins):
+//  1. Max depth      — env.Depth > maxDepth
+//  2. Cycle          — env.ReceiverAgentID already in env.Path
+//  3. Hop budget     — env.BudgetRemaining <= 0
 //
-//  1. Max depth — env.Depth > maxDepth → depth_exceeded.
-//     Rejects a call that would push the hop depth past the registry limit.
+// The budget trips at <=0, not <0: budgetRemaining is decremented per chained hop,
+// so hopBudget=N permits exactly N hops and the (N+1)-th is the first rejected
+// ("reject at zero", §12.7). Changing the comparison silently grants one extra hop.
 //
-//  2. Cycle detection — env.ReceiverAgentID ∈ env.Path → cycle_detected.
-//     The path accumulates the IDs of agents that have already sent in this
-//     chain (senders so far, ending in self). Forwarding to an agent that
-//     appears in the path would revisit it without progress.
+// It is a per-branch counter — each fan-out branch gets its own envelope copy. Do
+// NOT add shared cross-pod budget state here; that is CostBudget's job.
 //
-//  3. Hop budget — env.BudgetRemaining <= 0 → budget_exceeded.
-//     budgetRemaining was initialised to hopBudget on the first hop and
-//     decremented by 1 on each chained hop in buildEnvelope, so on the k-th hop
-//     of a branch the OUTGOING value is hopBudget-(k-1). It reaches 0 on the
-//     (hopBudget+1)-th hop, which is the first hop that must be rejected — hence
-//     the <=0 trip ("reject at zero", agent-mesh.md §12.7). This makes
-//     hopBudget=N permit exactly N hops (the (N+1)-th trips), hopBudget=1 permit
-//     1 hop, and hopBudget=0 trip on the first hop (0 hops).
-//     This is a per-branch counter for sync v1 (each fan-out branch receives
-//     its own copy of the envelope). A cross-branch / cross-conversation
-//     aggregate budget (and token + wall-clock cost tracking) is deferred to
-//     CostBudget at M8 — do NOT add shared cross-pod budget state here.
-//
-// A tripped guard is a typed best-effort denial: handleCall maps a non-nil
-// return to a 403 + amp.guard_tripped span event; it never panics or crashes.
+// A tripped guard is a typed denial: handleCall maps a non-nil return to 403 plus an
+// amp.guard_tripped span event, never a panic.
 func checkGuards(env envelope, maxDepth int) *guardError {
 	// Guard 1: max depth.
 	if env.Depth > maxDepth {
