@@ -65,7 +65,7 @@ func newTestA2AServer(
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var env envelope
-		_ = json.Unmarshal([]byte(r.Header.Get(a2aEnvelopeHeader)), &env)
+		_ = json.Unmarshal([]byte(r.Header.Get(legacyEnvelopeHeader)), &env)
 		peerCh <- peerCapture{
 			traceparent: r.Header.Get("Traceparent"),
 			runCap:      r.Header.Get(runcap.HeaderName),
@@ -291,7 +291,7 @@ func TestA2AChainedHopEnvelope(t *testing.T) {
 	incJSON, _ := json.Marshal(incoming)
 
 	callA2A(t, s, context.Background(), "analyst", `{"task":"crunch"}`,
-		map[string]string{a2aEnvelopeHeader: string(incJSON)})
+		map[string]string{legacyEnvelopeHeader: string(incJSON)})
 
 	env := (<-peerCh).envelope
 	if env.Depth != 2 {
@@ -341,7 +341,7 @@ func TestA2AChainedHopDoesNotAliasIncomingPath(t *testing.T) {
 	incJSON, _ := json.Marshal(incoming)
 
 	req := httptest.NewRequest(http.MethodPost, "/a2a/analyst", strings.NewReader(`{}`))
-	req.Header.Set(a2aEnvelopeHeader, string(incJSON))
+	req.Header.Set(legacyEnvelopeHeader, string(incJSON))
 	env, err := s.buildEnvelope(context.Background(), req, "analyst", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
@@ -558,7 +558,7 @@ func TestA2AInboundAllowsEmptyAllowlist(t *testing.T) {
 	handler, reached := newTestProxyWithGuard(t, cfg)
 
 	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
-	req.Header.Set(a2aEnvelopeHeader, inboundEnvelope("orchestrator", "orchestrator"))
+	req.Header.Set(legacyEnvelopeHeader, inboundEnvelope("orchestrator", "orchestrator"))
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -577,7 +577,7 @@ func TestA2AInboundAllowsListedCaller(t *testing.T) {
 	handler, reached := newTestProxyWithGuard(t, cfg)
 
 	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
-	req.Header.Set(a2aEnvelopeHeader, inboundEnvelope("research", "worker"))
+	req.Header.Set(legacyEnvelopeHeader, inboundEnvelope("research", "worker"))
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -596,7 +596,7 @@ func TestA2AInboundDeniesUnlistedCaller(t *testing.T) {
 	handler, reached := newTestProxyWithGuard(t, cfg)
 
 	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
-	req.Header.Set(a2aEnvelopeHeader, inboundEnvelope("intruder", "worker"))
+	req.Header.Set(legacyEnvelopeHeader, inboundEnvelope("intruder", "worker"))
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -619,7 +619,7 @@ func TestA2AInboundDeniesEmptyRole(t *testing.T) {
 	handler, reached := newTestProxyWithGuard(t, cfg)
 
 	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
-	req.Header.Set(a2aEnvelopeHeader, inboundEnvelope("orchestrator", "")) // empty role.
+	req.Header.Set(legacyEnvelopeHeader, inboundEnvelope("orchestrator", "")) // empty role.
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -639,7 +639,7 @@ func TestA2AInboundDeniesMalformedEnvelope(t *testing.T) {
 	handler, reached := newTestProxyWithGuard(t, cfg)
 
 	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
-	req.Header.Set(a2aEnvelopeHeader, `{not valid json`)
+	req.Header.Set(legacyEnvelopeHeader, `{not valid json`)
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -668,7 +668,7 @@ func TestA2AInboundDeniesCrossRegistry(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
 	// Foreign registry: a valid orchestrator caller, but from "other-team".
-	req.Header.Set(a2aEnvelopeHeader, inboundEnvelopeIn("other-team", "orchestrator", "orchestrator"))
+	req.Header.Set(legacyEnvelopeHeader, inboundEnvelopeIn("other-team", "orchestrator", "orchestrator"))
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -698,7 +698,7 @@ func TestA2ACrossRegistryCheckedBeforeAllowlist(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
 	// ...but names a foreign registry → cross-registry deny wins.
-	req.Header.Set(a2aEnvelopeHeader, inboundEnvelopeIn("other-team", "orchestrator", "orchestrator"))
+	req.Header.Set(legacyEnvelopeHeader, inboundEnvelopeIn("other-team", "orchestrator", "orchestrator"))
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -724,7 +724,7 @@ func TestA2AInboundAllowsSameRegistry(t *testing.T) {
 	handler, reached := newTestProxyWithGuard(t, cfg)
 
 	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
-	req.Header.Set(a2aEnvelopeHeader, inboundEnvelopeIn("research-team", "orchestrator", "orchestrator"))
+	req.Header.Set(legacyEnvelopeHeader, inboundEnvelopeIn("research-team", "orchestrator", "orchestrator"))
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -869,7 +869,7 @@ func TestCheckGuardsDepth(t *testing.T) {
 		incJSON, _ := json.Marshal(incoming)
 
 		rr := callA2A(t, s, context.Background(), "next", `{}`,
-			map[string]string{a2aEnvelopeHeader: string(incJSON)})
+			map[string]string{legacyEnvelopeHeader: string(incJSON)})
 
 		if rr.Code != http.StatusForbidden {
 			t.Fatalf("depth_exceeded: status = %d, want 403; body=%s", rr.Code, rr.Body.String())
@@ -925,7 +925,7 @@ func TestCheckGuardsCycle(t *testing.T) {
 
 		// Call back to "prev" — "prev" is in the path, triggering cycle_detected.
 		rr := callA2A(t, s, context.Background(), "prev", `{}`,
-			map[string]string{a2aEnvelopeHeader: string(incJSON)})
+			map[string]string{legacyEnvelopeHeader: string(incJSON)})
 
 		if rr.Code != http.StatusForbidden {
 			t.Fatalf("cycle_detected: status = %d, want 403; body=%s", rr.Code, rr.Body.String())
@@ -972,7 +972,7 @@ func TestCheckGuardsBudget(t *testing.T) {
 		incJSON, _ := json.Marshal(incoming)
 
 		rr := callA2A(t, s, context.Background(), "b", `{}`,
-			map[string]string{a2aEnvelopeHeader: string(incJSON)})
+			map[string]string{legacyEnvelopeHeader: string(incJSON)})
 		if rr.Code != http.StatusOK {
 			t.Fatalf("chained hop status = %d, want 200; body=%s", rr.Code, rr.Body.String())
 		}
@@ -1007,7 +1007,7 @@ func TestCheckGuardsBudget(t *testing.T) {
 					out := (<-peerCh).envelope
 					// Feed this hop's outgoing envelope in as the next hop's incoming.
 					outJSON, _ := json.Marshal(out)
-					incomingHeader = map[string]string{a2aEnvelopeHeader: string(outJSON)}
+					incomingHeader = map[string]string{legacyEnvelopeHeader: string(outJSON)}
 					continue
 				}
 				// The trip: must be a typed 403 budget_exceeded with a span event.
@@ -1218,5 +1218,104 @@ func TestRefuseRedirect_DoesNotFollow(t *testing.T) {
 	}
 	if reachedTarget {
 		t.Error("the client must never reach the redirect target")
+	}
+}
+
+// ── ADR 0138: the rename must never disable the guard ────────────────────────
+
+// TestEnvelopeHeaderAcceptsEitherName proves a callee understands both the current
+// and the legacy envelope header, preferring the current one.
+func TestEnvelopeHeaderAcceptsEitherName(t *testing.T) {
+	eq := func(t *testing.T, got, want, why string) {
+		t.Helper()
+		if got != want {
+			t.Fatalf("got %q, want %q — %s", got, want, why)
+		}
+	}
+
+	t.Run("current name is read", func(t *testing.T) {
+		h := http.Header{}
+		h.Set(ampEnvelopeHeader, `{"registryId":"r1"}`)
+		eq(t, envelopeHeader(h), `{"registryId":"r1"}`, "the current header must be read")
+	})
+
+	t.Run("legacy name is still read", func(t *testing.T) {
+		h := http.Header{}
+		h.Set(legacyEnvelopeHeader, `{"registryId":"r1"}`)
+		eq(t, envelopeHeader(h), `{"registryId":"r1"}`,
+			"a peer that has not been upgraded must still be understood")
+	})
+
+	t.Run("current wins when both are present", func(t *testing.T) {
+		h := http.Header{}
+		h.Set(legacyEnvelopeHeader, `{"registryId":"old"}`)
+		h.Set(ampEnvelopeHeader, `{"registryId":"new"}`)
+		eq(t, envelopeHeader(h), `{"registryId":"new"}`, "the current header wins")
+	})
+
+	t.Run("no envelope stays no envelope", func(t *testing.T) {
+		// Must stay exact: empty means "not a mediated call", and the guard
+		// deliberately does not apply to ordinary external /invoke traffic.
+		eq(t, envelopeHeader(http.Header{}), "", "absence must remain absence")
+	})
+}
+
+// TestGuardEnforcesUnderEitherHeaderName is the ✅ of M164: the cross-registry deny
+// must fire whichever name the caller used.
+//
+// The failure this forbids is silent. The guard fires only on a RECOGNISED envelope;
+// a request with none is treated as external traffic and access control does not
+// apply. So a launcher that stopped understanding one of the names would wave
+// through cross-registry calls rather than reject them — a security regression
+// wearing the shape of a rename.
+func TestGuardEnforcesUnderEitherHeaderName(t *testing.T) {
+	for _, header := range []string{ampEnvelopeHeader, legacyEnvelopeHeader} {
+		t.Run(header, func(t *testing.T) {
+			_, tp := newTestTracer(t)
+			guard := newA2AGuard(a2aConfig{RegistryID: "mine", SelfName: "callee"}, tp.Tracer(tracerName))
+			raw, err := json.Marshal(envelope{
+				RegistryID:      "theirs",
+				SenderAgentID:   "caller",
+				ReceiverAgentID: "callee",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/invoke", nil)
+			req.Header.Set(header, string(raw))
+			rec := httptest.NewRecorder()
+
+			if guard.enforceInbound(context.Background(), rec, req) {
+				t.Fatalf("%s: a cross-registry call was ALLOWED — the guard did not recognise the envelope", header)
+			}
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("%s: got %d, want 403", header, rec.Code)
+			}
+		})
+	}
+}
+
+// TestBothOutboundPathsAreServed proves the launcher answers on the current and the
+// legacy path. The SDK ships inside the customer's agent image and is versioned
+// independently of the launcher, so an older SDK calling /a2a must keep working
+// after the launcher is upgraded.
+func TestBothOutboundPathsAreServed(t *testing.T) {
+	for _, prefix := range []string{"/amp/", "/a2a/"} {
+		t.Run(prefix, func(t *testing.T) {
+			cfg := a2aConfig{RegistryID: "r1", SelfName: "caller", Port: 0}
+			_, tp := newTestTracer(t)
+			srv := newA2AServer(cfg, tp.Tracer(tracerName), propagation.TraceContext{}, nil)
+
+			req := httptest.NewRequest(http.MethodPost, prefix+"analyst", strings.NewReader(`{}`))
+			rec := httptest.NewRecorder()
+			srv.handler().ServeHTTP(rec, req)
+
+			// Any answer other than 404 proves the route is bound — the call itself
+			// fails because there is no peer, which is a different (typed) outcome.
+			if rec.Code == http.StatusNotFound {
+				t.Fatalf("%s is not served (404) — an older SDK on this path would break", prefix)
+			}
+		})
 	}
 }

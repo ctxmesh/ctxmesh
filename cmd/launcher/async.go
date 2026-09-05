@@ -350,7 +350,7 @@ func newProxyInvoker(proxyPort int, client *http.Client) func(context.Context, e
 		// Carry the full envelope so the callee's inbound guard (a2a.go) can
 		// enforce registry isolation / allowedCallers on the async path too.
 		if envJSON, mErr := json.Marshal(env); mErr == nil {
-			req.Header.Set(a2aEnvelopeHeader, string(envJSON))
+			req.Header.Set(legacyEnvelopeHeader, string(envJSON))
 		}
 		resp, err := client.Do(req)
 		if err != nil {
