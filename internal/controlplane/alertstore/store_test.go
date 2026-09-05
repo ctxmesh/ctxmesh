@@ -33,6 +33,11 @@ import (
 func eachStore(t *testing.T, fn func(t *testing.T, s alertstore.Store)) {
 	t.Helper()
 
+	// The in-memory twin runs the SAME contract. It used to run nothing, so the two
+	// implementations could disagree silently — which is how a cluster-wide read came
+	// to return zero rows in both, unnoticed.
+	t.Run("memory", func(t *testing.T) { fn(t, alertstore.NewMemStore()) })
+
 	dsn := os.Getenv("CONTROLPLANE_TEST_DSN")
 	if dsn == "" {
 		t.Skip("CONTROLPLANE_TEST_DSN unset — skipping alertstore Postgres conformance run (set it to a throwaway pg16 DB)")
@@ -137,5 +142,30 @@ func TestStore_Resolve(t *testing.T) {
 
 		// Resolving a non-existent id is a best-effort no-op, not an error.
 		require.NoError(t, s.Resolve(ctx, 9_999_999))
+	})
+}
+
+// TestStore_ListClusterWideReturnsEveryNamespace pins the scope contract: an empty
+// namespace is "all workspaces", not a literal match on the empty string.
+//
+// Both stores filtered on equality, so the console's default scope asked for every
+// namespace and was told there were no alerts — a 200 carrying a zero, which is the
+// most dangerous wrong answer this feed can give.
+func TestStore_ListClusterWideReturnsEveryNamespace(t *testing.T) {
+	eachStore(t, func(t *testing.T, s alertstore.Store) {
+		ctx := context.Background()
+		for _, ns := range []string{"ns1", "ns2", "ns3"} {
+			_, err := s.Append(ctx, sampleAlert(ns, "p", "c"))
+			require.NoError(t, err)
+		}
+
+		all, err := s.List(ctx, "", 50)
+		require.NoError(t, err)
+		require.Len(t, all, 3, "an empty namespace must read across every namespace")
+
+		scoped, err := s.List(ctx, "ns2", 50)
+		require.NoError(t, err)
+		require.Len(t, scoped, 1, "a named namespace must still narrow the read")
+		require.Equal(t, "ns2", scoped[0].Namespace)
 	})
 }

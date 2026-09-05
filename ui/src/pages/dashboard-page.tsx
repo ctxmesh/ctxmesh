@@ -763,6 +763,9 @@ export function DashboardPage() {
   const [tenants, setTenants] = useState<Load<TenantSummary[]>>({ kind: "loading" });
   const [usage, setUsage] = useState<Load<TenantUsageItem[]>>({ kind: "loading" });
   const [alerts, setAlerts] = useState<Load<AlertSummary[]>>({ kind: "loading" });
+  // True when the alert feed held more than we asked for, so every count derived
+  // from it is a lower bound and must be rendered as one.
+  const [alertsTruncated, setAlertsTruncated] = useState(false);
   // Providers + runs drive ONLY the first-run checklist. They are fetched for
   // that gate and nothing else — this page shows no provider list and no runs.
   const [providers, setProviders] = useState<Load<number>>({ kind: "loading" });
@@ -845,11 +848,15 @@ export function DashboardPage() {
         });
 
       api
-        .listAlerts({ limit: 50 }, controller.signal)
+        .listAlerts(
+          { limit: 50, ...(namespace ? { namespace } : {}) },
+          controller.signal,
+        )
         .then((res) => {
           if (!live()) return;
           // null is the client's calm 501 sentinel: no alert store on this
           // install. That is neither an error nor "no alerts are firing".
+          setAlertsTruncated(res?.truncated === true);
           setAlerts(
             res === null
               ? { kind: "unavailable" }
@@ -1134,7 +1141,12 @@ export function DashboardPage() {
           {attention.length > 0 && (
             <AttentionPanel rows={attention} complete={facts?.complete ?? false} />
           )}
-          <AlertsPanel state={alerts} firing={firing} onRetry={() => load()} />
+          <AlertsPanel
+            state={alerts}
+            firing={firing}
+            truncated={alertsTruncated}
+            onRetry={() => load()}
+          />
         </div>
       )}
 
@@ -1567,26 +1579,33 @@ function alertWord(a: AlertSummary): string {
 function AlertsPanel({
   state,
   firing,
+  truncated,
   onRetry,
 }: {
   state: Load<AlertSummary[]>;
   firing: AlertSummary[];
+  truncated: boolean;
   onRetry: () => void;
 }) {
   const shown = firing.slice(0, PANEL_ROWS);
   const more = firing.length - shown.length;
+  // The feed is limit-capped. When it came back full, every count derived from it
+  // describes the page and not the fleet — so say "50+", never "50".
+  const bound = truncated ? "+" : "";
 
   return (
     <Panel
       title="Alerts"
-      meta={state.kind === "ready" ? plural(firing.length, "firing") : undefined}
+      meta={
+        state.kind === "ready" ? `${firing.length}${bound} firing` : undefined
+      }
       testId="home-alerts"
       foot={
         state.kind === "ready" && firing.length > 0 ? (
           <MoreLine
             text={
               more > 0
-                ? `${plural(more, "further alert")} ${more === 1 ? "is" : "are"} firing.`
+                ? `${more}${bound} further alert${more === 1 && !bound ? " is" : "s are"} firing.`
                 : "Resolved alerts and their history live on the Alerts page."
             }
             label="Open the alerts"

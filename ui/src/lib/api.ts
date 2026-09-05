@@ -828,6 +828,9 @@ export interface AlertSummary {
 // AlertListResponse mirrors the BFF's AlertListResponse: items is non-null on the wire.
 export interface AlertListResponse {
   items: AlertSummary[];
+  // truncated says the store held more than `limit`. Without it the console
+  // printed items.length as the total, so 312 firing alerts read "50 firing".
+  truncated?: boolean;
 }
 
 // AlertListParams are the query params for GET /api/alerts.
