@@ -19,6 +19,7 @@ import {
   type WizardStep,
 } from "@/components/kit";
 import { useCapabilities } from "@/lib/capabilities";
+import { useNamespace } from "@/lib/namespace";
 import { cn } from "@/lib/utils";
 import { api, ApiError, type ConnectProviderResponse } from "@/lib/api";
 
@@ -149,6 +150,7 @@ export function ConnectProviderPage() {
   // in the shell; if they reach this page directly the API 403 is the real gate.
   // DISPLAY-ONLY (ADR 0011).
   const { canFlow, reprobe } = useCapabilities();
+  const { workingNamespace } = useNamespace();
   // The SERVER answers whether the whole connect flow is completable — see flows.go.
   const canConnect = canFlow("connectProvider");
 
@@ -166,6 +168,10 @@ export function ConnectProviderPage() {
     // immediately — it never survives the submit in any client-side store.
     const req = {
       provider: providerId,
+      // Name the namespace explicitly. Omitting it let the BFF fall back to a hardcoded
+      // "default", so the console wrote somewhere the user had not selected while the
+      // capability probe asked about a third namespace entirely.
+      ...(workingNamespace ? { namespace: workingNamespace } : {}),
       ...(connection.trim() ? { connection: connection.trim() } : {}),
       displayName: connection.trim() || provider.name,
       apiKey,

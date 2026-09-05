@@ -1204,6 +1204,14 @@ export interface ProviderModel {
 // never in a store/localStorage/sessionStorage/URL (ADR 0015).
 export interface ConnectProviderRequest {
   provider: string;
+  /**
+   * The namespace the Secret / SecretBinding / ModelRoute land in. REQUIRED in practice: the
+   * SPA used to omit it and the BFF fell back to a hardcoded "default", so the console wrote
+   * somewhere the user had not chosen and the capability probe asked about a third namespace
+   * again. Probe, selection and write must name the same namespace or the permission answer
+   * describes a different operation than the one performed.
+   */
+  namespace?: string;
   // connection (m22/ADR 0026): the named connection this key belongs to, so a
   // user can hold multiple keys per provider type. Optional; defaults to provider.
   connection?: string;

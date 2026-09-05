@@ -83,7 +83,11 @@ export function CapabilitiesProvider({
 }: {
   children: React.ReactNode;
 }) {
-  const { namespace } = useNamespace();
+  // workingNamespace, NOT namespace. "" is a read filter; feeding it to an SSAR asks "may I
+  // do this in every namespace at once", which only a ClusterRoleBinding satisfies — so the
+  // per-namespace RoleBinding the platform mandates produced an all-denied map.
+  const { workingNamespace } = useNamespace();
+  const namespace = workingNamespace;
   const [state, setState] = React.useState<CapState>({ kind: "loading" });
   // Per-namespace session cache of the last successful map. Keyed by namespace
   // ("" = all). A cache HIT serves instantly; a miss (or a forced reprobe)

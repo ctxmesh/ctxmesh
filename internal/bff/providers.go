@@ -147,9 +147,17 @@ func (s *Server) handleConnectProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ns := req.Namespace
+	// The namespace is the caller's to name. The silent fallback to "default" that used to sit
+	// here meant the console wrote into a namespace the user had not selected, while the
+	// capability probe asked about a different one again — probe, selection and write all
+	// describing different operations. The fallback is kept for API compatibility (an older SPA
+	// and any script that omits it), but it is now LOGGED, because "we picked a namespace for
+	// you" is a fact a credential write should never hide.
+	ns := strings.TrimSpace(req.Namespace)
 	if ns == "" {
 		ns = defaultCreateNamespace
+		s.log.Info("connect provider: no namespace in the request, defaulting",
+			"namespace", ns, "provider", req.Provider)
 	}
 
 	// (2) Validate the key with a live probe. A bad key → 401 (honest), an
