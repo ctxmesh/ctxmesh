@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -83,7 +82,7 @@ func (s *memStore) ListSkills(_ context.Context, ns string) ([]Skill, error) {
 			out = append(out, sk)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	slices.SortFunc(out, func(a, b Skill) int { return strings.Compare(a.Name, b.Name) })
 	return out, nil
 }
 
@@ -138,11 +137,11 @@ func (s *memStore) ListVersions(_ context.Context, ns, skill string) ([]SkillVer
 	// Newest first. Ties break on digest so the order is TOTAL: two versions added inside the
 	// same clock tick must not swap places between calls, or "the newest version" becomes
 	// non-deterministic and `latest` starts resolving differently on identical data.
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
-			return out[i].CreatedAt.After(out[j].CreatedAt)
+	slices.SortFunc(out, func(a, b SkillVersion) int {
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return b.CreatedAt.Compare(a.CreatedAt) // newest first
 		}
-		return out[i].Digest > out[j].Digest
+		return strings.Compare(b.Digest, a.Digest)
 	})
 	return out, nil
 }
