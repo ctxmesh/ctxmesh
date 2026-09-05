@@ -376,7 +376,7 @@ func buildGatewayServer(cfg Config, tracer trace.Tracer) *http.Server {
 		go gp.watchGuardrailPolicy(cfg.Gateway.GuardrailPolicyFile, nil)
 	}
 	return &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Gateway.Port),
+		Addr:    loopbackAddr(cfg.Gateway.Port),
 		Handler: gp.handler(),
 	}
 }

@@ -148,7 +148,7 @@ func main() {
 	var a2aSrv *http.Server
 	if cfg.A2AEnabled() {
 		a2aSrv = &http.Server{
-			Addr:    fmt.Sprintf(":%d", cfg.A2A.Port),
+			Addr:    loopbackAddr(cfg.A2A.Port),
 			Handler: newA2AServer(cfg.A2A, tracer, prop, off).handler(),
 		}
 	}
