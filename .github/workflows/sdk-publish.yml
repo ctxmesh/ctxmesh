@@ -128,3 +128,72 @@ jobs:
       # SHA-pin this at enablement (repo convention); release/v1 is the maintainer-pinned major.
       - name: Publish to PyPI (Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc # v1.12.4
+
+  # ── npm ─────────────────────────────────────────────────────────────────────
+  # ADR 0070 deferred this, mirroring a Python not-on-PyPI posture that ADR 0135 has
+  # since removed; the amendment records the reversal.
+  #
+  # Trusted publishing on npm is configured in the PACKAGE's settings, so unlike PyPI
+  # there is no pending-publisher: the package must exist before OIDC can be wired. The
+  # first version is therefore published by hand, and this job is idempotent so that
+  # manual publish and this one cannot collide — it skips a version already on the
+  # registry rather than failing the release on a duplicate.
+  publish-npm:
+    name: publish-npm
+    needs: build-verify
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/ctxmesh
+    permissions:
+      id-token: write # OIDC — trusted publishing mints a short-lived token; no stored secret.
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version-file: sdk/typescript/.nvmrc
+          registry-url: https://registry.npmjs.org
+      # Node 22 ships npm 10.x. Trusted publishing needs npm >= 11.5.1 — without it the
+      # CLI never attempts OIDC, falls back to looking for a token, finds none, and the
+      # publish fails in a way that reads as an auth problem rather than a version one.
+      - name: npm >= 11.5.1 (trusted publishing)
+        run: |
+          set -euo pipefail
+          npm install -g npm@latest
+          npm --version
+      - name: Stamp the version from the tag
+        working-directory: sdk/typescript
+        run: |
+          set -euo pipefail
+          python3 - "$GITHUB_REF_NAME" <<'PY'
+          import json, pathlib, sys
+          v = sys.argv[1].lstrip("v")
+          p = pathlib.Path("package.json")
+          pkg = json.loads(p.read_text()); pkg["version"] = v
+          p.write_text(json.dumps(pkg, indent=2) + "\n")
+          print(f"stamped the TS SDK at {v}")
+          PY
+      - name: Build
+        working-directory: sdk/typescript
+        run: |
+          set -euo pipefail
+          npm install --no-package-lock
+          npm run build
+      - name: Publish (skip if this version is already on the registry)
+        working-directory: sdk/typescript
+        run: |
+          set -euo pipefail
+          v="${GITHUB_REF_NAME#v}"
+          if npm view "ctxmesh@${v}" version >/dev/null 2>&1; then
+            echo "ctxmesh@${v} is already published — nothing to do."
+            exit 0
+          fi
+          # A pre-release must not become `latest`, or `npm install ctxmesh` hands
+          # everyone a beta.
+          tag=latest
+          case "$GITHUB_REF_NAME" in *-alpha*|*-beta*|*-rc*) tag=beta ;; esac
+          npm publish --provenance --access public --tag "$tag"
