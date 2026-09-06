@@ -327,8 +327,10 @@ describe("TeamDetailPage — the delegation tree at both sizes", () => {
     installFetch(READY_BACKEND);
     renderPage();
     const grid = await screen.findByRole("treegrid", { name: "Delegation tree" });
-    // 4 nodes + the header row.
-    expect(grid).toHaveAttribute("aria-rowcount", "5");
+    // waitFor, not a bare assert: the grid renders while the tree is still loading,
+    // so a synchronous read here sees the header row alone. Waiting for the true
+    // count also guarantees the rows below have landed.
+    await waitFor(() => expect(grid).toHaveAttribute("aria-rowcount", "5"));
     // §4.5: the tree cell carries the agent NAME; the namespace it shares with
     // the team is not repeated on every row, it rides in `title`.
     expect(within(grid).getByText("agent-kid-b")).toBeInTheDocument();
@@ -344,7 +346,7 @@ describe("TeamDetailPage — the delegation tree at both sizes", () => {
     const grid = await screen.findByRole("treegrid", { name: "Delegation tree" });
 
     // The failing child is surfaced; the rest sit behind one honest summary.
-    expect(within(grid).getByText("agent-w-007")).toBeInTheDocument();
+    expect(await within(grid).findByText("agent-w-007")).toBeInTheDocument();
     expect(within(grid).getByText("395 more, none need you")).toBeInTheDocument();
   });
 
@@ -411,7 +413,7 @@ describe("TeamDetailPage — the delegation tree at both sizes", () => {
 
     const grid = await screen.findByRole("treegrid", { name: "Delegation tree" });
     // The path to the held run is open all five levels down…
-    expect(within(grid).getByText("agent-deep-5")).toBeInTheDocument();
+    expect(await within(grid).findByText("agent-deep-5")).toBeInTheDocument();
     expect(within(grid).getByText("agent-deep-5").closest("tr")).toHaveAttribute(
       "aria-level",
       "6",
