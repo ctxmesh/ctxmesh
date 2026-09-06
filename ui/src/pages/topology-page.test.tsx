@@ -150,7 +150,7 @@ describe("TopologyPage — grouped graph view", () => {
     installFetch(() => ({ ok: true, body: GROUPED_RESPONSE }));
     renderPage();
     await screen.findByTestId("topology-page");
-    expect(screen.getByTestId("topology-graph-view")).toBeInTheDocument();
+    expect(await screen.findByTestId("topology-graph-view")).toBeInTheDocument();
     expect(screen.queryByTestId("topology-list-view")).toBeNull();
   });
 
@@ -158,7 +158,7 @@ describe("TopologyPage — grouped graph view", () => {
     installFetch(() => ({ ok: true, body: GROUPED_RESPONSE }));
     renderPage();
     await screen.findByTestId("topology-page");
-    fireEvent.click(screen.getByTestId("toggle-list"));
+    fireEvent.click(await screen.findByTestId("toggle-list"));
     expect(screen.getByTestId("topology-list-view")).toBeInTheDocument();
     expect(screen.queryByTestId("topology-graph-view")).toBeNull();
   });
@@ -167,7 +167,7 @@ describe("TopologyPage — grouped graph view", () => {
     installFetch(() => ({ ok: true, body: GROUPED_RESPONSE }));
     renderPage();
     await screen.findByTestId("topology-page");
-    fireEvent.click(screen.getByTestId("toggle-list"));
+    fireEvent.click(await screen.findByTestId("toggle-list"));
     fireEvent.click(screen.getByTestId("toggle-graph"));
     expect(screen.getByTestId("topology-graph-view")).toBeInTheDocument();
   });
@@ -176,7 +176,7 @@ describe("TopologyPage — grouped graph view", () => {
     installFetch(() => ({ ok: true, body: GROUPED_RESPONSE }));
     renderPage();
     await screen.findByTestId("topology-page");
-    fireEvent.click(screen.getByTestId("toggle-list"));
+    fireEvent.click(await screen.findByTestId("toggle-list"));
     expect(screen.getByTestId(`group-row-${GROUP_A.id}`)).toBeInTheDocument();
     expect(screen.getByTestId(`group-row-label-${GROUP_A.id}`)).toHaveTextContent("billing-team");
     // GROUP_A has 3 agents. The list view is a TABLE now (M151 A6): the member
@@ -271,7 +271,7 @@ describe("TopologyPage — list view expand", () => {
     });
     renderPage();
     await screen.findByTestId("topology-page");
-    fireEvent.click(screen.getByTestId("toggle-list"));
+    fireEvent.click(await screen.findByTestId("toggle-list"));
     await screen.findByTestId(`group-row-${GROUP_A.id}`);
     fireEvent.click(screen.getByTestId(`group-row-${GROUP_A.id}`));
     await waitFor(() =>
@@ -287,7 +287,7 @@ describe("TopologyPage — list view expand", () => {
     });
     renderPage();
     await screen.findByTestId("topology-page");
-    fireEvent.click(screen.getByTestId("toggle-list"));
+    fireEvent.click(await screen.findByTestId("toggle-list"));
     await screen.findByTestId(`group-row-${GROUP_A.id}`);
     fireEvent.click(screen.getByTestId(`group-row-${GROUP_A.id}`));
     await waitFor(() =>
@@ -312,7 +312,7 @@ describe("TopologyPage — search", () => {
     });
     renderPage();
     await screen.findByTestId("topology-page");
-    const searchInput = screen.getByTestId("topology-search");
+    const searchInput = await screen.findByTestId("topology-search");
     fireEvent.change(searchInput, { target: { value: "invoice" } });
     // Wait for the debounce (300ms) to fire and the fetch to include q=invoice.
     await waitFor(
@@ -360,7 +360,7 @@ describe("TopologyPage — error & empty states", () => {
     installFetch(() => ({ ok: true, body: { nodes: [], edges: [], groups: [] } satisfies TopologyResponse }));
     renderPage();
     await screen.findByTestId("topology-page");
-    fireEvent.change(screen.getByTestId("topology-search"), { target: { value: "xyz" } });
+    fireEvent.change(await screen.findByTestId("topology-search"), { target: { value: "xyz" } });
     // After debounce fires and data loads, loading spinner is gone.
     await waitFor(
       () => expect(screen.queryByTestId("topology-loading")).toBeNull(),
@@ -506,7 +506,7 @@ describe("TopologyPage — the canvas is a pan surface in a fixed frame (§4.6)"
     installFetch(() => ({ ok: true, body: GROUPED_RESPONSE }));
     renderPage();
     await screen.findByTestId("topology-page");
-    fireEvent.click(screen.getByTestId("toggle-list"));
+    fireEvent.click(await screen.findByTestId("toggle-list"));
     expect(screen.getByTestId("topology-list-view").className).toContain("overflow-x-auto");
   });
 
@@ -541,7 +541,7 @@ describe("TopologyPage — SUPPORT node kinds in list view", () => {
     });
     renderPage();
     await screen.findByTestId("topology-page");
-    fireEvent.click(screen.getByTestId("toggle-list"));
+    fireEvent.click(await screen.findByTestId("toggle-list"));
     // Expand GROUP_B
     await screen.findByTestId(`group-row-${GROUP_B.id}`);
     fireEvent.click(screen.getByTestId(`group-row-${GROUP_B.id}`));

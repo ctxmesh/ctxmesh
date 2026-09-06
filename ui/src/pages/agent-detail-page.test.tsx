@@ -328,7 +328,7 @@ describe("AgentDetailPage (landing page)", () => {
     await screen.findByTestId("agent-detail-page");
     // Header identity; the endpoint and the governing tenant live in the rail,
     // which persists across every tab (§6.1 A2).
-    expect(screen.getByRole("heading", { name: "billing" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "billing" })).toBeInTheDocument();
     expect(screen.getByTestId("agent-url")).toHaveAttribute("href", "http://billing.prod.example");
     // The link is the PUBLIC route, never the cluster-local address in `url` — an <a href>
     // to svc.cluster.local is dead on every click, in the one place the console exists to
@@ -369,7 +369,7 @@ describe("AgentDetailPage (landing page)", () => {
     renderAt();
     await screen.findByTestId("agent-detail-page");
     // The full grouped list is the Equipment tab's job; Overview carries the summary.
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
     const group = screen.getByTestId("binding-group-scalekit-mcp-server");
     expect(group).toHaveTextContent("scalekit-mcp-server");
     expect(group).toHaveTextContent("2 tools");
@@ -580,7 +580,7 @@ describe("AgentDetailPage — drift + managedOutsideUI badges (m15.11)", () => {
     installFetch({ detail: { ...DEFAULT_DETAIL, managedOutsideUI: true, drift: false } });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    expect(screen.getByTestId("managed-outside-badge")).toBeInTheDocument();
+    expect(await screen.findByTestId("managed-outside-badge")).toBeInTheDocument();
     expect(screen.queryByTestId("drift-badge")).toBeNull();
   });
 
@@ -588,7 +588,7 @@ describe("AgentDetailPage — drift + managedOutsideUI badges (m15.11)", () => {
     installFetch({ detail: { ...DEFAULT_DETAIL, managedOutsideUI: false, drift: true } });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    expect(screen.getByTestId("drift-badge")).toBeInTheDocument();
+    expect(await screen.findByTestId("drift-badge")).toBeInTheDocument();
     expect(screen.queryByTestId("managed-outside-badge")).toBeNull();
   });
 
@@ -596,7 +596,7 @@ describe("AgentDetailPage — drift + managedOutsideUI badges (m15.11)", () => {
     installFetch({ detail: { ...DEFAULT_DETAIL, managedOutsideUI: true, drift: true } });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    expect(screen.getByTestId("managed-outside-badge")).toBeInTheDocument();
+    expect(await screen.findByTestId("managed-outside-badge")).toBeInTheDocument();
     expect(screen.getByTestId("drift-badge")).toBeInTheDocument();
   });
 });
@@ -606,7 +606,7 @@ describe("AgentDetailPage — Edit Wizard (m15.11)", () => {
     installFetch({ caps: { agentdeployments: { create: true, update: true, delete: true } } });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Edit" })).toBeInTheDocument();
   });
 
   it("Edit button hidden for a viewer (no update permission)", async () => {
@@ -621,7 +621,7 @@ describe("AgentDetailPage — Edit Wizard (m15.11)", () => {
     renderAt();
     await screen.findByTestId("agent-detail-page");
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
     // Safe fields always shown.
     await screen.findByTestId("edit-image");
     expect(screen.getByTestId("edit-scaling-min")).toBeInTheDocument();
@@ -636,7 +636,7 @@ describe("AgentDetailPage — Edit Wizard (m15.11)", () => {
     renderAt();
     await screen.findByTestId("agent-detail-page");
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
     // Safe fields shown with the managed-outside note.
     await screen.findByTestId("managed-outside-note");
     expect(screen.getByTestId("edit-image")).toBeInTheDocument();
@@ -651,7 +651,7 @@ describe("AgentDetailPage — Edit Wizard (m15.11)", () => {
     renderAt();
     await screen.findByTestId("agent-detail-page");
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
     await screen.findByTestId("edit-image");
     // Click Continue to advance to full-fields step.
     fireEvent.click(screen.getByRole("button", { name: /continue/i }));
@@ -665,7 +665,7 @@ describe("AgentDetailPage — Edit Wizard (m15.11)", () => {
     renderAt();
     await screen.findByTestId("agent-detail-page");
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
     await screen.findByTestId("edit-image");
 
     // Edit the image.
@@ -693,7 +693,7 @@ describe("AgentDetailPage — Edit Wizard (m15.11)", () => {
     renderAt();
     await screen.findByTestId("agent-detail-page");
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
     await screen.findByTestId("edit-image");
     // Advance to review.
     fireEvent.click(screen.getByRole("button", { name: /continue/i }));
@@ -710,7 +710,7 @@ describe("AgentDetailPage — Delete dialog (m15.11)", () => {
     installFetch({ caps: { agentdeployments: { create: true, update: true, delete: true } } });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Delete" })).toBeInTheDocument();
   });
 
   it("Delete button hidden for a viewer (no delete permission)", async () => {
@@ -730,7 +730,7 @@ describe("AgentDetailPage — Delete dialog (m15.11)", () => {
     renderAt();
     await screen.findByTestId("agent-detail-page");
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
     // References load and show disposition badges.
     await screen.findByTestId("refs-list");
     expect(screen.getByTestId("ref-invoice-binding")).toHaveTextContent("MCPToolBinding/invoice-binding");
@@ -743,7 +743,7 @@ describe("AgentDetailPage — Delete dialog (m15.11)", () => {
     renderAt();
     await screen.findByTestId("agent-detail-page");
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
     await screen.findByTestId("refs-empty");
     // Confirm button should be disabled until the name is typed.
     const confirmBtn = screen.getByRole("button", { name: /delete agent/i });
@@ -758,7 +758,7 @@ describe("AgentDetailPage — Delete dialog (m15.11)", () => {
     renderAt();
     await screen.findByTestId("agent-detail-page");
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
     await screen.findByTestId("refs-empty");
     // Type the name to unlock and confirm.
     fireEvent.change(screen.getByPlaceholderText("billing"), { target: { value: "billing" } });
@@ -784,7 +784,7 @@ describe("AgentDetailPage — per-agent Runs tab (m15.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Runs" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Runs" }));
 
     await screen.findByTestId("runs-tab");
     expect(screen.getByText("tr-abc")).toBeInTheDocument();
@@ -795,7 +795,7 @@ describe("AgentDetailPage — per-agent Runs tab (m15.11)", () => {
     installFetch({ agentRuns: null });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Runs" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Runs" }));
 
     // The calm unavailable state — not an error toast, not an error state.
     await screen.findByTestId("runs-unavailable");
@@ -812,7 +812,7 @@ describe("AgentDetailPage — per-agent Runs tab (m15.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Runs" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Runs" }));
     await screen.findByTestId("runs-tab");
     // Click the row to open the inspector.
     fireEvent.click(screen.getByText("tr-abc"));
@@ -837,7 +837,7 @@ describe("AgentDetailPage — RBAC-aware affordances (m15.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Edit" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
   });
 
@@ -848,7 +848,7 @@ describe("AgentDetailPage — RBAC-aware affordances (m15.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
     await screen.findByTestId("edit-image");
     // Advance to review and submit.
     fireEvent.click(screen.getByRole("button", { name: /continue/i }));
@@ -875,7 +875,7 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     await screen.findByTestId("memory-panel");
     // Only the billing binding should be visible
@@ -901,7 +901,7 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     await screen.findByTestId("longterm-list");
     expect(screen.getByText(/prefers metric units/)).toBeInTheDocument();
@@ -911,7 +911,7 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     installFetch({ longTermMemory: null });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     await screen.findByTestId("memory-panel");
     expect(screen.queryByTestId("longterm-memory-panel")).toBeNull();
@@ -921,7 +921,7 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     installFetch({ longTermMemory: [] });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     await screen.findByTestId("longterm-empty");
     expect(screen.getByText(/Nothing remembered yet/)).toBeInTheDocument();
@@ -933,7 +933,7 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     await screen.findByTestId("longterm-tags");
     expect(screen.getByText(/topic: units/)).toBeInTheDocument();
@@ -948,7 +948,7 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     const link = await screen.findByTestId("longterm-trace-link-tr-99");
     expect(link).toHaveAttribute("href", "/traces/tr-99");
@@ -963,7 +963,7 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     installFetch({ longTermMemoryError: true });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     await screen.findByTestId("longterm-error");
   });
@@ -972,7 +972,7 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     const calls = installFetch({ memoryBindings: [] });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     await screen.findByTestId("memory-attach");
     fireEvent.click(screen.getByTestId("memory-attach"));
@@ -999,7 +999,7 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     await screen.findByTestId("memory-binding-mb-billing-global");
     fireEvent.click(screen.getByTestId("memory-detach-mb-billing-global"));
@@ -1033,7 +1033,7 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     await screen.findByTestId("memory-panel");
     expect(screen.queryByTestId("memory-attach")).toBeNull();
@@ -1045,7 +1045,7 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     const calls = installFetch({ longTermConfig: { enabled: false, perUser: false } });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     await screen.findByTestId("longterm-config");
     expect(screen.getByTestId("longterm-state")).toHaveTextContent("Disabled");
@@ -1064,7 +1064,7 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     const calls = installFetch({ sessionMemoryConfig: { enabled: true, perUser: false, scope: "session" } });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     await screen.findByTestId("sessionmem-config");
     expect(screen.getByTestId("sessionmem-state")).toHaveTextContent("agent-wide");
@@ -1084,7 +1084,7 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     installFetch({ sessionMemoryConfig: { enabled: true, perUser: false, scope: "shared" } });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     await screen.findByTestId("sessionmem-config");
     expect(screen.getByTestId("sessionmem-shared-note")).toBeInTheDocument();
@@ -1106,7 +1106,7 @@ describe("AgentDetailPage — Scaling panel (m17.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     await screen.findByTestId("scaling-panel");
     expect(screen.getByTestId("scaling-policy-sp-billing")).toBeInTheDocument();
@@ -1117,7 +1117,7 @@ describe("AgentDetailPage — Scaling panel (m17.11)", () => {
     const calls = installFetch({ scalingPolicies: [] });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     const toggle = await screen.findByTestId("keep-warm-toggle");
     expect(toggle).toHaveAttribute("aria-pressed", "false"); // no policy ⇒ scale-to-zero
@@ -1138,7 +1138,7 @@ describe("AgentDetailPage — Scaling panel (m17.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     const toggle = await screen.findByTestId("keep-warm-toggle");
     expect(toggle).toHaveAttribute("aria-pressed", "true"); // min=1 ⇒ warm
@@ -1157,7 +1157,7 @@ describe("AgentDetailPage — Scaling panel (m17.11)", () => {
     const calls = installFetch({ scalingPolicies: [] });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     await screen.findByTestId("scaling-attach");
     fireEvent.click(screen.getByTestId("scaling-attach"));
@@ -1188,7 +1188,7 @@ describe("AgentDetailPage — Scaling panel (m17.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     await screen.findByTestId("scaling-attach");
     fireEvent.click(screen.getByTestId("scaling-attach"));
@@ -1214,7 +1214,7 @@ describe("AgentDetailPage — Scaling panel (m17.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     await screen.findByTestId("scaling-policy-sp-billing");
     fireEvent.click(screen.getByTestId("scaling-detach-sp-billing"));
@@ -1247,7 +1247,7 @@ describe("AgentDetailPage — Scaling panel (m17.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     await screen.findByTestId("scaling-panel");
     expect(screen.queryByTestId("scaling-attach")).toBeNull();
@@ -1316,7 +1316,7 @@ describe("AgentDetailPage — Runtime section (m65.9)", () => {
     installFetch({ detail: RUNTIME_DETAIL });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     const section = screen.getByTestId("runtime-section");
     expect(section).toBeInTheDocument();
@@ -1328,7 +1328,7 @@ describe("AgentDetailPage — Runtime section (m65.9)", () => {
     installFetch({ detail: RUNTIME_DETAIL });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     const section = screen.getByTestId("runtime-tool-policy");
     expect(section).toBeInTheDocument();
@@ -1354,7 +1354,7 @@ describe("AgentDetailPage — Runtime section (m65.9)", () => {
     installFetch({ detail: RUNTIME_DETAIL });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     const section = screen.getByTestId("runtime-resilience");
     expect(section).toBeInTheDocument();
@@ -1374,7 +1374,7 @@ describe("AgentDetailPage — Runtime section (m65.9)", () => {
     installFetch({ detail: RUNTIME_DETAIL });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     const details = screen.getByTestId("runtime-schema-details");
     // <details> starts closed (no open attribute in the initial render for the
@@ -1391,7 +1391,7 @@ describe("AgentDetailPage — Runtime section (m65.9)", () => {
     installFetch({ detail: DEFAULT_DETAIL }); // DEFAULT_DETAIL has no runtime field
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
     expect(screen.queryByTestId("runtime-section")).toBeNull();
   });
 
@@ -1401,7 +1401,7 @@ describe("AgentDetailPage — Runtime section (m65.9)", () => {
     installFetch({ detail: { ...DEFAULT_DETAIL, runtime: {} } });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
     expect(screen.queryByTestId("runtime-section")).toBeNull();
   });
 });
@@ -1420,7 +1420,7 @@ describe("AgentDetailPage — Runtime section J6 polish (m76.6)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     // Badge is shown.
     expect(screen.getByTestId("runtime-output-schema-badge")).toHaveTextContent("✓ set");
@@ -1444,7 +1444,7 @@ describe("AgentDetailPage — Runtime section J6 polish (m76.6)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     expect(screen.getByTestId("runtime-output-schema-badge")).toHaveTextContent("✓ set");
     expect(screen.queryByTestId("runtime-output-schema-not-returned")).toBeNull();
@@ -1466,7 +1466,7 @@ describe("AgentDetailPage — Runtime section J6 polish (m76.6)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     const bindings = screen.getByTestId("bindings-tab");
     const runtimeSection = screen.getByTestId("runtime-section");
@@ -1493,7 +1493,7 @@ describe("AgentDetailPage — Runtime section J6 polish (m76.6)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Equipment" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
     expect(screen.getByTestId("runtime-tool-policy-note")).toHaveTextContent("SDK-layer convention");
   });
@@ -1508,7 +1508,7 @@ describe("AgentDetailPage — guardrailPolicyRef (m66.10)", () => {
     installFetch({ detail: { ...DEFAULT_DETAIL, guardrailPolicyRef: "pii-and-jailbreak" } });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    const link = screen.getByTestId("agent-guardrail-policy-link");
+    const link = await screen.findByTestId("agent-guardrail-policy-link");
     expect(link).toBeInTheDocument();
     expect(link).toHaveTextContent("pii-and-jailbreak");
     // The link leads to /guardrails.
@@ -1538,7 +1538,7 @@ describe("AgentDetailPage — guardrailPolicyRef (m66.10)", () => {
     renderAt();
     await screen.findByTestId("agent-detail-page");
     // The link to the policy is still rendered.
-    expect(screen.getByTestId("agent-guardrail-policy-link")).toHaveTextContent("missing-policy");
+    expect(await screen.findByTestId("agent-guardrail-policy-link")).toHaveTextContent("missing-policy");
     // The NotReady reason is surfaced inline next to the link. A Tag's label is
     // budgeted to ≤16 chars and reads as words (§4.5); the controller's raw
     // token stays recoverable in `title`.
@@ -1568,7 +1568,7 @@ describe("AgentDetailPage — guardrailPolicyRef (m66.10)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    expect(screen.getByTestId("agent-guardrail-policy-link")).toHaveTextContent("bad-regex-policy");
+    expect(await screen.findByTestId("agent-guardrail-policy-link")).toHaveTextContent("bad-regex-policy");
     const badge = screen.getByTestId("agent-guardrail-notready-reason");
     expect(badge).toHaveTextContent("Guardrail policy invalid");
     expect(badge).toHaveAttribute("title", "GuardrailPolicyInvalid");
@@ -1590,7 +1590,7 @@ describe("AgentDetailPage — K7 navRoute links (m76.6)", () => {
     installFetch({ detail: { ...DEFAULT_DETAIL, guardrailPolicyRef: "my-policy" } });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    const link = screen.getByTestId("agent-guardrail-policy-link");
+    const link = await screen.findByTestId("agent-guardrail-policy-link");
     // navRoute("guardrails") returns "/guardrails" — confirm the link is correct.
     expect(link).toHaveAttribute("href", "/guardrails");
   });
@@ -1599,7 +1599,7 @@ describe("AgentDetailPage — K7 navRoute links (m76.6)", () => {
     installFetch({ detail: { ...DEFAULT_DETAIL, promptRef: "my-prompt-v2" } });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    const link = screen.getByTestId("agent-promptref-link");
+    const link = await screen.findByTestId("agent-promptref-link");
     expect(link).toHaveAttribute("href", "/prompts");
     expect(link).toHaveTextContent("my-prompt-v2");
   });
@@ -1621,7 +1621,7 @@ describe("ImprovementLoopSection (m69.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Quality" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Quality" }));
     // The improvement-loop section renders in the Overview tab.
     const section = await screen.findByTestId("improvement-loop-section");
     expect(section).toBeInTheDocument();
@@ -1653,7 +1653,7 @@ describe("ImprovementLoopSection (m69.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Quality" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Quality" }));
     const badge = await screen.findByTestId("regression-detected-badge");
     expect(badge).toBeInTheDocument();
     expect(badge).toHaveTextContent("Regression detected");
@@ -1678,7 +1678,7 @@ describe("ImprovementLoopSection (m69.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Quality" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Quality" }));
     await screen.findByTestId("improvement-loop-section");
     expect(screen.queryByTestId("regression-detected-badge")).toBeNull();
     // Healthy badge shown when False
@@ -1709,7 +1709,7 @@ describe("ImprovementLoopSection (m69.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Quality" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Quality" }));
     const arms = await screen.findByTestId("canary-arms");
     expect(arms).toBeInTheDocument();
     // Two arms rendered.
@@ -1723,7 +1723,7 @@ describe("ImprovementLoopSection (m69.11)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Quality" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Quality" }));
 
     // The rollback section appears (there are 2 versions: billing-v1, billing-v2).
     const section = await screen.findByTestId("rollback-section");
@@ -1756,7 +1756,7 @@ describe("ImprovementLoopSection (m69.11)", () => {
     installFetch({ onlineScore: null }); // null → 501
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Quality" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Quality" }));
     // The section itself is hidden when 501 + no regression + no canary + versions < 2
     // but DEFAULT_DETAIL has 2 versions so the rollback section shows → section renders.
     // However in this test versions are from DEFAULT_DETAIL (2 versions), so section is shown.
@@ -1824,7 +1824,7 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
     installFetchWithPublish();
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    expect(screen.getByRole("button", { name: /Share (as template|new version)/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Share (as template|new version)/ })).toBeInTheDocument();
   });
 
   it("hides the Publish button when the caller cannot update agentdeployments", async () => {
@@ -1845,7 +1845,7 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
     renderAt();
     await screen.findByTestId("agent-detail-page");
 
-    fireEvent.click(screen.getByRole("button", { name: /Share (as template|new version)/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Share (as template|new version)/ }));
 
     // U8: dialog is now titled "Share X as template" (renamed from "Publish").
     expect(await screen.findByRole("dialog", { name: /Share billing as template/ })).toBeInTheDocument();
@@ -1882,7 +1882,7 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
 
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("button", { name: /Share (as template|new version)/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Share (as template|new version)/ }));
     // U8: dialog title is now "Share billing as template".
     await screen.findByRole("dialog", { name: /Share billing as template/ });
 
@@ -1902,7 +1902,7 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
     renderAt();
     await screen.findByTestId("agent-detail-page");
 
-    fireEvent.click(screen.getByRole("button", { name: /Share (as template|new version)/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Share (as template|new version)/ }));
     // U8: dialog title is now "Share billing as template".
     await screen.findByRole("dialog", { name: /Share billing as template/ });
     fireEvent.click(screen.getByTestId("publish-template-submit"));
@@ -1923,7 +1923,7 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
     installFetchWithPublish();
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("button", { name: /Share (as template|new version)/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Share (as template|new version)/ }));
     // U8: dialog is now titled "Share billing as template".
     await screen.findByRole("dialog", { name: /Share billing as template/ });
 
@@ -1950,7 +1950,7 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    expect(screen.getByTestId("needs-rebinding-banner")).toBeInTheDocument();
+    expect(await screen.findByTestId("needs-rebinding-banner")).toBeInTheDocument();
     // Same claim, said plainly: it cannot run, and connecting the refs is the fix.
     expect(screen.getByText(/run until its references are connected/i)).toBeInTheDocument();
     expect(screen.getByText(/Connect the ones below/i)).toBeInTheDocument();
@@ -1988,7 +1988,7 @@ describe("AgentDetailPage (m76.3 U5) — needs-rebinding banner repair links", (
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    expect(screen.getByTestId("rebind-model-route-link")).toBeInTheDocument();
+    expect(await screen.findByTestId("rebind-model-route-link")).toBeInTheDocument();
     expect(screen.getByTestId("rebind-model-route-link")).toHaveTextContent("Connect a model route");
   });
 
@@ -2001,7 +2001,7 @@ describe("AgentDetailPage (m76.3 U5) — needs-rebinding banner repair links", (
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    expect(screen.getByTestId("rebind-bindings-tab-link")).toBeInTheDocument();
+    expect(await screen.findByTestId("rebind-bindings-tab-link")).toBeInTheDocument();
     expect(screen.getByTestId("rebind-bindings-tab-link")).toHaveTextContent(/Bindings tab/i);
   });
 
@@ -2015,7 +2015,7 @@ describe("AgentDetailPage (m76.3 U5) — needs-rebinding banner repair links", (
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    expect(screen.getByTestId("needs-rebinding-banner")).toBeInTheDocument();
+    expect(await screen.findByTestId("needs-rebinding-banner")).toBeInTheDocument();
     expect(screen.queryByTestId("rebind-model-route-link")).toBeNull();
   });
 
@@ -2035,7 +2035,7 @@ describe("AgentDetailPage (m76.3 U5) — needs-rebinding banner repair links", (
     await screen.findByTestId("agent-detail-page");
 
     // The real ref names are listed.
-    const list = screen.getByTestId("rebind-ref-list");
+    const list = await screen.findByTestId("rebind-ref-list");
     expect(list).toHaveTextContent("model route: gpt4");
     expect(list).toHaveTextContent("prompt: greeting");
     // The model-route ref carries the connect-route action; the prompt carries an add-prompt link.
@@ -2056,7 +2056,7 @@ describe("AgentDetailPage (m76.3 U5) — needs-rebinding banner repair links", (
     renderAt();
     await screen.findByTestId("agent-detail-page");
 
-    expect(screen.getByTestId("rebind-ref-list")).toHaveTextContent("slack-search");
+    expect(await screen.findByTestId("rebind-ref-list")).toHaveTextContent("slack-search");
     expect(screen.getByTestId("rebind-bindings-tab-link")).toBeInTheDocument();
     // No model-route/prompt ref → those actions absent.
     expect(screen.queryByTestId("rebind-model-route-link")).toBeNull();
@@ -2106,7 +2106,7 @@ describe("AgentDetailPage (m76.3 U7) — published badge and unpublish", () => {
     await screen.findByTestId("agent-detail-page");
 
     // Publish the agent.
-    fireEvent.click(screen.getByRole("button", { name: /Share (as template|new version)/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Share (as template|new version)/ }));
     await screen.findByRole("dialog", { name: /Share billing as template/ });
     fireEvent.click(screen.getByTestId("publish-template-submit"));
 
@@ -2149,7 +2149,7 @@ describe("AgentDetailPage (m76.3 U7) — published badge and unpublish", () => {
     await screen.findByTestId("agent-detail-page");
 
     // Publish first.
-    fireEvent.click(screen.getByRole("button", { name: /Share (as template|new version)/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Share (as template|new version)/ }));
     await screen.findByRole("dialog", { name: /Share billing as template/ });
     fireEvent.click(screen.getByTestId("publish-template-submit"));
     await waitFor(() => expect(screen.getByRole("button", { name: "Unpublish" })).toBeInTheDocument());
@@ -2179,7 +2179,7 @@ describe("AgentDetailPage (m76.3 U7) — published badge and unpublish", () => {
     await screen.findByTestId("agent-detail-page");
 
     // No publish click — the badge is present purely from the loaded detail.
-    expect(screen.getByTestId("published-badge")).toBeInTheDocument();
+    expect(await screen.findByTestId("published-badge")).toBeInTheDocument();
     expect(screen.getByTestId("published-badge")).toHaveTextContent(/Published/);
     expect(screen.getByTestId("published-badge")).toHaveTextContent(/org/);
     expect(screen.getByTestId("published-badge")).toHaveTextContent(/v4/);
@@ -2216,7 +2216,7 @@ describe("AgentDetailPage (m76.3 U7) — published badge and unpublish", () => {
 
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("button", { name: /Share (as template|new version)/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Share (as template|new version)/ }));
     await screen.findByRole("dialog", { name: /Share billing as template/ });
     fireEvent.click(screen.getByTestId("publish-template-submit"));
     await waitFor(() => expect(screen.getByRole("button", { name: "Unpublish" })).toBeInTheDocument());
@@ -2253,7 +2253,7 @@ describe("AgentDetailPage (m76.3 U8) — publish dialog snapshot copy + rename",
 
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("button", { name: /Share (as template|new version)/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Share (as template|new version)/ }));
     await screen.findByRole("dialog", { name: /Share billing as template/ });
     // U8: must say "immutable snapshot".
     expect(screen.getByText(/immutable snapshot/i)).toBeInTheDocument();
@@ -2277,7 +2277,7 @@ describe("AgentDetailPage (m76.3 U12) — fork lineage", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    expect(screen.getByTestId("fork-lineage")).toBeInTheDocument();
+    expect(await screen.findByTestId("fork-lineage")).toBeInTheDocument();
     expect(screen.getByTestId("fork-lineage")).toHaveTextContent("prod/support-agent");
     expect(screen.getByTestId("fork-lineage")).toHaveTextContent("v2");
   });
@@ -2323,7 +2323,7 @@ describe("AgentDetailPage — P1-1 share verb coherence (entry button)", () => {
     installFetchWithPublish();
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    const btn = screen.getByRole("button", { name: /Share (as template|new version)/ });
+    const btn = await screen.findByRole("button", { name: /Share (as template|new version)/ });
     expect(btn).toHaveTextContent("Share as template");
   });
 
@@ -2333,7 +2333,7 @@ describe("AgentDetailPage — P1-1 share verb coherence (entry button)", () => {
     await screen.findByTestId("agent-detail-page");
 
     // Trigger a publish so publishedState is set.
-    fireEvent.click(screen.getByRole("button", { name: /Share (as template|new version)/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Share (as template|new version)/ }));
     await screen.findByRole("dialog", { name: /Share billing as template/ });
     fireEvent.click(screen.getByTestId("publish-template-submit"));
     await waitFor(() => expect(screen.getByTestId("published-badge")).toBeInTheDocument());
@@ -2347,7 +2347,7 @@ describe("AgentDetailPage — P1-1 share verb coherence (entry button)", () => {
     renderAt();
     await screen.findByTestId("agent-detail-page");
 
-    fireEvent.click(screen.getByRole("button", { name: /Share (as template|new version)/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Share (as template|new version)/ }));
     await screen.findByRole("dialog", { name: /Share billing as template/ });
     fireEvent.click(screen.getByTestId("publish-template-submit"));
 
@@ -2408,7 +2408,7 @@ describe("AgentDetailPage — live output RBAC gate (M100 UI99-logs)", () => {
     renderAt("/agents/prod/billing?tab=Logs");
     await screen.findByTestId("agent-detail-page");
     // The old link still means what it said: it opens the surface that owns logs now.
-    expect(screen.getByRole("tab", { name: "Runs" })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByRole("tab", { name: "Runs" })).toHaveAttribute("aria-selected", "true");
     expect(await screen.findByTestId("logs-tab")).toBeInTheDocument();
   });
 });
@@ -2448,7 +2448,7 @@ describe("AgentDetailPage — version diff (V3)", () => {
     installVersionDiffFetch({ diff: " image: base\n-tag: v1\n+tag: v2", identical: false });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Versions" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Versions" }));
 
     // The panel + both selects are present (with ≥2 versions).
     expect(screen.getByTestId("version-diff-panel")).toBeInTheDocument();
@@ -2466,7 +2466,7 @@ describe("AgentDetailPage — version diff (V3)", () => {
     installVersionDiffFetch({ diff: "", identical: true });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    fireEvent.click(screen.getByRole("tab", { name: "Versions" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Versions" }));
 
     fireEvent.click(screen.getByTestId("version-diff-compare"));
     await screen.findByTestId("version-diff-identical");
@@ -2565,7 +2565,7 @@ describe("AgentDetailPage — what it can reach (M151 §6.2)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    const tag = screen.getByTestId("reach-crm-search");
+    const tag = await screen.findByTestId("reach-crm-search");
     expect(tag).toHaveTextContent("working");
     expect(tag).toHaveClass("text-success");
     // The row names the server it is reached through, not just the tool.
@@ -2581,7 +2581,7 @@ describe("AgentDetailPage — what it can reach (M151 §6.2)", () => {
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    const tag = screen.getByTestId("reach-mailer");
+    const tag = await screen.findByTestId("reach-mailer");
     expect(tag).toHaveTextContent("never called");
     // §2.5's dashed `open` Tag: declared but never exercised.
     expect(tag).toHaveClass("border-dashed");
@@ -2615,7 +2615,7 @@ describe("AgentDetailPage — what it can reach (M151 §6.2)", () => {
     renderAt();
     await screen.findByTestId("agent-detail-page");
 
-    const broken = screen.getByTestId("reach-crm-refund");
+    const broken = await screen.findByTestId("reach-crm-refund");
     expect(broken).toHaveTextContent("unresolved");
     expect(broken).toHaveClass("text-destructive");
     // The healthy sibling keeps its own state — the panel is per-binding.
@@ -2637,7 +2637,7 @@ describe("AgentDetailPage — what it can reach (M151 §6.2)", () => {
     renderAt();
     await screen.findByTestId("agent-detail-page");
     // The agent holds no credentials of its own — tools are reached through the sidecar.
-    expect(screen.getByText(/egress sidecar/)).toBeInTheDocument();
+    expect(await screen.findByText(/egress sidecar/)).toBeInTheDocument();
     // "working" is defined as resolves-and-is-up, and the panel says so rather
     // than letting a green tag imply a measurement (§7.1).
     expect(screen.getByText(/Call counts aren’t on this endpoint\./)).toBeInTheDocument();
@@ -2647,7 +2647,7 @@ describe("AgentDetailPage — what it can reach (M151 §6.2)", () => {
     installFetch({ detail: withBindings([]) });
     renderAt();
     await screen.findByTestId("agent-detail-page");
-    expect(screen.getByText(/Nothing is bound to this agent yet\./)).toBeInTheDocument();
+    expect(await screen.findByText(/Nothing is bound to this agent yet\./)).toBeInTheDocument();
   });
 });
 

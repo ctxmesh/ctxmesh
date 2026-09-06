@@ -87,7 +87,7 @@ describe("ApprovalsPage — basic rendering (V15, M113)", () => {
     renderPage();
 
     await screen.findByTestId("approvals-page");
-    expect(screen.getByRole("heading", { name: "Approvals" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Approvals" })).toBeInTheDocument();
     // The old "Plan approvals" title must be gone
     expect(screen.queryByRole("heading", { name: "Plan approvals" })).toBeNull();
   });
@@ -105,7 +105,7 @@ describe("ApprovalsPage — basic rendering (V15, M113)", () => {
 
     expect(await screen.findByTestId("approvals-page")).toBeInTheDocument();
     // The table is rendered (aria-label)
-    expect(screen.getByRole("table", { name: "Approvals" })).toBeInTheDocument();
+    expect(await screen.findByRole("table", { name: "Approvals" })).toBeInTheDocument();
     // Run IDs appear as links
     const runAbcLink = screen.getByRole("link", { name: "run-abc" });
     expect(runAbcLink).toBeInTheDocument();
@@ -130,7 +130,7 @@ describe("ApprovalsPage — basic rendering (V15, M113)", () => {
     renderPage();
 
     await screen.findByTestId("approvals-page");
-    expect(screen.getByText("part of")).toBeInTheDocument();
+    expect(await screen.findByText("part of")).toBeInTheDocument();
     // rootRunId links to its own run detail page
     const rootLink = screen.getByRole("link", { name: "run-root" });
     expect(rootLink).toHaveAttribute("href", "/runs/run-root");
@@ -149,7 +149,7 @@ describe("ApprovalsPage — namespace column (M113)", () => {
     renderPage();
 
     await screen.findByTestId("approvals-page");
-    expect(screen.getByText("production")).toBeInTheDocument();
+    expect(await screen.findByText("production")).toBeInTheDocument();
   });
 });
 
@@ -165,7 +165,7 @@ describe("ApprovalsPage — kind badge (M113)", () => {
     renderPage();
 
     await screen.findByTestId("approvals-page");
-    expect(screen.getByText("Plan gate")).toBeInTheDocument();
+    expect(await screen.findByText("Plan gate")).toBeInTheDocument();
   });
 
   it('shows "Step approval" badge for approval kind', async () => {
@@ -177,7 +177,7 @@ describe("ApprovalsPage — kind badge (M113)", () => {
     renderPage();
 
     await screen.findByTestId("approvals-page");
-    expect(screen.getByText("Step approval")).toBeInTheDocument();
+    expect(await screen.findByText("Step approval")).toBeInTheDocument();
   });
 
   it("renders both badge kinds when the queue has mixed items", async () => {
@@ -192,7 +192,7 @@ describe("ApprovalsPage — kind badge (M113)", () => {
     renderPage();
 
     await screen.findByTestId("approvals-page");
-    expect(screen.getByText("Plan gate")).toBeInTheDocument();
+    expect(await screen.findByText("Plan gate")).toBeInTheDocument();
     expect(screen.getByText("Step approval")).toBeInTheDocument();
   });
 });
@@ -227,7 +227,7 @@ describe("ApprovalsPage — waitingSince column (M113)", () => {
     // formatRelativeTime returns "2h ago" for ~2 hours. Scoped to the TABLE:
     // the closing line now says the same thing about the oldest row, and an
     // unscoped query would match both.
-    const table = screen.getByRole("table", { name: "Approvals" });
+    const table = await screen.findByRole("table", { name: "Approvals" });
     expect(within(table).getAllByText(/\dh ago/)[0]).toBeInTheDocument();
   });
 });

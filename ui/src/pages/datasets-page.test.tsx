@@ -417,7 +417,7 @@ describe("TracePage — AddToDatasetPanel (m69.3)", () => {
     renderTrace();
 
     await screen.findByTestId("trace-page");
-    expect(screen.getByTestId("add-to-dataset-panel")).toBeInTheDocument();
+    expect(await screen.findByTestId("add-to-dataset-panel")).toBeInTheDocument();
     expect(screen.getByTestId("add-to-dataset-input")).toBeInTheDocument();
     expect(screen.getByTestId("add-to-dataset-submit")).toBeInTheDocument();
   });
@@ -430,7 +430,7 @@ describe("TracePage — AddToDatasetPanel (m69.3)", () => {
     renderTrace("t1");
     await screen.findByTestId("trace-page");
 
-    fireEvent.change(screen.getByTestId("add-to-dataset-input"), {
+    fireEvent.change(await screen.findByTestId("add-to-dataset-input"), {
       target: { value: "eval-set" },
     });
     fireEvent.click(screen.getByTestId("add-to-dataset-submit"));
@@ -457,7 +457,7 @@ describe("TracePage — AddToDatasetPanel (m69.3)", () => {
     renderTrace("t1");
     await screen.findByTestId("trace-page");
 
-    fireEvent.change(screen.getByTestId("add-to-dataset-input"), {
+    fireEvent.change(await screen.findByTestId("add-to-dataset-input"), {
       target: { value: "my-ds" },
     });
     fireEvent.click(screen.getByTestId("add-to-dataset-submit"));
@@ -496,7 +496,7 @@ describe("DatasetDetailPage — unlabelled is a state (M151)", () => {
     renderDetail();
     await screen.findByTestId("dataset-detail-page");
 
-    const row = screen.getByTestId("case-row-case-b");
+    const row = await screen.findByTestId("case-row-case-b");
     expect(within(row).getByText("unlabelled")).toBeInTheDocument();
     expect(
       within(row).getByText("Nobody has judged this case yet."),
@@ -523,7 +523,7 @@ describe("DatasetDetailPage — unlabelled is a state (M151)", () => {
     await screen.findByTestId("dataset-detail-page");
 
     // The meter's ARIA carries the numbers, so a screen reader gets them too.
-    const meter = screen.getByRole("meter", { name: "Cases labelled" });
+    const meter = await screen.findByRole("meter", { name: "Cases labelled" });
     expect(meter).toHaveAttribute("aria-valuenow", "1");
     expect(meter).toHaveAttribute("aria-valuemax", "2");
 
@@ -544,7 +544,7 @@ describe("DatasetDetailPage — unlabelled is a state (M151)", () => {
 
     // Zero is a MEASUREMENT here — every case is judged — so it renders as `0`,
     // never as the dash that means "we do not know" (§7.1).
-    const row = screen.getByText("Unlabelled").closest("div") as HTMLElement;
+    const row = (await screen.findByText("Unlabelled")).closest("div") as HTMLElement;
     expect(within(row).getByText("0")).toBeInTheDocument();
     expect(row.textContent).not.toContain("—");
   });

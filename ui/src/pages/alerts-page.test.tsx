@@ -92,7 +92,7 @@ describe("AlertsPage — basic rendering (m70.6)", () => {
     renderPage();
 
     expect(await screen.findByTestId("alerts-page")).toBeInTheDocument();
-    expect(screen.getByRole("table", { name: "Fired alerts" })).toBeInTheDocument();
+    expect(await screen.findByRole("table", { name: "Fired alerts" })).toBeInTheDocument();
     // The page root renders during loading, so awaiting it proves nothing about
     // the rows — await the row data itself.
     expect(await screen.findByText("budget-policy")).toBeInTheDocument();
