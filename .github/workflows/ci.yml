@@ -83,9 +83,31 @@ jobs:
     name: unit
     needs: lint
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: read
+    # A real Postgres, because the twenty store conformance suites gate on
+    # CONTROLPLANE_TEST_DSN and skip without it — so until now every durable store
+    # was covered only by its in-memory twin. That is the exact gap M161 recorded
+    # ("a twin that passes is not a store that works", found when a migration could
+    # not parse while the twin passed everything) and M164 hit again (the alertstore
+    # twin returned nil where the real store returns an empty slice).
+    #
+    # pgvector, not plain postgres: migrations 0003 and 0005 CREATE EXTENSION vector.
+    # OpenDB runs the migrations itself, so an empty database is the right input.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: ctxmesh-ci
+          POSTGRES_DB: ctxmesh
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -97,6 +119,8 @@ jobs:
       # ui jobs). Reproduces the umbrella recipe: manifests+generate+fmt+vet,
       # then `go test ./... -coverprofile cover.out`.
       - name: Go unit tests (manifests/generate/fmt/vet + go test)
+        env:
+          CONTROLPLANE_TEST_DSN: postgres://postgres:ctxmesh-ci@localhost:5432/ctxmesh?sslmode=disable
         run: |
           make manifests generate fmt vet
           go test ./... -coverprofile cover.out
