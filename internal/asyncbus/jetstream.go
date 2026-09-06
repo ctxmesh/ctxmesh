@@ -276,11 +276,30 @@ func (b *JetStreamBus) Subscribe(ctx context.Context, subject, durable string, h
 	if err != nil {
 		return fmt.Errorf("asyncbus: consuming %q: %w", subject, err)
 	}
-	defer consumeCtx.Stop()
-
 	<-ctx.Done()
+
+	// Stop() is ASYNCHRONOUS: it signals the consume loop and returns immediately, so
+	// returning here would break this method's contract. A caller that treats the
+	// return as "I am no longer consuming" would be wrong — the old loop can still be
+	// attached, still receiving, and still ACKING. Two subscribers on one durable then
+	// split the stream between them, and messages meant for the new one are consumed
+	// and acked by the old one, silently.
+	//
+	// Closed() is the client's own "fully stopped/drained, processing complete" signal.
+	// Bounded, because a wedged handler must not hold shutdown open forever.
+	consumeCtx.Stop()
+	select {
+	case <-consumeCtx.Closed():
+	case <-time.After(consumerStopTimeout):
+	}
 	return nil
 }
+
+// consumerStopTimeout bounds how long Subscribe waits for the consume loop to finish
+// after its context is cancelled. Generous: the wait exists so a rebind of the same
+// durable cannot race a loop that is still attached, and the only cost of waiting is
+// a slower shutdown.
+const consumerStopTimeout = 30 * time.Second
 
 // Close drains and closes the connection. Idempotent.
 func (b *JetStreamBus) Close() error {
