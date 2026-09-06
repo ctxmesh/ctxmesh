@@ -18,7 +18,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ctxmesh"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 description = "Typed Python SDK over the ctxmesh launcher localhost plane (memory / tools / feedback)."
 readme = "README.md"
 # 3.9 is the floor because the agent base image still ships it; the classifiers below
