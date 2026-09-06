@@ -65,7 +65,7 @@ describe("GuardrailPoliciesPage (m66.10)", () => {
     renderPage();
 
     expect(await screen.findByTestId("guardrail-policies-page")).toBeInTheDocument();
-    expect(screen.getByRole("table", { name: "Guardrail policies" })).toBeInTheDocument();
+    expect(await screen.findByRole("table", { name: "Guardrail policies" })).toBeInTheDocument();
     expect(screen.getByText("pii-and-jailbreak")).toBeInTheDocument();
     // The validated policy shows a "Ready" badge (unified lexicon, M99 E1).
     expect(screen.getByText("Ready")).toBeInTheDocument();

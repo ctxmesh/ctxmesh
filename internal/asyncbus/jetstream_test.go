@@ -24,6 +24,8 @@ import (
 	"time"
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -120,6 +122,15 @@ func consume(t *testing.T, bus *asyncbus.JetStreamBus, subject, durable string, 
 	case <-c.done:
 		satisfied = true
 	case <-time.After(wait):
+		// A bare "Should be true" from the caller says nothing about WHY, which is how
+		// a delivery failure in CI reads as "slow infrastructure". Say what arrived.
+		got := c.messages()
+		ids := make([]string, 0, len(got))
+		for _, m := range got {
+			ids = append(ids, m.ID)
+		}
+		t.Logf("consume(%s/%s) timed out after %s: wanted %d, got %d %v (handler called %d times)",
+			subject, durable, wait, c.want, len(got), ids, c.attempts())
 	}
 	cancel()
 	select {
@@ -265,4 +276,40 @@ func TestSubject_CannotEscapeItsToken(t *testing.T) {
 func TestJetStream_PublishRequiresASubject(t *testing.T) {
 	bus := newBus(t, startEmbeddedJetStream(t))
 	require.Error(t, bus.Publish(context.Background(), asyncbus.Message{ID: "x", Data: []byte("{}")}))
+}
+
+// TestSubscribe_LeavesNothingUnacked pins the precondition the consumer-restart test
+// states in prose and did not actually establish.
+//
+// consume() returns when the HANDLER has what it wants, and the handler runs BEFORE
+// m.Ack(). Teardown was `defer consumeCtx.Stop()`, and Stop is asynchronous — so
+// Subscribe could return with the ack still in flight, leaving the message
+// outstanding for the full AckWait (two minutes). The restart test then began its
+// "publish while no consumer is running" phase against a durable that still had an
+// un-acked message, which is not the state it says it is testing.
+//
+// This asserts the state directly from the server rather than by timing.
+func TestSubscribe_LeavesNothingUnacked(t *testing.T) {
+	url := startEmbeddedJetStream(t)
+	bus := newBus(t, url)
+	subject := asyncbus.Subject("reg-acked")
+	const durable = "dispatcher-reg-acked"
+
+	c := newCollector(1)
+	require.NoError(t, bus.Publish(context.Background(), hop("only-1", subject, `{"n":1}`)))
+	require.True(t, consume(t, bus, subject, durable, c, 20*time.Second))
+
+	// Ask the server, not the clock.
+	nc, err := nats.Connect(url)
+	require.NoError(t, err)
+	t.Cleanup(nc.Close)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	cons, err := js.Consumer(context.Background(), "CTXMESH_A2A", durable)
+	require.NoError(t, err)
+	info, err := cons.Info(context.Background())
+	require.NoError(t, err)
+
+	require.Zero(t, info.NumAckPending,
+		"Subscribe returned with an un-acked message still outstanding — the ack was still in flight when the consumer was torn down")
 }

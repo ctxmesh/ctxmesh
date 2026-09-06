@@ -110,9 +110,14 @@ describe("WorkflowsPage (m67.9)", () => {
 
     renderPage();
 
-    expect(await screen.findByTestId("workflows-page")).toBeInTheDocument();
+    // Await the DATA, not the container. findByTestId("workflows-page") resolves as
+    // soon as the page shell mounts, which can be a tick before the fetched rows
+    // render — and the synchronous getBy calls that followed it then throw. This
+    // test flaked in CI exactly that way. Awaiting a row awaits the state the test
+    // is actually about.
+    expect(await screen.findByText("my-pipeline")).toBeInTheDocument();
+    expect(screen.getByTestId("workflows-page")).toBeInTheDocument();
     expect(screen.getByRole("table", { name: "Workflows" })).toBeInTheDocument();
-    expect(screen.getByText("my-pipeline")).toBeInTheDocument();
     expect(screen.getByText("broken-wf")).toBeInTheDocument();
 
     // Status badges (M144.1 semantic vocabulary): validated → "Ready" (green);

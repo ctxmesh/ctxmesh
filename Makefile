@@ -174,10 +174,11 @@ ui-deps: ## Bootstrap the UI toolchain on a clean host (nvm+node from .nvmrc, pn
 	$(UI_NODE) install
 
 .PHONY: ui-lint
-ui-lint: ## Lint the UI (eslint) + typecheck (tsc). Bootstraps the toolchain first. Wired into `make lint`.
+ui-lint: ## Lint the UI (eslint) + typecheck (tsc) + test-determinism gate. Bootstraps the toolchain first. Wired into `make lint`.
 	$(UI_NODE) install
 	$(UI_NODE) run lint
 	$(UI_NODE) run typecheck
+	./hack/ui-await-the-data.sh
 
 .PHONY: ui-test
 ui-test: ## Run the UI unit/component tests (vitest run). Bootstraps the toolchain first. Wired into `make test`.

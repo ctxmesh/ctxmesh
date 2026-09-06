@@ -155,7 +155,7 @@ describe("CreateTeamPage (m71.7)", () => {
 
     expect(await screen.findByTestId("create-team-page")).toBeInTheDocument();
     // Registry picker (an <input> until the list loads, then a <select>).
-    expect(screen.getByTestId("registry-select")).toBeInTheDocument();
+    expect(await screen.findByTestId("registry-select")).toBeInTheDocument();
     expect(screen.getByTestId("team-description")).toBeInTheDocument();
     // The wizard's forward control names what it will do.
     expect(generateButton()).toBeInTheDocument();

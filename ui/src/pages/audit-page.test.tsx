@@ -93,7 +93,7 @@ describe("AuditPage — basic rendering (m63.5)", () => {
     renderPage();
 
     expect(await screen.findByTestId("audit-page")).toBeInTheDocument();
-    expect(screen.getByRole("table", { name: "Audit events" })).toBeInTheDocument();
+    expect(await screen.findByRole("table", { name: "Audit events" })).toBeInTheDocument();
     // The page root renders during loading, so awaiting it proves nothing about
     // the rows — await the row data itself (the T4 flake fix runs-page documents).
     expect(await screen.findByText("alice")).toBeInTheDocument();

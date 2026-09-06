@@ -254,7 +254,7 @@ describe("ProvidersPage — an absent control explains itself", () => {
     renderPage(OPERATOR);
     await screen.findByTestId("providers-page");
 
-    expect(screen.getByTestId("connect-provider-button")).toBeInTheDocument();
+    expect(await screen.findByTestId("connect-provider-button")).toBeInTheDocument();
     expect(
       screen.queryByText(/cannot connect a provider in this namespace/i),
     ).toBeNull();

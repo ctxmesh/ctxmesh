@@ -239,6 +239,6 @@ describe("TracePage (m16.7)", () => {
     renderPage();
 
     await screen.findByTestId("trace-page");
-    expect(screen.getByTestId("feedback-panel")).toBeInTheDocument();
+    expect(await screen.findByTestId("feedback-panel")).toBeInTheDocument();
   });
 });
