@@ -202,7 +202,7 @@ describe("SecretBinding — NO VALUE field in UI (security invariant)", () => {
     renderDetail();
     await screen.findByTestId("secret-detail-page");
     // Shows the ref
-    expect(screen.getByTestId("secret-ref-name")).toHaveTextContent("my-oai-secret");
+    expect(await screen.findByTestId("secret-ref-name")).toHaveTextContent("my-oai-secret");
     expect(screen.getByTestId("secret-ref-key")).toHaveTextContent("apiKey");
     // No-value note is shown
     expect(screen.getByTestId("no-value-note")).toBeInTheDocument();
@@ -306,7 +306,7 @@ describe("SecretBindingDetailPage — delete", () => {
     renderDetail("/secrets/default/oai-key?delete=1");
     await screen.findByTestId("secret-detail-page");
     // ConfirmDialog uses placeholder matching the confirmText
-    fireEvent.change(screen.getByPlaceholderText("oai-key"), { target: { value: "oai-key" } });
+    fireEvent.change(await screen.findByPlaceholderText("oai-key"), { target: { value: "oai-key" } });
     fireEvent.click(screen.getByRole("button", { name: /Delete binding/i }));
     await waitFor(() => {
       expect(calls.some((c) => c.method === "DELETE" && c.url.includes("/api/secretbindings/default/oai-key"))).toBe(true);
@@ -606,7 +606,7 @@ describe("SecretBindingDetailPage — archetype A2 (M151)", () => {
     await screen.findByTestId("secret-detail-page");
 
     // The rail's last fact is the deliberate absence — not a blank row.
-    expect(screen.getByText("never read here")).toBeInTheDocument();
+    expect(await screen.findByText("never read here")).toBeInTheDocument();
     // And the surface says why, once, beside the reference it DOES show.
     expect(screen.getByTestId("no-value-note")).toBeInTheDocument();
     // The reference itself is still fully readable.

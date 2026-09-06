@@ -158,7 +158,7 @@ describe("KnowledgeBasesPage — list (m68.13)", () => {
     renderListPage();
 
     expect(await screen.findByTestId("knowledge-bases-page")).toBeInTheDocument();
-    expect(screen.getByRole("table", { name: "KnowledgeBases" })).toBeInTheDocument();
+    expect(await screen.findByRole("table", { name: "KnowledgeBases" })).toBeInTheDocument();
     expect(screen.getByText("kb-ready")).toBeInTheDocument();
     expect(screen.getByText("kb-ingesting")).toBeInTheDocument();
     expect(screen.getByText("kb-failed")).toBeInTheDocument();
@@ -203,7 +203,7 @@ describe("KBDetailPage — test-query panel (m68.13)", () => {
     renderDetailPage();
 
     expect(await screen.findByTestId("kb-detail-page")).toBeInTheDocument();
-    expect(screen.getByTestId("kb-detail-header")).toBeInTheDocument();
+    expect(await screen.findByTestId("kb-detail-header")).toBeInTheDocument();
     // The name now appears in more than one place by design (M151 A2: the
     // breadcrumb trail, the mono h1, and the rail's record row), exactly as
     // "Ready" already did — so both assert presence rather than uniqueness.
@@ -221,7 +221,7 @@ describe("KBDetailPage — test-query panel (m68.13)", () => {
     renderDetailPage();
 
     await screen.findByTestId("kb-detail-page");
-    expect(screen.getByTestId("query-input")).toBeInTheDocument();
+    expect(await screen.findByTestId("query-input")).toBeInTheDocument();
     expect(screen.getByTestId("query-topk")).toBeInTheDocument();
     expect(screen.getByTestId("query-submit")).toBeInTheDocument();
   });
@@ -255,7 +255,7 @@ describe("KBDetailPage — test-query panel (m68.13)", () => {
     await screen.findByTestId("kb-detail-page");
 
     // Type a query and submit
-    fireEvent.change(screen.getByTestId("query-input"), {
+    fireEvent.change(await screen.findByTestId("query-input"), {
       target: { value: "how to configure" },
     });
     fireEvent.click(screen.getByTestId("query-submit"));
@@ -292,7 +292,7 @@ describe("KBDetailPage — test-query panel (m68.13)", () => {
     renderDetailPage();
     await screen.findByTestId("kb-detail-page");
 
-    fireEvent.change(screen.getByTestId("query-input"), {
+    fireEvent.change(await screen.findByTestId("query-input"), {
       target: { value: "test query" },
     });
     fireEvent.click(screen.getByTestId("query-submit"));
@@ -313,7 +313,7 @@ describe("KBDetailPage — test-query panel (m68.13)", () => {
     renderDetailPage();
     await screen.findByTestId("kb-detail-page");
 
-    expect(screen.getByTestId("ingest-button")).toBeInTheDocument();
+    expect(await screen.findByTestId("ingest-button")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("ingest-button"));
 
     await waitFor(() =>
