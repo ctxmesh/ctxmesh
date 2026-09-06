@@ -356,8 +356,14 @@ jobs:
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
           kind version
-      - name: Bring up the harness cluster (Knative Serving + Kourier)
-        run: make -C agent-brain/harness dev-up M=1
+      # M=7, not M=1: the controller watches Knative Eventing Triggers UNCONDITIONALLY
+      # (Owns(&eventingv1.Trigger{})), so on a Serving-only cluster its cache never syncs
+      # and the manager exits 1 in a crash loop — which is exactly how this job has failed
+      # since 2026-09-04, reported only as "controller never created the Knative Service".
+      # dev-up installs Eventing at M>=7. The better fix is for the controller to degrade
+      # when the CRD is absent rather than crash; carded as m52.M165-eventing-hard-dep.
+      - name: Bring up the harness cluster (Knative Serving + Eventing + Kourier)
+        run: make -C agent-brain/harness dev-up M=7
       - name: Run the M2 e2e slice
         env:
           AGENT_ENGINE: ${{ github.workspace }}
