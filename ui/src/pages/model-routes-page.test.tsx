@@ -209,7 +209,7 @@ describe("ModelRouteDetailPage", () => {
     installFetch({});
     renderDetail();
     expect(await screen.findByTestId("route-detail-page")).toBeInTheDocument();
-    expect(screen.getByText("openai")).toBeInTheDocument();
+    expect(await screen.findByText("openai")).toBeInTheDocument();
     expect(screen.getByText("gpt-4o")).toBeInTheDocument();
     // apiBase must be present and shown
     expect(screen.getByText("https://api.openai.com/v1")).toBeInTheDocument();
@@ -266,7 +266,7 @@ describe("ModelRouteDetailPage", () => {
     renderDetail("/routes/default/gpt4?delete=1");
     await screen.findByTestId("route-detail-page");
     // ConfirmDialog uses placeholder matching the confirmText for the input
-    fireEvent.change(screen.getByPlaceholderText("gpt4"), { target: { value: "gpt4" } });
+    fireEvent.change(await screen.findByPlaceholderText("gpt4"), { target: { value: "gpt4" } });
     fireEvent.click(screen.getByRole("button", { name: /Delete route/i }));
     await waitFor(() => {
       expect(calls.some((c) => c.method === "DELETE" && c.url.includes("/api/modelroutes/default/gpt4"))).toBe(true);
@@ -343,7 +343,7 @@ describe("ModelRouteDetailPage — archetype A2 (M151)", () => {
     renderDetail();
     await screen.findByTestId("route-detail-page");
 
-    const first = screen.getByTestId("provider-row-0");
+    const first = await screen.findByTestId("provider-row-0");
     const second = screen.getByTestId("provider-row-1");
     const third = screen.getByTestId("provider-row-2");
 
@@ -364,7 +364,7 @@ describe("ModelRouteDetailPage — archetype A2 (M151)", () => {
     installFetch({ detail: { ok: true, body: ROUTE({ providers: [] }) } });
     renderDetail();
     await screen.findByTestId("route-detail-page");
-    expect(screen.getByText("This route has no providers yet.")).toBeInTheDocument();
+    expect(await screen.findByText("This route has no providers yet.")).toBeInTheDocument();
     // Calm — an unconfigured route is not a failure.
     expect(screen.queryByRole("alert")).toBeNull();
   });
@@ -376,7 +376,7 @@ describe("ModelRouteDetailPage — archetype A2 (M151)", () => {
 
     // The bound is real and shown; the usage against it is absent, and the
     // meter says so in words rather than drawing a fill at zero.
-    expect(screen.getByText("600/min")).toBeInTheDocument();
+    expect(await screen.findByText("600/min")).toBeInTheDocument();
     expect(screen.getByText(/not recorded for this install/)).toBeInTheDocument();
   });
 
@@ -384,7 +384,7 @@ describe("ModelRouteDetailPage — archetype A2 (M151)", () => {
     installFetch({ detail: { ok: true, body: ROUTE() } });
     renderDetail();
     await screen.findByTestId("route-detail-page");
-    expect(screen.getByText("not capped")).toBeInTheDocument();
+    expect(await screen.findByText("not capped")).toBeInTheDocument();
     expect(screen.queryByText("0")).toBeNull();
   });
 

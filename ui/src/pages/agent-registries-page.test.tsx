@@ -253,7 +253,7 @@ describe("AgentRegistryDetailPage", () => {
     renderDetail();
     expect(await screen.findByTestId("registry-detail-page")).toBeInTheDocument();
     // registryId shown read-only in detail
-    expect(screen.getByTestId("registry-id-display")).toHaveTextContent("prod-reg-001");
+    expect(await screen.findByTestId("registry-id-display")).toHaveTextContent("prod-reg-001");
     // members shown
     expect(screen.getByTestId("registry-members-panel")).toBeInTheDocument();
     expect(screen.getByText("billing-agent")).toBeInTheDocument();
@@ -284,7 +284,7 @@ describe("AgentRegistryDetailPage", () => {
     const calls = installFetch({ remove: { ok: true } });
     renderDetail("/registries/default/prod-registry?delete=1");
     await screen.findByTestId("registry-detail-page");
-    fireEvent.change(screen.getByPlaceholderText("prod-registry"), { target: { value: "prod-registry" } });
+    fireEvent.change(await screen.findByPlaceholderText("prod-registry"), { target: { value: "prod-registry" } });
     fireEvent.click(screen.getByRole("button", { name: /Delete registry/ }));
     await waitFor(() => {
       expect(calls.some((c) => c.method === "DELETE" && c.url.includes("/api/agentregistries/default/prod-registry"))).toBe(true);

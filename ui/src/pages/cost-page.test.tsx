@@ -154,7 +154,7 @@ describe("CostPage — basic rendering (m16.10)", () => {
     renderPage();
 
     await screen.findByTestId("cost-page");
-    expect(screen.getByTestId("cost-breakdown-table")).toBeInTheDocument();
+    expect(await screen.findByTestId("cost-breakdown-table")).toBeInTheDocument();
     expect(screen.getByRole("table", { name: "Cost breakdown" })).toBeInTheDocument();
   });
 
@@ -450,7 +450,7 @@ describe("CostPage — cursor pagination (m16.10)", () => {
     renderPage();
     await screen.findByTestId("cost-page");
     // Next is disabled when nextCursor is ""
-    expect(screen.getByRole("button", { name: /Next page/ })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: /Next page/ })).toBeDisabled();
   });
 });
 

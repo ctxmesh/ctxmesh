@@ -111,3 +111,60 @@ jobs:
           set -euo pipefail
           v="${GITHUB_REF_NAME#v}"
           helm push "dist/ctxmesh-${v}.tgz" oci://ghcr.io/ctxmesh/charts
+
+  # ── The Release page ────────────────────────────────────────────────────────
+  # Publishing images and a chart is not a release anybody can SEE. Without this the
+  # tag produces artifacts and nothing else: no notes, no install command, no link to
+  # what changed. The notes are the CHANGELOG section for this tag — one source of
+  # truth, so the page cannot drift from the file.
+  #
+  # Runs LAST and depends on both publish jobs: a Release page pointing at artifacts
+  # that failed to push is worse than no page, because it reads as success.
+  github-release:
+    name: release-notes
+    needs: [images, chart]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Extract this tag's CHANGELOG section
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # The section runs from its own heading to the next one at the same level.
+          awk -v tag="$tag" '
+            $0 ~ "^## " tag "( |$)" { inside = 1; next }
+            inside && /^## / { exit }
+            inside { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::CHANGELOG.md has no '## ${tag}' section — the release would have no notes."
+            exit 1
+          fi
+          {
+            echo
+            echo "---"
+            echo
+            echo '```sh'
+            echo "helm install ctxmesh oci://ghcr.io/ctxmesh/charts/ctxmesh \\"
+            echo "  --version ${GITHUB_REF_NAME#v} --namespace ctxmesh --create-namespace --wait"
+            echo '```'
+            echo
+            echo "Compatibility: https://ctxmesh.github.io/reference/compatibility/"
+          } >> notes.md
+          echo "--- notes.md ---"; cat notes.md
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          prerelease=""
+          case "${GITHUB_REF_NAME}" in *-alpha*|*-beta*|*-rc*) prerelease="--prerelease" ;; esac
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file notes.md \
+            $prerelease

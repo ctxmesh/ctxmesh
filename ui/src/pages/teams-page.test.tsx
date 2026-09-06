@@ -88,7 +88,7 @@ describe("TeamsPage — the §4.4 teams-index budget", () => {
     renderPage();
 
     expect(await screen.findByTestId("teams-page")).toBeInTheDocument();
-    expect(screen.getByRole("table", { name: "Agent teams" })).toBeInTheDocument();
+    expect(await screen.findByRole("table", { name: "Agent teams" })).toBeInTheDocument();
     expect(screen.getByText("research")).toBeInTheDocument();
 
     // Shape: the declared ladder — roster length + the three resolved ceilings.

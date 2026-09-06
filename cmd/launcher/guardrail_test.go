@@ -78,7 +78,7 @@ func guardrailDecisionEvents(rec *tracetest.SpanRecorder) []map[string]string {
 			}
 			m := map[string]string{}
 			for _, a := range ev.Attributes {
-				m[string(a.Key)] = a.Value.Emit()
+				m[string(a.Key)] = a.Value.String()
 			}
 			out = append(out, m)
 		}
@@ -97,7 +97,7 @@ func allEventAttrText(rec *tracetest.SpanRecorder) string {
 				b.WriteString("|")
 				b.WriteString(string(a.Key))
 				b.WriteString("=")
-				b.WriteString(a.Value.Emit())
+				b.WriteString(a.Value.String())
 			}
 		}
 	}
