@@ -54,6 +54,45 @@ build on verb wildcards or cluster-scoped Secret writes.
 **Install.** Postgres and NATS are bundled and chart-owned; an install-truth gate fails
 the build when the chart consumes something it never creates.
 
+### Breaking change: the inter-agent telemetry namespace
+
+The inter-agent call surface is now called **AMP**, renamed from A2A — which predated Google's
+Agent2Agent by years and had come to collide with it while meaning the opposite thing (theirs is
+interop between agents run by different parties; ours is mediation between agents one platform
+already owns).
+
+Almost nothing about the rename is breaking. `client.mesh.call()` is unchanged, the launcher still
+serves `POST /a2a/{target}` alongside `/amp/{target}`, and it still sends **and** accepts
+`X-A2A-Envelope` alongside `X-AMP-Envelope`, so an older SDK keeps working against a newer launcher.
+
+**What does break: spans, span events and attributes move from `a2a.*` to `amp.*`** — `amp.call`,
+`amp.guard`, `amp.guard_tripped`, `amp.cross_registry_denied`, `amp.conversation.id`, and the
+`amp.async.*` family. A span cannot be emitted under two names at once, so this is one deliberate
+cut. **A saved dashboard, alert or trace query keyed on `a2a.*` returns nothing rather than
+erroring** — grep your saved queries before upgrading. Full mapping in
+[docs/upgrading.md](docs/upgrading.md).
+
+### Prerequisite clarified: Knative Eventing is required
+
+The controller watches Knative Eventing `Trigger` resources at startup, so on a cluster without
+Eventing it cannot start — **even if you only ever use the serving execution model**. `Chart.yaml`
+has always listed it; the install docs did not, and now do. Install Knative Serving *and* Eventing
+before the chart.
+
+### Also in this release
+
+- **Home is a work queue.** The console's landing page leads with one ranked list of everything
+  blocked on a person — stops, approvals, failing agents, critical alerts — over a fleet bar whose
+  every stage opens the list it counts. Counts that used to read "not yet known" above 200 agents
+  are now real, from a new census endpoint.
+- **Counts that were wrong are fixed.** The alerts feed answered a cluster-wide read with zero
+  (both stores filtered on namespace equality while the console sent none), and a capped fetch was
+  printed as a total. Any count that could be the size of a page now renders as a bound.
+- **Zero reachable vulnerabilities.** Seven standard-library CVEs and one in gRPC, all reachable
+  from the call graph, closed before this tag.
+- **The durable stores are tested against a real database in CI**, not only against their in-memory
+  test doubles.
+
 ### Known limitations
 
 - **Connecting a provider needs a permission no shipped role grants.** `secrets: create`
