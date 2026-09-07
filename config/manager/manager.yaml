@@ -38,6 +38,16 @@ spec:
       control-plane: controller-manager
       app.kubernetes.io/name: ctxmesh
   replicas: 1
+  # progressDeadlineSeconds: Kubernetes defaults to 600s, and this workload cannot meet it on a COLD
+  # cluster. It fails fast when the control-plane store is unreachable and relies on Kubernetes to
+  # restart it, so while postgres is still pulling its image this pod crash-loops -- and CrashLoopBackOff
+  # is exponential (10s..300s). On a cold node postgres can take minutes, by which time its dependents
+  # are sleeping out a 300s backoff, and the Deployment trips the 600s deadline with nothing actually
+  # broken. That failed a first `helm install` of v0.1.0-beta.1 intermittently, decided purely by how
+  # fast postgres pulled relative to eight other images. Raising it hands the bound back to the user's
+  # `helm --timeout` instead of a fixed 600s. The real fix is retrying the store connection in-process
+  # instead of exiting (m52.M166-store-retry); this stops the release being a coin flip until then.
+  progressDeadlineSeconds: 1800
   template:
     metadata:
       annotations:

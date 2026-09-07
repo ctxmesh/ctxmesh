@@ -100,7 +100,14 @@ spec:
   # install loudly, not retry — the in-Job retry would hit "already provisioned" and no-op to a false
   # success, re-silencing a key-less consumer (the recovery is a `helm upgrade` re-run, not a Job retry).
   backoffLimit: 0
-  activeDeadlineSeconds: 120
+  # activeDeadlineSeconds runs from Job CREATION, so it covers the image pull, not just the keygen. At
+  # 120s that made a cold cluster fail its first install: the bff pull competed with eight other images
+  # (pgvector, minio, litellm, valkey + four first-party), lost, and DeadlineExceeded + backoffLimit 0 is
+  # terminal. The cluster then healed itself while Helm held `failed` and the keypair Secret did not exist
+  # — and the same command succeeded on retry, once the images were cached. This bound exists to stop a
+  # HUNG keygen, which is a sub-second operation; it must therefore clear the slowest realistic cold pull,
+  # not the fastest warm one.
+  activeDeadlineSeconds: {{ .Values.capabilityKey.activeDeadlineSeconds | default 900 }}
   template:
     metadata:
       labels:

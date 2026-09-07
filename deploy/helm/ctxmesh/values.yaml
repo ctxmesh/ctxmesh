@@ -144,6 +144,10 @@ componentPodDisruptionBudgets:
 # production should BYO a managed key — the generated key is a getting-started default).
 capabilityKey:
   generate: true
+  # Bounds a HUNG keygen, but Kubernetes counts it from Job creation, so it also has to cover the image
+  # pull. Sized for the slowest realistic cold pull, not the warm one — at 120s a first install on a
+  # clean cluster failed here while the keygen itself never got to run.
+  activeDeadlineSeconds: 900
 
 # GA Gate A install preflight (M124, ADR 0095). A post-install/upgrade Helm hook Job runs
 # `bff -preflight` to FAIL LOUD on an incoherent config (empty required env, a mismatched capability
@@ -152,6 +156,8 @@ capabilityKey:
 # install PASSES it; a wrong one fails at install. Helm hooks are excluded from the no-drift diff (Fork 3).
 preflight:
   enabled: true
+  # See capabilityKey.activeDeadlineSeconds — same cold-start reasoning.
+  activeDeadlineSeconds: 900
 
 # Horizontal-scale dials for the stateless request-servers (M50 hardening). The
 # gateway (config-rendered LiteLLM proxy) and token-service (credential-plane
