@@ -1,6 +1,6 @@
 import type { ReactElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { axe } from "vitest-axe";
 
@@ -159,11 +159,12 @@ describe("AgentsPage (DataTable + list contract)", () => {
     });
     const { container } = renderWithCaps(<AgentsPage />);
     await screen.findByText("echo");
-    await waitFor(async () => {
-      expect(
-        await axe(container, { rules: { "color-contrast": { enabled: false } } }),
-      ).toHaveNoViolations();
-    });
+    // No waitFor: the row is already on screen, so there is nothing to retry FOR — and waitFor
+    // retries against a 1s budget that one full-page axe scan can exceed on its own under
+    // full-suite parallelism, which read as a violation and was really a deadline.
+    expect(
+      await axe(container, { rules: { "color-contrast": { enabled: false } } }),
+    ).toHaveNoViolations();
   });
 
   it("paginates by the opaque cursor (Next/Prev walk the page stack)", async () => {
