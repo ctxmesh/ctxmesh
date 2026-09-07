@@ -25,7 +25,10 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 1
-  activeDeadlineSeconds: 120
+  # Counted from Job creation, so it covers the image pull as well as the checks — and this hook also
+  # waits on the control-plane store, which on a cold cluster is still pulling its own image. Same sizing
+  # rule as the keygen hook: clear the slowest cold start, not the fastest warm one.
+  activeDeadlineSeconds: {{ .Values.preflight.activeDeadlineSeconds | default 900 }}
   template:
     metadata:
       labels:

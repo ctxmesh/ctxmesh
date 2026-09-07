@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.1.0-beta.2 — the first install actually works
+
+v0.1.0-beta.1 published correctly and could not be installed. This release fixes that, and
+it is the first version whose install was tested from the published artifacts *before*
+shipping rather than after.
+
+**The command on the release page could not succeed.** It was `--wait` with no `--timeout`,
+which is Helm's 5-minute default. A first install pulls nine images into an empty cache and
+the PostgreSQL image alone took 4m31s in a measured cold run. That is not bad luck, it is
+arithmetic — the command budgeted five minutes for work that needs fifteen, then reported a
+failed install while the cluster was still pulling. The release notes and the install docs
+now pass `--timeout 20m` and explain that it is a ceiling, not an expected wait.
+
+**Two Helm hooks were timing the image pull, not their own work.** `activeDeadlineSeconds` is
+counted by Kubernetes from Job *creation*, so the capability-keygen hook's 120s covered the
+pull of the image it had not yet started. On a cold node it lost that race and
+`backoffLimit: 0` made the loss terminal. `backoffLimit: 0` is kept — its reasoning, that a
+keygen which *ran* and failed must not retry into an "already provisioned" no-op, is sound and
+was simply never about a container that failed to start. Both hooks now allow 900s and are
+configurable for a slow registry.
+
+**The control plane slept through its own dependency recovering.** `controller`, `bff` and
+`token-service` exit when the control-plane store is unreachable and rely on Kubernetes to
+restart them, but CrashLoopBackOff is exponential to a 300s cap. While PostgreSQL pulled, its
+dependents accumulated backoff and were still asleep after it was healthy — observed directly
+as `postgres 1/1 Running` beside `controller CrashLoopBackOff` — tripping the 600s
+`progressDeadlineSeconds` default with nothing actually broken. That bound is now 1800s, which
+hands the limit back to the user's `--timeout`.
+
+**Why this was invisible.** Every tier installs from a working tree or a local registry that
+serves images in about a second, so every deadline was met with room to spare. A new harness
+slice installs from `oci://ghcr.io/ctxmesh/charts/ctxmesh` onto a cold cluster, pulling the
+chart *logged out* — an authenticated pull succeeds against a private package, which is how
+beta.1 was called verified while five of six packages were unreachable. It asserts what a
+pods-are-Running check waves through: Helm status `deployed` at revision 1, and the capability
+keypair Secret existing.
+
+Upgrading from beta.1 needs no action beyond the new `--timeout`. If a beta.1 install is
+sitting at `STATUS: failed`, re-running `helm upgrade` provisions the keypair it never created.
+
 ## v0.1.0-beta.1 — the first beta
 
 The first release you can install without cloning the repository.

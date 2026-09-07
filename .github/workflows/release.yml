@@ -151,7 +151,18 @@ jobs:
             echo
             echo '```sh'
             echo "helm install ctxmesh oci://ghcr.io/ctxmesh/charts/ctxmesh \\"
-            echo "  --version ${GITHUB_REF_NAME#v} --namespace ctxmesh --create-namespace --wait"
+            echo "  --version ${GITHUB_REF_NAME#v} --namespace ctxmesh --create-namespace \\"
+            echo "  --wait --timeout 20m"
+            echo '```'
+            echo
+            echo "> **The first install pulls nine images and takes several minutes.** \`--wait\` without"
+            echo "> \`--timeout\` uses Helm's 5-minute default, which a cold cluster does not meet — the"
+            echo "> postgres image alone can take longer than that. The timeout above is a ceiling, not a"
+            echo "> wait: a warm cluster finishes in well under it."
+            echo
+            echo '```sh'
+            echo "# afterwards, confirm the release actually landed"
+            echo "helm status ctxmesh -n ctxmesh"
             echo '```'
             echo
             echo "Compatibility: https://ctxmesh.github.io/reference/compatibility/"
