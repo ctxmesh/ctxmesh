@@ -1060,6 +1060,7 @@ metadata:
   name: ctxmesh-controller-manager
   namespace: {{ .Values.namespace }}
 spec:
+  progressDeadlineSeconds: 1800
   replicas: {{ .Values.controllerManager.replicas | default 1 }}
   selector:
     matchLabels:
@@ -1334,6 +1335,7 @@ metadata:
   name: ctxmesh-token-service
   namespace: {{ .Values.namespace }}
 spec:
+  progressDeadlineSeconds: 1800
   replicas: {{ .Values.tokenService.replicas | default 1 }}
   selector:
     matchLabels:
