@@ -26,6 +26,15 @@ on:
   # They ship at the product's version now (ADR 0135).
   push:
     tags: ["v*"]
+  # Re-publish a version without cutting a tag. Needed the day npm rejected the publish for
+  # a reason unrelated to the artifact: everything else had already shipped, and a new tag
+  # purely to retry one job would have burned a version number on every registry.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, e.g. v0.1.0-beta.2"
+        required: true
+        type: string
 
 permissions: {}
 
@@ -141,7 +150,7 @@ jobs:
   publish-npm:
     name: publish-npm
     needs: build-verify
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
@@ -153,10 +162,15 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      # NO registry-url. It exists for TOKEN auth: setup-node writes an .npmrc carrying
+      # `_authToken=${NODE_AUTH_TOKEN}` and `always-auth=true`, and with no token in the
+      # environment npm reads that as "auth is already configured", so the OIDC exchange
+      # does not happen cleanly (actions/setup-node#1551). The tell in the log is
+      # `npm warn Unknown user config "always-auth"`. Trusted publishing needs no registry
+      # line — registry.npmjs.org is the default.
       - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
           node-version-file: sdk/typescript/.nvmrc
-          registry-url: https://registry.npmjs.org
       # Node 22 ships npm 10.x. Trusted publishing needs npm >= 11.5.1 — without it the
       # CLI never attempts OIDC, falls back to looking for a token, finds none, and the
       # publish fails in a way that reads as an auth problem rather than a version one.
@@ -167,9 +181,11 @@ jobs:
           npm --version
       - name: Stamp the version from the tag
         working-directory: sdk/typescript
+        env:
+          VERSION_OVERRIDE: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          python3 - "$GITHUB_REF_NAME" <<'PY'
+          python3 - "${VERSION_OVERRIDE:-$GITHUB_REF_NAME}" <<'PY'
           import json, pathlib, sys
           v = sys.argv[1].lstrip("v")
           p = pathlib.Path("package.json")
@@ -185,9 +201,20 @@ jobs:
           npm run build
       - name: Publish (skip if this version is already on the registry)
         working-directory: sdk/typescript
+        env:
+          VERSION_OVERRIDE: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          v="${GITHUB_REF_NAME#v}"
+          # An .npmrc auth line suppresses the OIDC exchange, and the resulting failure
+          # reads as a permissions problem rather than a config one. Fail on it here.
+          for f in "$HOME/.npmrc" .npmrc; do
+            if [ -f "$f" ] && grep -q "_authToken" "$f"; then
+              echo "::error::$f carries an _authToken line, which blocks OIDC trusted publishing"
+              exit 1
+            fi
+          done
+          v="${VERSION_OVERRIDE:-$GITHUB_REF_NAME}"
+          v="${v#v}"   # the dispatch input carries the leading v, like the tag does
           if npm view "ctxmesh@${v}" version >/dev/null 2>&1; then
             echo "ctxmesh@${v} is already published — nothing to do."
             exit 0
@@ -195,5 +222,5 @@ jobs:
           # A pre-release must not become `latest`, or `npm install ctxmesh` hands
           # everyone a beta.
           tag=latest
-          case "$GITHUB_REF_NAME" in *-alpha*|*-beta*|*-rc*) tag=beta ;; esac
+          case "${VERSION_OVERRIDE:-$GITHUB_REF_NAME}" in *-alpha*|*-beta*|*-rc*) tag=beta ;; esac
           npm publish --provenance --access public --tag "$tag"
