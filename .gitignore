@@ -72,3 +72,6 @@ sdk/java/target/
 
 # Rust SDK build output
 sdk/rust/target/
+
+# Ruby SDK build output
+sdk/ruby/*.gem
