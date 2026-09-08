@@ -5,8 +5,6 @@ import java.util.function.Function;
 
 /** The resolved plane for one agent process. */
 public final class Config {
-  /** The tools/discovery sidecar is on a fixed port; the others are injected. */
-  public static final int DISCOVERY_PORT = 2999;
   static final int DEFAULT_MEMORY_PORT = 2998;
   static final int DEFAULT_FEEDBACK_PORT = 2995;
   static final int DEFAULT_AMP_PORT = 2997;
@@ -89,7 +87,6 @@ public final class Config {
   String memoryBase() { return "http://127.0.0.1:" + memoryPort; }
   String feedbackBase() { return "http://127.0.0.1:" + feedbackPort; }
   String ampBase() { return "http://127.0.0.1:" + ampPort; }
-  String toolsBase() { return "http://127.0.0.1:" + DISCOVERY_PORT; }
 
   static Config fromSystemEnv() {
     Map<String, String> env = System.getenv();

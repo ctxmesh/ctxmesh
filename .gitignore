@@ -69,3 +69,6 @@ sdk/python/dist/
 
 # Java SDK build output
 sdk/java/target/
+
+# Rust SDK build output
+sdk/rust/target/

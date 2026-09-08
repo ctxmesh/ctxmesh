@@ -19,10 +19,9 @@ import (
 	"strings"
 )
 
-// Ports the launcher binds. The tools/discovery port is fixed; the others are injected and
-// their absence is how the SDK knows a capability is not wired for this agent.
+// Ports the launcher binds. Their absence is how the SDK knows a capability is not wired for
+// this agent.
 const (
-	DiscoveryPort       = 2999
 	defaultMemoryPort   = 2998
 	defaultFeedbackPort = 2995
 	defaultAMPPort      = 2997
@@ -130,4 +129,3 @@ func port(look func(string) (string, bool), name string, def int) (int, bool, er
 func (c *Config) memoryBase() string   { return fmt.Sprintf("http://127.0.0.1:%d", c.MemoryPort) }
 func (c *Config) feedbackBase() string { return fmt.Sprintf("http://127.0.0.1:%d", c.FeedbackPort) }
 func (c *Config) ampBase() string      { return fmt.Sprintf("http://127.0.0.1:%d", c.AMPPort) }
-func (c *Config) toolsBase() string    { return fmt.Sprintf("http://127.0.0.1:%d", DiscoveryPort) }

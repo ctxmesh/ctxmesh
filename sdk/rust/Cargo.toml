@@ -1,0 +1,24 @@
+[package]
+name = "ctxmesh"
+version = "0.1.0-beta.1"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+description = "Rust SDK for ctxmesh agents — typed clients for memory, tools, knowledge, feedback and agent-to-agent calls. Reads its endpoints from the environment the platform injects, so your code never holds credentials."
+homepage = "https://ctxmesh.github.io"
+repository = "https://github.com/ctxmesh/ctxmesh"
+documentation = "https://docs.rs/ctxmesh"
+readme = "README.md"
+keywords = ["ctxmesh", "agents", "llm", "kubernetes", "ai"]
+categories = ["api-bindings", "web-programming::http-client"]
+
+# ureq over reqwest: this is an SDK, installed beside an application that has its own async
+# runtime and its own opinion about which one. A blocking client with no tokio dependency
+# cannot conflict with that choice.
+[dependencies]
+ureq = { version = "2.10", default-features = false, features = ["json", "tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tiny_http = "0.12"
