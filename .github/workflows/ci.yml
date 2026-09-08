@@ -345,6 +345,26 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      # Resolve the brain ref BEFORE checkout. The convention is that it mirrors the engine
+      # branch, but when the engine branch exists and the brain one does not, actions/checkout
+      # fails with a bare `The process '/usr/bin/git' failed with exit code 1` — no repo, no
+      # ref, no cause. That reads as an infrastructure flake and was mistaken for one across
+      # three runs. Falling back to main is also the right behaviour: most engine branches do
+      # not touch the harness, and main is the harness the last release shipped with.
+      - name: Resolve the agent-brain ref
+        id: brainref
+        env:
+          GH_TOKEN: ${{ secrets.BRAIN_CHECKOUT_TOKEN }}
+          WANT: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/ctxmesh/agent-brain/branches/$WANT" >/dev/null 2>&1; then
+            echo "ref=$WANT" >> "$GITHUB_OUTPUT"
+            echo "agent-brain: using $WANT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+            echo "::warning::agent-brain has no branch '$WANT'; falling back to main. If this engine branch changes the harness, push the matching brain branch."
+          fi
       - name: Check out agent-brain (harness owns e2e — ADR 0004)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -352,9 +372,7 @@ jobs:
           token: ${{ secrets.BRAIN_CHECKOUT_TOKEN }}
           path: agent-brain
           persist-credentials: false
-          # Brain ref mirrors the engine branch (m<n> <-> m<n>, main <-> main),
-          # per the per-milestone branching convention in agent-brain/CLAUDE.md.
-          ref: ${{ github.head_ref || github.ref_name }}
+          ref: ${{ steps.brainref.outputs.ref }}
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
           go-version-file: go.mod
