@@ -1,13 +1,12 @@
 apiVersion: v2
 name: ctxmesh
+# Renders as ONE truncated line in `helm search`, Artifact Hub cards and the GHCR
+# listing, so only the first clause is ever read. The internal detail that used to
+# live here (ADR/PRD citations, the BFF ServiceAccount's grants) is in the docs.
 description: >-
-  ctxmesh — the Kubernetes-native control plane for deploying, scaling, and
-  observing LLM agents. This chart deploys the control plane (controller-manager,
-  CRDs, the LiteLLM gateway, RBAC personas, metrics wiring), the operator UI +
-  Go BFF (ui.enabled, default on; the BFF SA holds no agent-CRD access — ADR 0011),
-  and an optional bundled dev data plane (Valkey + MinIO) for dev/trial use only
-  (PRD §23). PREREQUISITES: the controller watches Knative Serving + Eventing and
-  KEDA CRDs — install those add-ons on the cluster first (see NOTES on install).
+  Kubernetes-native control plane for deploying, governing, and observing AI agents
+  — CRDs, controller, model gateway, and web console. Requires Knative Serving +
+  Eventing and KEDA on the cluster.
 # The control-plane + CRD templates are GENERATED from `kustomize build
 # config/default` by hack/gen-helm-chart.sh — see templates/ banners and the
 # `make helm-verify` no-drift check. Do not hand-edit generated templates.
@@ -30,3 +29,18 @@ keywords:
 home: https://github.com/ctxmesh/ctxmesh
 sources:
   - https://github.com/ctxmesh/ctxmesh
+
+maintainers:
+  - name: ctxmesh
+    url: https://github.com/ctxmesh
+# Artifact Hub renders these on the chart page; without them it shows no category,
+# licence or links.
+annotations:
+  artifacthub.io/category: ai-machine-learning
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/prerelease: "true"
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://ctxmesh.github.io
+    - name: Source
+      url: https://github.com/ctxmesh/ctxmesh
