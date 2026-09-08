@@ -26,7 +26,12 @@ impl Config {
     }
 
     /// Builds a config explicitly — for tests and offline work.
-    pub fn for_test(memory_port: u16, feedback_port: u16, amp_port: u16, conversation_id: &str) -> Self {
+    pub fn for_test(
+        memory_port: u16,
+        feedback_port: u16,
+        amp_port: u16,
+        conversation_id: &str,
+    ) -> Self {
         Self {
             memory_port,
             feedback_port,
@@ -41,9 +46,14 @@ impl Config {
     }
 
     pub(crate) fn from_lookup(look: &dyn Fn(&str) -> Option<String>) -> Result<Self, Error> {
-        let in_pod = ["MEMORY_PORT", "FEEDBACK_PORT", "AGENT_NAME", "MODEL_GATEWAY_URL"]
-            .iter()
-            .any(|k| look(k).is_some());
+        let in_pod = [
+            "MEMORY_PORT",
+            "FEEDBACK_PORT",
+            "AGENT_NAME",
+            "MODEL_GATEWAY_URL",
+        ]
+        .iter()
+        .any(|k| look(k).is_some());
         if !in_pod {
             return Err(Error::NotInPod("no launcher environment".into()));
         }
@@ -64,15 +74,24 @@ impl Config {
         })
     }
 
-    pub(crate) fn memory_base(&self) -> String { format!("http://127.0.0.1:{}", self.memory_port) }
-    pub(crate) fn feedback_base(&self) -> String { format!("http://127.0.0.1:{}", self.feedback_port) }
-    pub(crate) fn amp_base(&self) -> String { format!("http://127.0.0.1:{}", self.amp_port) }
-    pub(crate) fn tools_base(&self) -> String { format!("http://127.0.0.1:{DISCOVERY_PORT}") }
+    pub(crate) fn memory_base(&self) -> String {
+        format!("http://127.0.0.1:{}", self.memory_port)
+    }
+    pub(crate) fn feedback_base(&self) -> String {
+        format!("http://127.0.0.1:{}", self.feedback_port)
+    }
+    pub(crate) fn amp_base(&self) -> String {
+        format!("http://127.0.0.1:{}", self.amp_port)
+    }
 }
 
 /// Returns `(value, was_explicitly_set)`. The caller needs the difference: an unset port means
 /// the capability is not wired, not that it is on the default.
-fn port(look: &dyn Fn(&str) -> Option<String>, name: &str, default: u16) -> Result<(u16, bool), Error> {
+fn port(
+    look: &dyn Fn(&str) -> Option<String>,
+    name: &str,
+    default: u16,
+) -> Result<(u16, bool), Error> {
     match look(name) {
         None => Ok((default, false)),
         Some(raw) if raw.trim().is_empty() => Ok((default, false)),

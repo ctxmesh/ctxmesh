@@ -142,10 +142,19 @@ impl Client {
                 return Err(if code == 403 {
                     Error::Denied { path, body: text }
                 } else {
-                    Error::Api { status: code, path, body: text }
+                    Error::Api {
+                        status: code,
+                        path,
+                        body: text,
+                    }
                 });
             }
-            Err(e) => return Err(Error::Transport { path: path_of(url), source: e.to_string() }),
+            Err(e) => {
+                return Err(Error::Transport {
+                    path: path_of(url),
+                    source: e.to_string(),
+                })
+            }
         };
         let text = resp.into_string().map_err(|e| Error::Transport {
             path: path_of(url),
@@ -156,7 +165,10 @@ impl Client {
         }
         serde_json::from_str(&text)
             .map(Some)
-            .map_err(|e| Error::Decode { path: path_of(url), source: e.to_string() })
+            .map_err(|e| Error::Decode {
+                path: path_of(url),
+                source: e.to_string(),
+            })
     }
 
     // ── memory: /memory and /memory/agent ────────────────────────────────────
@@ -201,23 +213,41 @@ impl Client {
     /// Returns the conversation so far.
     pub fn memory_get(&self, conversation_id: Option<&str>) -> Result<Vec<Entry>, Error> {
         self.require_memory()?;
-        let url = format!("{}/memory/{}", self.cfg.memory_base(), self.conv(conversation_id)?);
-        Ok(self.send("GET", &url, None, DEFAULT_TIMEOUT)?.unwrap_or_default())
+        let url = format!(
+            "{}/memory/{}",
+            self.cfg.memory_base(),
+            self.conv(conversation_id)?
+        );
+        Ok(self
+            .send("GET", &url, None, DEFAULT_TIMEOUT)?
+            .unwrap_or_default())
     }
 
     /// Adds one entry to the conversation.
     pub fn memory_append(&self, entry: &Entry, conversation_id: Option<&str>) -> Result<(), Error> {
         self.require_memory()?;
-        let url = format!("{}/memory/{}", self.cfg.memory_base(), self.conv(conversation_id)?);
+        let url = format!(
+            "{}/memory/{}",
+            self.cfg.memory_base(),
+            self.conv(conversation_id)?
+        );
         let body = serde_json::to_value(entry).map_err(|e| Error::Invalid(e.to_string()))?;
         self.send::<serde_json::Value>("POST", &url, Some(body), DEFAULT_TIMEOUT)?;
         Ok(())
     }
 
     /// Replaces the conversation wholesale.
-    pub fn memory_put(&self, entries: &[Entry], conversation_id: Option<&str>) -> Result<(), Error> {
+    pub fn memory_put(
+        &self,
+        entries: &[Entry],
+        conversation_id: Option<&str>,
+    ) -> Result<(), Error> {
         self.require_memory()?;
-        let url = format!("{}/memory/{}", self.cfg.memory_base(), self.conv(conversation_id)?);
+        let url = format!(
+            "{}/memory/{}",
+            self.cfg.memory_base(),
+            self.conv(conversation_id)?
+        );
         let body = serde_json::to_value(entries).map_err(|e| Error::Invalid(e.to_string()))?;
         self.send::<serde_json::Value>("PUT", &url, Some(body), DEFAULT_TIMEOUT)?;
         Ok(())
@@ -236,9 +266,15 @@ impl Client {
     }
 
     /// Retrieves facts from long-term memory; `min_score` drops weak matches.
-    pub fn search_agent(&self, query: &str, top_k: usize, min_score: f64) -> Result<Vec<Fact>, Error> {
+    pub fn search_agent(
+        &self,
+        query: &str,
+        top_k: usize,
+        min_score: f64,
+    ) -> Result<Vec<Fact>, Error> {
         self.require_long_term()?;
-        let body = serde_json::json!({ "query": query, "topK": if top_k == 0 { 5 } else { top_k } });
+        let body =
+            serde_json::json!({ "query": query, "topK": if top_k == 0 { 5 } else { top_k } });
         let url = format!("{}/memory/agent/search", self.cfg.memory_base());
         let out: Option<Results<Fact>> = self.send("POST", &url, Some(body), DEFAULT_TIMEOUT)?;
         Ok(out
@@ -263,7 +299,8 @@ impl Client {
                 "knowledge (KNOWLEDGE_BASE_ENABLED is not true)".into(),
             ));
         }
-        let mut body = serde_json::json!({ "query": query, "topK": if top_k == 0 { 5 } else { top_k } });
+        let mut body =
+            serde_json::json!({ "query": query, "topK": if top_k == 0 { 5 } else { top_k } });
         if let Some(kb) = knowledge_base.filter(|s| !s.is_empty()) {
             body["knowledgeBase"] = serde_json::Value::String(kb.to_string());
         }
@@ -324,7 +361,9 @@ impl Client {
             return Err(Error::Invalid("target agent is required".into()));
         }
         let url = format!("{}/amp/{}", self.cfg.amp_base(), target_agent);
-        Ok(self.send("POST", &url, Some(payload), DEFAULT_TIMEOUT)?.unwrap_or(serde_json::Value::Null))
+        Ok(self
+            .send("POST", &url, Some(payload), DEFAULT_TIMEOUT)?
+            .unwrap_or(serde_json::Value::Null))
     }
 
     /// Invokes another agent through the retired `/a2a` path. Prefer [`Client::call_agent`].
@@ -340,7 +379,9 @@ impl Client {
             return Err(Error::Invalid("target agent is required".into()));
         }
         let url = format!("{}/a2a/{}", self.cfg.amp_base(), target_agent);
-        Ok(self.send("POST", &url, Some(payload), DEFAULT_TIMEOUT)?.unwrap_or(serde_json::Value::Null))
+        Ok(self
+            .send("POST", &url, Some(payload), DEFAULT_TIMEOUT)?
+            .unwrap_or(serde_json::Value::Null))
     }
 
     // ── runs: /delegate and /handoff ─────────────────────────────────────────
@@ -356,7 +397,10 @@ impl Client {
         let body = serde_json::json!({ "subAgent": sub_agent, "input": input });
         let url = format!("{}/delegate", self.cfg.memory_base());
         self.send("POST", &url, Some(body), DEFAULT_TIMEOUT)?
-            .ok_or_else(|| Error::Decode { path: "/delegate".into(), source: "empty body".into() })
+            .ok_or_else(|| Error::Decode {
+                path: "/delegate".into(),
+                source: "empty body".into(),
+            })
     }
 
     /// Transfers the conversation to another agent.
