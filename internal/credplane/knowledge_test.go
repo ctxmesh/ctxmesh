@@ -23,15 +23,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/pgtest"
 )
 
 // postRaw sends a raw (possibly malformed) body to path — used to assert honest 4xx on bad input.
@@ -166,14 +165,10 @@ func TestKnowledgeSearch_UnsupportedWhenNotWired(t *testing.T) {
 // container with the `vector` extension). It seeds a corpus, drives the handler, asserts the right chunk comes back
 // WITH provenance + score, and that a cross-embeddingModel query returns nothing (the one-way-door fail-safe).
 func TestKnowledgeSearch_RealPostgres(t *testing.T) {
-	dsn := os.Getenv("CONTROLPLANE_TEST_DSN")
-	if dsn == "" {
-		t.Skip("CONTROLPLANE_TEST_DSN unset — skipping the real-Postgres knowledge retrieval round-trip")
-	}
+	// Own schema: three packages drop the shared knowledge_chunks parent, and go test runs
+	// packages in parallel — without this, one package deletes another's partitions mid-test.
+	db := pgtest.Open(t, "credplane_knowledge")
 	ctx := context.Background()
-	db, err := controlplane.OpenDB(ctx, dsn)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
 
 	setupKnowledgeSchema(t, db)
 	store := knowledge.NewPostgresStore(db)

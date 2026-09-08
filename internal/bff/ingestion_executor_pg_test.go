@@ -30,7 +30,6 @@ package bff
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -40,8 +39,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/pgtest"
 	"github.com/ctxmesh/ctxmesh/internal/objectstore"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 )
@@ -69,15 +68,11 @@ func (m *pgMockEmbedder) EmbedBatch(ctx context.Context, model string, texts []s
 // returns a pgvector-backed knowledge store. Skips when the DSN is unset.
 func openKnowledgePG(t *testing.T) knowledge.Store {
 	t.Helper()
-	dsn := os.Getenv("CONTROLPLANE_TEST_DSN")
-	if dsn == "" {
-		t.Skip("set CONTROLPLANE_TEST_DSN (a throwaway pgvector Postgres) to run the real-Postgres ingestion tests")
-	}
-	db, err := controlplane.OpenDB(context.Background(), dsn)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	// Own schema: three packages drop the shared knowledge_chunks parent, and go test runs
+	// packages in parallel — without this, one package deletes another's partitions mid-test.
+	db := pgtest.Open(t, "bff_ingest")
 
-	_, err = db.Exec(`DROP TABLE IF EXISTS knowledge_chunks CASCADE`)
+	_, err := db.Exec(`DROP TABLE IF EXISTS knowledge_chunks CASCADE`)
 	require.NoError(t, err)
 	_, err = db.Exec(`
 		CREATE TABLE knowledge_chunks (

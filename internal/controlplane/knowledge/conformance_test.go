@@ -19,7 +19,6 @@ package knowledge
 import (
 	"context"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -27,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/pgtest"
 )
 
 const embModel = "text-embedding-3-small"
@@ -50,17 +50,12 @@ func eachStore(t *testing.T, fn func(t *testing.T, s Store)) {
 	t.Helper()
 	t.Run("mem", func(t *testing.T) { fn(t, NewMemStore()) })
 
-	dsn := os.Getenv("CONTROLPLANE_TEST_DSN")
-	if dsn == "" {
-		t.Log("CONTROLPLANE_TEST_DSN unset — skipping the Postgres conformance run (the twin still ran)")
-		return
-	}
-	db, err := controlplane.OpenDB(context.Background(), dsn)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	// Own schema: three packages drop the shared knowledge_chunks parent, and go test runs
+	// packages in parallel — without this, one package deletes another's partitions mid-test.
+	db := pgtest.Open(t, "knowledge_conformance")
 	// Drop every child partition + the parent, then re-migrate — a clean corpus namespace per run. (goose only
 	// runs pending versions, so re-running Migrate after a DROP does nothing; recreate the parent directly.)
-	_, err = db.Exec(`DROP TABLE IF EXISTS knowledge_chunks CASCADE`)
+	_, err := db.Exec(`DROP TABLE IF EXISTS knowledge_chunks CASCADE`)
 	require.NoError(t, err)
 	_, err = db.Exec(`
 		CREATE TABLE knowledge_chunks (
