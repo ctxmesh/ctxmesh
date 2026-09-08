@@ -15,7 +15,11 @@ pub enum Error {
     /// A 403. The plane understood the call and refused it; `body` carries its reason.
     Denied { path: String, body: String },
     /// Any other non-2xx.
-    Api { status: u16, path: String, body: String },
+    Api {
+        status: u16,
+        path: String,
+        body: String,
+    },
     /// The request never completed.
     Transport { path: String, source: String },
     /// The response was not what the contract says.
@@ -29,10 +33,16 @@ impl fmt::Display for Error {
         match self {
             Error::NotInPod(m) => write!(f, "ctxmesh: not running in a ctxmesh pod ({m})"),
             Error::NotWired(m) => write!(f, "ctxmesh: capability not wired for this agent: {m}"),
-            Error::Denied { path, body } => write!(f, "ctxmesh: {path} denied by the platform: {body}"),
-            Error::Api { status, path, body } => write!(f, "ctxmesh: {path} returned {status}: {body}"),
+            Error::Denied { path, body } => {
+                write!(f, "ctxmesh: {path} denied by the platform: {body}")
+            }
+            Error::Api { status, path, body } => {
+                write!(f, "ctxmesh: {path} returned {status}: {body}")
+            }
             Error::Transport { path, source } => write!(f, "ctxmesh: {path}: {source}"),
-            Error::Decode { path, source } => write!(f, "ctxmesh: decode response from {path}: {source}"),
+            Error::Decode { path, source } => {
+                write!(f, "ctxmesh: decode response from {path}: {source}")
+            }
             Error::Invalid(m) => write!(f, "ctxmesh: {m}"),
         }
     }

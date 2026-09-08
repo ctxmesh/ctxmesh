@@ -15,12 +15,17 @@ fn plane(status: u16) -> (Client, Arc<Mutex<Vec<String>>>) {
     std::thread::spawn(move || {
         for req in server.incoming_requests() {
             let path = req.url().split('?').next().unwrap_or("").to_string();
-            recorder.lock().unwrap().push(format!("{} {}", req.method(), path));
+            recorder
+                .lock()
+                .unwrap()
+                .push(format!("{} {}", req.method(), path));
             let body = match path.as_str() {
                 "/memory/agent/search" => {
                     r#"{"results":[{"content":"strong","score":0.9},{"content":"weak","score":0.1}]}"#
                 }
-                "/knowledge/search" => r#"{"results":[{"content":"c","documentRef":"d","score":0.5}]}"#,
+                "/knowledge/search" => {
+                    r#"{"results":[{"content":"c","documentRef":"d","score":0.5}]}"#
+                }
                 "/skills" => r#"{"skills":[{"name":"s","description":"d"}]}"#,
                 "/skills/load" => r#"{"content":"body"}"#,
                 "/delegate" => r#"{"runId":"r1","accepted":true}"#,
@@ -30,13 +35,17 @@ fn plane(status: u16) -> (Client, Arc<Mutex<Vec<String>>>) {
             let resp = tiny_http::Response::from_string(body)
                 .with_status_code(status)
                 .with_header(
-                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                        .unwrap(),
                 );
             let _ = req.respond(resp);
         }
     });
 
-    (Client::with_config(Config::for_test(port, port, port, "conv-1")), seen)
+    (
+        Client::with_config(Config::for_test(port, port, port, "conv-1")),
+        seen,
+    )
 }
 
 #[test]
@@ -44,7 +53,14 @@ fn every_route_is_actually_called() {
     let (c, seen) = plane(200);
 
     c.memory_get(None).expect("memory get");
-    c.memory_append(&Entry { role: "user".into(), content: "hi".into() }, None).expect("append");
+    c.memory_append(
+        &Entry {
+            role: "user".into(),
+            content: "hi".into(),
+        },
+        None,
+    )
+    .expect("append");
     let mut tags = BTreeMap::new();
     tags.insert("topic".to_string(), "x".to_string());
     c.remember("a fact", &tags).expect("remember");
@@ -52,19 +68,33 @@ fn every_route_is_actually_called() {
     c.knowledge_search("q", Some("kb"), 3).expect("knowledge");
     c.skills().expect("skills");
     c.skill_load("s").expect("skill load");
-    c.feedback("t1", "helpfulness", 1.0, Some("clear")).expect("feedback");
-    c.call_agent("other", serde_json::json!({"q":1})).expect("amp");
-    c.call_agent_legacy("other", serde_json::json!({"q":1})).expect("a2a");
-    c.delegate("sub", serde_json::json!({"x":1})).expect("delegate");
+    c.feedback("t1", "helpfulness", 1.0, Some("clear"))
+        .expect("feedback");
+    c.call_agent("other", serde_json::json!({"q":1}))
+        .expect("amp");
+    c.call_agent_legacy("other", serde_json::json!({"q":1}))
+        .expect("a2a");
+    c.delegate("sub", serde_json::json!({"x":1}))
+        .expect("delegate");
     c.handoff("other", true).expect("handoff");
 
     let got = seen.lock().unwrap().clone();
     for want in [
-        "/memory/", "/memory/agent", "/memory/agent/search", "/knowledge/search", "/skills",
-        "/skills/load", "/feedback", "/amp/", "/a2a/", "/delegate", "/handoff",
+        "/memory/",
+        "/memory/agent",
+        "/memory/agent/search",
+        "/knowledge/search",
+        "/skills",
+        "/skills/load",
+        "/feedback",
+        "/amp/",
+        "/a2a/",
+        "/delegate",
+        "/handoff",
     ] {
         assert!(
-            got.iter().any(|s| s.split(' ').nth(1).is_some_and(|p| p.starts_with(want))),
+            got.iter()
+                .any(|s| s.split(' ').nth(1).is_some_and(|p| p.starts_with(want))),
             "route {want} was never actually requested; seen={got:?}"
         );
     }
@@ -98,8 +128,14 @@ fn unwired_capabilities_refuse_locally() {
     };
     let c = Client::with_config(cfg);
     assert!(matches!(c.memory_get(None), Err(Error::NotWired(_))));
-    assert!(matches!(c.feedback("t", "d", 1.0, None), Err(Error::NotWired(_))));
-    assert!(matches!(c.knowledge_search("q", None, 1), Err(Error::NotWired(_))));
+    assert!(matches!(
+        c.feedback("t", "d", 1.0, None),
+        Err(Error::NotWired(_))
+    ));
+    assert!(matches!(
+        c.knowledge_search("q", None, 1),
+        Err(Error::NotWired(_))
+    ));
 }
 
 #[test]
@@ -117,7 +153,13 @@ fn ambiguous_conversation_is_refused() {
     let bare = Client::with_config(cfg);
     assert!(matches!(bare.memory_get(None), Err(Error::Invalid(_))));
     assert!(matches!(
-        c.memory_append(&Entry { role: "u".into(), content: "x".into() }, Some("has/slash")),
+        c.memory_append(
+            &Entry {
+                role: "u".into(),
+                content: "x".into()
+            },
+            Some("has/slash")
+        ),
         Err(Error::Invalid(_))
     ));
 }
