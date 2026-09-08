@@ -66,3 +66,12 @@ sdk/python/dist/
 
 # Build output (release metadata, install.yaml) — never tracked.
 /dist/
+
+# Java SDK build output
+sdk/java/target/
+
+# Rust SDK build output
+sdk/rust/target/
+
+# Ruby SDK build output
+sdk/ruby/*.gem
