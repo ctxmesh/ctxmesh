@@ -56,6 +56,23 @@ jobs:
           - image: managed-agent
             target: docker-build-managed
             local: managed-agent:latest
+          # base-python / base-node are the images an AGENT AUTHOR builds FROM. The docs
+          # have always said `FROM ghcr.io/ctxmesh/base-python`, and no release ever
+          # published it — anyone following the SDK guide got an auth failure on a tag
+          # that does not exist. Same class as the managed-agent default above: a
+          # documented path that cannot be walked.
+          - image: base-python
+            target: docker-build-base-python
+            local: base-python:latest
+          - image: base-node
+            target: docker-build-base-node
+            local: base-node:latest
+          # echo-agent is what the quickstart and every CRD reference example tell a user
+          # to deploy. It was never published, so the first thing a new user runs ended in
+          # ImagePullBackOff.
+          - image: echo-agent
+            target: docker-build-example
+            local: echo-agent:latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:

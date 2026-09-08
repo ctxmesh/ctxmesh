@@ -290,6 +290,14 @@ jobs:
       - name: Comment-budget gate (no new wall-of-text comment blocks)
         run: ./hack/comment-budget.sh
 
+      # Both added in v0.1.0-beta.3, for defects that shipped in beta.1 and beta.2 while
+      # every existing gate stayed green. They compare the docs to the release, and the
+      # registry copy to a plain reader — dimensions nothing else looked at.
+      - name: Docs-images gate (documented images are actually published)
+        run: ./hack/docs-images-published.sh
+      - name: Registry-copy gate (no internal vocabulary on registry pages)
+        run: ./hack/registry-copy.sh
+
   envtest:
     name: envtest
     needs: unit

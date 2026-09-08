@@ -57,7 +57,7 @@ resp.text        # the completion; resp.usage → token counts; resp.raw → ful
 `agent.from_env()` **fails fast** (`NotInPodError`) when no launcher env is
 present — it never silently no-ops. For tests / offline use, build a
 `PlaneConfig` explicitly (`PlaneConfig.for_test(...)`) and call
-`agent.from_config(config)` against a fake localhost plane.
+`agent.from_config(config)` against an in-process fake, so tests need no cluster.
 
 ## Step-tracing helpers (custom loops)
 
