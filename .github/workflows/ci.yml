@@ -146,6 +146,57 @@ jobs:
       # the pinned venv from the provisioned python3 — deterministic in CI.
       - name: Python SDK lint + tests (ruff + pytest, pinned venv)
         run: make py-lint py-test
+  # The four plane-client SDKs (ADR 0139). Without this they are code nobody compiles: the
+  # contract gate proves each route STRING appears in them, which a comment satisfies.
+  sdks:
+    name: sdks
+    needs: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: sdk/go/go.mod
+          cache-dependency-path: sdk/go/go.sum
+      - name: Go SDK (vet + test + race)
+        working-directory: sdk/go
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go test ./... -race -count=1
+
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Java SDK (mvn test)
+        working-directory: sdk/java
+        run: mvn -B -q test
+
+      - name: Rust SDK (fmt + clippy + test)
+        working-directory: sdk/rust
+        run: |
+          set -euo pipefail
+          rustup component add rustfmt clippy
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test --all-targets
+
+      - uses: ruby/setup-ruby@a2bbe5b1b236842c1cb7dd11e8e3b51e0a616acc # v1.202.0
+        with:
+          ruby-version: "3.3"
+      - name: Ruby SDK (tests + gem builds)
+        working-directory: sdk/ruby
+        run: |
+          set -euo pipefail
+          gem install minitest webrick --no-document
+          ruby -Ilib test/client_test.rb
+          gem build ctxmesh.gemspec
 
   ui:
     name: ui
