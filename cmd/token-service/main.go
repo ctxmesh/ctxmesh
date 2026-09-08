@@ -182,7 +182,10 @@ func run(log logr.Logger) error {
 	if cpDSN == "" {
 		return errors.New("CONTROLPLANE_DSN is required: ToolRegistry is retired to Postgres (ADR 0044)")
 	}
-	cpDB, dbErr := controlplane.Connect(context.Background(), cpDSN)
+	// See cmd/main.go: wait at start-up, still fail loud once serving.
+	cpDB, dbErr := controlplane.ConnectWaiting(context.Background(), cpDSN, func(err error, in time.Duration) {
+		log.Info("control-plane store not ready yet; retrying", "retryIn", in, "err", err.Error())
+	})
 	if dbErr != nil {
 		return fmt.Errorf("connect control-plane postgres for ToolRegistry reads: %w", dbErr)
 	}

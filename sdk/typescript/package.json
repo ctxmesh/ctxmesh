@@ -2,7 +2,7 @@
   "name": "ctxmesh",
   "version": "0.1.0-beta.1",
   "license": "Apache-2.0",
-  "description": "The ctxmesh TypeScript SDK \u2014 typed access to the ctxmesh launcher localhost plane (memory, tools, mesh calls, feedback), at parity with the Python SDK.",
+  "description": "TypeScript SDK for ctxmesh agents \u2014 typed clients for memory, tools, knowledge, model calls and feedback, plus OpenTelemetry step tracing. Reads its endpoints from the environment the platform injects, so your code never holds credentials.",
   "type": "module",
   "packageManager": "pnpm@9.15.0",
   "engines": {
@@ -77,9 +77,12 @@
     "ctxmesh",
     "llm",
     "agents",
+    "ai-agents",
     "kubernetes",
     "observability",
-    "sdk"
+    "opentelemetry",
+    "mcp",
+    "llmops"
   ],
   "homepage": "https://ctxmesh.github.io",
   "repository": {

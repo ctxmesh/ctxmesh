@@ -1,8 +1,22 @@
-# ctxmesh — ctxmesh Python SDK
+# ctxmesh — Python SDK
 
-Optional, typed sugar over the launcher's language-agnostic localhost platform
-plane (ADR 0002). Bundled into `base-python`, importable as `ctxmesh`. Never a
-hard dependency: every capability it exposes is *also* a raw launcher endpoint.
+Typed clients for agents running on [ctxmesh](https://ctxmesh.github.io), the
+Kubernetes-native control plane for AI agents.
+
+Your agent runs in a pod beside the platform's sidecars. This SDK is the typed way to
+reach them — conversation memory, tools and MCP servers, knowledge bases, model calls,
+and feedback — plus OpenTelemetry step tracing that produces the same trace tree a
+framework agent gets.
+
+**Your code never holds credentials.** Endpoints and identity arrive in the environment
+the platform injects, so there is no API key to manage and no base URL to configure.
+
+```bash
+pip install ctxmesh
+```
+
+The SDK is optional by design: every capability here is also a plain HTTP endpoint the
+platform serves, so an agent in any language can call the contract directly.
 
 - **Distribution name:** `ctxmesh` · **import name:** `ctxmesh`
 - **Python:** 3.9+ · **runtime deps:** the plane clients are pure stdlib; the
@@ -19,7 +33,7 @@ from ctxmesh import agent
 
 client = agent.from_env()          # in-pod: reads the launcher-injected env
 
-# memory (:2998, M5)
+# memory (:2998)
 client.memory.get()                       # full context (list)
 client.memory.put([{"role": "user", "content": "hi"}])
 client.memory.append({"role": "assistant", "content": "hey"})
@@ -28,14 +42,14 @@ client.memory.search("hi")
 turn = client.with_conversation("conv-42")
 turn.memory.get()
 
-# tools / discovery (:2999, M4)
+# tools / discovery (:2999)
 client.tools.list()                       # live manifest as Tool objects
 client.tools.call("word-count", text="a b c")   # MCP tools/call
 
-# feedback (:2995, M9)
+# feedback (:2995)
 client.feedback.score("trace-abc", "thumbs-up", 1, comment="great")
 
-# model gateway ($MODEL_GATEWAY_URL, M2/M8) — emits an OpenInference LLM span
+# model gateway ($MODEL_GATEWAY_URL) — emits an OpenInference LLM span
 resp = client.model.chat("gpt-4o-mini", [{"role": "user", "content": "q"}])
 resp.text        # the completion; resp.usage → token counts; resp.raw → full body
 ```
@@ -43,7 +57,7 @@ resp.text        # the completion; resp.usage → token counts; resp.raw → ful
 `agent.from_env()` **fails fast** (`NotInPodError`) when no launcher env is
 present — it never silently no-ops. For tests / offline use, build a
 `PlaneConfig` explicitly (`PlaneConfig.for_test(...)`) and call
-`agent.from_config(config)` against a fake localhost plane.
+`agent.from_config(config)` against an in-process fake, so tests need no cluster.
 
 ## Step-tracing helpers (custom loops)
 
@@ -119,15 +133,11 @@ ctxmesh.serve(handle)           # blocks; serves /invoke + health on $AGENT_PORT
 `examples/sdk-custom-agent` shows the same loop with the HTTP handler written out by
 hand — the "under the hood" reference for what `serve` collapses into one call.
 
-## Dev
+## Documentation
 
-The toolchain (ruff + pytest, pinned) is wired into the engine `Makefile`:
+- [Python SDK guide](https://ctxmesh.github.io/sdk/python/)
+- [Compatibility](https://ctxmesh.github.io/reference/compatibility/) — which SDK works with which ctxmesh
+- [Source and issues](https://github.com/ctxmesh/ctxmesh)
 
-```
-make py-venv     # create .venv-sdk with pinned ruff+pytest (from host python3)
-make lint        # go lint + ruff (sdk/python)
-make test        # go unit tests + pytest (sdk/python)
-```
-
-Pins live in `requirements-dev.txt` (mirrored in the `dev` extra of
-`pyproject.toml`).
+Apache-2.0. Contributor and toolchain notes live in
+[the repository](https://github.com/ctxmesh/ctxmesh/tree/main/sdk/python).

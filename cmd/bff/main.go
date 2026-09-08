@@ -426,7 +426,10 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	if cpDSN == "" {
 		return errors.New("CONTROLPLANE_DSN is required: PromptVersion + ToolRegistry are retired to Postgres (ADR 0044)")
 	}
-	cpDB, cpErr := controlplane.OpenDB(context.Background(), cpDSN)
+	// See cmd/main.go: wait at start-up, still fail loud once serving.
+	cpDB, cpErr := controlplane.OpenDBWaiting(context.Background(), cpDSN, func(err error, in time.Duration) {
+		log.Info("control-plane store not ready yet; retrying", "retryIn", in, "err", err.Error())
+	})
 	if cpErr != nil {
 		return fmt.Errorf("open control-plane postgres: %w", cpErr)
 	}

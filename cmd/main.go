@@ -498,7 +498,12 @@ func main() {
 			"(ADR 0044) — there is no CRD to read")
 		os.Exit(1)
 	}
-	cpDB, cpErr := controlplane.OpenDB(context.Background(), cpDSN)
+	// Wait for the store rather than exiting: on a cold cluster postgres may still be pulling,
+	// and CrashLoopBackOff would then sleep past the Deployment's progress deadline (ADR 0139 era
+	// cold-start work). A store that dies LATER still takes the process down.
+	cpDB, cpErr := controlplane.OpenDBWaiting(context.Background(), cpDSN, func(err error, in time.Duration) {
+		setupLog.Info("control-plane store not ready yet; retrying", "retryIn", in, "err", err.Error())
+	})
 	if cpErr != nil {
 		setupLog.Error(cpErr, "Failed to open the control-plane store (CONTROLPLANE_DSN)")
 		os.Exit(1)

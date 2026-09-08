@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.1.0-beta.3 — the install stops needing a flag
+
+beta.2 made a cold install *possible*. This makes it work without the user knowing to ask.
+
+**The control plane waits for its store instead of exiting.** `controller`, `bff` and
+`token-service` fail-fast when `CONTROLPLANE_DSN` is unreachable and rely on Kubernetes to
+restart them. That stance is preserved — a store that dies while a process is serving still
+takes it down — but it was never about start-up *order*. CrashLoopBackOff is exponential to
+a 300s cap, so on a cold cluster where PostgreSQL is still pulling its image, its dependents
+burn restarts and are asleep in a five-minute backoff by the time the database is healthy.
+
+Only the start-up connection retries, backoff is capped at 15s (an *uncapped* exponential is
+the shape that caused this), and `CONTROLPLANE_STARTUP_TIMEOUT=0` restores the previous
+behaviour exactly.
+
+**`--timeout` is still required on a cold cluster, and this does not change that.** The
+retry removes the *backoff* — the part that made a first install a coin flip decided by
+which image finished pulling first. It does not remove the *pulling*: the PostgreSQL image
+alone took 4m31s in a measured run and a full cold install took 8m05s, both past Helm's
+five-minute default. What changes is that the install now fails or succeeds for an honest
+reason instead of a race. Keep `--timeout 20m` on a first install; a chart cannot set that
+default on your behalf, because Helm has no chart-side equivalent of the client flag.
+
+**A release gate that runs.** `make release-verify VERSION=v<x.y.z>` installs a *published*
+release onto a cold cluster from `oci://ghcr.io`, pulling the chart logged-out. The guard
+that caught beta.1 being uninstallable existed but nothing ran it, so it would not have
+caught the next one.
+
+**CI stopped lying.** Three test packages dropped a shared `knowledge_chunks` parent in the
+one database twenty-four test files share, and `go test` runs packages in parallel — so one
+package's setup deleted another's partitions mid-test. It presented as flakiness: the same
+commit passed `unit` on a PR and failed it on `main`, which is what makes a green check stop
+meaning anything. Each package now gets its own Postgres schema.
+
+Upgrading from beta.2 needs no action.
+
 ## v0.1.0-beta.2 — the first install actually works
 
 v0.1.0-beta.1 published correctly and could not be installed. This release fixes that, and
