@@ -66,3 +66,6 @@ sdk/python/dist/
 
 # Build output (release metadata, install.yaml) — never tracked.
 /dist/
+
+# Java SDK build output
+sdk/java/target/
