@@ -22,6 +22,9 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"os"
+	"strings"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver
 	"github.com/pressly/goose/v3"
@@ -93,4 +96,103 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("controlplane: migrate: %w", err)
 	}
 	return nil
+}
+
+// StartupRetryBudget is how long OpenDBWaiting / ConnectWaiting keep retrying the FIRST
+// connection before giving up. Overridable with CONTROLPLANE_STARTUP_TIMEOUT (any
+// time.ParseDuration value); 0 or a negative value disables retrying entirely and restores
+// the plain fail-fast behaviour.
+const StartupRetryBudget = 5 * time.Minute
+
+// OpenDBWaiting is OpenDB with a bounded retry on the STARTUP connection.
+//
+// WHY THIS EXISTS, AND WHY ONLY AT STARTUP
+// ----------------------------------------
+// The control plane fails loud when the store is unreachable, and Kubernetes restarts it.
+// That is a deliberate stance and it is preserved: once a process is serving, a store that
+// dies still takes it down. The stance was never about start-up ORDER, though, and at
+// start-up it behaves badly. CrashLoopBackOff is exponential to a 300s cap, so on a cold
+// cluster where Postgres is still pulling its image, its dependents burn several restarts,
+// and by the time the database is healthy they are asleep in a five-minute backoff. The
+// Deployment then trips the 600s progressDeadlineSeconds with nothing actually broken.
+//
+// That made a first `helm install` a coin flip decided by image-pull speed, and it is why
+// the install docs have to tell people to pass `--timeout 20m`: Helm's default is 5
+// minutes, and a chart cannot set that default for them. Retrying here is what makes the
+// long timeout unnecessary rather than mandatory.
+//
+// A dependency that is SLOW is not a dependency that is BROKEN, and only the caller's
+// start-up path can tell the difference.
+func OpenDBWaiting(ctx context.Context, dsn string, notify func(error, time.Duration)) (*sql.DB, error) {
+	return waitForStore(ctx, notify, func(c context.Context) (*sql.DB, error) { return OpenDB(c, dsn) })
+}
+
+// ConnectWaiting is Connect with the same bounded start-up retry. See OpenDBWaiting.
+func ConnectWaiting(ctx context.Context, dsn string, notify func(error, time.Duration)) (*sql.DB, error) {
+	return waitForStore(ctx, notify, func(c context.Context) (*sql.DB, error) { return Connect(c, dsn) })
+}
+
+// waitForStore retries open until it succeeds or the budget is spent, backing off
+// 1s, 2s, 4s … capped at 15s. The cap matters: an uncapped exponential is what turned a
+// slow dependency into a five-minute sleep in the first place, and repeating that here
+// would move the bug rather than fix it.
+func waitForStore(ctx context.Context, notify func(error, time.Duration), open func(context.Context) (*sql.DB, error)) (*sql.DB, error) {
+	budget := StartupRetryBudget
+	if raw := strings.TrimSpace(os.Getenv("CONTROLPLANE_STARTUP_TIMEOUT")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("controlplane: CONTROLPLANE_STARTUP_TIMEOUT=%q is not a duration: %w", raw, err)
+		}
+		budget = d
+	}
+	if budget <= 0 {
+		return open(ctx) // explicitly opted out — fail fast
+	}
+
+	deadline := time.Now().Add(budget)
+	backoff := firstBackoff
+	var lastErr error
+	for {
+		db, err := open(ctx)
+		if err == nil {
+			return db, nil
+		}
+		lastErr = err
+		// The caller's context ending is not a slow dependency — do not sit on it.
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("controlplane: waiting for the store: %w (last error: %v)", ctx.Err(), lastErr)
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("controlplane: the store was still unreachable after %s: %w", budget, lastErr)
+		}
+		wait := min(backoff, remaining)
+		if notify != nil {
+			notify(err, wait)
+		}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return nil, fmt.Errorf("controlplane: waiting for the store: %w (last error: %v)", ctx.Err(), lastErr)
+		}
+		backoff = nextBackoff(backoff)
+	}
+}
+
+const (
+	firstBackoff = time.Second
+	// maxBackoff caps the growth. An UNCAPPED exponential is what turned a slow dependency
+	// into a five-minute sleep and tripped the Deployment's progress deadline; repeating
+	// that shape here would move the bug rather than fix it.
+	maxBackoff = 15 * time.Second
+)
+
+// nextBackoff doubles up to the cap. Split out so the sequence can be asserted without a
+// test sleeping through it — the earlier version of that test took 60 seconds, which is
+// how a suite becomes something people skip.
+func nextBackoff(d time.Duration) time.Duration {
+	if d *= 2; d > maxBackoff {
+		return maxBackoff
+	}
+	return d
 }
