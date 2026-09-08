@@ -480,12 +480,11 @@ func TestRedisSeenSet_SetNXSemantics(t *testing.T) {
 // store reports the error rather than hanging).
 func TestRedisSeenSet_BackendDown_Errors(t *testing.T) {
 	t.Parallel()
-	// A closed miniredis address: dial fails fast (bounded by dedupeOpTimeout).
-	mr := miniredis.RunT(t)
-	addr := mr.Addr()
-	mr.Close()
-
-	s := newRedisSeenSet(addr)
+	// Port 1 rather than a closed miniredis: binding it needs root, so nothing in this
+	// package can take it, and the dial is refused immediately. Closing a miniredis frees
+	// its port, and under CI's parallelism another miniredis rebinds it — MarkSeen then
+	// SUCCEEDS against the wrong server and the test fails claiming Valkey was reachable.
+	s := newRedisSeenSet("127.0.0.1:1")
 	ctx, cancel := context.WithTimeout(context.Background(), dedupeOpTimeout+time.Second)
 	defer cancel()
 	if _, err := s.MarkSeen(ctx, "id-x", dedupeTTL); err == nil {
