@@ -44,11 +44,6 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
 ]
 
-[project.urls]
-Homepage = "https://ctxmesh.github.io"
-Documentation = "https://ctxmesh.github.io/sdk/python/"
-Source = "https://github.com/ctxmesh/ctxmesh"
-Issues = "https://github.com/ctxmesh/ctxmesh/issues"
 # Runtime deps for the m10.3 model + step-tracing helpers. Pinned to the exact
 # versions images/base-python already bundles, so `import ctxmesh` adds nothing
 # net to the base image (the plane clients themselves remain pure stdlib):
@@ -84,6 +79,14 @@ dev = [
     "pytest==8.3.3",
 ]
 
+
+# PyPI renders these in the sidebar. Without them the page has no outbound links at all
+# and a reader who lands there cannot get back to the project.
+[project.urls]
+Homepage = "https://ctxmesh.github.io"
+Documentation = "https://ctxmesh.github.io/sdk/python/"
+Source = "https://github.com/ctxmesh/ctxmesh"
+Issues = "https://github.com/ctxmesh/ctxmesh/issues"
 [tool.setuptools.packages.find]
 where = ["src"]
 
