@@ -1,29 +1,13 @@
 // Package pgtest gives a test package its own Postgres schema inside the one shared
 // CONTROLPLANE_TEST_DSN database.
 //
-// WHY THIS EXISTS
-// ---------------
-// Twenty-four test files open CONTROLPLANE_TEST_DSN, and three of them recreate the
-// `knowledge_chunks` parent table by dropping it first:
+// Three packages recreate the `knowledge_chunks` parent by dropping it first, and the
+// `kc_<prefix>_<hash>` tables are PARTITIONS of it — so a CASCADE drop takes another
+// package's tables with it while `go test ./...` runs packages in parallel. A schema per
+// package makes those drops disjoint, so each keeps its drop-and-recreate setup (goose will
+// not re-run a DROPped migration, so recreating the parent directly is the pattern here).
 //
-//	DROP TABLE IF EXISTS knowledge_chunks CASCADE
-//
-// The `kc_<prefix>_<hash>` tables are PARTITIONS of that parent, so the CASCADE takes
-// them with it. `go test ./...` runs packages in parallel, so one package's setup deletes
-// another package's tables mid-test and the victim fails with
-//
-//	relation "kc_docs_46b42b4229cd7a39" does not exist (SQLSTATE 42P01)
-//
-// which reads as a product bug in the corpus code and is really a missing isolation
-// boundary. It presents as flakiness only because it needs the timing to line up: the
-// same commit passed `unit` on a PR and failed it on main.
-//
-// A schema per package makes the drops disjoint, so the three can keep their
-// drop-and-recreate setup — which is deliberate; goose will not re-run a DROPped
-// migration, so recreating the parent directly is the established pattern here.
-//
-// Serialising with `go test -p 1` would also work and was rejected: it slows every
-// package in the repo to fix three of them.
+// `go test -p 1` would also work; it slows every package to fix three (m52.M167-shared-testdb-drops).
 package pgtest
 
 import (
