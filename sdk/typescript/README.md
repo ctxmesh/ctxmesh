@@ -1,56 +1,64 @@
-# ctxmesh — the ctxmesh TypeScript SDK
+# ctxmesh — TypeScript SDK
 
-Typed sugar over the **launcher localhost plane** — at parity with the Python SDK
-(`sdk/python/`). The launcher (PID 1) injects a fixed env/port contract into every
-agent container describing the localhost platform plane (memory, tools/discovery,
-feedback, the model gateway, the OTLP collector) and the run context; this SDK
-reads that contract and gives a Node/TS agent author the same ergonomics a Python
-author has (ADR 0002, ADR 0070).
+Typed clients for agents running on [ctxmesh](https://ctxmesh.github.io), the Kubernetes-native
+control plane for AI agents.
 
-The SDK is **optional**: every capability it wraps is also a raw localhost endpoint,
-so the raw contract stays first-class (ADR 0002). It is **not published to npm** in
-v1 — it is vendored into the `base-node` agent image, mirroring the Python SDK's
-not-on-PyPI posture.
+Your agent runs in a pod beside the platform's sidecars. This SDK is the typed way to reach
+them — conversation memory, tools and MCP servers, knowledge bases, model calls, and feedback —
+plus OpenTelemetry tracing that produces the same trace tree a framework agent gets.
 
-## Status
+**Your code never holds credentials.** Endpoints and identity arrive in the environment the
+platform injects, so there is no API key to manage and no base URL to configure.
 
-Foundation (M77.1): the package scaffold + toolchain, `PlaneConfig` (the exact
-env/port contract), the typed error hierarchy, and a `node:http` mock launcher
-plane for offline tests. The data-plane clients (memory/knowledge/tools+MCP/
-feedback/model), tracing (OTel-JS/OpenInference), `serve()` + the managed loop,
-and the base-node image land in M77.2–M77.6.
-
-## Toolchain
-
-Pinned to the console's Node story (`ui/`): Node **22** (`.nvmrc`), pnpm
-**9.15.0** (`packageManager`), TypeScript **5.7.2**, vitest **2.1.8**. Bootstrapped
-on a clean host + CI through `hack/sdk-ts.sh` (nvm + corepack pnpm), the sibling of
-`hack/ui-node.sh`.
-
-```sh
-make sdk-ts-build   # tsc -b  → dist/ (ESM + CJS + .d.ts)
-make sdk-ts-test    # vitest run
-make sdk-ts-lint    # eslint + tsc --noEmit
+```bash
+npm install ctxmesh@beta
 ```
 
-All three are folded into the harness `tier0` gate (via `make lint` / `make test`),
-so the SDK is lint + typecheck + test-gated with the rest of the tree.
+> Use the `beta` tag. Plain `npm install ctxmesh` currently resolves to the older
+> `0.1.0-beta.1`; that pin lifts with the first stable release.
 
-## Layout
+## Use it
 
+```ts
+import { agent } from "ctxmesh";
+
+const client = agent.fromEnv();   // reads MODEL_GATEWAY_URL, MEMORY_PORT, AGENT_NAME, …
+
+// Conversation memory, keyed by conversation id
+await client.memory.append({ role: "user", content: "What changed in the deploy?" }, cid);
+const history = await client.memory.get(cid);
+
+// Long-term memory for this agent
+await client.memory.remember("The customer prefers email.", { topic: "prefs" });
+const facts = await client.memory.searchAgent("contact preference", 5, 0.0);
+
+// Tools — everything the platform granted, including MCP servers
+const tools = await client.tools.list();
+const result = await client.tools.call("search_web", { query: "ctxmesh" });
+
+// Feedback — the signal that drives evals and canary promotion
+await client.feedback.score(traceId, "helpfulness", 1.0, "clear");
 ```
-sdk/typescript/
-  package.json          name "ctxmesh", private, ESM+CJS export map
-  tsconfig*.json         library build → dist/ (ESM + CJS + declarations)
-  eslint.config.js       flat config, mirrors ui/ (minus React)
-  vitest.config.ts
-  .nvmrc                 22
-  src/
-    config.ts            PlaneConfig / RunContext — the env/port contract
-    errors.ts            the typed error hierarchy
-    index.ts             public entry
-  test/
-    plane.ts             the node:http mock launcher plane (stubs + fixtures)
-    config.test.ts       fromEnv parity (markers, port defaults, gates)
-    errors.test.ts       the error types + instanceof
-```
+
+`agent.fromEnv()` throws `NotInPodError` outside the platform. For tests and offline work,
+`agent.fromConfig(config)` builds a client from an explicit `PlaneConfig`.
+
+## Testing without a cluster
+
+`ctxmesh/testing` ships offline stubs for every plane, so unit tests need no cluster and no
+network.
+
+## Is the SDK required?
+
+No, and that is deliberate. Every capability here is also a plain HTTP endpoint the platform
+serves, so an agent in any language can call the contract directly. This SDK is the typed,
+ergonomic path over it — never a dependency the platform imposes.
+
+## Documentation
+
+- [TypeScript SDK guide](https://ctxmesh.github.io/sdk/typescript/) — every client, with examples
+- [Compatibility](https://ctxmesh.github.io/reference/compatibility/) — which SDK works with which ctxmesh
+- [Source and issues](https://github.com/ctxmesh/ctxmesh)
+
+Apache-2.0. Contributor and toolchain notes live in
+[the repository](https://github.com/ctxmesh/ctxmesh/tree/main/sdk/typescript).
