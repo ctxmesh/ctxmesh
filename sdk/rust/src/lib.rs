@@ -264,13 +264,37 @@ impl Client {
     pub fn memory_append(&self, entry: &Entry, conversation_id: Option<&str>) -> Result<(), Error> {
         self.require_memory()?;
         let url = format!(
-            "{}/memory/{}",
+            "{}/memory/{}/append",
             self.cfg.memory_base(),
             self.conv(conversation_id)?
         );
         let body = serde_json::to_value(entry).map_err(|e| Error::Invalid(e.to_string()))?;
         self.send::<serde_json::Value>("POST", &url, Some(body), DEFAULT_TIMEOUT, &[])?;
         Ok(())
+    }
+
+    /// Searches this conversation's memory. `capability` is optional: without it a per-user agent
+    /// silently reads the agent-wide bucket rather than the caller's own.
+    pub fn memory_search(
+        &self,
+        query: &str,
+        conversation_id: Option<&str>,
+        capability: Option<&str>,
+    ) -> Result<Vec<Entry>, Error> {
+        self.require_memory()?;
+        let url = format!(
+            "{}/memory/{}/search?q={}",
+            self.cfg.memory_base(),
+            self.conv(conversation_id)?,
+            urlencode(query)
+        );
+        let headers: Vec<(&str, &str)> = match capability.filter(|c| !c.is_empty()) {
+            Some(c) => vec![(CAPABILITY_HEADER, c)],
+            None => vec![],
+        };
+        Ok(self
+            .send("GET", &url, None, DEFAULT_TIMEOUT, &headers)?
+            .unwrap_or_default())
     }
 
     /// Replaces the conversation wholesale.
@@ -337,11 +361,16 @@ impl Client {
                 "knowledge (KNOWLEDGE_BASE_ENABLED is not true)".into(),
             ));
         }
-        let mut body =
-            serde_json::json!({ "query": query, "topK": if top_k == 0 { 5 } else { top_k } });
-        if let Some(kb) = knowledge_base.filter(|s| !s.is_empty()) {
-            body["knowledgeBase"] = serde_json::Value::String(kb.to_string());
-        }
+        // REQUIRED: the handler answers 400 "knowledgeBase is required", so the
+        // omit-to-search-all mode this SDK used to document does not exist.
+        let kb = knowledge_base
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                Error::Invalid("knowledgeBase is required (the launcher 400s without it)".into())
+            })?;
+        let body = serde_json::json!({
+            "query": query, "topK": if top_k == 0 { 5 } else { top_k }, "knowledgeBase": kb
+        });
         let url = format!("{}/knowledge/search", self.cfg.memory_base());
         let out: Option<Results<Chunk>> =
             self.send("POST", &url, Some(body), SEARCH_TIMEOUT, &[])?;
@@ -517,4 +546,17 @@ fn path_of(url: &str) -> String {
     url.find("//")
         .and_then(|i| url[i + 2..].find('/').map(|j| url[i + 2 + j..].to_string()))
         .unwrap_or_else(|| url.to_string())
+}
+
+/// Minimal query-string escaping: the plane is on localhost and queries are short, so this avoids
+/// a dependency for one call.
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
