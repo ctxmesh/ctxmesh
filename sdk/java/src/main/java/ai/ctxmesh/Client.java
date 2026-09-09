@@ -25,7 +25,7 @@ import java.util.Map;
  */
 public final class Client {
   /** Stamped from the product tag at release (ADR 0135). */
-  public static final String VERSION = "0.1.0-beta.1";
+  public static final String VERSION = "0.1.0-beta.3";
 
   private final Config cfg;
   private final HttpClient http;

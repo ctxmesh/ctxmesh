@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// Stamped from the product tag at release (ADR 0135).
-pub const VERSION: &str = "0.1.0-beta.1";
+pub const VERSION: &str = "0.1.0-beta.3";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Search may wait on an embedding call through the token-service.

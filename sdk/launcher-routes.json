@@ -1,0 +1,102 @@
+{
+  "routes": [
+    {
+      "method": "POST",
+      "path": "/a2a/{targetAgent}",
+      "listener": "amp",
+      "portEnv": "A2A_PORT",
+      "defaultPort": 2997
+    },
+    {
+      "method": "POST",
+      "path": "/amp/{targetAgent}",
+      "listener": "amp",
+      "portEnv": "A2A_PORT",
+      "defaultPort": 2997
+    },
+    {
+      "method": "POST",
+      "path": "/delegate",
+      "listener": "delegate",
+      "portEnv": "DELEGATE_PORT",
+      "defaultPort": 2994
+    },
+    {
+      "method": "ANY",
+      "path": "/feedback",
+      "listener": "feedback",
+      "portEnv": "FEEDBACK_PORT",
+      "defaultPort": 2995
+    },
+    {
+      "method": "POST",
+      "path": "/handoff",
+      "listener": "delegate",
+      "portEnv": "DELEGATE_PORT",
+      "defaultPort": 2994
+    },
+    {
+      "method": "POST",
+      "path": "/knowledge/search",
+      "listener": "memory",
+      "portEnv": "MEMORY_PORT",
+      "defaultPort": 2998
+    },
+    {
+      "method": "POST",
+      "path": "/memory/agent/remember",
+      "listener": "memory",
+      "portEnv": "MEMORY_PORT",
+      "defaultPort": 2998
+    },
+    {
+      "method": "POST",
+      "path": "/memory/agent/search",
+      "listener": "memory",
+      "portEnv": "MEMORY_PORT",
+      "defaultPort": 2998
+    },
+    {
+      "method": "GET",
+      "path": "/memory/{conversationId}",
+      "listener": "memory",
+      "portEnv": "MEMORY_PORT",
+      "defaultPort": 2998
+    },
+    {
+      "method": "PUT",
+      "path": "/memory/{conversationId}",
+      "listener": "memory",
+      "portEnv": "MEMORY_PORT",
+      "defaultPort": 2998
+    },
+    {
+      "method": "POST",
+      "path": "/memory/{conversationId}/append",
+      "listener": "memory",
+      "portEnv": "MEMORY_PORT",
+      "defaultPort": 2998
+    },
+    {
+      "method": "GET",
+      "path": "/memory/{conversationId}/search",
+      "listener": "memory",
+      "portEnv": "MEMORY_PORT",
+      "defaultPort": 2998
+    },
+    {
+      "method": "GET",
+      "path": "/skills",
+      "listener": "memory",
+      "portEnv": "MEMORY_PORT",
+      "defaultPort": 2998
+    },
+    {
+      "method": "POST",
+      "path": "/skills/load",
+      "listener": "memory",
+      "portEnv": "MEMORY_PORT",
+      "defaultPort": 2998
+    }
+  ]
+}

@@ -6,7 +6,7 @@
 
   <groupId>ai.ctxmesh</groupId>
   <artifactId>ctxmesh</artifactId>
-  <version>0.1.0-beta.1</version>
+  <version>0.1.0-beta.3</version>
   <packaging>jar</packaging>
 
   <name>ctxmesh</name>
