@@ -8,10 +8,13 @@ public final class Config {
   static final int DEFAULT_MEMORY_PORT = 2998;
   static final int DEFAULT_FEEDBACK_PORT = 2995;
   static final int DEFAULT_AMP_PORT = 2997;
+  static final int DEFAULT_DELEGATE_PORT = 2994;
 
   public final int memoryPort;
   public final int feedbackPort;
   public final int ampPort;
+  /** Its OWN listener. /delegate and /handoff on the memory port are a 404. */
+  public final int delegatePort;
   public final String agentName;
   public final String conversationId;
 
@@ -24,11 +27,13 @@ public final class Config {
   public final boolean longTermEnabled;
   public final boolean knowledgeEnabled;
 
-  Config(int memoryPort, int feedbackPort, int ampPort, String agentName, String conversationId,
-         boolean memoryWired, boolean feedbackWired, boolean longTermEnabled, boolean knowledgeEnabled) {
+  Config(int memoryPort, int feedbackPort, int ampPort, int delegatePort, String agentName,
+         String conversationId, boolean memoryWired, boolean feedbackWired,
+         boolean longTermEnabled, boolean knowledgeEnabled) {
     this.memoryPort = memoryPort;
     this.feedbackPort = feedbackPort;
     this.ampPort = ampPort;
+    this.delegatePort = delegatePort;
     this.agentName = agentName;
     this.conversationId = conversationId;
     this.memoryWired = memoryWired;
@@ -38,8 +43,10 @@ public final class Config {
   }
 
   /** Builds a Config explicitly — for tests and offline work. */
-  public static Config of(int memoryPort, int feedbackPort, int ampPort, String conversationId) {
-    return new Config(memoryPort, feedbackPort, ampPort, "", conversationId, true, true, true, true);
+  public static Config of(int memoryPort, int feedbackPort, int ampPort, int delegatePort,
+                          String conversationId) {
+    return new Config(memoryPort, feedbackPort, ampPort, delegatePort, "", conversationId,
+        true, true, true, true);
   }
 
   static Config fromEnv(Function<String, String> look) {
@@ -52,8 +59,10 @@ public final class Config {
     }
     int[] mem = port(look, "MEMORY_PORT", DEFAULT_MEMORY_PORT);
     int[] fb = port(look, "FEEDBACK_PORT", DEFAULT_FEEDBACK_PORT);
-    int[] amp = port(look, "AMP_PORT", DEFAULT_AMP_PORT);
-    return new Config(mem[0], fb[0], amp[0],
+    // A2A_PORT is what the launcher publishes; AMP_PORT was invented.
+    int[] amp = port(look, "A2A_PORT", DEFAULT_AMP_PORT);
+    int[] del = port(look, "DELEGATE_PORT", DEFAULT_DELEGATE_PORT);
+    return new Config(mem[0], fb[0], amp[0], del[0],
         str(look, "AGENT_NAME"), str(look, "CONVERSATION_ID"),
         mem[1] == 1, fb[1] == 1,
         "true".equals(str(look, "MEMORY_LONGTERM_ENABLED")),
@@ -87,6 +96,7 @@ public final class Config {
   String memoryBase() { return "http://127.0.0.1:" + memoryPort; }
   String feedbackBase() { return "http://127.0.0.1:" + feedbackPort; }
   String ampBase() { return "http://127.0.0.1:" + ampPort; }
+  String delegateBase() { return "http://127.0.0.1:" + delegatePort; }
 
   static Config fromSystemEnv() {
     Map<String, String> env = System.getenv();

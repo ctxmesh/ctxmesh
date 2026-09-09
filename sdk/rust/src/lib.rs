@@ -26,6 +26,12 @@ use std::time::Duration;
 /// Stamped from the product tag at release (ADR 0135).
 pub const VERSION: &str = "0.1.0-beta.3";
 
+/// Carries the run capability. Delegation, handoff, per-user session memory, per-user long-term
+/// memory and per-user knowledge bases all key on it. Session memory fails SAFE without it —
+/// every user silently shares the agent-wide bucket instead of their own — so omitting it defeats
+/// an isolation control with no error to notice.
+pub const CAPABILITY_HEADER: &str = "X-Ctxmesh-Run-Capability";
+
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Search may wait on an embedding call through the token-service.
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -68,13 +74,38 @@ pub struct Skill {
     pub description: String,
 }
 
-/// The accepted sub-run.
+/// What `/delegate` answers. The launcher returns HTTP 200 for EVERY outcome and signals success
+/// in `ok`, so a refusal decoded as a transport success is silent data loss — `answer` is the
+/// entire point of delegating.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Delegation {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(rename = "subAgent", default)]
+    pub sub_agent: String,
+    #[serde(rename = "subRun", default)]
+    pub sub_run: String,
+    #[serde(default)]
+    pub answer: String,
+    #[serde(default)]
+    pub error: String,
+    #[serde(default)]
+    pub suspend: bool,
+    #[serde(default)]
+    pub endpoint: String,
+}
+
+/// What `/handoff` answers, with the same ok-not-status convention.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Handoff {
+    #[serde(default)]
+    pub ok: bool,
     #[serde(rename = "runId", default)]
     pub run_id: String,
+    #[serde(rename = "handedOffTo", default)]
+    pub handed_off_to: String,
     #[serde(default)]
-    pub accepted: bool,
+    pub error: String,
 }
 
 #[derive(Deserialize)]
@@ -90,9 +121,11 @@ struct SkillList {
 }
 
 #[derive(Deserialize)]
+/// The launcher answers {"body": "..."}. Reading "content" gave an empty string with NO
+/// error, so a skill loaded as nothing and the model carried on without it.
 struct SkillBody {
     #[serde(default)]
-    content: String,
+    body: String,
 }
 
 /// The entry point.
@@ -126,8 +159,12 @@ impl Client {
         url: &str,
         body: Option<serde_json::Value>,
         timeout: Duration,
+        headers: &[(&str, &str)],
     ) -> Result<Option<T>, Error> {
-        let req = self.agent.request(method, url).timeout(timeout);
+        let mut req = self.agent.request(method, url).timeout(timeout);
+        for (k, v) in headers {
+            req = req.set(k, v);
+        }
         let resp = match body {
             Some(v) => req.send_json(v),
             None => req.call(),
@@ -219,7 +256,7 @@ impl Client {
             self.conv(conversation_id)?
         );
         Ok(self
-            .send("GET", &url, None, DEFAULT_TIMEOUT)?
+            .send("GET", &url, None, DEFAULT_TIMEOUT, &[])?
             .unwrap_or_default())
     }
 
@@ -232,7 +269,7 @@ impl Client {
             self.conv(conversation_id)?
         );
         let body = serde_json::to_value(entry).map_err(|e| Error::Invalid(e.to_string()))?;
-        self.send::<serde_json::Value>("POST", &url, Some(body), DEFAULT_TIMEOUT)?;
+        self.send::<serde_json::Value>("POST", &url, Some(body), DEFAULT_TIMEOUT, &[])?;
         Ok(())
     }
 
@@ -249,7 +286,7 @@ impl Client {
             self.conv(conversation_id)?
         );
         let body = serde_json::to_value(entries).map_err(|e| Error::Invalid(e.to_string()))?;
-        self.send::<serde_json::Value>("PUT", &url, Some(body), DEFAULT_TIMEOUT)?;
+        self.send::<serde_json::Value>("PUT", &url, Some(body), DEFAULT_TIMEOUT, &[])?;
         Ok(())
     }
 
@@ -260,8 +297,8 @@ impl Client {
         if !tags.is_empty() {
             body["tags"] = serde_json::to_value(tags).map_err(|e| Error::Invalid(e.to_string()))?;
         }
-        let url = format!("{}/memory/agent", self.cfg.memory_base());
-        self.send::<serde_json::Value>("POST", &url, Some(body), DEFAULT_TIMEOUT)?;
+        let url = format!("{}/memory/agent/remember", self.cfg.memory_base());
+        self.send::<serde_json::Value>("POST", &url, Some(body), DEFAULT_TIMEOUT, &[])?;
         Ok(())
     }
 
@@ -276,7 +313,8 @@ impl Client {
         let body =
             serde_json::json!({ "query": query, "topK": if top_k == 0 { 5 } else { top_k } });
         let url = format!("{}/memory/agent/search", self.cfg.memory_base());
-        let out: Option<Results<Fact>> = self.send("POST", &url, Some(body), DEFAULT_TIMEOUT)?;
+        let out: Option<Results<Fact>> =
+            self.send("POST", &url, Some(body), DEFAULT_TIMEOUT, &[])?;
         Ok(out
             .map(|r| r.results)
             .unwrap_or_default()
@@ -305,7 +343,8 @@ impl Client {
             body["knowledgeBase"] = serde_json::Value::String(kb.to_string());
         }
         let url = format!("{}/knowledge/search", self.cfg.memory_base());
-        let out: Option<Results<Chunk>> = self.send("POST", &url, Some(body), SEARCH_TIMEOUT)?;
+        let out: Option<Results<Chunk>> =
+            self.send("POST", &url, Some(body), SEARCH_TIMEOUT, &[])?;
         Ok(out.map(|r| r.results).unwrap_or_default())
     }
 
@@ -314,7 +353,7 @@ impl Client {
     /// The skills the platform attached to this agent.
     pub fn skills(&self) -> Result<Vec<Skill>, Error> {
         let url = format!("{}/skills", self.cfg.memory_base());
-        let out: Option<SkillList> = self.send("GET", &url, None, DEFAULT_TIMEOUT)?;
+        let out: Option<SkillList> = self.send("GET", &url, None, DEFAULT_TIMEOUT, &[])?;
         Ok(out.map(|s| s.skills).unwrap_or_default())
     }
 
@@ -322,8 +361,8 @@ impl Client {
     pub fn skill_load(&self, name: &str) -> Result<String, Error> {
         let url = format!("{}/skills/load", self.cfg.memory_base());
         let body = serde_json::json!({ "name": name });
-        let out: Option<SkillBody> = self.send("POST", &url, Some(body), DEFAULT_TIMEOUT)?;
-        Ok(out.map(|b| b.content).unwrap_or_default())
+        let out: Option<SkillBody> = self.send("POST", &url, Some(body), DEFAULT_TIMEOUT, &[])?;
+        Ok(out.map(|b| b.body).unwrap_or_default())
     }
 
     // ── feedback: /feedback ──────────────────────────────────────────────────
@@ -340,12 +379,12 @@ impl Client {
             return Err(Error::NotWired("feedback (FEEDBACK_PORT is unset)".into()));
         }
         let mut body =
-            serde_json::json!({ "traceId": trace_id, "dimension": dimension, "score": score });
+            serde_json::json!({ "traceId": trace_id, "name": dimension, "value": score });
         if let Some(c) = comment.filter(|s| !s.is_empty()) {
             body["comment"] = serde_json::Value::String(c.to_string());
         }
         let url = format!("{}/feedback", self.cfg.feedback_base());
-        self.send::<serde_json::Value>("POST", &url, Some(body), DEFAULT_TIMEOUT)?;
+        self.send::<serde_json::Value>("POST", &url, Some(body), DEFAULT_TIMEOUT, &[])?;
         Ok(())
     }
 
@@ -362,7 +401,7 @@ impl Client {
         }
         let url = format!("{}/amp/{}", self.cfg.amp_base(), target_agent);
         Ok(self
-            .send("POST", &url, Some(payload), DEFAULT_TIMEOUT)?
+            .send("POST", &url, Some(payload), DEFAULT_TIMEOUT, &[])?
             .unwrap_or(serde_json::Value::Null))
     }
 
@@ -380,7 +419,7 @@ impl Client {
         }
         let url = format!("{}/a2a/{}", self.cfg.amp_base(), target_agent);
         Ok(self
-            .send("POST", &url, Some(payload), DEFAULT_TIMEOUT)?
+            .send("POST", &url, Some(payload), DEFAULT_TIMEOUT, &[])?
             .unwrap_or(serde_json::Value::Null))
     }
 
@@ -388,31 +427,87 @@ impl Client {
 
     /// Spawns a sub-run on another agent.
     ///
-    /// The platform fences this — spawn depth, total spawns and budget are enforced on its side,
-    /// so a refusal arrives as [`Error::Denied`] rather than a silently dropped call.
-    pub fn delegate(&self, sub_agent: &str, input: serde_json::Value) -> Result<Delegation, Error> {
+    /// `step` and `call_id` are the idempotency key the launcher hard-requires — the supervisor's
+    /// loop iteration and the model's tool-call id — so a reclaimed supervisor resolves to the SAME
+    /// sub-run rather than spawning a second. `capability` is the run capability; delegation is
+    /// refused without an authenticated run.
+    ///
+    /// The launcher answers 200 for every outcome: check [`Delegation::ok`].
+    pub fn delegate(
+        &self,
+        sub_agent: &str,
+        step: &str,
+        call_id: &str,
+        capability: &str,
+        input: serde_json::Value,
+    ) -> Result<Delegation, Error> {
         if sub_agent.trim().is_empty() {
             return Err(Error::Invalid("sub-agent is required".into()));
         }
-        let body = serde_json::json!({ "subAgent": sub_agent, "input": input });
-        let url = format!("{}/delegate", self.cfg.memory_base());
-        self.send("POST", &url, Some(body), DEFAULT_TIMEOUT)?
-            .ok_or_else(|| Error::Decode {
-                path: "/delegate".into(),
-                source: "empty body".into(),
-            })
+        if step.trim().is_empty() || call_id.trim().is_empty() {
+            return Err(Error::Invalid(
+                "step and callId are required (the idempotency key)".into(),
+            ));
+        }
+        if capability.trim().is_empty() {
+            return Err(Error::NotWired(format!(
+                "delegation needs the run capability ({CAPABILITY_HEADER})"
+            )));
+        }
+        let body = serde_json::json!({
+            "subAgent": sub_agent, "input": input, "step": step, "callId": call_id
+        });
+        let url = format!("{}/delegate", self.cfg.delegate_base());
+        self.send(
+            "POST",
+            &url,
+            Some(body),
+            DEFAULT_TIMEOUT,
+            &[(CAPABILITY_HEADER, capability)],
+        )?
+        .ok_or_else(|| Error::Decode {
+            path: "/delegate".into(),
+            source: "empty body".into(),
+        })
     }
 
     /// Transfers the conversation to another agent.
-    pub fn handoff(&self, target_agent: &str, include_history: bool) -> Result<(), Error> {
+    ///
+    /// The launcher treats an ABSENT `includeHistory` as true, so it is always sent explicitly.
+    /// `message` is the receiver's opening note — without history and without a message it is
+    /// handed nothing.
+    pub fn handoff(
+        &self,
+        target_agent: &str,
+        capability: &str,
+        message: Option<&str>,
+        include_history: bool,
+    ) -> Result<Handoff, Error> {
         if target_agent.trim().is_empty() {
             return Err(Error::Invalid("target agent is required".into()));
         }
-        let body =
+        if capability.trim().is_empty() {
+            return Err(Error::NotWired(format!(
+                "handoff needs the run capability ({CAPABILITY_HEADER})"
+            )));
+        }
+        let mut body =
             serde_json::json!({ "targetAgent": target_agent, "includeHistory": include_history });
-        let url = format!("{}/handoff", self.cfg.memory_base());
-        self.send::<serde_json::Value>("POST", &url, Some(body), DEFAULT_TIMEOUT)?;
-        Ok(())
+        if let Some(m) = message.filter(|s| !s.is_empty()) {
+            body["message"] = serde_json::Value::String(m.to_string());
+        }
+        let url = format!("{}/handoff", self.cfg.delegate_base());
+        self.send(
+            "POST",
+            &url,
+            Some(body),
+            DEFAULT_TIMEOUT,
+            &[(CAPABILITY_HEADER, capability)],
+        )?
+        .ok_or_else(|| Error::Decode {
+            path: "/handoff".into(),
+            source: "empty body".into(),
+        })
     }
 }
 
