@@ -185,6 +185,25 @@ public final class Client {
       send("POST", cfg.memoryBase() + "/memory/" + enc(conv(conversationId)) + "/append", body);
     }
 
+    /**
+     * Searches this conversation's memory. {@code capability} is optional: without it a per-user
+     * agent silently reads the agent-wide bucket rather than the caller's own.
+     */
+    public List<Entry> search(String query, String conversationId, String capability) {
+      require();
+      String url = cfg.memoryBase() + "/memory/" + enc(conv(conversationId))
+          + "/search?q=" + enc(query == null ? "" : query);
+      Map<String, String> h = capability == null || capability.isBlank()
+          ? Map.of() : Map.of(CAPABILITY_HEADER, capability);
+      Object o = send("GET", url, null, Duration.ofSeconds(15), h);
+      List<Entry> out = new ArrayList<>();
+      for (Object e : jsonArray(o, "entries")) {
+        Map<String, Object> m = map(e);
+        out.add(new Entry(s(m, "role"), m.get("content")));
+      }
+      return out;
+    }
+
     /** Replaces the conversation wholesale. */
     public void put(List<Entry> entries, String conversationId) {
       require();
