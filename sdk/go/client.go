@@ -114,8 +114,30 @@ func (m *MemoryClient) Append(ctx context.Context, e Entry, conversationID strin
 	if err != nil {
 		return err
 	}
-	u := m.c.cfg.memoryBase() + "/memory/" + url.PathEscape(id)
+	u := m.c.cfg.memoryBase() + "/memory/" + url.PathEscape(id) + "/append"
 	return m.c.t.do(ctx, "POST", u, e, nil, nil)
+}
+
+// Search searches this conversation's memory. capability is optional: without it a per-user
+// agent silently reads the agent-wide bucket rather than the caller's own.
+func (m *MemoryClient) Search(ctx context.Context, query, conversationID, capability string) ([]Entry, error) {
+	if err := m.require(); err != nil {
+		return nil, err
+	}
+	id, err := m.convID(conversationID)
+	if err != nil {
+		return nil, err
+	}
+	var out []Entry
+	u := m.c.cfg.memoryBase() + "/memory/" + url.PathEscape(id) + "/search?q=" + url.QueryEscape(query)
+	h := map[string]string{}
+	if capability != "" {
+		h[CapabilityHeader] = capability
+	}
+	if err := m.c.t.do(ctx, "GET", u, nil, &out, h); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // Put replaces the conversation wholesale.
@@ -143,7 +165,7 @@ func (m *MemoryClient) Remember(ctx context.Context, content string, tags map[st
 	if len(tags) > 0 {
 		body["tags"] = tags
 	}
-	return m.c.t.do(ctx, "POST", m.c.cfg.memoryBase()+"/memory/agent", body, nil, nil)
+	return m.c.t.do(ctx, "POST", m.c.cfg.memoryBase()+"/memory/agent/remember", body, nil, nil)
 }
 
 // SearchAgent retrieves facts from long-term memory. minScore filters weak matches; pass 0 to
@@ -188,8 +210,8 @@ type Chunk struct {
 	Score         float64 `json:"score"`
 }
 
-// Search runs retrieval over the granted knowledge bases. knowledgeBase may be empty to search
-// all of them.
+// Search runs retrieval over one knowledge base. knowledgeBase is REQUIRED — the launcher answers
+// 400 "knowledgeBase is required" without it, so an omit-to-search-all mode does not exist.
 func (k *KnowledgeClient) Search(ctx context.Context, query, knowledgeBase string, topK int) ([]Chunk, error) {
 	if !k.c.cfg.KnowledgeEnabled {
 		return nil, fmt.Errorf("%w: knowledge (KNOWLEDGE_BASE_ENABLED is not true)", ErrNotWired)
@@ -197,17 +219,19 @@ func (k *KnowledgeClient) Search(ctx context.Context, query, knowledgeBase strin
 	if topK <= 0 {
 		topK = 5
 	}
-	body := map[string]any{"query": query, "topK": topK}
-	if knowledgeBase != "" {
-		body["knowledgeBase"] = knowledgeBase
+	if strings.TrimSpace(knowledgeBase) == "" {
+		return nil, fmt.Errorf("ctxmesh: knowledgeBase is required")
 	}
+	body := map[string]any{"query": query, "topK": topK, "knowledgeBase": knowledgeBase}
 	var out struct {
 		Results []Chunk `json:"results"`
 	}
-	t := &transport{hc: k.c.t.hc}
-	t.hc.Timeout = searchTimeout
+	// Per-request, NOT by writing the shared client's Timeout: that field is read concurrently by
+	// every other call, so mutating it was both a process-wide side effect and a data race.
+	sctx, cancel := context.WithTimeout(ctx, searchTimeout)
+	defer cancel()
 	u := k.c.cfg.memoryBase() + "/knowledge/search"
-	if err := t.do(ctx, "POST", u, body, &out, nil); err != nil {
+	if err := k.c.t.do(sctx, "POST", u, body, &out, nil); err != nil {
 		return nil, err
 	}
 	return out.Results, nil
@@ -239,14 +263,16 @@ func (s *SkillsClient) List(ctx context.Context) ([]Skill, error) {
 
 // Load fetches a skill's body by name.
 func (s *SkillsClient) Load(ctx context.Context, name string) (string, error) {
+	// The launcher answers {"body": "..."} — reading "content" yielded an empty string with NO
+	// error, so a skill loaded as nothing and the model carried on without it.
 	var out struct {
-		Content string `json:"content"`
+		Body string `json:"body"`
 	}
 	u := s.c.cfg.memoryBase() + "/skills/load"
 	if err := s.c.t.do(ctx, "POST", u, map[string]any{"name": name}, &out, nil); err != nil {
 		return "", err
 	}
-	return out.Content, nil
+	return out.Body, nil
 }
 
 // ── feedback: /feedback ──────────────────────────────────────────────────────
@@ -260,7 +286,9 @@ func (f *FeedbackClient) Score(ctx context.Context, traceID, dimension string, s
 	if !f.c.cfg.FeedbackWired {
 		return fmt.Errorf("%w: feedback (FEEDBACK_PORT is unset)", ErrNotWired)
 	}
-	body := map[string]any{"traceId": traceID, "dimension": dimension, "score": score}
+	// name/value, not dimension/score: the handler decodes those field names and relays to
+	// Langfuse. Sending the wrong keys returned 202 while writing a nameless zero score.
+	body := map[string]any{"traceId": traceID, "name": dimension, "value": score}
 	if comment != "" {
 		body["comment"] = comment
 	}
@@ -307,35 +335,79 @@ func (m *MeshClient) CallLegacy(ctx context.Context, targetAgent string, payload
 // RunsClient spawns sub-runs and hands conversations off.
 type RunsClient struct{ c *Client }
 
-// Delegation is the accepted sub-run.
+// Delegation is what /delegate answers. The launcher returns HTTP 200 for every outcome and
+// signals success in OK, so a refusal decoded as a transport success is silent data loss —
+// Answer is the entire point of delegating.
 type Delegation struct {
-	RunID    string `json:"runId"`
+	OK       bool   `json:"ok"`
+	SubAgent string `json:"subAgent,omitempty"`
 	SubRun   string `json:"subRun,omitempty"`
-	Accepted bool   `json:"accepted"`
+	Answer   string `json:"answer,omitempty"`
+	Error    string `json:"error,omitempty"`
+	// Suspend and Endpoint are the L7 suspend signal: the launcher resolved the target and
+	// budget-checked it but did NOT spawn. The caller suspends once and the BFF creates the child.
+	Suspend  bool   `json:"suspend,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
-// Delegate spawns a sub-run on another agent and returns once the platform accepts it.
+// Handoff is what /handoff answers, with the same OK-not-status convention.
+type Handoff struct {
+	OK          bool   `json:"ok"`
+	RunID       string `json:"runId,omitempty"`
+	SourceRun   string `json:"sourceRun,omitempty"`
+	HandedOffTo string `json:"handedOffTo,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
+
+// Delegate spawns a sub-run on another agent.
 //
-// The platform fences this: spawn depth, total spawns and budget are enforced on its side, so a
-// refusal arrives as ErrDenied rather than as a silently dropped call.
-func (r *RunsClient) Delegate(ctx context.Context, subAgent string, input any) (*Delegation, error) {
+// step and callID are the idempotency key the launcher hard-requires: step is the supervisor's
+// loop iteration and callID the model's tool-call id, so a reclaimed supervisor resolves to the
+// SAME sub-run rather than spawning a second one. capability is the run capability
+// (X-Ctxmesh-Run-Capability); delegation is refused without an authenticated run.
+//
+// The launcher answers 200 for every outcome, so check Delegation.OK — a refusal is not an error.
+func (r *RunsClient) Delegate(ctx context.Context, subAgent, step, callID, capability string, input any) (*Delegation, error) {
 	if strings.TrimSpace(subAgent) == "" {
 		return nil, fmt.Errorf("ctxmesh: sub-agent is required")
 	}
-	body := map[string]any{"subAgent": subAgent, "input": input}
+	if strings.TrimSpace(step) == "" || strings.TrimSpace(callID) == "" {
+		return nil, fmt.Errorf("ctxmesh: step and callId are required (they are the idempotency key)")
+	}
+	if strings.TrimSpace(capability) == "" {
+		return nil, fmt.Errorf("%w: delegation needs the run capability (%s)", ErrNotWired, CapabilityHeader)
+	}
+	body := map[string]any{"subAgent": subAgent, "input": input, "step": step, "callId": callID}
 	var out Delegation
-	if err := r.c.t.do(ctx, "POST", r.c.cfg.memoryBase()+"/delegate", body, &out, nil); err != nil {
+	u := r.c.cfg.delegateBase() + "/delegate"
+	if err := r.c.t.do(ctx, "POST", u, body, &out, map[string]string{CapabilityHeader: capability}); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-// Handoff transfers the conversation to another agent. includeHistory carries the transcript
-// across; without it the receiver starts clean.
-func (r *RunsClient) Handoff(ctx context.Context, targetAgent string, includeHistory bool) error {
+// Handoff transfers the conversation to another agent.
+//
+// includeHistory carries the transcript across; the launcher treats an ABSENT field as true, so
+// this sends it explicitly. message is B's opening note — without history and without a message
+// the receiver is handed nothing.
+//
+// Like Delegate, the launcher answers 200 for every outcome: check Handoff.OK.
+func (r *RunsClient) Handoff(ctx context.Context, targetAgent, capability, message string, includeHistory bool) (*Handoff, error) {
 	if strings.TrimSpace(targetAgent) == "" {
-		return fmt.Errorf("ctxmesh: target agent is required")
+		return nil, fmt.Errorf("ctxmesh: target agent is required")
+	}
+	if strings.TrimSpace(capability) == "" {
+		return nil, fmt.Errorf("%w: handoff needs the run capability (%s)", ErrNotWired, CapabilityHeader)
 	}
 	body := map[string]any{"targetAgent": targetAgent, "includeHistory": includeHistory}
-	return r.c.t.do(ctx, "POST", r.c.cfg.memoryBase()+"/handoff", body, nil, nil)
+	if message != "" {
+		body["message"] = message
+	}
+	var out Handoff
+	u := r.c.cfg.delegateBase() + "/handoff"
+	if err := r.c.t.do(ctx, "POST", u, body, &out, map[string]string{CapabilityHeader: capability}); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
