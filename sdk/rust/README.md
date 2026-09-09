@@ -50,7 +50,7 @@ choice for them.
 
 ## Conformance tier
 
-**plane-client** (ADR 0139) — every launcher route is reachable here. The managed agent loop and
+**plane-client** — every launcher route is reachable here. The managed agent loop and
 model client are authoring-tier and live in the Python and TypeScript SDKs. Every capability is
 also a plain HTTP endpoint, so this crate is convenience, never a requirement.
 

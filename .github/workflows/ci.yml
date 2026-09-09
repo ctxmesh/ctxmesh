@@ -344,7 +344,18 @@ jobs:
       # Both added in v0.1.0-beta.3, for defects that shipped in beta.1 and beta.2 while
       # every existing gate stayed green. They compare the docs to the release, and the
       # registry copy to a plain reader — dimensions nothing else looked at.
+      # The docs site is a separate repo and it is where the images this gate exists to catch
+      # actually live. Without it the gate scans one file and cannot fail, which is how
+      # base-python and example-agent stayed broken through two releases.
+      - name: Check out the docs site (public, no token)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ctxmesh/ctxmesh.github.io
+          path: ctxmesh.github.io
+          persist-credentials: false
       - name: Docs-images gate (documented images are actually published)
+        env:
+          CTXMESH_SITE: ${{ github.workspace }}/ctxmesh.github.io
         run: ./hack/docs-images-published.sh
       - name: Registry-copy gate (no internal vocabulary on registry pages)
         run: ./hack/registry-copy.sh
