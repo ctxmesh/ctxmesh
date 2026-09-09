@@ -43,7 +43,7 @@ fn plane(status: u16) -> (Client, Arc<Mutex<Vec<String>>>) {
     });
 
     (
-        Client::with_config(Config::for_test(port, port, port, "conv-1")),
+        Client::with_config(Config::for_test(port, port, port, port, "conv-1")),
         seen,
     )
 }
@@ -76,7 +76,8 @@ fn every_route_is_actually_called() {
         .expect("a2a");
     c.delegate("sub", serde_json::json!({"x":1}))
         .expect("delegate");
-    c.handoff("other", true).expect("handoff");
+    c.handoff("other", "cap-token", Some("over to you"), true)
+        .expect("handoff");
 
     let got = seen.lock().unwrap().clone();
     for want in [
@@ -105,7 +106,7 @@ fn denied_is_distinguishable_from_a_transport_failure() {
     // A 403 is the platform refusing. An agent that must behave differently when the delegate
     // fence or a budget stops it needs to branch on that.
     let (c, _) = plane(403);
-    match c.delegate("sub", serde_json::Value::Null) {
+    match c.delegate("sub", "s", "c", "cap", serde_json::Value::Null) {
         Err(Error::Denied { .. }) => {}
         other => panic!("403 must surface as Error::Denied, got {other:?}"),
     }
@@ -119,6 +120,7 @@ fn unwired_capabilities_refuse_locally() {
         memory_port: 1,
         feedback_port: 1,
         amp_port: 1,
+        delegate_port: 1,
         agent_name: String::new(),
         conversation_id: "c".into(),
         memory_wired: false,
@@ -133,7 +135,7 @@ fn unwired_capabilities_refuse_locally() {
         Err(Error::NotWired(_))
     ));
     assert!(matches!(
-        c.knowledge_search("q", None, 1),
+        c.knowledge_search("q", Some("kb"), 1),
         Err(Error::NotWired(_))
     ));
 }
@@ -149,7 +151,7 @@ fn min_score_filters_weak_facts() {
 #[test]
 fn ambiguous_conversation_is_refused() {
     let (c, _) = plane(200);
-    let cfg = Config::for_test(1, 1, 1, "");
+    let cfg = Config::for_test(1, 1, 1, 1, "");
     let bare = Client::with_config(cfg);
     assert!(matches!(bare.memory_get(None), Err(Error::Invalid(_))));
     assert!(matches!(

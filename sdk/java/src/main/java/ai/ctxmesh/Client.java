@@ -27,6 +27,14 @@ public final class Client {
   /** Stamped from the product tag at release (ADR 0135). */
   public static final String VERSION = "0.1.0-beta.3";
 
+  /**
+   * Carries the run capability. Delegation, handoff, per-user session memory, per-user long-term
+   * memory and per-user knowledge bases all key on it. Session memory fails SAFE without it —
+   * every user silently shares the agent-wide bucket instead of their own — so omitting it
+   * defeats an isolation control with no error to notice.
+   */
+  public static final String CAPABILITY_HEADER = "X-Ctxmesh-Run-Capability";
+
   private final Config cfg;
   private final HttpClient http;
 
@@ -53,6 +61,11 @@ public final class Client {
   // ── transport ──────────────────────────────────────────────────────────────
 
   private Object send(String method, String url, Object body, Duration timeout) {
+    return send(method, url, body, timeout, Map.of());
+  }
+
+  private Object send(String method, String url, Object body, Duration timeout,
+                      Map<String, String> headers) {
     HttpRequest.BodyPublisher pub = body == null
         ? HttpRequest.BodyPublishers.noBody()
         : HttpRequest.BodyPublishers.ofString(Json.write(body), StandardCharsets.UTF_8);
@@ -61,6 +74,7 @@ public final class Client {
         .header("Accept", "application/json")
         .method(method, pub);
     if (body != null) b.header("Content-Type", "application/json");
+    headers.forEach((k, v) -> { if (v != null && !v.isBlank()) b.header(k, v); });
 
     HttpResponse<String> resp;
     try {
@@ -168,7 +182,7 @@ public final class Client {
       Map<String, Object> body = new LinkedHashMap<>();
       body.put("role", entry.role());
       body.put("content", entry.content());
-      send("POST", cfg.memoryBase() + "/memory/" + enc(conv(conversationId)), body);
+      send("POST", cfg.memoryBase() + "/memory/" + enc(conv(conversationId)) + "/append", body);
     }
 
     /** Replaces the conversation wholesale. */
@@ -190,7 +204,7 @@ public final class Client {
       Map<String, Object> body = new LinkedHashMap<>();
       body.put("content", content);
       if (tags != null && !tags.isEmpty()) body.put("tags", tags);
-      send("POST", cfg.memoryBase() + "/memory/agent", body);
+      send("POST", cfg.memoryBase() + "/memory/agent/remember", body);
     }
 
     /** Retrieves facts from long-term memory; minScore drops weak matches. */
@@ -216,15 +230,18 @@ public final class Client {
   public record Chunk(String content, String documentRef, String knowledgeBase, double score) {}
 
   public final class Knowledge {
-    /** Retrieval over the granted knowledge bases; knowledgeBase may be null for all of them. */
+    /** Retrieval over ONE knowledge base. Required — the launcher 400s without it. */
     public List<Chunk> search(String query, String knowledgeBase, int topK) {
       if (!cfg.knowledgeEnabled) {
         throw new NotWiredException("ctxmesh: knowledge is not enabled (KNOWLEDGE_BASE_ENABLED)");
       }
+      if (knowledgeBase == null || knowledgeBase.isBlank()) {
+        throw new CtxmeshException("ctxmesh: knowledgeBase is required");
+      }
       Map<String, Object> body = new LinkedHashMap<>();
       body.put("query", query);
       body.put("topK", topK <= 0 ? 5 : topK);
-      if (knowledgeBase != null && !knowledgeBase.isBlank()) body.put("knowledgeBase", knowledgeBase);
+      body.put("knowledgeBase", knowledgeBase);
       // Longer: this may wait on an embedding call through the token-service.
       Object o = send("POST", cfg.memoryBase() + "/knowledge/search", body, Duration.ofSeconds(60));
       List<Chunk> out = new ArrayList<>();
@@ -257,7 +274,9 @@ public final class Client {
     public String load(String name) {
       Map<String, Object> body = new LinkedHashMap<>();
       body.put("name", name);
-      return s(map(send("POST", cfg.memoryBase() + "/skills/load", body)), "content");
+      // The launcher answers {"body": "..."}. Reading "content" yielded an empty string with NO
+      // error, so a skill loaded as nothing and the model carried on without it.
+      return s(map(send("POST", cfg.memoryBase() + "/skills/load", body)), "body");
     }
   }
 
@@ -270,9 +289,11 @@ public final class Client {
         throw new NotWiredException("ctxmesh: feedback is not wired (FEEDBACK_PORT unset)");
       }
       Map<String, Object> body = new LinkedHashMap<>();
+      // name/value, not dimension/score: the handler decodes those and relays to Langfuse.
+      // The wrong keys returned 202 while writing a nameless zero score.
       body.put("traceId", traceId);
-      body.put("dimension", dimension);
-      body.put("score", score);
+      body.put("name", dimension);
+      body.put("value", score);
       if (comment != null && !comment.isBlank()) body.put("comment", comment);
       send("POST", cfg.feedbackBase() + "/feedback", body);
     }
@@ -304,34 +325,79 @@ public final class Client {
 
   // ── runs: /delegate and /handoff ──────────────────────────────────────────
 
-  /** The accepted sub-run. */
-  public record Delegation(String runId, boolean accepted) {}
+  /**
+   * What /delegate answers. The launcher returns HTTP 200 for EVERY outcome and signals success
+   * in {@code ok}, so a refusal decoded as a transport success is silent data loss — {@code
+   * answer} is the entire point of delegating.
+   */
+  public record Delegation(boolean ok, String subAgent, String subRun, String answer,
+                           String error, boolean suspend, String endpoint) {}
+
+  /** What /handoff answers, with the same ok-not-status convention. */
+  public record Handoff(boolean ok, String runId, String sourceRun, String handedOffTo,
+                        String error) {}
 
   public final class Runs {
     /**
      * Spawns a sub-run on another agent. The platform fences this — spawn depth, total spawns
      * and budget are enforced on its side, so a refusal arrives as DeniedException.
      */
-    public Delegation delegate(String subAgent, Object input) {
+    /**
+     * Spawns a sub-run on another agent.
+     *
+     * <p>{@code step} and {@code callId} are the idempotency key the launcher hard-requires — the
+     * supervisor's loop iteration and the model's tool-call id — so a reclaimed supervisor resolves
+     * to the SAME sub-run rather than spawning a second. {@code capability} is the run capability;
+     * delegation is refused without an authenticated run.
+     *
+     * <p>The launcher answers 200 for every outcome: check {@link Delegation#ok()}.
+     */
+    public Delegation delegate(String subAgent, String step, String callId, String capability,
+                               Object input) {
       if (subAgent == null || subAgent.isBlank()) {
         throw new CtxmeshException("ctxmesh: sub-agent is required");
+      }
+      if (step == null || step.isBlank() || callId == null || callId.isBlank()) {
+        throw new CtxmeshException("ctxmesh: step and callId are required (the idempotency key)");
+      }
+      if (capability == null || capability.isBlank()) {
+        throw new NotWiredException("ctxmesh: delegation needs the run capability (" + CAPABILITY_HEADER + ")");
       }
       Map<String, Object> body = new LinkedHashMap<>();
       body.put("subAgent", subAgent);
       body.put("input", input);
-      Map<String, Object> m = map(send("POST", cfg.memoryBase() + "/delegate", body));
-      return new Delegation(s(m, "runId"), Boolean.TRUE.equals(m.get("accepted")));
+      body.put("step", step);
+      body.put("callId", callId);
+      Map<String, Object> m = map(send("POST", cfg.delegateBase() + "/delegate", body,
+          Duration.ofSeconds(15), Map.of(CAPABILITY_HEADER, capability)));
+      return new Delegation(Boolean.TRUE.equals(m.get("ok")), s(m, "subAgent"), s(m, "subRun"),
+          s(m, "answer"), s(m, "error"), Boolean.TRUE.equals(m.get("suspend")), s(m, "endpoint"));
     }
 
-    /** Transfers the conversation to another agent. */
-    public void handoff(String targetAgent, boolean includeHistory) {
+    /**
+     * Transfers the conversation to another agent.
+     *
+     * <p>{@code includeHistory} carries the transcript; the launcher treats an ABSENT field as
+     * true, so this always sends it explicitly. {@code message} is the receiver's opening note —
+     * without history and without a message it is handed nothing.
+     */
+    public Handoff handoff(String targetAgent, String capability, String message,
+                           boolean includeHistory) {
       if (targetAgent == null || targetAgent.isBlank()) {
         throw new CtxmeshException("ctxmesh: target agent is required");
+      }
+      if (capability == null || capability.isBlank()) {
+        throw new NotWiredException("ctxmesh: handoff needs the run capability (" + CAPABILITY_HEADER + ")");
       }
       Map<String, Object> body = new LinkedHashMap<>();
       body.put("targetAgent", targetAgent);
       body.put("includeHistory", includeHistory);
-      send("POST", cfg.memoryBase() + "/handoff", body);
+      if (message != null && !message.isBlank()) body.put("message", message);
+      Map<String, Object> m = map(send("POST", cfg.delegateBase() + "/handoff", body,
+          Duration.ofSeconds(15), Map.of(CAPABILITY_HEADER, capability)));
+      return new Handoff(Boolean.TRUE.equals(m.get("ok")), s(m, "runId"), s(m, "sourceRun"),
+          s(m, "handedOffTo"), s(m, "error"));
     }
+
   }
 }
