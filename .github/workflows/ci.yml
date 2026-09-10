@@ -152,6 +152,7 @@ jobs:
     name: sdks
     needs: lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -162,7 +163,9 @@ jobs:
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
           go-version-file: sdk/go/go.mod
-          cache-dependency-path: sdk/go/go.sum
+          # No cache-dependency-path: sdk/go has zero dependencies, so no go.sum exists and
+          # setup-go would warn on every run.
+          cache: false
       - name: Go SDK (vet + test + race)
         working-directory: sdk/go
         run: |
@@ -195,7 +198,7 @@ jobs:
         run: |
           set -euo pipefail
           gem install minitest webrick --no-document
-          ruby -Ilib test/client_test.rb
+          ruby -Ilib test/routes_test.rb
           gem build ctxmesh.gemspec
 
   ui:
