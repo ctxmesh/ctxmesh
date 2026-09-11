@@ -166,5 +166,27 @@ jcode="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 25 \
 [ "$jcode" = "200" ] && ok "java: Central serves the pinned $jpin" \
   || bad "java: README pins $jpin and Central answers HTTP $jcode for its pom — the copy-paste install fails outright"
 
+# Every link the README offers must actually go somewhere. Added after writing the footers found
+# /sdk/go/, /sdk/rust/, /sdk/ruby/ and /sdk/java/ all 404 — four published SDKs with no docs page.
+# A footer pointing at a dead page is the same defect as a pin naming a version that does not exist.
+echo
+echo "resolving every documentation link:"
+for d in $SDKS; do
+  f="sdk/$d/README.md"
+  urls="$(grep -oE 'https://(ctxmesh\.github\.io|github\.com/ctxmesh)[^ )"]*' "$f" | sed 's/[.,]$//' | sort -u)"
+  [ -n "$urls" ] || continue
+  dead=""
+  while read -r u; do
+    [ -n "$u" ] || continue
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -L "$u" 2>/dev/null || echo 000)"
+    case "$code" in 2*|3*) ;; *) dead="$dead\n      $code  $u" ;; esac
+  done <<< "$urls"
+  if [ -n "$dead" ]; then
+    bad "$d README links pages that do not resolve:$(printf "$dead")"
+  else
+    ok "$d: every documentation link resolves ($(printf '%s' "$urls" | grep -c . ) links)"
+  fi
+done
+
 [ "$rc" = "0" ] || exit 1
-echo "PASS: every SDK README links the repo, pins $product, and resolves on its own registry"
+echo "PASS: every SDK README links the repo, pins $product, resolves on its own registry, and every doc link is live"
