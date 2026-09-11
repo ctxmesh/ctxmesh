@@ -60,7 +60,7 @@ jobs:
       # someone forgets to bump them, and a wheel that misreports its own version is
       # unfixable after upload — PyPI will not let you replace a file.
       - name: Stamp the SDKs at ${{ github.ref_name }}
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         run: |
           set -euo pipefail
           v="${GITHUB_REF_NAME#v}"
@@ -108,8 +108,10 @@ jobs:
               assert body["output"] == "ci offline", body
           print("OK: pip-installed ctxmesh ran an agent offline")
           PY
+      # A dispatch needs this too: publish-pypi downloads it, and gating it on tags meant a
+      # dispatch failed with "Artifact not found" — the retry path failing for want of its input.
       - name: Upload dist artifact
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ctxmesh-dist
@@ -331,12 +333,34 @@ jobs:
         run: |
           set -euo pipefail
           v="${VERSION_OVERRIDE:-$GITHUB_REF_NAME}"; v="${v#v}"
-          # Central is immutable: a re-run of a release must not fail on a duplicate.
-          if curl -sf "https://repo1.maven.org/maven2/ai/ctxmesh/ctxmesh/$v/" >/dev/null 2>&1; then
+          # Central is immutable, so a re-run must not fail on a duplicate. Two things make
+          # that harder than it looks:
+          #
+          #   • repo1 serves no directory listings, so the obvious `.../$v/` probe 404s even
+          #     for a PUBLISHED version. That guard could never fire, and every run deployed.
+          #     Query a real file — the .pom — which exists iff the version is published.
+          #   • repo1 reflects only PUBLISHED artifacts. Central also has a staging state, so
+          #     an upload that succeeded but was never released still reads as absent here and
+          #     the deploy then fails with "Component ... already exists". That is what the
+          #     first run did: plugin 0.7.0 uploaded fine and died parsing the response.
+          #
+          # So: probe the pom for the published case, and treat an already-exists refusal as
+          # success for the staged case, since the component IS on Central either way.
+          pom="https://repo1.maven.org/maven2/ai/ctxmesh/ctxmesh/$v/ctxmesh-$v.pom"
+          if curl -sfI "$pom" >/dev/null 2>&1; then
             echo "ai.ctxmesh:ctxmesh:$v is already on Central — nothing to do."
             exit 0
           fi
-          mvn -B -P release deploy -DskipTests
+          set +e
+          mvn -B -P release deploy -DskipTests 2>&1 | tee /tmp/mvn-deploy.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ] && grep -q "already exists" /tmp/mvn-deploy.log; then
+            echo "::warning::Central already holds a deployment for this version — it may be an"
+            echo "::warning::earlier upload awaiting release in the portal. Nothing more to do here."
+            exit 0
+          fi
+          exit "$rc"
 
   publish-npm:
     name: publish-npm
