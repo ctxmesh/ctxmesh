@@ -137,6 +137,11 @@ jobs:
       # SHA-pin this at enablement (repo convention); release/v1 is the maintainer-pinned major.
       - name: Publish to PyPI (Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc # v1.12.4
+        with:
+          # As every other registry job here does. A release publishing five SDKs to five
+          # registries will sometimes be re-run because ONE failed, and PyPI was the only one
+          # that would then die on a duplicate rather than pass through.
+          skip-existing: true
 
   # ── npm ─────────────────────────────────────────────────────────────────────
   # ADR 0070 deferred this, mirroring a Python not-on-PyPI posture that ADR 0135 has
@@ -254,6 +259,82 @@ jobs:
           fi
           gem build ctxmesh.gemspec
           gem push ctxmesh-*.gem
+
+  # ── Maven Central ──────────────────────────────────────────────────────────
+  # The only registry here with no OIDC option: Central needs a portal token AND a GPG key, so
+  # four secrets. The job SKIPS when they are absent rather than failing, because six SDKs across
+  # five registries means one missing credential must not take a release down.
+  publish-maven:
+    name: publish-maven
+    needs: build-verify
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment:
+      name: maven
+      url: https://central.sonatype.com/artifact/ai.ctxmesh/ctxmesh
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Are the credentials configured?
+        id: creds
+        env:
+          U: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          K: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "$U" ] && [ -n "$K" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Maven Central credentials are not configured; the Java SDK was NOT published. Set MAVEN_CENTRAL_USERNAME/PASSWORD and MAVEN_GPG_PRIVATE_KEY/PASSPHRASE."
+          fi
+
+      # setup-java imports the key and writes settings.xml with the server id the pom names.
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        if: steps.creds.outputs.ready == 'true'
+        with:
+          distribution: temurin
+          java-version: "17"
+          server-id: central
+          server-username: MAVEN_CENTRAL_USERNAME
+          server-password: MAVEN_CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+
+      - name: Stamp the version from the tag
+        if: steps.creds.outputs.ready == 'true'
+        working-directory: sdk/java
+        env:
+          VERSION_OVERRIDE: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          v="${VERSION_OVERRIDE:-$GITHUB_REF_NAME}"; v="${v#v}"
+          mvn -B -q versions:set -DnewVersion="$v" -DgenerateBackupPoms=false
+          sed -i -E "s/VERSION = \".*\";/VERSION = \"$v\";/" src/main/java/ai/ctxmesh/Client.java
+          grep -m1 'VERSION =' src/main/java/ai/ctxmesh/Client.java
+
+      - name: Publish (skip if this version is already on Central)
+        if: steps.creds.outputs.ready == 'true'
+        working-directory: sdk/java
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+          VERSION_OVERRIDE: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          v="${VERSION_OVERRIDE:-$GITHUB_REF_NAME}"; v="${v#v}"
+          # Central is immutable: a re-run of a release must not fail on a duplicate.
+          if curl -sf "https://repo1.maven.org/maven2/ai/ctxmesh/ctxmesh/$v/" >/dev/null 2>&1; then
+            echo "ai.ctxmesh:ctxmesh:$v is already on Central — nothing to do."
+            exit 0
+          fi
+          mvn -B -P release deploy -DskipTests
 
   publish-npm:
     name: publish-npm
