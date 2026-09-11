@@ -5,17 +5,18 @@
 # ---------------
 # Measured 2026-09-12 against what the six registries actually render, not against the repo:
 # four of six SDK READMEs (Go, Rust, Ruby, Java) never linked github.com/ctxmesh/ctxmesh at all,
-# and two install snippets did not work — Java pinned 0.1.0-beta.1, a hard 404 on Central, and
-# `gem "ctxmesh"` could not resolve because every published version is a prerelease.
+# and Java pinned 0.1.0-beta.1 — a hard 404 on Central, so the copy-paste install failed outright.
 #
 # Two properties make this checkable only the hard way:
 #
 #   1. A pinned version can be perfectly well-formed and still not exist. Java's `0.1.0-beta.1`
 #      would pass any string comparison against a CHANGELOG that also said beta.1. It 404s.
 #      So --live asks the registry.
-#   2. Each ecosystem SELECTS differently. pip installs a prerelease when no stable exists;
-#      bundler will not. The same bare `install ctxmesh` is correct for Python and broken for
-#      Ruby. A generic "does any version exist" check calls both fine and is worthless.
+#   2. Each ecosystem SELECTS differently, and so do TOOLS WITHIN one ecosystem. `gem install
+#      ctxmesh` refuses a prerelease-only gem while a Gemfile's `gem "ctxmesh"` resolves it,
+#      so the same package is broken or fine depending on which command the README prints.
+#      A generic "does any version exist" check calls everything fine and is worthless. The
+#      first version of this gate failed Ruby for exactly that conflation.
 #
 # Registries also serve the README baked into the PUBLISHED artifact, so a green run here proves
 # the NEXT publish will be right — never that the live page is. Task m175.6 re-reads the published
