@@ -12,7 +12,7 @@ platform injects, so there is no API key to manage and no base URL to configure.
 
 ```toml
 [dependencies]
-ctxmesh = "0.1.0-beta.1"
+ctxmesh = "0.1.0-beta.3"
 ```
 
 ## Use it

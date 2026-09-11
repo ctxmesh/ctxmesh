@@ -14,6 +14,13 @@ platform injects, so there is no API key to manage and no base URL to configure.
 gem "ctxmesh"
 ```
 
+Installing it directly needs `--pre` while the gem is in beta — `gem install` will not pick a
+prerelease on its own, though Bundler resolves the line above without help:
+
+```sh
+gem install ctxmesh --pre
+```
+
 ## Use it
 
 ```ruby
