@@ -5,6 +5,12 @@ import (
 	"fmt"
 )
 
+// CapabilityHeader carries the run capability. Delegation, handoff, per-user session memory,
+// per-user long-term memory and per-user knowledge bases all key on it. Session memory fails
+// SAFE without it — every user silently shares the agent-wide bucket instead of their own — so
+// omitting it defeats an isolation control with no error to notice.
+const CapabilityHeader = "X-Ctxmesh-Run-Capability"
+
 // The SDK's error vocabulary. These are sentinels so a caller can errors.Is them rather than
 // matching on strings — an agent that must behave differently when a capability is simply not
 // granted needs to tell that apart from a transport failure.

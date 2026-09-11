@@ -20,6 +20,12 @@ require_relative "ctxmesh/config"
 # Conformance tier: plane-client (ADR 0139). The managed agent loop and model client are
 # authoring-tier and live in the Python and TypeScript SDKs.
 module Ctxmesh
+  # Carries the run capability. Delegation, handoff, per-user session memory, per-user long-term
+  # memory and per-user knowledge bases all key on it. Session memory fails SAFE without it --
+  # every user silently shares the agent-wide bucket instead of their own -- so omitting it
+  # defeats an isolation control with no error to notice.
+  CAPABILITY_HEADER = "X-Ctxmesh-Run-Capability"
+
   # The entry point.
   class Client
     DEFAULT_TIMEOUT = 15
@@ -50,9 +56,19 @@ module Ctxmesh
     # Adds one entry to the conversation.
     def memory_append(role:, content:, conversation_id: nil)
       require_memory!
-      request("POST", "#{@config.memory_base}/memory/#{escape(conv(conversation_id))}",
+      request("POST", "#{@config.memory_base}/memory/#{escape(conv(conversation_id))}/append",
               { role: role, content: content })
       nil
+    end
+
+    # Searches this conversation's memory. capability is optional: without it a per-user agent
+    # silently reads the agent-wide bucket rather than the caller's own.
+    def memory_search(query, conversation_id: nil, capability: nil)
+      require_memory!
+      url = "#{@config.memory_base}/memory/#{escape(conv(conversation_id))}/search?q=#{escape(query.to_s)}"
+      headers = capability && !capability.empty? ? { CAPABILITY_HEADER => capability } : {}
+      body = request("GET", url, nil, DEFAULT_TIMEOUT, headers)
+      body.is_a?(Array) ? body : []
     end
 
     # Replaces the conversation wholesale.
@@ -67,7 +83,7 @@ module Ctxmesh
       require_long_term!
       payload = { content: content }
       payload[:tags] = tags unless tags.nil? || tags.empty?
-      request("POST", "#{@config.memory_base}/memory/agent", payload)
+      request("POST", "#{@config.memory_base}/memory/agent/remember", payload)
       nil
     end
 
@@ -87,8 +103,11 @@ module Ctxmesh
         raise NotWiredError, "ctxmesh: knowledge is not enabled (KNOWLEDGE_BASE_ENABLED)"
       end
 
-      payload = { query: query, topK: top_k.positive? ? top_k : 5 }
-      payload[:knowledgeBase] = knowledge_base if knowledge_base && !knowledge_base.empty?
+      if knowledge_base.nil? || knowledge_base.strip.empty?
+        raise Error, "ctxmesh: knowledgeBase is required (the launcher 400s without it)"
+      end
+
+      payload = { query: query, topK: top_k.positive? ? top_k : 5, knowledgeBase: knowledge_base }
       results(request("POST", "#{@config.memory_base}/knowledge/search", payload, SEARCH_TIMEOUT))
     end
 
@@ -103,7 +122,9 @@ module Ctxmesh
     # Fetches a skill's body by name.
     def skill_load(name)
       body = request("POST", "#{@config.memory_base}/skills/load", { name: name })
-      body.is_a?(Hash) ? body.fetch("content", "") : ""
+      # The launcher answers {"body": "..."}. Reading "content" gave "" with NO error,
+      # so a skill loaded as nothing and the model carried on without it.
+      body.is_a?(Hash) ? body.fetch("body", "") : ""
     end
 
     # ── feedback: /feedback ─────────────────────────────────────────────────
@@ -114,7 +135,9 @@ module Ctxmesh
         raise NotWiredError, "ctxmesh: feedback is not wired (FEEDBACK_PORT unset)"
       end
 
-      payload = { traceId: trace_id, dimension: dimension, score: score }
+      # name/value, not dimension/score: the wrong keys returned 202 while writing a
+      # nameless zero score, silently corrupting the eval signal.
+      payload = { traceId: trace_id, name: dimension, value: score }
       payload[:comment] = comment if comment && !comment.empty?
       request("POST", "#{@config.feedback_base}/feedback", payload)
       nil
@@ -141,20 +164,40 @@ module Ctxmesh
 
     # Spawns a sub-run on another agent.
     #
-    # The platform fences this — spawn depth, total spawns and budget are enforced on its side,
-    # so a refusal arrives as DeniedError rather than a silently dropped call.
-    def delegate(sub_agent, input)
+    # step and call_id are the idempotency key the launcher hard-requires -- the supervisor's loop
+    # iteration and the model's tool-call id -- so a reclaimed supervisor resolves to the SAME
+    # sub-run rather than spawning a second. capability is the run capability.
+    #
+    # The launcher answers 200 for EVERY outcome and signals success in "ok", so check that: a
+    # refusal decoded as a transport success is silent data loss, and "answer" is the entire point.
+    def delegate(sub_agent, step:, call_id:, capability:, input: nil)
       raise Error, "ctxmesh: sub-agent is required" if sub_agent.nil? || sub_agent.strip.empty?
+      if step.to_s.strip.empty? || call_id.to_s.strip.empty?
+        raise Error, "ctxmesh: step and callId are required (the idempotency key)"
+      end
+      if capability.to_s.strip.empty?
+        raise NotWiredError, "ctxmesh: delegation needs the run capability (#{CAPABILITY_HEADER})"
+      end
 
-      request("POST", "#{@config.memory_base}/delegate", { subAgent: sub_agent, input: input })
+      request("POST", "#{@config.delegate_base}/delegate",
+              { subAgent: sub_agent, input: input, step: step, callId: call_id },
+              DEFAULT_TIMEOUT, { CAPABILITY_HEADER => capability }) || {}
     end
 
     # Transfers the conversation to another agent.
-    def handoff(target_agent, include_history: false)
+    #
+    # The launcher treats an ABSENT includeHistory as TRUE, so it is always sent explicitly --
+    # defaulting to false handed the receiver nothing. message is its opening note.
+    def handoff(target_agent, capability:, message: nil, include_history: true)
       require_target!(target_agent)
-      request("POST", "#{@config.memory_base}/handoff",
-              { targetAgent: target_agent, includeHistory: include_history })
-      nil
+      if capability.to_s.strip.empty?
+        raise NotWiredError, "ctxmesh: handoff needs the run capability (#{CAPABILITY_HEADER})"
+      end
+
+      payload = { targetAgent: target_agent, includeHistory: include_history }
+      payload[:message] = message if message && !message.empty?
+      request("POST", "#{@config.delegate_base}/handoff", payload,
+              DEFAULT_TIMEOUT, { CAPABILITY_HEADER => capability }) || {}
     end
 
     private
@@ -192,10 +235,11 @@ module Ctxmesh
 
     def escape(s) = URI.encode_www_form_component(s)
 
-    def request(method, url, payload = nil, timeout = DEFAULT_TIMEOUT)
+    def request(method, url, payload = nil, timeout = DEFAULT_TIMEOUT, headers = {})
       uri = URI.parse(url)
       req = Net::HTTP.const_get(method.capitalize).new(uri)
       req["Accept"] = "application/json"
+      headers.each { |k, v| req[k] = v if v && !v.to_s.empty? }
       if payload
         req["Content-Type"] = "application/json"
         req.body = JSON.generate(payload)

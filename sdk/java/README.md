@@ -54,7 +54,7 @@ version conflict in every application that already has one.
 
 ## Conformance tier
 
-**plane-client** ([ADR 0139](https://github.com/ctxmesh/ctxmesh)) — every launcher route is
+**plane-client** — every launcher route is
 reachable here. The managed agent loop, tool dispatch and model client are authoring-tier and
 live in the Python and TypeScript SDKs. Every capability is also a plain HTTP endpoint, so this
 SDK is convenience, never a requirement.

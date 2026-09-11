@@ -11,11 +11,21 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Every file that renders on a registry page. The four plane-client SDKs were added in M168-M172
+# and this list was not updated with them, so their READMEs shipped citing ADR 0139 — the exact
+# vocabulary this gate blocks — with the Java one linking a PRIVATE-repo ADR to a public URL.
 FILES=(
   sdk/typescript/package.json
   sdk/typescript/README.md
   sdk/python/pyproject.toml
   sdk/python/README.md
+  sdk/go/README.md
+  sdk/java/README.md
+  sdk/java/pom.xml
+  sdk/rust/README.md
+  sdk/rust/Cargo.toml
+  sdk/ruby/README.md
+  sdk/ruby/ctxmesh.gemspec
   deploy/helm/ctxmesh/Chart.yaml
 )
 
@@ -40,8 +50,14 @@ rendered() {
     *package.json)
       python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("description","")); print(" ".join(d.get("keywords",[])))' "$1" ;;
     *pyproject.toml)
-      grep -E '^(description|keywords|classifiers) *=' -A6 "$1" | grep -v '^\s*#' ;;
-    *) grep -v '^\s*#' "$1" ;;
+      grep -E '^(description|keywords|classifiers) *=' -A6 "$1" | grep -v '^[[:space:]]*#' ;;
+    *pom.xml)
+      grep -E '<(description|name|url)>' "$1" ;;
+    *Cargo.toml)
+      grep -E '^(description|keywords|categories) *=' "$1" ;;
+    *.gemspec)
+      grep -E '(summary|description) *=' -A3 "$1" ;;
+    *) grep -v '^[[:space:]]*#' "$1" ;;
   esac
 }
 

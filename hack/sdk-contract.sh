@@ -78,26 +78,17 @@ sdks="$(printf '%s' "$sdks" | sed '/^$/d')"
 [ -n "$sdks" ] || { echo "FAIL: found no SDKs — the gate is not checking anything"; exit 1; }
 n_sdks="$(wc -l <<< "$sdks" | tr -d ' ')"
 
-# ── 1. every launcher route is reachable from EVERY SDK, at every tier ───────
-# /healthz is waived: the launcher's liveness probe, not an agent-facing capability.
-routes="$(grep -rhoE 'mux\.HandleFunc\("(GET |POST |PUT |DELETE |PATCH )?/[a-zA-Z0-9/_{}-]*"' "$LAUNCHER" \
-  | sed -E 's/.*HandleFunc\("//; s/"$//; s/^(GET|POST|PUT|DELETE|PATCH) //' \
-  | sed -E 's#^(/[a-zA-Z0-9_-]+(/[a-zA-Z0-9_-]+)?).*#\1#' \
-  | grep -vE '\{' | grep -v '^/healthz$' | sort -u)"
-[ -n "$routes" ] || bad "read no routes out of $LAUNCHER — the gate is not actually checking anything"
-
-checked=0
-while IFS=: read -r lang tier s; do
-  [ -n "$lang" ] || continue
-  while read -r route; do
-    [ -n "$route" ] || continue
-    grep -rqF -- "$route" "$ROOT/$s" \
-      || bad "the launcher serves '$route' and the $lang SDK ($tier) never calls it — a platform capability with no SDK surface"
-    checked=$((checked + 1))
-  done <<< "$routes"
-done <<< "$sdks"
-[ "$checked" -gt 0 ] || bad "no routes were actually checked"
-[ "$rc" = "0" ] && echo "  ok: $(wc -l <<< "$routes" | tr -d ' ') launcher routes reachable from all $n_sdks SDKs (/healthz waived)"
+# ── 1. the committed route fixture still matches the launcher ────────────────
+# The previous version of this check grepped the SDK source for route SUBSTRINGS and was
+# defeated three ways: it truncated paths to two segments (so /memory/agent/remember became
+# /memory/agent, a path the launcher never serves — and four SDKs were written against that
+# fiction), it dropped every {param} route, and a literal in a COMMENT satisfied it. An SDK
+# replaced by six lines of comments passed with "10 launcher routes reachable from all 6 SDKs".
+#
+# Route COVERAGE is no longer asserted here at all. A static grep cannot tell a call from a
+# comment, so each SDK's test suite proves it by driving a fake launcher built from this same
+# fixture, which 404s anything unregistered. This gate's job is only to keep the fixture honest.
+./hack/gen-launcher-routes.sh --check || rc=1
 
 # ── 2. authoring SDKs stay at parity with each other ─────────────────────────
 n_auth="$(grep -c ':authoring:' <<< "$sdks" || true)"
@@ -123,23 +114,39 @@ if [ "${n_auth:-0}" -ge 2 ]; then
   fi
 fi
 
-# ── 3. every SDK ships at ONE version (ADR 0135) ─────────────────────────────
-first_lang=""; first_ver=""
+# ── 3. every SDK ships at the PRODUCT's version (ADR 0135) ───────────────────
+# The old check compared the SDKs only to EACH OTHER, so uniform staleness was indistinguishable
+# from correctness: it printed "all 6 SDKs declare 0.1.0-beta.1, consistently" while the product
+# was on beta.3, three releases later, and that output was quoted as proof.
+#
+# The distinction it erased: release stamps python and typescript from the tag, so their
+# committed value is genuinely decorative. NOTHING stamps go, java, rust or ruby — their
+# committed constant is what a user gets. One rule cannot cover both.
+STAMPED_AT_RELEASE="python typescript"
+product="$(grep -m1 -oE '^## v[0-9][^ ]*' "$ROOT/CHANGELOG.md" | sed 's/^## v//')"
+[ -n "$product" ] || bad "could not read the product version from CHANGELOG.md — the gate is not actually checking anything"
+
 while IFS=: read -r lang tier s; do
   [ -n "$lang" ] || continue
   v="$(declared_version "$lang" 2>/dev/null || true)"
   [ -n "$v" ] || { bad "sdk/$lang declares no version where this gate looks — see declared_version()"; continue; }
-  if [ -z "$first_lang" ]; then first_lang="$lang"; first_ver="$v"
-  elif [ "$v" != "$first_ver" ]; then
-    bad "$lang declares $v and $first_lang declares $first_ver — the SDKs ship together, at one version"
+  if grep -qw -- "$lang" <<< "$STAMPED_AT_RELEASE"; then
+    # May lag: the release rewrites it. It must still agree with the other stamped SDKs, or the
+    # stamping step is papering over a real divergence.
+    [ -z "${stamped_ver:-}" ] && stamped_ver="$v" && stamped_lang="$lang"
+    [ "$v" = "$stamped_ver" ] \
+      || bad "$lang declares $v and $stamped_lang declares $stamped_ver — the stamped SDKs must still agree"
+  else
+    # Shipped verbatim. Anything but the product version is what the user installs.
+    [ "$v" = "$product" ] \
+      || bad "sdk/$lang declares $v but the product is $product, and NOTHING stamps $lang at release — a user would install a version that lies about itself"
   fi
 done <<< "$sdks"
 
-# Python declares it twice and the two can silently disagree.
 py_init="$(grep -E '^__version__ *= *"' "$ROOT/sdk/python/src/ctxmesh/__init__.py" | head -1 | sed -E 's/.*"(.*)".*/\1/')"
 [ "$(declared_version python)" = "$py_init" ] \
   || bad "python pyproject version ($(declared_version python)) != ctxmesh.__version__ ($py_init) — an installed SDK would misreport itself"
-[ "$rc" = "0" ] && echo "  ok: all $n_sdks SDKs declare $first_ver, consistently"
+[ "$rc" = "0" ] && echo "  ok: unstamped SDKs are at the product version ($product); stamped SDKs agree at $stamped_ver"
 
 # ── 4. the SDKs publish on the product's tag, not their own ──────────────────
 grep -qE '^\s+tags: \["sdk-v\*"\]' "$ROOT/.github/workflows/sdk-publish.yml" 2>/dev/null \
