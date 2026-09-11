@@ -131,8 +131,13 @@ else
   bad "rust: README pins $rpin and crates.io serves [$rs] — cargo may still resolve it via caret, but the page lies"
 fi
 
-# gem "ctxmesh" — bundler selects only a NON-prerelease unless one is named. This is the rule that
-# makes the same bare install correct for pip and broken here.
+# Ruby has TWO install forms with DIFFERENT prerelease rules, and conflating them is a false
+# positive either way (measured 2026-09-12):
+#   • Gemfile `gem "ctxmesh"` via bundler  -> RESOLVES to 0.1.0.pre.beta.3. Bundler takes a
+#     prerelease when it is the only version published.
+#   • CLI `gem install ctxmesh`            -> FAILS, "Could not find a valid gem". The CLI will
+#     not select a prerelease without --pre or an exact version.
+# So the check depends on which form the README actually shows.
 rb="$(fetch https://rubygems.org/api/v1/versions/ctxmesh.json | python3 -c '
 import json,sys
 try: vs=[v["number"] for v in json.load(sys.stdin)]
@@ -142,10 +147,13 @@ print("STABLE:"+stable[0] if stable else "PRERELEASE_ONLY:"+",".join(vs))' 2>/de
 case "$rb" in
   STABLE:*) ok "ruby: a stable gem exists, so a bare gem \"ctxmesh\" resolves (${rb#STABLE:})" ;;
   PRERELEASE_ONLY:*)
-    if grep -qE -- '--pre|"~> *[0-9].*pre|, *"[0-9][^"]*pre' sdk/ruby/README.md; then
-      ok "ruby: only prereleases are published (${rb#PRERELEASE_ONLY:}) and the README names one explicitly"
+    vs="${rb#PRERELEASE_ONLY:}"
+    if grep -qE '^gem install ctxmesh\s*$' sdk/ruby/README.md; then
+      bad "ruby: only prereleases are published ($vs) and the README shows a bare 'gem install ctxmesh', which fails with 'Could not find a valid gem' — it needs --pre or an exact version"
+    elif grep -qE '^gem "ctxmesh"' sdk/ruby/README.md; then
+      ok "ruby: only prereleases are published ($vs); the README shows a Gemfile line, which bundler resolves"
     else
-      bad "ruby: only prereleases are published (${rb#PRERELEASE_ONLY:}) and the README shows a bare install — 'gem install ctxmesh' fails with 'Could not find a valid gem'"
+      ok "ruby: only prereleases are published ($vs); the README names a version explicitly"
     fi ;;
   *) bad "ruby: could not read RubyGems versions ($rb)" ;;
 esac
