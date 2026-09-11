@@ -328,6 +328,17 @@ jobs:
       # served by the launcher and exposed by neither SDK.
       - name: SDK-contract gate (the SDKs track the product)
         run: ./hack/sdk-contract.sh
+      # M175 — the SDKs were correct and their registry PAGES were not. Four of six never linked
+      # the repository, so someone landing on crates.io or Maven Central had no route back to the
+      # project, and Java's install snippet pinned a version that 404s on Central. sdk-contract
+      # checks manifests, which stayed right the whole time.
+      - name: SDK-readme gate (the registry page orients a stranger)
+        run: ./hack/sdk-readme-truth.sh
+      # One writer for every version shipped verbatim. ADR 0135 stamps Python and TypeScript at
+      # release; the other four are whatever is in the tree, and nothing wrote them — which is how
+      # two README pins sat three releases behind.
+      - name: Version coherence (verbatim SDKs + README pins)
+        run: ./hack/bump-version.sh --check
       # M155 — every console flow must be completable by at least one shipped role.
       #
       # The BFF writes with the CALLER's client (ADR 0011), so a flow is only real if some
