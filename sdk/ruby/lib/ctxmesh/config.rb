@@ -6,15 +6,18 @@ module Ctxmesh
     DEFAULT_MEMORY_PORT = 2998
     DEFAULT_FEEDBACK_PORT = 2995
     DEFAULT_AMP_PORT = 2997
+    DEFAULT_DELEGATE_PORT = 2994
 
-    attr_reader :memory_port, :feedback_port, :amp_port, :agent_name, :conversation_id
+    attr_reader :memory_port, :feedback_port, :amp_port, :delegate_port, :agent_name, :conversation_id
 
-    def initialize(memory_port:, feedback_port:, amp_port:, agent_name: "", conversation_id: "",
+    def initialize(memory_port:, feedback_port:, amp_port:, delegate_port: DEFAULT_DELEGATE_PORT,
+                   agent_name: "", conversation_id: "",
                    memory_wired: true, feedback_wired: true, long_term_enabled: true,
                    knowledge_enabled: true)
       @memory_port = memory_port
       @feedback_port = feedback_port
       @amp_port = amp_port
+      @delegate_port = delegate_port
       @agent_name = agent_name
       @conversation_id = conversation_id
       @memory_wired = memory_wired
@@ -32,6 +35,8 @@ module Ctxmesh
     def memory_base = "http://127.0.0.1:#{@memory_port}"
     def feedback_base = "http://127.0.0.1:#{@feedback_port}"
     def amp_base = "http://127.0.0.1:#{@amp_port}"
+    # Its OWN listener. /delegate and /handoff on the memory port are a 404.
+    def delegate_base = "http://127.0.0.1:#{@delegate_port}"
 
     # Reads the launcher environment.
     def self.from_env(env = ENV)
@@ -40,10 +45,12 @@ module Ctxmesh
 
       mem, mem_set = port(env, "MEMORY_PORT", DEFAULT_MEMORY_PORT)
       fb, fb_set = port(env, "FEEDBACK_PORT", DEFAULT_FEEDBACK_PORT)
-      amp, = port(env, "AMP_PORT", DEFAULT_AMP_PORT)
+      # A2A_PORT is what the launcher publishes; AMP_PORT was invented.
+      amp, = port(env, "A2A_PORT", DEFAULT_AMP_PORT)
+      del, = port(env, "DELEGATE_PORT", DEFAULT_DELEGATE_PORT)
 
       new(
-        memory_port: mem, feedback_port: fb, amp_port: amp,
+        memory_port: mem, feedback_port: fb, amp_port: amp, delegate_port: del,
         agent_name: env.fetch("AGENT_NAME", "").strip,
         conversation_id: env.fetch("CONVERSATION_ID", "").strip,
         memory_wired: mem_set, feedback_wired: fb_set,

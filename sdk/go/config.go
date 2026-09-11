@@ -25,6 +25,7 @@ const (
 	defaultMemoryPort   = 2998
 	defaultFeedbackPort = 2995
 	defaultAMPPort      = 2997
+	defaultDelegatePort = 2994
 )
 
 // Config is the resolved plane for one agent process.
@@ -32,6 +33,9 @@ type Config struct {
 	MemoryPort   int
 	FeedbackPort int
 	AMPPort      int
+	// DelegatePort is its OWN listener. Sending /delegate and /handoff to the memory port is
+	// a 404, which is what all four SDKs did.
+	DelegatePort int
 
 	AgentName       string
 	AgentVersion    string
@@ -86,13 +90,19 @@ func fromEnv(look func(string) (string, bool)) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	amp, _, err := port(look, "AMP_PORT", defaultAMPPort)
+	amp, _, err := port(look, "A2A_PORT", defaultAMPPort)
+	if err != nil {
+		return nil, err
+	}
+
+	del, _, err := port(look, "DELEGATE_PORT", defaultDelegatePort)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Config{
 		MemoryPort:       mem,
+		DelegatePort:     del,
 		FeedbackPort:     fb,
 		AMPPort:          amp,
 		AgentName:        get("AGENT_NAME"),
@@ -129,3 +139,4 @@ func port(look func(string) (string, bool), name string, def int) (int, bool, er
 func (c *Config) memoryBase() string   { return fmt.Sprintf("http://127.0.0.1:%d", c.MemoryPort) }
 func (c *Config) feedbackBase() string { return fmt.Sprintf("http://127.0.0.1:%d", c.FeedbackPort) }
 func (c *Config) ampBase() string      { return fmt.Sprintf("http://127.0.0.1:%d", c.AMPPort) }
+func (c *Config) delegateBase() string { return fmt.Sprintf("http://127.0.0.1:%d", c.DelegatePort) }
