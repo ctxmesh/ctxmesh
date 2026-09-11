@@ -14,7 +14,7 @@ platform injects, so there is no API key to manage and no base URL to configure.
 <dependency>
   <groupId>ai.ctxmesh</groupId>
   <artifactId>ctxmesh</artifactId>
-  <version>0.1.0-beta.1</version>
+  <version>0.1.0-beta.4</version>
 </dependency>
 ```
 
@@ -59,4 +59,11 @@ reachable here. The managed agent loop, tool dispatch and model client are autho
 live in the Python and TypeScript SDKs. Every capability is also a plain HTTP endpoint, so this
 SDK is convenience, never a requirement.
 
-Apache-2.0.
+## Documentation
+
+- [SDK overview](https://ctxmesh.github.io/sdk/) — every language, and what each tier gives you
+- [Compatibility](https://ctxmesh.github.io/reference/compatibility/) — which SDK works with which ctxmesh
+- [Source and issues](https://github.com/ctxmesh/ctxmesh)
+
+Apache-2.0. Contributor and toolchain notes live in
+[the repository](https://github.com/ctxmesh/ctxmesh/tree/main/sdk/java).

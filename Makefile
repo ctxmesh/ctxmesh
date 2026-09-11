@@ -447,6 +447,14 @@ flow-completability: ## Assert every caller-scoped BFF write is completable by a
 sdk-contract: ## Assert the SDKs track the product — every launcher route reachable, both languages at parity, one version (M155). Static.
 	./hack/sdk-contract.sh
 
+.PHONY: sdk-readme-truth
+sdk-readme-truth: ## Assert every SDK README links the repo and pins a version that resolves (M175). Add --live to ask the registries.
+	./hack/sdk-readme-truth.sh
+
+.PHONY: bump-version
+bump-version: ## Assert every verbatim-shipped version and README pin matches CHANGELOG (M175). Pass a version to WRITE them: ./hack/bump-version.sh 0.1.0-beta.4
+	./hack/bump-version.sh --check
+
 .PHONY: release-truth
 release-truth: ## Assert the release publishes every artifact an install needs, at a version (M154). Static, no cluster.
 	./hack/release-truth.sh

@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.1.0-beta.4 — the registry pages tell the truth
+
+beta.3 published six SDKs. This release fixes what those six pages actually said, because a
+package nobody can orient themselves around is not really published.
+
+**Four SDKs never linked the project.** Go, Rust, Ruby and Java were built from a shared template
+that dropped the footer Python and TypeScript carry, so someone landing on crates.io or Maven
+Central found a package and no route back — no repository, no docs, no issue tracker. All six now
+end the same way: SDK overview, compatibility, source and issues, and a link into the SDK's own
+directory.
+
+**Java's install snippet did not work.** It pinned `0.1.0-beta.1`, which 404s on Maven Central, so
+the copy-paste install failed outright. Rust pinned the same version; Cargo resolves it through
+caret semantics, so it *worked* while telling people the wrong version — the quieter failure, and
+the one that survives longer. Both now pin the shipped version.
+
+**The cause was structural, and is closed.** [ADR 0135](https://github.com/ctxmesh/ctxmesh/blob/main/decisions)
+stamps Python and TypeScript at release; the other four ship verbatim, whatever is in the tree, and
+nothing wrote them. `hack/bump-version.sh` is now the single writer for those four manifests *and*
+the README pins, with `--check` in CI. `hack/sdk-readme-truth.sh` additionally asserts every README
+links the repository, pins a version that **actually resolves on that SDK's own registry**, and
+offers no documentation link that 404s — a live check, because Java's pin was perfectly well-formed
+and still a 404.
+
+**The docs site named two SDKs while six shipped.** Go, Rust, Ruby and Java appeared nowhere on
+ctxmesh.github.io. The SDK index now carries all six with their registries and explains the two
+tiers, and the compatibility table has six rows. Both Helm install pages had also drifted two
+releases behind and now pin the current chart.
+
+**Pre-release installs are documented because they are not uniform.** `pip install ctxmesh` takes a
+pre-release when no stable exists; `gem install ctxmesh` refuses and needs `--pre`, though a
+Gemfile's `gem "ctxmesh"` resolves it without help; npm uses the `beta` dist-tag; Maven and Cargo
+take an exact version. RubyGems publishes `0.1.0-beta.4` as `0.1.0.pre.beta.4`.
+
+Upgrading from beta.3 needs no action — no runtime behaviour changed.
+
 ## v0.1.0-beta.3 — the install stops needing a flag
 
 beta.2 made a cold install *possible*. This makes it work without the user knowing to ask.

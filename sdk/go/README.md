@@ -59,4 +59,11 @@ pull the operator's entire Kubernetes tree into an agent that wants an HTTP clie
 live in the Python and TypeScript SDKs. Every capability is also a plain HTTP endpoint, so this
 package is convenience, never a requirement.
 
-Apache-2.0.
+## Documentation
+
+- [SDK overview](https://ctxmesh.github.io/sdk/) — every language, and what each tier gives you
+- [Compatibility](https://ctxmesh.github.io/reference/compatibility/) — which SDK works with which ctxmesh
+- [Source and issues](https://github.com/ctxmesh/ctxmesh)
+
+Apache-2.0. Contributor and toolchain notes live in
+[the repository](https://github.com/ctxmesh/ctxmesh/tree/main/sdk/go).

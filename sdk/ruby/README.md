@@ -14,6 +14,13 @@ platform injects, so there is no API key to manage and no base URL to configure.
 gem "ctxmesh"
 ```
 
+Installing it directly needs `--pre` while the gem is in beta — `gem install` will not pick a
+prerelease on its own, though Bundler resolves the line above without help:
+
+```sh
+gem install ctxmesh --pre
+```
+
 ## Use it
 
 ```ruby
@@ -52,4 +59,11 @@ application that already has it.
 model client are authoring-tier and live in the Python and TypeScript SDKs. Every capability is
 also a plain HTTP endpoint, so this gem is convenience, never a requirement.
 
-Apache-2.0.
+## Documentation
+
+- [SDK overview](https://ctxmesh.github.io/sdk/) — every language, and what each tier gives you
+- [Compatibility](https://ctxmesh.github.io/reference/compatibility/) — which SDK works with which ctxmesh
+- [Source and issues](https://github.com/ctxmesh/ctxmesh)
+
+Apache-2.0. Contributor and toolchain notes live in
+[the repository](https://github.com/ctxmesh/ctxmesh/tree/main/sdk/ruby).
