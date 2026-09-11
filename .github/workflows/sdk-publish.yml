@@ -439,3 +439,54 @@ jobs:
           tag=latest
           case "${VERSION_OVERRIDE:-$GITHUB_REF_NAME}" in *-alpha*|*-beta*|*-rc*) tag=beta ;; esac
           npm publish --provenance --access public --tag "$tag"
+
+  # Go has no registry: `go get` resolves a module from a git TAG via proxy.golang.org, and for a
+  # module in a subdirectory that tag must be `sdk/go/vX.Y.Z`. Nothing created it — sdk/go/v0.1.0-beta.3
+  # was tagged by hand, so the Go SDK shipped only because someone remembered. Every other channel
+  # publishes itself; this one silently would not.
+  tag-go-module:
+    name: tag-go-module
+    needs: build-verify
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.1.7
+        with:
+          fetch-depth: 0
+      - name: Tag the Go module at ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="sdk/go/${GITHUB_REF_NAME}"
+          # Idempotent: a re-run of a release must not fail because the tag is already there.
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "$tag already exists — nothing to do."
+            exit 0
+          fi
+          # The module's own version.go must already say this version, or `go get` would hand the
+          # user a module that misreports itself — and a git tag cannot be moved once proxied.
+          want="${GITHUB_REF_NAME#v}"
+          got="$(grep -oE 'const Version = "[^"]*"' sdk/go/version.go | sed 's/.*"\(.*\)"/\1/')"
+          if [ "$got" != "$want" ]; then
+            echo "::error::sdk/go/version.go says $got but the tag is $want — refusing to publish a module that misreports itself"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "ctxmesh Go SDK ${GITHUB_REF_NAME}"
+          git push origin "$tag"
+          echo "tagged $tag"
+      - name: Prove the module proxy resolves it
+        run: |
+          set -euo pipefail
+          v="${GITHUB_REF_NAME}"
+          # The proxy fetches lazily; asking for it is what makes it index the version.
+          for i in $(seq 1 10); do
+            if curl -sf "https://proxy.golang.org/github.com/ctxmesh/ctxmesh/sdk/go/@v/$v.info" >/dev/null; then
+              echo "proxy.golang.org serves $v"; exit 0
+            fi
+            echo "attempt $i: not yet indexed, waiting"; sleep 15
+          done
+          echo "::error::proxy.golang.org never served $v — go get would fail for users"
+          exit 1
