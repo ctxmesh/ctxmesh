@@ -147,6 +147,114 @@ jobs:
   # first version is therefore published by hand, and this job is idempotent so that
   # manual publish and this one cannot collide — it skips a version already on the
   # registry rather than failing the release on a duplicate.
+  # ── crates.io ──────────────────────────────────────────────────────────────
+  # Trusted publishing: crates.io exchanges the workflow's OIDC identity for a short-lived
+  # token, so nothing long-lived is stored. It has NO pending-publisher support (RFC 3691
+  # lists it under future possibilities), so the crate was published once by hand to create
+  # it, and this took over from there.
+  publish-crates:
+    name: publish-crates
+    needs: build-verify
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: crates
+      url: https://crates.io/crates/ctxmesh
+    permissions:
+      id-token: write # OIDC — the whole point; no token in a secret
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb2c1d2b797f26dc76c936 # stable
+        with:
+          toolchain: stable
+      - name: Stamp the version from the tag
+        working-directory: sdk/rust
+        env:
+          VERSION_OVERRIDE: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          v="${VERSION_OVERRIDE:-$GITHUB_REF_NAME}"; v="${v#v}"
+          python3 - "$v" <<'PY'
+          import re, sys, pathlib
+          v = sys.argv[1]
+          p = pathlib.Path("Cargo.toml")
+          p.write_text(re.sub(r'^version = ".*"$', f'version = "{v}"', p.read_text(), count=1, flags=re.M))
+          q = pathlib.Path("src/lib.rs")
+          q.write_text(re.sub(r'^pub const VERSION: &str = ".*";$', f'pub const VERSION: &str = "{v}";', q.read_text(), count=1, flags=re.M))
+          print(f"stamped the Rust SDK at {v}")
+          PY
+      - uses: rust-lang/crates-io-auth-action@e919bc7605cde86df457cf5b93c5e103838bd879 # v1
+        id: auth
+      - name: Publish (skip if this version is already on the registry)
+        working-directory: sdk/rust
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          VERSION_OVERRIDE: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          v="${VERSION_OVERRIDE:-$GITHUB_REF_NAME}"; v="${v#v}"
+          # Idempotent, like the npm job: a manual publish and this one must not collide, and a
+          # re-run of a release must not fail on a duplicate.
+          if curl -sf -A ctxmesh-ci "https://index.crates.io/ct/xm/ctxmesh" | grep -q "\"vers\":\"$v\""; then
+            echo "ctxmesh $v is already on crates.io — nothing to do."
+            exit 0
+          fi
+          cargo publish --allow-dirty
+
+  # ── RubyGems ───────────────────────────────────────────────────────────────
+  # Skips cleanly when the trusted publisher is not configured yet, rather than failing the
+  # whole release: four SDKs publish to four registries and a missing credential on one must
+  # not take the others down.
+  publish-rubygems:
+    name: publish-rubygems
+    needs: build-verify
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: rubygems
+      url: https://rubygems.org/gems/ctxmesh
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@a2bbe5b1b236842c1cb7dd11e8e3b51e0a616acc # v1.202.0
+        with:
+          ruby-version: "3.3"
+      - name: Stamp the version from the tag
+        working-directory: sdk/ruby
+        env:
+          VERSION_OVERRIDE: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          v="${VERSION_OVERRIDE:-$GITHUB_REF_NAME}"; v="${v#v}"
+          sed -i -E "s/VERSION = \".*\"/VERSION = \"$v\"/" lib/ctxmesh/version.rb
+          grep VERSION lib/ctxmesh/version.rb
+      # configure-rubygems-credentials, not release-gem: the latter runs `rake release`, which
+      # needs a Rakefile with Bundler's gem tasks AND does its own git tagging — this repo is
+      # released by pushing a product tag, so a second tagger would fight it.
+      - uses: rubygems/configure-rubygems-credentials@daab0479595bcc124493903b3df17273d86e073f # main
+      - name: Build and push (skip if this version is already on the registry)
+        working-directory: sdk/ruby
+        env:
+          VERSION_OVERRIDE: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          v="${VERSION_OVERRIDE:-$GITHUB_REF_NAME}"; v="${v#v}"
+          # RubyGems normalises 0.1.0-beta.3 to 0.1.0.pre.beta.3, so ask the registry rather
+          # than assuming the string round-trips.
+          if gem list -r --all --prerelease ctxmesh 2>/dev/null | grep -qF "$(ruby -e 'puts Gem::Version.new(ARGV[0]).to_s' "$v")"; then
+            echo "ctxmesh $v is already on RubyGems — nothing to do."
+            exit 0
+          fi
+          gem build ctxmesh.gemspec
+          gem push ctxmesh-*.gem
+
   publish-npm:
     name: publish-npm
     needs: build-verify
