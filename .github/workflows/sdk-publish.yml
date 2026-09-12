@@ -477,16 +477,38 @@ jobs:
           git tag -a "$tag" -m "ctxmesh Go SDK ${GITHUB_REF_NAME}"
           git push origin "$tag"
           echo "tagged $tag"
-      - name: Prove the module proxy resolves it
+      # Prove what is OURS: the module at this tag is valid and fetchable from the VCS. The proxy
+      # is a third-party cache that fills on demand, and blocking the release on it is the same
+      # mistake Maven's waitUntil=published was — beta.6 tagged correctly, resolved fine with
+      # GOPROXY=direct, and still failed here because the proxy had not indexed it in 150 seconds.
+      #
+      # Worse, hammering it is counterproductive: the proxy negatively caches a miss, so ten rapid
+      # asks can delay the very availability the step is checking for.
+      - name: Prove the module at this tag is valid and fetchable
         run: |
           set -euo pipefail
           v="${GITHUB_REF_NAME}"
-          # The proxy fetches lazily; asking for it is what makes it index the version.
-          for i in $(seq 1 10); do
+          tmp="$(mktemp -d)"; cd "$tmp"
+          printf 'module releasecheck\ngo 1.23\n' > go.mod
+          # direct: straight from the VCS, no proxy, no sumdb — this is the artifact we created.
+          GOFLAGS=-mod=mod GOPROXY=direct GONOSUMDB='*' GOPRIVATE='*' GONOSUMCHECK=1 \
+            go get "github.com/ctxmesh/ctxmesh/sdk/go@$v" \
+            || { echo "::error::the module at $v does not resolve even directly — the tag is bad"; exit 1; }
+          echo "the module at $v resolves directly from the VCS"
+
+      # The proxy, best-effort. A miss here is NOT a release failure: the tag is the artifact and
+      # the proxy fills on first request. `hack/release-truth-sdks.sh` asserts the proxy at
+      # acceptance, which is the right place for a claim about what a default-configured user gets.
+      - name: Nudge the module proxy (best-effort)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          v="${GITHUB_REF_NAME}"
+          for i in 1 2 3 4 5 6; do
             if curl -sf "https://proxy.golang.org/github.com/ctxmesh/ctxmesh/sdk/go/@v/$v.info" >/dev/null; then
               echo "proxy.golang.org serves $v"; exit 0
             fi
-            echo "attempt $i: not yet indexed, waiting"; sleep 15
+            echo "attempt $i: not yet indexed"; sleep $((i * 30))
           done
-          echo "::error::proxy.golang.org never served $v — go get would fail for users"
-          exit 1
+          echo "::warning::proxy.golang.org has not indexed $v yet. The tag is correct and the module"
+          echo "::warning::resolves directly; the proxy fills on demand. release-truth-sdks.sh asserts it."
