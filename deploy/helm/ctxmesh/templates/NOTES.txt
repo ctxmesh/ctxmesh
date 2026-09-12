@@ -61,16 +61,24 @@ Console login — OIDC/SSO via Dex (m19.5, ADR 0020):
     --oidc-groups-claim=groups
   On a MANAGED cluster that can't set apiserver flags, KEEP token login (ADR 0012)
   — it stays as the fallback and is NOT a regression.
-{{- if and .Values.auth.oidc.staticUser.enabled .Values.auth.oidc.demoBinding }}
-  RBAC: a demo ClusterRoleBinding maps User "{{ .Values.auth.oidc.usernamePrefix }}{{ .Values.auth.oidc.staticUser.email }}"
-        to the operator persona. Enterprise: map real IdP groups to the personas
-        (bind the groups claim), and set auth.oidc.demoBinding=false.
-  SECURITY — MULTI-TENANT (C17): the demo binding above is CLUSTER-WIDE (single-tenant only).
-        For a multi-tenant install, bind the {operator,developer,viewer} personas PER-NAMESPACE
-        (a RoleBinding in each tenant namespace), NOT a ClusterRoleBinding. The caller-scoped authz
+{{- if .Values.auth.oidc.staticUser.enabled }}
+  RBAC: the demo user "{{ .Values.auth.oidc.usernamePrefix }}{{ .Values.auth.oidc.staticUser.email }}"
+        is RoleBound to the operator persona PER-NAMESPACE, in:
+          {{ join ", " .Values.auth.oidc.demoBindingNamespaces }}
+        A RoleBinding, NOT a ClusterRoleBinding, and that is deliberate: the caller-scoped authz
         model (ADR 0011) — incl. the tenant-wide MCP catalog read — assumes a principal's RBAC is
-        confined to its own namespaces; a cluster-wide persona binding lets one tenant enumerate
-        another's resources by passing the victim's namespace. See specs tenancy-and-quotas §C17.
+        confined to its own namespaces. A cluster-wide persona binding lets one tenant enumerate
+        another's by passing the victim's ?namespace=. See tenancy-and-quotas §C17.
+
+        YOU CAN ONLY WORK IN THE NAMESPACES LISTED ABOVE. For another, add a RoleBinding there:
+          kubectl create rolebinding ctxmesh-operator --clusterrole=ctxmesh-operator \
+            --user="{{ .Values.auth.oidc.usernamePrefix }}{{ .Values.auth.oidc.staticUser.email }}" -n <ns>
+
+        Enterprise: map real IdP groups to the personas instead of a static user.
+{{- if .Values.auth.oidc.demoBindingClusterWide }}
+  SECURITY: demoBindingClusterWide=true grants the operator persona in EVERY namespace, which breaks
+        the isolation precondition above. Single-tenant demos only.
+{{- end }}
 {{- end }}
 {{- if .Values.auth.oidc.langfuse.enabled }}
   Langfuse SSO (m19.7): Langfuse is registered as a Dex client ({{ .Values.auth.oidc.langfuse.clientId }})
