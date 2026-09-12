@@ -61,6 +61,7 @@ also a plain HTTP endpoint, so this gem is convenience, never a requirement.
 
 ## Documentation
 
+- [Ruby SDK guide](https://ctxmesh.github.io/sdk/ruby/) — the full surface, with examples
 - [SDK overview](https://ctxmesh.github.io/sdk/) — every language, and what each tier gives you
 - [Compatibility](https://ctxmesh.github.io/reference/compatibility/) — which SDK works with which ctxmesh
 - [Source and issues](https://github.com/ctxmesh/ctxmesh)
