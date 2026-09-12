@@ -7,11 +7,14 @@ Gem::Specification.new do |spec|
   spec.version = Ctxmesh::VERSION
   spec.authors = ["ctxmesh"]
 
-  spec.summary = "Ruby SDK for ctxmesh agents"
-  spec.description = "Typed clients for agents running on ctxmesh: conversation memory, " \
-                     "long-term memory, knowledge bases, skills, feedback and agent-to-agent " \
-                     "calls. Reads its endpoints from the environment the platform injects, so " \
-                     "your code never holds credentials."
+  spec.summary = "Ruby SDK for ctxmesh — the Kubernetes-native control plane for AI agents"
+  # RubyGems renders no README — this description is the whole page body, so it has to say what
+  # ctxmesh is and where the project lives, not just what the gem does.
+  spec.description = "Ruby SDK for ctxmesh, the Kubernetes-native control plane for AI agents. " \
+                     "Typed clients for conversation memory, long-term memory, knowledge bases, " \
+                     "skills, feedback, delegation and agent-to-agent calls. Reads its endpoints " \
+                     "from the environment the platform injects, so your code never holds " \
+                     "credentials. Source, docs and issues: https://github.com/ctxmesh/ctxmesh"
   spec.homepage = "https://ctxmesh.github.io"
   spec.license = "Apache-2.0"
   spec.required_ruby_version = ">= 3.1"

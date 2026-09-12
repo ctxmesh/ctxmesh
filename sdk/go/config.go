@@ -1,4 +1,6 @@
-// Package ctxmesh is the Go SDK for agents running on ctxmesh.
+// Package ctxmesh is the Go SDK for ctxmesh, the Kubernetes-native control plane for AI agents.
+//
+// Source, docs and issues: https://github.com/ctxmesh/ctxmesh
 //
 // An agent runs in a pod beside the platform's sidecars, and this package is the typed way to
 // reach them over localhost: conversation memory, long-term memory, tools, knowledge bases,

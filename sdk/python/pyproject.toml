@@ -19,7 +19,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ctxmesh"
 version = "0.1.0-beta.1"
-description = "Python SDK for ctxmesh agents — typed clients for memory, tools, knowledge, model calls and feedback, plus OpenTelemetry step tracing. Reads its endpoints from the environment the platform injects, so your code never holds credentials."
+description = "Python SDK for ctxmesh, the Kubernetes-native control plane for AI agents. Typed clients for memory, tools, knowledge, model calls and feedback, plus OpenTelemetry step tracing. Reads its endpoints from the environment the platform injects, so your code never holds credentials. Source, docs and issues: https://github.com/ctxmesh/ctxmesh"
 readme = "README.md"
 # 3.9 is the floor because the agent base image still ships it; the classifiers below
 # state the range actually supported. A library that claims only 3.9 reads as abandoned to
