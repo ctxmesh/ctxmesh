@@ -14,7 +14,7 @@ platform injects, so there is no API key to manage and no base URL to configure.
 <dependency>
   <groupId>ai.ctxmesh</groupId>
   <artifactId>ctxmesh</artifactId>
-  <version>0.1.0-beta.5</version>
+  <version>0.1.0-beta.6</version>
 </dependency>
 ```
 
@@ -61,6 +61,7 @@ SDK is convenience, never a requirement.
 
 ## Documentation
 
+- [Java SDK guide](https://ctxmesh.github.io/sdk/java/) — the full surface, with examples
 - [SDK overview](https://ctxmesh.github.io/sdk/) — every language, and what each tier gives you
 - [Compatibility](https://ctxmesh.github.io/reference/compatibility/) — which SDK works with which ctxmesh
 - [Source and issues](https://github.com/ctxmesh/ctxmesh)

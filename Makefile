@@ -455,6 +455,10 @@ sdk-readme-truth: ## Assert every SDK README links the repo and pins a version t
 bump-version: ## Assert every verbatim-shipped version and README pin matches CHANGELOG (M175). Pass a version to WRITE them: ./hack/bump-version.sh 0.1.0-beta.4
 	./hack/bump-version.sh --check
 
+.PHONY: release-truth-sdks
+release-truth-sdks: ## Ask all 7 published artifacts what version they actually serve (M176). VERSION=<x.y.z>, defaults to CHANGELOG.
+	./hack/release-truth-sdks.sh $(VERSION)
+
 .PHONY: release-truth
 release-truth: ## Assert the release publishes every artifact an install needs, at a version (M154). Static, no cluster.
 	./hack/release-truth.sh

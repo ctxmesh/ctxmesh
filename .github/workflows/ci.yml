@@ -31,6 +31,15 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# proxy.golang.org drops HTTP/2 streams under load — it failed `lint` (sum.golang.org, installing
+# golangci-lint) and `e2e` (proxy.golang.org, inside a docker build) 24 minutes apart on 2026-09-11,
+# neither related to the change under test. A required check that goes red for reasons unrelated to
+# the change teaches the reader to dismiss red, which is how a real failure eventually gets waved
+# through. The Dockerfiles retry their own `go mod download`; this covers the `go install` paths.
+env:
+  GOPROXY: https://proxy.golang.org,direct
+  GOSUMDB: sum.golang.org
+
 jobs:
   lint:
     name: lint

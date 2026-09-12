@@ -273,7 +273,7 @@ jobs:
     needs: build-verify
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     environment:
       name: maven
       url: https://central.sonatype.com/artifact/ai.ctxmesh/ctxmesh
