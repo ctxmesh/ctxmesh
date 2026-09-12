@@ -2,7 +2,7 @@
   "name": "ctxmesh",
   "version": "0.1.0-beta.1",
   "license": "Apache-2.0",
-  "description": "TypeScript SDK for ctxmesh agents \u2014 typed clients for memory, tools, knowledge, model calls and feedback, plus OpenTelemetry step tracing. Reads its endpoints from the environment the platform injects, so your code never holds credentials.",
+  "description": "TypeScript SDK for ctxmesh, the Kubernetes-native control plane for AI agents. Typed clients for memory, tools, knowledge, model calls and feedback, plus OpenTelemetry step tracing. Reads its endpoints from the environment the platform injects, so your code never holds credentials. Source, docs and issues: https://github.com/ctxmesh/ctxmesh",
   "type": "module",
   "packageManager": "pnpm@9.15.0",
   "engines": {

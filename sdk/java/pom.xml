@@ -6,11 +6,11 @@
 
   <groupId>ai.ctxmesh</groupId>
   <artifactId>ctxmesh</artifactId>
-  <version>0.1.0-beta.4</version>
+  <version>0.1.0-beta.5</version>
   <packaging>jar</packaging>
 
   <name>ctxmesh</name>
-  <description>Java SDK for ctxmesh agents — typed clients for memory, tools, knowledge, feedback and agent-to-agent calls. Reads its endpoints from the environment the platform injects, so your code never holds credentials.</description>
+  <description>Java SDK for ctxmesh, the Kubernetes-native control plane for AI agents. Typed clients for memory, knowledge, skills, feedback, delegation and agent-to-agent calls. Reads its endpoints from the environment the platform injects, so your code never holds credentials. Source, docs and issues: https://github.com/ctxmesh/ctxmesh</description>
   <url>https://ctxmesh.github.io</url>
 
   <licenses>

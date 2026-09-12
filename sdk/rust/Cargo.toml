@@ -1,10 +1,10 @@
 [package]
 name = "ctxmesh"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 edition = "2021"
 rust-version = "1.75"
 license = "Apache-2.0"
-description = "Rust SDK for ctxmesh agents — typed clients for memory, tools, knowledge, feedback and agent-to-agent calls. Reads its endpoints from the environment the platform injects, so your code never holds credentials."
+description = "Rust SDK for ctxmesh, the Kubernetes-native control plane for AI agents. Typed clients for memory, knowledge, skills, feedback, delegation and agent-to-agent calls. Reads its endpoints from the environment the platform injects, so your code never holds credentials. Source, docs and issues: https://github.com/ctxmesh/ctxmesh"
 homepage = "https://ctxmesh.github.io"
 repository = "https://github.com/ctxmesh/ctxmesh"
 documentation = "https://docs.rs/ctxmesh"

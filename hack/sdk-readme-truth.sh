@@ -53,6 +53,22 @@ pin_for() {
   esac
 }
 
+# The DESCRIPTION field, which is a different surface from the README and on two registries is the
+# ONLY one. rubygems.org and Maven Central render no README at all — their page body is the gem
+# description / POM <description>. So a README footer, however good, is invisible there: measured
+# 2026-09-12, rubygems.org/gems/ctxmesh showed zero of it. A reader saw "typed clients for agents
+# running on ctxmesh" and had no way to learn what ctxmesh is or where it lives.
+description_of() {
+  case "$1" in
+    python)     grep -m1 '^description = ' sdk/python/pyproject.toml ;;
+    typescript) python3 -c 'import json;print(json.load(open("sdk/typescript/package.json"))["description"])' ;;
+    rust)       grep -m1 '^description = ' sdk/rust/Cargo.toml ;;
+    ruby)       sed -n '/spec.description/,/^$/p' sdk/ruby/ctxmesh.gemspec ;;
+    java)       python3 -c 'import re;s=open("sdk/java/pom.xml").read();m=re.search(r"<description>(.*?)</description>",s,re.S);print(m.group(1) if m else "")' ;;
+    go)         sed -n '1,12p' sdk/go/config.go ;;
+  esac
+}
+
 echo "product version: $product"
 for d in $SDKS; do
   f="sdk/$d/README.md"
@@ -68,7 +84,14 @@ for d in $SDKS; do
     bad "$d README never links $REPO — someone landing on the registry page cannot find the project"
   fi
 
-  # (b) If it pins a version, that version must be the one being shipped.
+  # (b) The description must orient a stranger too — it is the whole page on two registries.
+  if description_of "$d" 2>/dev/null | grep -q "$REPO"; then
+    ok "$d description references the repository"
+  else
+    bad "$d description never mentions $REPO — on rubygems.org and Maven Central the description IS the page, and no README is rendered there"
+  fi
+
+  # (c) If it pins a version, that version must be the one being shipped.
   pin="$(pin_for "$d" "$f")"
   if [ -n "$pin" ]; then
     if [ "$pin" = "$product" ]; then
