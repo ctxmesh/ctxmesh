@@ -128,4 +128,51 @@ sys.exit(1 if bad else 0)
 PY
 ok "the durable run path (bff.runStore.enabled=true) consumes nothing the chart does not create"
 
+# N. The demo login must be able to complete the flow the console advertises.
+#
+# Found from a real install (M177): with the demo login on, the chart bound ONLY
+# ctxmesh-operator — which grants no rule on secrets. Connect provider must create a Secret to hold
+# the provider key, so the console's flagship onboarding flow rendered a "you have read-only access
+# here" note on a stock install. The persona is deliberately secret-less (an operator must not READ
+# tenant credentials), so the fix is a separate write-only credential role bound alongside it.
+#
+# Asserted on the RENDER: if the demo user is bound to a persona in a namespace, that same namespace
+# must also get a binding that can create secrets. A grant the console offers and the RBAC refuses is
+# the defect class this whole gate exists for.
+DEMO="$(mktemp)"; trap 'rm -f "$RENDER" "$PROD" "$DEMO"' EXIT
+helm template ctxmesh "$CHART" -n ctxmesh \
+  --set auth.oidc.enabled=true --set auth.oidc.staticUser.enabled=true > "$DEMO" 2>/dev/null \
+  || fail "the demo-login render does not template"
+
+python3 - "$DEMO" <<'PY2'
+import re, sys
+docs = open(sys.argv[1]).read().split("\n---\n")
+persona, creds = {}, {}
+for d in docs:
+    if "kind: RoleBinding" not in d:
+        continue
+    ns = (re.search(r'^\s*namespace:\s*(\S+)', d, re.M) or [None, None])[1]
+    role = (re.search(r'roleRef:(?:.|\n)*?name:\s*(\S+)', d) or [None, None])[1]
+    if not ns or not role:
+        continue
+    if role.endswith("-operator") or role.endswith("-developer"):
+        persona.setdefault(ns, []).append(role)
+    if "credential" in role:
+        creds.setdefault(ns, []).append(role)
+
+missing = [ns for ns in persona if ns not in creds]
+if missing:
+    print("FAIL: the demo login is bound to a console persona in namespaces that cannot create", file=sys.stderr)
+    print("      secrets, so Connect provider renders read-only on a stock install:", file=sys.stderr)
+    for ns in sorted(missing):
+        print(f"        {ns}: {persona[ns]} with no credential role", file=sys.stderr)
+    sys.exit(1)
+if not persona:
+    print("FAIL: the demo render bound no console persona at all — the assertion checked nothing",
+          file=sys.stderr)
+    sys.exit(1)
+print(f"  ok: every demo-bound namespace ({', '.join(sorted(persona))}) can also store a credential")
+PY2
+[ "$?" = "0" ] || exit 1
+
 echo "PASS: the chart provisions what it consumes"
