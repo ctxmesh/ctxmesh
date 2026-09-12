@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.1.0-beta.5 — the description says what ctxmesh is, and where it lives
+
+beta.4 fixed the SDK READMEs. That was the wrong surface for two of the six registries, and this
+release finishes the job.
+
+**rubygems.org and Maven Central render no README at all.** Their page body is the gem
+`description` / POM `<description>`, so the footer added in beta.4 was invisible there — measured on
+the published beta.4 gem, `rubygems.org/gems/ctxmesh` showed none of it. A reader saw "typed clients
+for agents running on ctxmesh", with no way to learn what ctxmesh *is* or where the project lives.
+The repository link existed only in a sidebar list.
+
+**None of the six descriptions mentioned the repository, and none said what ctxmesh is.** Every one
+now opens with "SDK for ctxmesh, the Kubernetes-native control plane for AI agents" and ends with
+`Source, docs and issues: https://github.com/ctxmesh/ctxmesh`. Go's package doc — what pkg.go.dev
+renders — says the same.
+
+**The gate was blind in the same place.** `hack/sdk-readme-truth.sh` checked READMEs, which is why
+beta.4 passed it while two registry pages still told a visitor nothing. It now also asserts every
+package's *description* references the repository, and was proven by removing the reference and
+watching it fail.
+
+Upgrading from beta.4 needs no action — metadata only, no code changed.
+
 ## v0.1.0-beta.4 — the registry pages tell the truth
 
 beta.3 published six SDKs. This release fixes what those six pages actually said, because a
