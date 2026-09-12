@@ -673,6 +673,17 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "workflow")
 		os.Exit(1)
 	}
+	// Namespace EXISTENCE mirror (M177): the console cannot enumerate namespaces for a caller bound
+	// per-namespace, and the tenant mirror below is empty on a tenancy-less install — which left a
+	// stock install's console read-only for every non-cluster-admin. See
+	// migrations/0027_console_namespaces.sql.
+	if err := (&controller.NamespaceDiscoveryReconciler{
+		Client:          mgr.GetClient(),
+		NamespaceTenant: namespacetenant.NewPostgresStore(cpDB),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "namespacediscovery")
+		os.Exit(1)
+	}
 	if err := (&controller.TenantReconciler{
 		Client: mgr.GetClient(),
 		// Namespace→tenant membership mirror (m73.3, ADR 0067 §6): the reconcile mirrors the tenant's
