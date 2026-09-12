@@ -1233,6 +1233,11 @@ spec:
           requests:
             cpu: 50m
             memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
         startupProbe:
           failureThreshold: 90
           httpGet:
@@ -1243,6 +1248,13 @@ spec:
         - mountPath: /etc/litellm
           name: gateway-config
           readOnly: true
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
       terminationGracePeriodSeconds: 10
       volumes:
       - configMap:
