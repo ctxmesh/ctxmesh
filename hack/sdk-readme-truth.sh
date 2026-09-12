@@ -91,6 +91,18 @@ for d in $SDKS; do
     bad "$d description never mentions $REPO — on rubygems.org and Maven Central the description IS the page, and no README is rendered there"
   fi
 
+  # (b2) npm SILENTLY TRUNCATES a description at 255 characters. A 342-char one published as 255,
+  # cut mid-word, losing the repo URL that was at the end — and every local check passed, because
+  # the file was fine. Only the registry knew. Checked here so the trailing reference survives.
+  if [ "$d" = "typescript" ]; then
+    len="$(python3 -c 'import json;print(len(json.load(open("sdk/typescript/package.json"))["description"]))')"
+    if [ "$len" -le 255 ]; then
+      ok "typescript description is ${len} chars (npm truncates above 255)"
+    else
+      bad "typescript description is ${len} chars — npm truncates at 255 and would cut off the repo URL at the end"
+    fi
+  fi
+
   # (c) If it pins a version, that version must be the one being shipped.
   pin="$(pin_for "$d" "$f")"
   if [ -n "$pin" ]; then
