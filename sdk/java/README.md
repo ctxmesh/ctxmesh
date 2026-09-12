@@ -14,7 +14,7 @@ platform injects, so there is no API key to manage and no base URL to configure.
 <dependency>
   <groupId>ai.ctxmesh</groupId>
   <artifactId>ctxmesh</artifactId>
-  <version>0.1.0-beta.5</version>
+  <version>0.1.0-beta.6</version>
 </dependency>
 ```
 

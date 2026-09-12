@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.1.0-beta.6 — the release reports itself
+
+The first release verified by a gate instead of by hand.
+
+**One command now answers "what actually got published?"** `hack/release-truth-sdks.sh` asks all six
+registries plus the chart and fails on anything absent. [ADR 0139](https://github.com/ctxmesh/ctxmesh/blob/main/decisions)
+asked for this after beta.2 shipped 8 of 9 artifacts and it was never built; establishing the truth
+took six manual queries as recently as beta.5. Two things made it harder than a loop over six URLs:
+every ecosystem spells the version differently (`0.1.0b6` on PyPI, `0.1.0.pre.beta.6` on RubyGems),
+and a registry can answer 200 and still be wrong, so each probe asserts the **version**, not the
+package.
+
+**CI stops failing on someone else's outage.** `proxy.golang.org` drops HTTP/2 streams under load and
+took down two different required jobs 24 minutes apart during beta.5, neither related to the change
+under test. All 11 Dockerfiles now retry `go mod download`, and the `go install` paths get a
+workflow-level `GOPROXY`. The cost was never the re-runs — a required check that goes red for
+unrelated reasons teaches you to dismiss red.
+
+**Maven no longer blocks on Central's queue.** The publish job waited for full publication, which took
+14 minutes for beta.4 and was still waiting at 25 for beta.5, where the job timeout killed it *after*
+the bundle had uploaded successfully. It now waits only for validation — which still fails on a bad
+signature, a missing javadoc or a malformed POM — and Central publishes on its own schedule.
+
+**npm silently truncates a description at 255 characters.** The TypeScript description was 342, so it
+published cut mid-word, losing the repository URL at the end. Every local check passed because the
+file was correct; only the registry knew.
+
+**The four plane-client SDKs have documentation.** `/sdk/go/`, `/sdk/rust/`, `/sdk/ruby/` and
+`/sdk/java/` were all 404 — four SDKs on public registries with no guide. Each page is written
+against that SDK's real exported surface and states plainly what the plane-client tier does not
+include.
+
+**The public site can no longer drift unnoticed.** A new harness gate asserts every version named in
+an install command is installable — it runs at *release*, not on the docs deploy path, so a registry
+hiccup cannot block a docs deploy. It immediately found the install pages pinning a chart a release
+behind.
+
+Also: `npm install ctxmesh` still resolves to an older build than other ecosystems, and that is now a
+recorded decision rather than an oversight — npm's OIDC trusted publishing cannot move a dist-tag,
+and the token it would need cannot be scoped to that one operation. See ADR 0140. It self-heals at
+the first stable release.
+
+Upgrading from beta.5 needs no action — release tooling and documentation only, no runtime change.
+
 ## v0.1.0-beta.5 — the description says what ctxmesh is, and where it lives
 
 beta.4 fixed the SDK READMEs. That was the wrong surface for two of the six registries, and this
