@@ -3554,8 +3554,17 @@ export const api = {
   // listProviders lists the already-connected providers (names/models, NO
   // secrets). Drives the dashboard empty-state decision ([] ⇒ show the CTA) and
   // the connect wizard's "already connected" awareness. A 404 = the kill-switch.
-  listProviders: (signal?: AbortSignal) =>
-    getJSON<ProviderListResponse>("/api/providers", signal),
+  //
+  // The namespace is required in practice even though the parameter is optional: without it the
+  // BFF lists ModelRoutes cluster-wide, which a caller bound per-namespace — the shape the chart
+  // ships — cannot do, so the call 403s. Pass `workingNamespace`. Omitting it made the Providers
+  // page and the entire first-run checklist unreachable on a correct install, because a 403
+  // leaves the dashboard's `gateReady` false forever (M177).
+  listProviders: (namespace?: string, signal?: AbortSignal) =>
+    getJSON<ProviderListResponse>(
+      `/api/providers${namespace ? `?namespace=${encodeURIComponent(namespace)}` : ""}`,
+      signal,
+    ),
 
   // connectProvider validates the pasted key server-side and creates the
   // Secret + SecretBinding + ModelRoute (caller-scoped, ADR 0015). The response
