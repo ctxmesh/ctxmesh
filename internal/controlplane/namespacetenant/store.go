@@ -51,6 +51,17 @@ type Store interface {
 	// would make this a namespace-existence oracle across tenants.
 	AllNamespaces(ctx context.Context) ([]string, error)
 
+	// RecordNamespace notes that a namespace EXISTS, independent of any tenant. The Tenant controller
+	// only ever writes namespaces that belong to a Tenant, and tenancy is opt-in — so on a stock
+	// install AllNamespaces returned nothing and the console could not enumerate a single namespace
+	// (0027_console_namespaces.sql). Membership here confers NO authority: it widens the candidate
+	// set the BFF then filters with a caller-scoped SSAR, nothing more.
+	RecordNamespace(ctx context.Context, namespace string) error
+
+	// ForgetNamespace drops the discovery row for a deleted namespace. It must not touch tenant
+	// attribution — that is the Tenant controller's to converge.
+	ForgetNamespace(ctx context.Context, namespace string) error
+
 	// TenantOf returns the tenant that owns the namespace, and whether a row exists.
 	TenantOf(ctx context.Context, namespace string) (tenant string, ok bool, err error)
 

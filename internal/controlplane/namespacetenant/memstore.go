@@ -28,6 +28,10 @@ import (
 type memStore struct {
 	mu   sync.RWMutex
 	data map[string]string // namespace → tenant
+	// discovered holds namespaces the controller has SEEN, independent of tenancy. It exists because
+	// the tenant map is empty on a tenancy-less install, which left the console unable to enumerate
+	// any namespace at all (0027_console_namespaces.sql). It grants nothing.
+	discovered map[string]struct{}
 	// hardCap tracks the per-tenant at-storage-hard-cap flag (m80.3). Only tenants at their hard cap
 	// have an entry (true); a tenant under cap / with no hard cap has no entry (⇒ not exceeded).
 	hardCap map[string]bool // tenant → at-hard-cap
@@ -84,15 +88,46 @@ func (s *memStore) DeleteTenant(_ context.Context, tenant string) error {
 }
 
 // AllNamespaces returns every mirrored namespace, across all tenants, sorted ascending.
+// AllNamespaces unions tenant-attributed namespaces with discovery-only ones, matching the pg
+// store. Without the union a tenancy-less install enumerates nothing — the defect 0027 documents.
 func (s *memStore) AllNamespaces(_ context.Context) ([]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]string, 0, len(s.data))
+	seen := make(map[string]struct{}, len(s.data)+len(s.discovered))
 	for ns := range s.data {
+		seen[ns] = struct{}{}
+	}
+	for ns := range s.discovered {
+		seen[ns] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for ns := range seen {
 		out = append(out, ns)
 	}
 	slices.Sort(out)
 	return out, nil
+}
+
+// RecordNamespace notes a namespace exists, independent of tenancy.
+func (s *memStore) RecordNamespace(_ context.Context, namespace string) error {
+	if namespace == "" {
+		return fmt.Errorf("namespacetenant: namespace is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.discovered == nil {
+		s.discovered = map[string]struct{}{}
+	}
+	s.discovered[namespace] = struct{}{}
+	return nil
+}
+
+// ForgetNamespace drops the discovery entry; tenant attribution is left alone.
+func (s *memStore) ForgetNamespace(_ context.Context, namespace string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.discovered, namespace)
+	return nil
 }
 
 func (s *memStore) MembersOf(_ context.Context, tenant string) ([]string, error) {

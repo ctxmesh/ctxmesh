@@ -166,6 +166,33 @@ subjects:
   - apiGroup: rbac.authorization.k8s.io
     kind: User
     name: "{{ $oidc.usernamePrefix }}{{ $oidc.staticUser.email }}"
+---
+# Credential-admin, bound ALONGSIDE the persona and scoped to the SAME namespaces.
+#
+# Connect provider must create a Secret to hold the key, and ctxmesh-operator grants no rule on
+# secrets — so on a stock install the console's flagship onboarding flow was disabled, reporting
+# "you have read-only access here". The persona roles are deliberately secret-LESS (an operator
+# must not be able to READ tenant credentials), so the fix is this separate write-only role rather
+# than widening the persona:
+#   ctxmesh-credential-admin = secrets {create, update, delete}, and NO get/list.
+# A holder can store and rotate a provider key; they can never read one back out.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: {{ $.Release.Service }}
+    app.kubernetes.io/name: ctxmesh
+    control-plane: dex
+  name: ctxmesh-dex-demo-credentials
+  namespace: {{ $ns }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ctxmesh-credential-admin
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: "{{ $oidc.usernamePrefix }}{{ $oidc.staticUser.email }}"
 {{- end }}
 {{- if $oidc.demoBindingClusterWide }}
 ---

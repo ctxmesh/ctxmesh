@@ -141,8 +141,16 @@ func (s *pgStore) MembersOf(ctx context.Context, tenant string) ([]string, error
 // NOT an error — it returns ("", false, nil).
 // AllNamespaces returns every mirrored namespace, across all tenants.
 func (s *pgStore) AllNamespaces(ctx context.Context) ([]string, error) {
+	// UNION, not just namespace_tenants. That table is written only by the Tenant controller, and
+	// tenancy is opt-in — so on a stock install it is EMPTY and this returned nothing, which left
+	// the console's picker empty and every flow reading read-only (see 0027_console_namespaces.sql).
+	// console_namespaces carries no authority; the caller-scoped SSAR in the BFF is still the gate.
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT DISTINCT namespace FROM namespace_tenants ORDER BY namespace ASC`)
+		`SELECT namespace FROM (
+		     SELECT namespace FROM namespace_tenants
+		     UNION
+		     SELECT namespace FROM console_namespaces
+		 ) AS all_ns ORDER BY namespace ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("namespacetenant: list all namespaces: %w", err)
 	}
@@ -260,4 +268,33 @@ func (s *pgStore) EndUserIdentityForNamespace(ctx context.Context, namespace str
 	cfg.Scopes = splitNonEmpty(scopesJoined)
 	cfg.AllowedHosts = splitNonEmpty(hostsJoined)
 	return cfg, true, nil
+}
+
+// RecordNamespace notes that a namespace exists, independent of any tenant. Idempotent: the
+// controller calls it on every namespace reconcile, so the common path is a no-op touch.
+func (s *pgStore) RecordNamespace(ctx context.Context, namespace string) error {
+	if namespace == "" {
+		return fmt.Errorf("namespacetenant: namespace is required")
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO console_namespaces (namespace) VALUES ($1)
+		 ON CONFLICT (namespace) DO UPDATE SET updated_at = now()`, namespace)
+	if err != nil {
+		return fmt.Errorf("namespacetenant: record namespace: %w", err)
+	}
+	return nil
+}
+
+// ForgetNamespace drops the discovery row for a deleted namespace. It deliberately does NOT touch
+// namespace_tenants — tenant membership is the Tenant controller's to converge, and deleting a row
+// it owns from here would race its reconcile.
+func (s *pgStore) ForgetNamespace(ctx context.Context, namespace string) error {
+	if namespace == "" {
+		return fmt.Errorf("namespacetenant: namespace is required")
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM console_namespaces WHERE namespace = $1`, namespace); err != nil {
+		return fmt.Errorf("namespacetenant: forget namespace: %w", err)
+	}
+	return nil
 }
