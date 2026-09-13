@@ -25,9 +25,28 @@ spec:
         control-plane: gateway
         app.kubernetes.io/name: ctxmesh
     spec:
+      # PodSecurity `restricted` compliance (M177). The namespace ENFORCES `baseline` and only
+      # warns/audits at `restricted`, so this shipped as a warning on every reconcile rather than a
+      # rejection — which is exactly why it survived: nothing failed, it only logged.
+      #
+      # runAsUser is EXPLICIT because the upstream image's USER is root (verified by `id` in the
+      # running container: uid=0). `runAsNonRoot: true` alone refuses to start the pod with
+      # "container has runAsNonRoot and image will run as root".
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: litellm
           image: ghcr.io/berriai/litellm:v1.91.0
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           args:
             - --config
             - /etc/litellm/config.yaml
