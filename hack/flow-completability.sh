@@ -21,6 +21,8 @@
 # the fifth flow cannot be discovered by a user in production.
 set -euo pipefail
 
+CHART="${CHART:-deploy/helm/ctxmesh}"
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BFF="$ROOT/internal/bff"
 RBAC="$ROOT/config/rbac"
@@ -65,13 +67,52 @@ for path in sorted(glob.glob(os.path.join(rbac_dir, "*.yaml"))):
             continue
         for rule in doc.get("rules") or []:
             if res in (rule.get("resources") or []) and verb in (rule.get("verbs") or []):
-                print(doc["metadata"]["name"]); raise SystemExit
+                # EVERY granting role, not the first. Several personas may grant the same verb
+                # (networkpolicies is on both developer and operator), and stopping at the first
+                # made the binding check below report "nobody is bound" while the demo user held a
+                # DIFFERENT role that grants it — a false positive, which is worse than no gate.
+                print(doc["metadata"]["name"])
+                break
 PY
 )"
   if [ -z "$holder" ]; then
     bad "no shipped role grants '$verb $res' — the console flows that need it are uncompletable by every persona"
+    continue
+  fi
+
+  # A role that grants it is NOT enough, and assuming otherwise is how this gate passed while the
+  # defect it was built for shipped again (M177). `credential-admin` granted `secrets: create` the
+  # whole time and the chart bound NOBODY to it, so Connect provider rendered "you have read-only
+  # access here" on a stock install while this gate printed "ok". Capability existing and capability
+  # being REACHABLE are different claims, and only the second one is what a user experiences.
+  bound="$(python3 - "$CHART" $holder <<'PY2'
+import subprocess, sys, yaml
+chart, holders = sys.argv[1], set(sys.argv[2:])
+out = subprocess.run(
+    ["helm", "template", "ctxmesh", chart, "-n", "ctxmesh",
+     "--set", "auth.oidc.enabled=true", "--set", "auth.oidc.staticUser.enabled=true"],
+    capture_output=True, text=True).stdout
+for doc in yaml.safe_load_all(out):
+    if not doc or doc.get("kind") not in ("RoleBinding", "ClusterRoleBinding"):
+        continue
+    # kustomize stamps a `ctxmesh-` namePrefix on the rendered chart, so the raw config/rbac name
+    # ("credential-admin") and the rendered roleRef ("ctxmesh-credential-admin") never match
+    # literally. Comparing them naively made this check fail on a binding that is actually present.
+    ref = (doc.get("roleRef") or {}).get("name") or ""
+    if ref not in holders and ref.removeprefix("ctxmesh-") not in holders:
+        continue
+    for sub in doc.get("subjects") or []:
+        # A ServiceAccount subject is the platform binding itself, not a person reaching a flow.
+        if sub.get("kind") in ("User", "Group"):
+            ns = doc["metadata"].get("namespace", "cluster-wide")
+            print(f"{doc['metadata']['name']} ({ns})")
+            raise SystemExit
+PY2
+)"
+  if [ -z "$bound" ]; then
+    bad "roles granting '$verb $res' exist but the chart binds NO user or group to any of them — the flow is uncompletable on a stock install even though the permission exists"
   else
-    echo "  ok: $verb $res -> ClusterRole/$holder"
+    echo "  ok: $verb $res -> bound by $bound"
   fi
 done
 
