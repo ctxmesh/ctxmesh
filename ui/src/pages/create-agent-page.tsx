@@ -218,6 +218,7 @@ export function CreateAgentPage() {
 // install that 404s /api/providers still reaches the form.
 function ProviderGate({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
+  const { workingNamespace } = useNamespace();
   const [state, setState] = React.useState<
     { kind: "loading" } | { kind: "gate" } | { kind: "ok" }
   >({ kind: "loading" });
@@ -225,7 +226,7 @@ function ProviderGate({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     const controller = new AbortController();
     api
-      .listProviders(controller.signal)
+      .listProviders(workingNamespace, controller.signal)
       .then((res: { providers: ProviderSummary[] }) => {
         if (controller.signal.aborted) return;
         setState(
@@ -237,7 +238,7 @@ function ProviderGate({ children }: { children: React.ReactNode }) {
         if (!controller.signal.aborted) setState({ kind: "ok" });
       });
     return () => controller.abort();
-  }, []);
+  }, [workingNamespace]);
 
   if (state.kind === "loading") {
     // §7 A4: the panel shows shaped skeleton text, never a spinner or a
@@ -399,6 +400,7 @@ const EXAMPLE_PROMPTS = [
 ];
 
 function DescribeFlow({ onBack }: { onBack: () => void }) {
+  const { workingNamespace } = useNamespace();
   const [description, setDescription] = React.useState("");
   const [model, setModel] = React.useState("");
   const [stage, setStage] = React.useState<DescribeStage>({ kind: "prompt" });
@@ -413,7 +415,7 @@ function DescribeFlow({ onBack }: { onBack: () => void }) {
   React.useEffect(() => {
     const controller = new AbortController();
     api
-      .listProviders(controller.signal)
+      .listProviders(workingNamespace, controller.signal)
       .then((res) => {
         if (controller.signal.aborted) return;
         setProviders(res.providers);
@@ -422,7 +424,7 @@ function DescribeFlow({ onBack }: { onBack: () => void }) {
         /* the gate already handled a hard failure; a soft miss just hides the dropdown */
       });
     return () => controller.abort();
-  }, []);
+  }, [workingNamespace]);
 
   // Every model across the connected providers (id → provider). The dropdown
   // only renders when there's a real choice (>1 model), matching the wireframe.
@@ -1221,6 +1223,7 @@ function ConfigureFlow({
   // Seed a MANAGED agent (the aha default — no Docker build); the user can flip
   // to a custom image in step 1. Reuses the shared ConfigForm model + validate +
   // toAgentYAML (NOT rewritten) — the tools are picked at the shared review.
+  const { workingNamespace } = useNamespace();
   const [seed] = React.useState<ConfigForm>(() => ({
     ...emptyForm(),
     runtime: "managed",
@@ -1255,7 +1258,7 @@ function ConfigureFlow({
         /* soft miss: fall back to a free-text route */
       });
     api
-      .listProviders(c.signal)
+      .listProviders(workingNamespace, c.signal)
       .then((r) => {
         if (c.signal.aborted) return;
         const flat = (r.items ?? []).flatMap((p) =>
@@ -1298,7 +1301,7 @@ function ConfigureFlow({
         /* soft miss: the prompt picker just stays hidden */
       });
     return () => c.abort();
-  }, [initialProvider]);
+  }, [initialProvider, workingNamespace]);
 
   function set<K extends keyof ConfigForm>(key: K, value: ConfigForm[K]) {
     setForm((f) => ({ ...f, [key]: value }));

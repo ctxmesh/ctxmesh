@@ -68,7 +68,7 @@ function installFetch(opts: Setup = {}) {
           flows: flowsFor(opts.caps ?? OPERATOR),
         });
 
-      if (url === "/api/providers" && method === "GET") {
+      if (url.split("?")[0] === "/api/providers" && method === "GET") {
         const status = opts.providersStatus ?? 200;
         if (status >= 400) return j({ error: "unavailable" }, false, status);
         return j(

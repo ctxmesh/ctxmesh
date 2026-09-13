@@ -47,7 +47,7 @@ function recordingFetch(opts: {
       if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
       if (url.startsWith("/api/capabilities"))
         return j({ namespace: "", allowed: opts.caps ?? { agentdeployments: { create: true } } });
-      if (url === "/api/providers" && method === "GET")
+      if (url.split("?")[0] === "/api/providers" && method === "GET")
         return j({ providers: opts.providers ?? [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4"], secretName: "anthropic", ready: true }] });
       if (url === "/api/tools")
         return j({ tools: opts.tools ?? [] });
@@ -487,7 +487,7 @@ describe("CreateAgentPage — refine chat + draft lifecycle (m71.4/m71.5)", () =
         if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
         if (url.startsWith("/api/capabilities"))
           return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
-        if (url === "/api/providers" && method === "GET")
+        if (url.split("?")[0] === "/api/providers" && method === "GET")
           return j({ providers: [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4"], secretName: "s", ready: true }] });
         if (url === "/api/tools")
           return j({ tools: [] });
@@ -694,7 +694,7 @@ describe("CreateAgentPage — m72.1 smart defaults", () => {
         if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
         if (url.startsWith("/api/capabilities"))
           return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
-        if (url === "/api/providers" && method === "GET")
+        if (url.split("?")[0] === "/api/providers" && method === "GET")
           return j({ providers: [providerEntry], items: [providerEntry] });
         if (url === "/api/tools") return j({ tools: [] });
         if (url.startsWith("/api/modelroutes")) return j({ items: [] });
@@ -788,7 +788,7 @@ describe("CreateAgentPage — m72.3 check-requirements checklist (advisory)", ()
         if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
         if (url.startsWith("/api/capabilities"))
           return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
-        if (url === "/api/providers" && method === "GET")
+        if (url.split("?")[0] === "/api/providers" && method === "GET")
           return j({ providers: [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4-6"], secretName: "s", ready: true }] });
         if (url === "/api/tools") return j({ tools: [] });
         if (url === "/api/agents/generate" && method === "POST")
@@ -875,7 +875,7 @@ describe("CreateAgentPage — m72.5 recipe gallery", () => {
         if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
         if (url.startsWith("/api/capabilities"))
           return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
-        if (url === "/api/providers" && method === "GET")
+        if (url.split("?")[0] === "/api/providers" && method === "GET")
           return j({ providers: [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4-6"], secretName: "s", ready: true }] });
         if (url === "/api/recipes") return j({ recipes: [
           { name: "order-bot", title: "Order Bot", description: "Handles order queries.", icon: "🛒", spec: recipeSpec },
@@ -950,7 +950,7 @@ describe("CreateAgentPage — m74 P1-2: ?recipe=<name> pre-fills the create flow
         if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
         if (url.startsWith("/api/capabilities"))
           return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
-        if (url === "/api/providers" && method === "GET")
+        if (url.split("?")[0] === "/api/providers" && method === "GET")
           return j({ providers: [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4-6"], secretName: "s", ready: true }] });
         if (url === "/api/recipes")
           return j({ recipes: [
@@ -1045,7 +1045,7 @@ describe("CreateAgentPage — a requirement that wasn't checked is not a satisfi
         if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
         if (url.startsWith("/api/capabilities"))
           return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
-        if (url === "/api/providers" && method === "GET")
+        if (url.split("?")[0] === "/api/providers" && method === "GET")
           return j({ providers: [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4"], secretName: "s", ready: true }] });
         if (url === "/api/tools") return j({ tools: [] });
         if (url === "/api/agents/generate" && method === "POST")

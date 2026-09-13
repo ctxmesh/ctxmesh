@@ -46,6 +46,7 @@ import {
   type ProviderSummary,
 } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
+import { useNamespace } from "@/lib/namespace";
 import { RES_ROUTES } from "@/lib/nav";
 
 // ModelRouteDetailPage — the route reader + its edit form (M151 §6.1 archetype
@@ -600,12 +601,13 @@ function useConnectedModels(): {
   modelsForProvider: (provider: string) => string[];
   secretBindingNames: string[];
 } {
+  const { workingNamespace } = useNamespace();
   const [connected, setConnected] = React.useState<ProviderSummary[]>([]);
   const [bindingNames, setBindingNames] = React.useState<string[]>([]);
   React.useEffect(() => {
     const ctrl = new AbortController();
     api
-      .listProviders(ctrl.signal)
+      .listProviders(workingNamespace, ctrl.signal)
       .then((r) => setConnected(r.items ?? []))
       .catch(() => {
         // No providers / no permission → the fields stay free-text (no dropdown).
@@ -619,7 +621,7 @@ function useConnectedModels(): {
         /* no bindings / no permission → secretBindingRef stays type-able. */
       });
     return () => ctrl.abort();
-  }, []);
+  }, [workingNamespace]);
 
   const modelsByProvider = React.useMemo(() => {
     const m = new Map<string, string[]>();
