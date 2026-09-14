@@ -1156,12 +1156,7 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 10
         resources:
-          limits:
-            cpu: 500m
-            memory: 128Mi
-          requests:
-            cpu: 10m
-            memory: 64Mi
+          {{- toYaml .Values.controllerManager.resources | nindent 10 }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -1227,12 +1222,7 @@ spec:
             port: 4000
           periodSeconds: 10
         resources:
-          limits:
-            cpu: "2"
-            memory: 1536Mi
-          requests:
-            cpu: 50m
-            memory: 512Mi
+          {{- toYaml .Values.gateway.resources | nindent 10 }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -1318,12 +1308,7 @@ spec:
           initialDelaySeconds: 3
           periodSeconds: 10
         resources:
-          limits:
-            cpu: 500m
-            memory: 128Mi
-          requests:
-            cpu: 10m
-            memory: 64Mi
+          {{- toYaml .Values.statelayerProxy.resources | nindent 10 }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -1408,12 +1393,7 @@ spec:
           tcpSocket:
             port: 8443
         resources:
-          limits:
-            cpu: 500m
-            memory: 128Mi
-          requests:
-            cpu: 10m
-            memory: 64Mi
+          {{- toYaml .Values.tokenService.resources | nindent 10 }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

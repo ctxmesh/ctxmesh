@@ -99,13 +99,11 @@ spec:
               port: 6379
             periodSeconds: 15
             failureThreshold: 3
+          {{- if .Values.statelayer.persistence.cpuLimit }}
+          {{- fail "statelayer.persistence.cpuLimit was replaced by statelayer.persistence.resources (M178) — move the value to statelayer.persistence.resources.limits.cpu. Failing loudly rather than ignoring a limit you set on purpose." }}
+          {{- end }}
           resources:
-            requests:
-              cpu: 50m
-              memory: 128Mi
-            limits:
-              cpu: {{ .Values.statelayer.persistence.cpuLimit | quote }}
-              memory: 256Mi
+            {{- toYaml .Values.statelayer.persistence.resources | nindent 12 }}
           volumeMounts:
             - name: data
               mountPath: /data

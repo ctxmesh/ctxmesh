@@ -63,7 +63,14 @@ console-authz;^config/rbac/;flow-completability ux-review tier1
 console-authz;^deploy/helm/.*/(dex|control-plane)\.yaml$;flow-completability install-truth ux-review
 console-authz;^internal/controlplane/namespacetenant/;flow-completability tier0 tier1
 install;^deploy/helm/;install-truth helm-lint tier2
-install;^config/(crd|default|gateway|manager)/;install-truth helm-generate tier1
+install;^config/(crd|default|gateway|manager|webhook|prometheus|network-policy|samples)/;install-truth helm-generate tier1
+# config/bff and config/run-worker are the server-side layer the console runs on, so a change
+# here reaches the console without touching ui/ — the blind spot that let M177 ship three
+# console-facing defects from a diff with zero files under ui/.
+console;^config/(bff|run-worker)/;ux-review install-truth helm-generate tier1
+# The bundled data plane and the credential/state hops. They render into the chart, so a change
+# here is an install change even though no chart file was edited.
+install;^config/(nats|objectstore|postgres|statelayer|statelayer-proxy|token-service)/;install-truth helm-generate tier1
 install;^internal/controlplane/migrations/;tier1 install-truth
 runtime;^cmd/launcher/;tier0 tier1 sdk-live
 runtime;^internal/controller/;tier0 tier1 tier2

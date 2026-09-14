@@ -138,6 +138,10 @@ spec:
           value: {{ .Values.bff.discoveryEmbeddingRoute | default "" | quote }}
         - name: DISCOVERY_RERANK_URL
           value: {{ .Values.bff.discoveryRerankURL | default "" | quote }}
+        - name: RUN_EXEC_TIMEOUT
+          value: {{ .Values.bff.runExecTimeout | default "" | quote }}
+        - name: RUN_EXEC_MAX_TIMEOUT
+          value: {{ .Values.bff.runExecMaxTimeout | default "" | quote }}
         - name: ASYNC_BACKEND
           value: {{ .Values.bff.asyncBackend | default "" | quote }}
         - name: NATS_URL
@@ -201,12 +205,7 @@ spec:
           initialDelaySeconds: 3
           periodSeconds: 10
         resources:
-          limits:
-            cpu: 500m
-            memory: 1Gi
-          requests:
-            cpu: 10m
-            memory: 192Mi
+          {{- toYaml .Values.bff.resources | nindent 10 }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

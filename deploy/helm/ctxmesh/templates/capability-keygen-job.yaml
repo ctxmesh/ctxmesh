@@ -137,9 +137,5 @@ spec:
               drop:
                 - ALL
           resources:
-            requests:
-              cpu: 10m
-              memory: 64Mi
-            limits:
-              memory: 128Mi
+            {{- toYaml .Values.capabilityKey.resources | nindent 12 }}
 {{- end }}
