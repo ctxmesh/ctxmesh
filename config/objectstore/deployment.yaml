@@ -7,7 +7,12 @@
 # is a product workload the engine deploys, exactly like the dedicated dev Valkey
 # state layer (config/statelayer/).
 #
-# Image pinned by digest at minio/minio:RELEASE.2025-09-07T16-13-09Z (newest
+# Pulled from quay.io, NOT Docker Hub: minio/minio on Docker Hub is not anonymously
+# pullable -- even :latest returns insufficient_scope -- so a stock helm install left
+# the objectstore in permanent ImagePullBackOff. The M179 cold-install gate caught it on
+# its first real run against the published chart. The DIGEST is unchanged and identical
+# on both registries, so this is the same bytes from a host that serves them.
+# Image pinned by digest at quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z (newest
 # stable as of 2026-07-09; verified multi-arch amd64/arm64 via
 # `docker manifest inspect`). The tag is retained alongside the digest for
 # human readability; the digest is what actually pins the pull.
@@ -45,7 +50,7 @@ spec:
     spec:
       containers:
         - name: minio
-          image: minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+          image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
           args:
             - server
             - /data
@@ -77,6 +82,15 @@ spec:
               port: 9000
             periodSeconds: 5
             failureThreshold: 3
+          # startupProbe so LIVENESS does not police STARTUP (see config/manager/manager.yaml).
+          # Every component here gave its process 45-75s to come up on a COLD cluster or be killed,
+          # which is a crash-loop caused by the probe rather than by anything being wrong.
+          startupProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            periodSeconds: 10
+            failureThreshold: 30
           livenessProbe:
             httpGet:
               path: /minio/health/live

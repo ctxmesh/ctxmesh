@@ -37,7 +37,16 @@ concurrency:
 # the change teaches the reader to dismiss red, which is how a real failure eventually gets waved
 # through. The Dockerfiles retry their own `go mod download`; this covers the `go install` paths.
 env:
-  GOPROXY: https://proxy.golang.org,direct
+  # `|` not `,`. A COMMA falls through to the next proxy only on 404/410 -- a module that is
+  # genuinely absent. It does NOT fall through on a read or network error, which is the failure
+  # this project keeps hitting: `goose@v3.27.2: read "https://..."`, `wsl/v5@v5.8.0: verifying
+  # module: read ...`, `minio-go/v7@v7.2.1: read "https://..."` -- three different modules across
+  # three jobs in one afternoon, none related to the change under test. A PIPE falls through on ANY
+  # error, so a proxy having a bad minute stops being a red required check.
+  #
+  # A required check that goes red for reasons unrelated to the change teaches the reader to
+  # dismiss red, which is how a real failure eventually gets waved through.
+  GOPROXY: https://proxy.golang.org|https://goproxy.io|direct
   GOSUMDB: sum.golang.org
 
 jobs:

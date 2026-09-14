@@ -210,6 +210,11 @@ const (
 // AGENT_ALLOWED_CALLERS / guard-default env are injected by the AgentDeployment
 // reconciler, which watches AgentRegistry and re-renders on membership change.
 type AgentRegistryReconciler struct {
+	// EventingAvailable is whether this cluster serves the Knative Eventing kinds (ADR 0141).
+	// False skips the Broker watch and fails a registry that needs one LOUDLY, rather than
+	// leaving it looking reconciled.
+	EventingAvailable bool
+
 	client.Client
 	Scheme *runtime.Scheme
 }
@@ -592,6 +597,12 @@ func (r *AgentRegistryReconciler) reconcileBroker(
 	ctx context.Context,
 	registry *agentsv1alpha1.AgentRegistry,
 ) error {
+	// Fail LOUDLY, never silently (ADR 0141). A registry whose Broker was quietly skipped looks
+	// reconciled while every eventing agent bound to it will never receive an event.
+	if !r.EventingAvailable {
+		return eventingUnavailableErr("an AgentRegistry broker")
+	}
+
 	retry := brokerRetry
 	backoffDelay := brokerBackoffDelay
 	backoffPolicy := eventingduckv1.BackoffPolicyExponential
@@ -781,10 +792,16 @@ func (r *AgentRegistryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	)
 
-	return ctrl.NewControllerManagedBy(mgr).
+	// Knative Eventing is OPTIONAL (ADR 0141): owning a kind the cluster does not serve stops the
+	// manager from starting, which made eventing a hard prerequisite for everyone -- including
+	// users who never send an event.
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1alpha1.AgentRegistry{}).
-		Owns(&networkingv1.NetworkPolicy{}).
-		Owns(&eventingv1.Broker{}).
+		Owns(&networkingv1.NetworkPolicy{})
+	if r.EventingAvailable {
+		b = b.Owns(&eventingv1.Broker{})
+	}
+	return b.
 		Owns(&servingv1.Service{}).
 		Watches(&agentsv1alpha1.AgentDeployment{}, mapAgentToRegistries).
 		Named("agentregistry").

@@ -73,7 +73,7 @@ console;^config/(bff|run-worker)/;ux-review install-truth helm-generate tier1
 install;^config/(nats|objectstore|postgres|statelayer|statelayer-proxy|token-service)/;install-truth helm-generate tier1
 install;^internal/controlplane/migrations/;tier1 install-truth
 runtime;^cmd/launcher/;tier0 tier1 sdk-live
-runtime;^internal/controller/;tier0 tier1 tier2
+runtime;^internal/controller/;tier0 tier1 tier2 prereqs-are-real
 runtime;^internal/(run|gateway|egress|pki|statelayer)/;tier0 tier1
 sdk;^sdk/;sdk-contract sdk-readme-truth tier0
 release;^\.github/workflows/;release-truth tier0
