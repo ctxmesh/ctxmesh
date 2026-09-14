@@ -68,6 +68,10 @@ const defaultCooldownSeconds int32 = 60
 // It does NOT write the ksvc, Knative autoscaling annotations, or CronJobs —
 // those are the AgentDeployment reconciler's domain (m7.5, single-writer rule).
 type AgentScalingPolicyReconciler struct {
+	// KEDAAvailable is whether this cluster serves keda.sh (ADR 0141). False skips the ScaledObject
+	// watch and fails an autoscaling policy loudly rather than silently never reconciling it.
+	KEDAAvailable bool
+
 	client.Client
 	Scheme *runtime.Scheme
 }
@@ -92,6 +96,11 @@ type AgentScalingPolicyReconciler struct {
 // For trigger=schedule: sets status.backend="cronjob" only (the CronJob is
 // emitted by the AgentDeployment reconciler).
 func (r *AgentScalingPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	// Fail LOUDLY (ADR 0141). Without this the policy is accepted, nothing is ever created, and
+	// the user sees a healthy-looking resource that does nothing.
+	if !r.KEDAAvailable {
+		return ctrl.Result{}, kedaUnavailableErr()
+	}
 	log := logf.FromContext(ctx)
 
 	// ── Fetch ────────────────────────────────────────────────────────────────
@@ -346,9 +355,15 @@ func (r *AgentScalingPolicyReconciler) setReadyFalse(
 // owns the KEDA ScaledObjects it generates (GC on policy delete), and watches
 // AgentScalingPolicy objects.
 func (r *AgentScalingPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&agentsv1alpha1.AgentScalingPolicy{}).
-		Owns(&kedatypes.ScaledObject{}).
+	// KEDA is OPTIONAL (ADR 0141). Owning a kind the cluster does not serve does not stop the
+	// manager, but it stops THIS controller reconciling anything at all — which looks healthy and
+	// is not.
+	b := ctrl.NewControllerManagedBy(mgr).
+		For(&agentsv1alpha1.AgentScalingPolicy{})
+	if r.KEDAAvailable {
+		b = b.Owns(&kedatypes.ScaledObject{})
+	}
+	return b.
 		Named("agentscalingpolicy").
 		Complete(r)
 }
