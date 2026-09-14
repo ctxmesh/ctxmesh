@@ -52,9 +52,14 @@ var bareIdentitySuffix = "-h" + hardeningFold(combinedBindingDigest("", "", "", 
 // API server.
 func newReconciler() *AgentDeploymentReconciler {
 	return &AgentDeploymentReconciler{
-		Client:   k8sClient,
-		Scheme:   k8sClient.Scheme(),
-		Registry: NewPostgresRegistryReader(testRegStore),
+		// The suite loads the Knative Eventing CRDs (suite_test.go), so this cluster HAS eventing.
+		// Left unset it is false, and every eventing-model reconcile refuses (ADR 0141) -- which is
+		// the correct production default and exactly what broke three registry and two exec-model
+		// tests until each construction site was made explicit.
+		EventingAvailable: true,
+		Client:            k8sClient,
+		Scheme:            k8sClient.Scheme(),
+		Registry:          NewPostgresRegistryReader(testRegStore),
 		// Dev posture (OPS-2): the envtest suite seeds the bundled dev data plane (dev Langfuse
 		// Secret, dev MinIO), so the reconciler injects the dev object-store + feedback creds — the
 		// behavior these suites assert. A production render sets this false (no dev-cred injection);

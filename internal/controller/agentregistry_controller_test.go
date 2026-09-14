@@ -42,8 +42,13 @@ import (
 // newRegistryReconciler builds an AgentRegistryReconciler on the envtest client.
 func newRegistryReconciler() *AgentRegistryReconciler {
 	return &AgentRegistryReconciler{
-		Client: k8sClient,
-		Scheme: k8sClient.Scheme(),
+		// The suite loads the Knative Eventing CRDs (see suite_test.go), so this cluster HAS
+		// eventing. Leaving it false made every broker reconcile refuse (ADR 0141) and failed
+		// three registry tests -- caught by CI's envtest job, because `go test ./internal/...`
+		// without KUBEBUILDER_ASSETS reports "no tests to run" and skips them silently.
+		EventingAvailable: true,
+		Client:            k8sClient,
+		Scheme:            k8sClient.Scheme(),
 	}
 }
 
