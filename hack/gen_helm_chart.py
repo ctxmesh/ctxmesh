@@ -215,6 +215,11 @@ OPTIONAL_MODEL_ENV = [
     ("KNOWLEDGE_RERANK_URL", "bff.knowledgeRerankURL"),
     ("DISCOVERY_EMBEDDING_ROUTE", "bff.discoveryEmbeddingRoute"),
     ("DISCOVERY_RERANK_URL", "bff.discoveryRerankURL"),
+    # The run deadline. Configurable in code since ADR 0093 and unreachable from the chart until
+    # M178 — the same shape as the resource limits: the engine supports it, the install path does
+    # not, so the knob exists for anyone reading the source and for nobody installing the product.
+    ("RUN_EXEC_TIMEOUT", "bff.runExecTimeout"),
+    ("RUN_EXEC_MAX_TIMEOUT", "bff.runExecMaxTimeout"),
     ("ASYNC_BACKEND", "bff.asyncBackend"),
     ("NATS_URL", "bff.natsURL"),
     ("NATS_CREDENTIALS_FILE", "bff.natsCredentialsFile"),
