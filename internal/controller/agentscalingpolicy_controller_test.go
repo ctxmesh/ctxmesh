@@ -38,8 +38,12 @@ import (
 // envtest API server and scheme.
 func newScalingReconciler() *AgentScalingPolicyReconciler {
 	return &AgentScalingPolicyReconciler{
-		Client: k8sClient,
-		Scheme: k8sClient.Scheme(),
+		// The suite loads the KEDA CRDs (suite_test.go), so this cluster HAS KEDA. Unset it is false
+		// and every autoscaling reconcile refuses (ADR 0141) -- the correct production default, and
+		// why every construction site has to be explicit.
+		KEDAAvailable: true,
+		Client:        k8sClient,
+		Scheme:        k8sClient.Scheme(),
 	}
 }
 
