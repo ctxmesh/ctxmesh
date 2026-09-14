@@ -201,12 +201,7 @@ spec:
           initialDelaySeconds: 3
           periodSeconds: 10
         resources:
-          limits:
-            cpu: 500m
-            memory: 1Gi
-          requests:
-            cpu: 10m
-            memory: 192Mi
+          {{- toYaml .Values.bff.resources | nindent 10 }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

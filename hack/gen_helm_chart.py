@@ -613,6 +613,67 @@ def subject_namespace(doc: str) -> str:
     )
 
 
+
+# Container resources, per workload (M178). Until this existed an operator could not size any part
+# of the install: 31 limits/requests blocks across the chart, none reachable from values, while the
+# same templates read .Values 219 times for everything else.
+#
+# Keyed on the `control-plane:` label so each workload gets its own dial even where two blocks are
+# textually identical -- statelayer-proxy and token-service ship the same numbers, and a plain
+# string replace over the concatenated render would rewrite only the first.
+RESOURCE_DIALS = {
+    "controller-manager": "controllerManager",
+    "gateway": "gateway",
+    "token-service": "tokenService",
+    "statelayer-proxy": "statelayerProxy",
+    "bff": "bff",
+    "statelayer": "devDataPlane.statelayer",
+    "objectstore": "devDataPlane.objectstore",
+    "postgres": "devDataPlane.postgres",
+    "nats": "devDataPlane.nats",
+}
+
+
+def template_resources(doc: str, valpath: str) -> str:
+    """Point one container's literal `resources:` block at .Values.<valpath>.resources.
+
+    Two things this must NOT touch. An RBAC rule's `resources:` is a list of API kinds, not a
+    quantity map -- it is excluded by requiring `limits:`/`requests:` on the next line. And a
+    PersistentVolumeClaim's `resources.requests.storage` is a volume size; templating it as a
+    container resource would render a disk size where a CPU limit belongs.
+
+    Defaults in values.yaml are the numbers kustomize emits here, so `helm template` at default
+    values is semantically identical and `make helm-verify` stays clean. It is not byte-identical:
+    Helm's toYaml sorts map keys, so `limits` sorts ahead of `requests` where the source had them
+    the other way round. The chart-resources gate compares effective resources as DATA for exactly
+    that reason.
+    """
+    lines = doc.split("\n")
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped != "resources:":
+            continue
+        indent = len(line) - len(line.lstrip())
+        nxt = next((x for x in lines[i + 1 : i + 3] if x.strip()), "")
+        if not nxt.strip().startswith(("limits:", "requests:")):
+            continue  # an RBAC rule
+        j = i + 1
+        while j < len(lines) and (
+            not lines[j].strip() or (len(lines[j]) - len(lines[j].lstrip())) > indent
+        ):
+            j += 1
+        while j - 1 > i and not lines[j - 1].strip():
+            j -= 1
+        if "storage:" in "\n".join(lines[i + 1 : j]):
+            continue  # a PVC claim, not a container
+        lines[i + 1 : j] = [
+            " " * (indent + 2)
+            + "{{- toYaml .Values.%s.resources | nindent %d }}" % (valpath, indent + 2)
+        ]
+        return "\n".join(lines)
+    return doc
+
+
 def main() -> None:
     out_dir = os.environ["OUT_DIR"]
     raw = sys.stdin.read()
@@ -627,6 +688,8 @@ def main() -> None:
 
         # Apply substitutions to every doc uniformly (image + namespace fields).
         doc = substitute(doc)
+        if kind in ("Deployment", "StatefulSet") and cp in RESOURCE_DIALS:
+            doc = template_resources(doc, RESOURCE_DIALS[cp])
         if kind == "Namespace":
             doc = substitute_namespace_object(doc)
         doc = subject_namespace(doc)

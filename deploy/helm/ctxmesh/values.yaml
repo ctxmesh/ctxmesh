@@ -269,26 +269,29 @@ crds:
 devDataPlane:
   # Container resources for the bundled dev data plane. Same contract as the
   # control-plane components: today's numbers, overridable per component.
-  resources:
-    nats:
+  nats:
+    resources:
       limits:
         memory: 512Mi
       requests:
         cpu: 50m
         memory: 64Mi
-    objectstore:
+  objectstore:
+    resources:
       limits:
         memory: 512Mi
       requests:
         cpu: 50m
         memory: 128Mi
-    postgres:
+  postgres:
+    resources:
       limits:
         memory: 2Gi
       requests:
         cpu: 100m
         memory: 256Mi
-    statelayer:
+  statelayer:
+    resources:
       limits:
         memory: 256Mi
       requests:
@@ -366,7 +369,18 @@ statelayer:
     # node, so a reschedule sticks Pending; see ADR 0047).
     storageClassName: ""
     # CPU limit on the Valkey container (bound it — the ClickHouse-heat lesson).
-    cpuLimit: "1"
+    # cpuLimit was the chart's only resource dial before M178 gave every workload a
+    # full `resources` map. It is kept ONLY so an operator who set it gets a loud
+    # failure naming the replacement — a silently ignored CPU limit on the state
+    # layer is the kind of change that gets discovered in production.
+    cpuLimit: ""
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: "1"
+        memory: 256Mi
 
 # --- Prometheus wiring -------------------------------------------------------
 # The controller-manager exposes HTTPS metrics on :8443 (already in the
