@@ -112,8 +112,11 @@ const ALLOW_ALL = {
 
 const DENY_WRITE = {
   ok: true,
+  // A real workspace: the probe only runs once the shell HAS one, because a namespace-less SSAR
+  // asks "may I do this in every namespace at once" and its all-false is not a verdict (M177).
+  namespaces: [{ name: "team-a" }],
   body: {
-    namespace: "",
+    namespace: "team-a",
     allowed: {
       agentdeployments: { get: true, list: true, create: false, update: false, delete: false },
     },
@@ -174,7 +177,12 @@ describe("AppShell — the approved IA", () => {
   });
 
   it("shows the honest capability banner (not all-disabled) on a probe 500, and keeps write nav visible", async () => {
-    installFetch({ ok: false, status: 500, body: { error: "probe failed" } });
+    installFetch({
+      ok: false,
+      status: 500,
+      namespaces: [{ name: "team-a" }],
+      body: { error: "probe failed" },
+    });
     renderShell();
     expect(await screen.findByTestId("capability-banner")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Config builder/ })).toBeInTheDocument();

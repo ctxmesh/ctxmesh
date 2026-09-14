@@ -131,6 +131,15 @@ export function CapabilitiesProvider({
   );
 
   React.useEffect(() => {
+    // NEVER probe with no namespace. The SSAR then asks "may I do this in EVERY namespace at
+    // once", which only a ClusterRoleBinding satisfies, and the answer comes back a definite
+    // all-false at HTTP 200 — measured 0/58 verbs against 57/58 for the same caller one line
+    // later with ?namespace=default. Rule 2 above consumes a present `false` as a real deny, so
+    // that reply was read as a verdict about the user: a caller holding full rights in their own
+    // namespace was shown "You have read-only access" before the namespace list had even
+    // resolved (M177). Staying in `loading` keeps can() optimistic, which is the honest state
+    // for a question we have not asked yet.
+    if (namespace === "") return;
     const controller = new AbortController();
     fetchCaps(namespace, false, controller.signal);
     return () => controller.abort();
