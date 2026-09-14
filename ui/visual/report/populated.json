@@ -1,7 +1,7 @@
 {
   "label": "populated",
   "mode": "populated",
-  "generated": "2026-09-02T05:13:29.619Z",
+  "generated": "2026-09-14T19:40:25.046Z",
   "totals": {
     "renders": 416,
     "clean": 416,
@@ -1579,7 +1579,10 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/home__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [
+        "TypeError: ae.groups is not iterable\n    at http://127.0.0.1:4173/assets/index-BoiYwOFW.js:589:8951\n    at Object.tb [as useMemo] (http://127.0.0.1:4173/assets/index-BoiYwOFW.js:38:21401)\n    at Ke.us",
+        "pageerror: TypeError: ae.groups is not iterable"
+      ]
     },
     {
       "documentScrollsX": false,
@@ -1592,7 +1595,10 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/home__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [
+        "TypeError: ae.groups is not iterable\n    at http://127.0.0.1:4173/assets/index-BoiYwOFW.js:589:8951\n    at Object.tb [as useMemo] (http://127.0.0.1:4173/assets/index-BoiYwOFW.js:38:21401)\n    at Ke.us",
+        "pageerror: TypeError: ae.groups is not iterable"
+      ]
     },
     {
       "documentScrollsX": false,
@@ -1605,7 +1611,10 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/home__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [
+        "TypeError: ae.groups is not iterable\n    at http://127.0.0.1:4173/assets/index-BoiYwOFW.js:589:8951\n    at Object.tb [as useMemo] (http://127.0.0.1:4173/assets/index-BoiYwOFW.js:38:21401)\n    at Ke.us",
+        "pageerror: TypeError: ae.groups is not iterable"
+      ]
     },
     {
       "documentScrollsX": false,
@@ -1618,7 +1627,10 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/home__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [
+        "TypeError: ae.groups is not iterable\n    at http://127.0.0.1:4173/assets/index-BoiYwOFW.js:589:8951\n    at Object.tb [as useMemo] (http://127.0.0.1:4173/assets/index-BoiYwOFW.js:38:21401)\n    at Ke.us",
+        "pageerror: TypeError: ae.groups is not iterable"
+      ]
     },
     {
       "documentScrollsX": false,
@@ -1631,7 +1643,10 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/home__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [
+        "TypeError: ae.groups is not iterable\n    at http://127.0.0.1:4173/assets/index-BoiYwOFW.js:589:8951\n    at Object.tb [as useMemo] (http://127.0.0.1:4173/assets/index-BoiYwOFW.js:38:21401)\n    at Ke.us",
+        "pageerror: TypeError: ae.groups is not iterable"
+      ]
     },
     {
       "documentScrollsX": false,
@@ -1644,7 +1659,10 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/home__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [
+        "TypeError: ae.groups is not iterable\n    at http://127.0.0.1:4173/assets/index-BoiYwOFW.js:589:8951\n    at Object.tb [as useMemo] (http://127.0.0.1:4173/assets/index-BoiYwOFW.js:38:21401)\n    at Ke.us",
+        "pageerror: TypeError: ae.groups is not iterable"
+      ]
     },
     {
       "documentScrollsX": false,
@@ -1657,7 +1675,10 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/home__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [
+        "TypeError: ae.groups is not iterable\n    at http://127.0.0.1:4173/assets/index-BoiYwOFW.js:589:8951\n    at Object.tb [as useMemo] (http://127.0.0.1:4173/assets/index-BoiYwOFW.js:38:21401)\n    at Ke.us",
+        "pageerror: TypeError: ae.groups is not iterable"
+      ]
     },
     {
       "documentScrollsX": false,
@@ -1670,7 +1691,10 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/home__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [
+        "TypeError: ae.groups is not iterable\n    at http://127.0.0.1:4173/assets/index-BoiYwOFW.js:589:8951\n    at Object.tb [as useMemo] (http://127.0.0.1:4173/assets/index-BoiYwOFW.js:38:21401)\n    at Ke.us",
+        "pageerror: TypeError: ae.groups is not iterable"
+      ]
     },
     {
       "documentScrollsX": false,
