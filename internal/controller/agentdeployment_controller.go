@@ -611,7 +611,7 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 	if err := r.deleteWorkload(ctx, deploy, &batchv1.CronJob{}); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.deleteWorkload(ctx, deploy, &eventingv1.Trigger{}); err != nil {
+	if err := r.deleteStaleTrigger(ctx, deploy); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.deleteWorkload(ctx, deploy, &appsv1.Deployment{}); err != nil {
@@ -791,7 +791,7 @@ func (r *AgentDeploymentReconciler) reconcileEventing(
 		// Eventing needs a per-registry broker; without membership there is no
 		// broker to subscribe to. Report the error and drop any stale Trigger so
 		// no orphaned subscription lingers — but keep the Deployment + Service.
-		if err = r.deleteWorkload(ctx, deploy, &eventingv1.Trigger{}); err != nil {
+		if err = r.deleteStaleTrigger(ctx, deploy); err != nil {
 			return ctrl.Result{}, err
 		}
 		return r.setReadyFalse(ctx, deploy, "NotRegistryMember",
@@ -826,7 +826,7 @@ func (r *AgentDeploymentReconciler) reconcileJob(
 	if err := r.deleteWorkload(ctx, deploy, &servingv1.Service{}); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.deleteWorkload(ctx, deploy, &eventingv1.Trigger{}); err != nil {
+	if err := r.deleteStaleTrigger(ctx, deploy); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.deleteWorkload(ctx, deploy, &appsv1.Deployment{}); err != nil {

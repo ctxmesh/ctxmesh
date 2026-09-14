@@ -544,6 +544,12 @@ func main() {
 	// both state. Per-reconcile discovery would hide a capability change inside an unrelated
 	// code path and cost an API call every time.
 	eventingAvailable := controller.EventingAvailable(mgr)
+	kedaAvailable := controller.KEDAAvailable(mgr)
+	if !kedaAvailable {
+		setupLog.Info("KEDA is not installed on this cluster; AgentScalingPolicy is unavailable and "+
+			"will fail explicitly. Install KEDA and restart this controller to enable autoscaling.",
+			"group", "keda.sh")
+	}
 	if !eventingAvailable {
 		setupLog.Info("Knative Eventing is not installed on this cluster; "+
 			"executionModel 'eventing' and AgentRegistry brokers are unavailable and will fail "+
@@ -651,8 +657,9 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.AgentScalingPolicyReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		KEDAAvailable: kedaAvailable,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agentscalingpolicy")
 		os.Exit(1)
