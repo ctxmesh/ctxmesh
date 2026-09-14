@@ -473,6 +473,13 @@ bff:
   # so KB ingestion and generation work out of the box. Override to point at an
   # external gateway.
   modelGatewayURL: ""
+  # How long one run advance may take, and the ceiling that kills a wedged run
+  # regardless (ADR 0093). Both were readable by the process and settable by nobody:
+  # no chart value templated them, so a Helm install — the only documented install
+  # path — could not change a 10m default it might badly need to. Empty uses the
+  # compiled defaults, 10m and 60m.
+  runExecTimeout: ""
+  runExecMaxTimeout: ""
   # The offline OCR + reranker services (M140) are deployed separately; empty
   # keeps their honest degradation (a scanned PDF stays PartiallyIngested; the
   # rerank stage is skipped) rather than pretending they exist.

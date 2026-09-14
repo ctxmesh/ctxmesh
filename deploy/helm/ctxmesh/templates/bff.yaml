@@ -138,6 +138,10 @@ spec:
           value: {{ .Values.bff.discoveryEmbeddingRoute | default "" | quote }}
         - name: DISCOVERY_RERANK_URL
           value: {{ .Values.bff.discoveryRerankURL | default "" | quote }}
+        - name: RUN_EXEC_TIMEOUT
+          value: {{ .Values.bff.runExecTimeout | default "" | quote }}
+        - name: RUN_EXEC_MAX_TIMEOUT
+          value: {{ .Values.bff.runExecMaxTimeout | default "" | quote }}
         - name: ASYNC_BACKEND
           value: {{ .Values.bff.asyncBackend | default "" | quote }}
         - name: NATS_URL

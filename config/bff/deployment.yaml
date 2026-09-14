@@ -194,6 +194,16 @@ spec:
               value: ""
             - name: DISCOVERY_RERANK_URL
               value: ""
+            # RUN_EXEC_TIMEOUT bounds one run advance; RUN_EXEC_MAX_TIMEOUT is the ceiling that
+            # kills a wedged run regardless (ADR 0093). Both were readable by the process and
+            # settable by nobody: no chart value templated them, so a Helm install -- the only
+            # documented install path -- could not change a 10m default it might badly need to.
+            # Empty means "use the compiled default", which envDuration() already does and a test
+            # already pins, so this renders byte-identical to before.
+            - name: RUN_EXEC_TIMEOUT
+              value: ""
+            - name: RUN_EXEC_MAX_TIMEOUT
+              value: ""
             - name: ASYNC_BACKEND
               value: ""
             - name: NATS_URL
