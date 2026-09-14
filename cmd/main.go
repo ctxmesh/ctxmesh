@@ -539,11 +539,24 @@ func main() {
 		setupLog.Info("startup preflight WARNING (C8b): " + msg)
 	}
 
+	// Knative Eventing is an OPTIONAL capability (ADR 0141). Asked once, at startup: installing
+	// Eventing later needs a controller restart, which the log line below and the install docs
+	// both state. Per-reconcile discovery would hide a capability change inside an unrelated
+	// code path and cost an API call every time.
+	eventingAvailable := controller.EventingAvailable(mgr)
+	if !eventingAvailable {
+		setupLog.Info("Knative Eventing is not installed on this cluster; "+
+			"executionModel 'eventing' and AgentRegistry brokers are unavailable and will fail "+
+			"explicitly. Install Knative Eventing and restart this controller to enable them.",
+			"group", "eventing.knative.dev/v1")
+	}
+
 	if err := (&controller.AgentDeploymentReconciler{
-		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(), // uncached telemetry-Secret read (collector env stability)
-		Scheme:    mgr.GetScheme(),
-		OBOEgress: oboEgress,
+		EventingAvailable: eventingAvailable,
+		Client:            mgr.GetClient(),
+		APIReader:         mgr.GetAPIReader(), // uncached telemetry-Secret read (collector env stability)
+		Scheme:            mgr.GetScheme(),
+		OBOEgress:         oboEgress,
 		// End-user AGENT exposure mirror (M137/EU1b, ADR 0107): the reconciler writes an endUserAccess
 		// agent's endpoint + spec here so the BFF resolves an end-user run without a K8s read.
 		EndUserAgentStore: enduseragent.NewPostgresStore(cpDB),
@@ -630,8 +643,9 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.AgentRegistryReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		EventingAvailable: eventingAvailable,
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agentregistry")
 		os.Exit(1)

@@ -247,6 +247,11 @@ type AgentDeploymentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// EventingAvailable is whether this cluster serves the Knative Eventing kinds (ADR 0141).
+	// False skips the Trigger watch and fails an eventing agent LOUDLY at reconcile rather than
+	// leaving it looking accepted.
+	EventingAvailable bool
+
 	// Skills resolves spec.skillRefs to pinned digests (ADR 0137). Nil when the install has no
 	// control-plane database — an agent that attaches no skills is unaffected, and one that
 	// does is failed honestly rather than deployed with them silently missing.
@@ -3186,11 +3191,17 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	)
 
-	return ctrl.NewControllerManagedBy(mgr).
+	// Knative Eventing is OPTIONAL (ADR 0141). Owning a kind the cluster does not serve stops the
+	// manager from starting at all, so a user running nothing but serving agents -- the default, and
+	// the whole quickstart -- had to install a second Knative component first.
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1alpha1.AgentDeployment{}).
 		Owns(&agentsv1alpha1.AgentVersion{}).
-		Owns(&servingv1.Service{}).
-		Owns(&eventingv1.Trigger{}).
+		Owns(&servingv1.Service{})
+	if r.EventingAvailable {
+		b = b.Owns(&eventingv1.Trigger{})
+	}
+	return b.
 		Owns(&batchv1.Job{}).
 		Owns(&batchv1.CronJob{}).
 		Owns(&appsv1.Deployment{}).
