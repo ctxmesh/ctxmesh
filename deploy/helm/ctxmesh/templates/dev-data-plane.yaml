@@ -231,6 +231,12 @@ spec:
           capabilities:
             drop:
             - ALL
+        startupProbe:
+          failureThreshold: 30
+          httpGet:
+            path: /healthz
+            port: 8222
+          periodSeconds: 10
         volumeMounts:
         - mountPath: /etc/nats
           name: config
@@ -311,6 +317,12 @@ spec:
           periodSeconds: 5
         resources:
           {{- toYaml .Values.devDataPlane.objectstore.resources | nindent 10 }}
+        startupProbe:
+          failureThreshold: 30
+          httpGet:
+            path: /minio/health/live
+            port: 9000
+          periodSeconds: 10
         volumeMounts:
         - mountPath: /data
           name: data
@@ -481,6 +493,11 @@ spec:
             port: 6379
         resources:
           {{- toYaml .Values.devDataPlane.statelayer.resources | nindent 10 }}
+        startupProbe:
+          failureThreshold: 30
+          periodSeconds: 10
+          tcpSocket:
+            port: 6379
         volumeMounts:
         - mountPath: /data
           name: data
