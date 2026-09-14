@@ -41,6 +41,15 @@ log() { printf '>> %s\n' "$*" >&2; }
 # is real: the name is whatever the operator put in the CredentialStore's localKEKSecretRef. A
 # guessed name fails as NotFound on the one asset without which credential ciphertext is
 # permanently inert, at the exact moment somebody is restoring.
+# KUBE_CONTEXT pins which cluster this talks to. Every kubectl below used the AMBIENT context,
+# which is whatever the last `kind create cluster` set -- so running this while another cluster was
+# current dumped THAT cluster instead, silently and with a plausible-looking dump. The M178 DR drill
+# caught it exactly that way: it seeded a marker in one cluster, this tool backed up another, and
+# the restore put nothing back. A disaster-recovery tool must never be ambiguous about which
+# disaster it is recovering.
+KUBE_CONTEXT="${KUBE_CONTEXT:-}"
+kubectl() { command kubectl ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} "$@"; }
+
 NS="${NS:-ctxmesh}"
 CRED_NS="${CRED_NS:-ctxmesh}"
 VALKEY_STS="${VALKEY_STS:-statelayer}"

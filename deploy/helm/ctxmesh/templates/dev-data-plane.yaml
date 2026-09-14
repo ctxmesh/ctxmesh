@@ -231,6 +231,12 @@ spec:
           capabilities:
             drop:
             - ALL
+        startupProbe:
+          failureThreshold: 30
+          httpGet:
+            path: /healthz
+            port: 8222
+          periodSeconds: 10
         volumeMounts:
         - mountPath: /etc/nats
           name: config
@@ -288,7 +294,7 @@ spec:
             secretKeyRef:
               key: rootPassword
               name: ctxmesh-objectstore-dev
-        image: minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+        image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
         livenessProbe:
           failureThreshold: 3
           httpGet:
@@ -311,6 +317,12 @@ spec:
           periodSeconds: 5
         resources:
           {{- toYaml .Values.devDataPlane.objectstore.resources | nindent 10 }}
+        startupProbe:
+          failureThreshold: 30
+          httpGet:
+            path: /minio/health/live
+            port: 9000
+          periodSeconds: 10
         volumeMounts:
         - mountPath: /data
           name: data
@@ -481,6 +493,11 @@ spec:
             port: 6379
         resources:
           {{- toYaml .Values.devDataPlane.statelayer.resources | nindent 10 }}
+        startupProbe:
+          failureThreshold: 30
+          periodSeconds: 10
+          tcpSocket:
+            port: 6379
         volumeMounts:
         - mountPath: /data
           name: data

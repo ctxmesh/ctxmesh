@@ -175,6 +175,13 @@ func (r *AgentDeploymentReconciler) reconcileTrigger(
 	deploy *agentsv1alpha1.AgentDeployment,
 	membership registryMembership,
 ) error {
+	// Fail LOUDLY, never silently. Returning nil here would leave an eventing agent looking
+	// reconciled while no Trigger exists and no event will ever reach it -- the failure mode this
+	// project keeps paying for (ADR 0141).
+	if !r.EventingAvailable {
+		return eventingUnavailableErr("executionModel 'eventing'")
+	}
+
 	brokerName := membership.RegistryName + brokerNameSuffix
 
 	trigger := &eventingv1.Trigger{

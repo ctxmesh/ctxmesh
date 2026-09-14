@@ -238,6 +238,19 @@ spec:
           capabilities:
             drop:
             - "ALL"
+        # A startupProbe so LIVENESS does not police STARTUP. Without one the manager had
+        # 15s + 3x20s = 75 seconds to become live or be killed, and on a cold cluster its startup
+        # includes minting a CA and leaf cert, writing the webhook Secret and applying the VWC.
+        # Measured on the M179 cold-install gate: three restarts before it settled, which is a
+        # crash-loop caused by the probe rather than by anything wrong. The startupProbe gives
+        # startup 5 minutes and hands over to liveness only once the process has answered once --
+        # which is exactly what the probe is for.
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          periodSeconds: 10
+          failureThreshold: 30
         livenessProbe:
           httpGet:
             path: /healthz

@@ -43,6 +43,22 @@ UI + Go BFF (spec §6):
 
 Console login — OIDC/SSO via Dex (m19.5, ADR 0020):
   - enabled:                   {{ .Values.auth.oidc.enabled }}
+{{- if not .Values.auth.oidc.enabled }}
+
+  SSO is OFF, so the console asks for a Kubernetes bearer token and acts with THAT identity.
+  This install binds NOBODY to a persona, so signing in without the step below shows an empty,
+  read-only console — which looks like a broken install and is not one.
+
+    kubectl create rolebinding my-operator --clusterrole=ctxmesh-operator \
+      --user="$(kubectl config view --minify -o jsonpath='{.contexts[0].context.user}')" -n <your-namespace>
+
+  Add --clusterrole=ctxmesh-credential-admin in the same namespace to connect a model provider
+  (it can write a credential and deliberately cannot read one back). Bind PER-NAMESPACE: a
+  cluster-wide persona binding lets one tenant enumerate another's catalog (ADR 0046).
+
+  For real use turn on auth.oidc.enabled and bind the personas to IdP groups instead of handing
+  out tokens.
+{{- end }}
 {{- if .Values.auth.oidc.enabled }}
   - Dex broker:                Deployment/ctxmesh-dex, Service/ctxmesh-dex:5556
   - issuer:                    {{ .Values.auth.oidc.issuer }}
