@@ -126,6 +126,14 @@ spec:
             - secretRef:
                 name: bff-adapters
                 optional: true
+          # startupProbe so LIVENESS does not police STARTUP (see config/manager/manager.yaml).
+          # Every component here gave its process 45-75s to come up on a COLD cluster or be killed,
+          # which is a crash-loop caused by the probe rather than by anything being wrong.
+          startupProbe:
+            tcpSocket:
+              port: 8443
+            periodSeconds: 10
+            failureThreshold: 30
           livenessProbe:
             tcpSocket:
               port: 8443

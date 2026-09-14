@@ -212,6 +212,12 @@ spec:
             drop:
             - ALL
           readOnlyRootFilesystem: true
+        startupProbe:
+          failureThreshold: 30
+          httpGet:
+            path: /api/health
+            port: 9090
+          periodSeconds: 10
         volumeMounts:
         - mountPath: /etc/ctxmesh/recipes
           name: recipe-overlay

@@ -1163,6 +1163,12 @@ spec:
             drop:
             - ALL
           readOnlyRootFilesystem: true
+        startupProbe:
+          failureThreshold: 30
+          httpGet:
+            path: /healthz
+            port: 8081
+          periodSeconds: 10
         volumeMounts:
         - mountPath: /tmp/k8s-webhook-server/serving-certs
           name: webhook-certs
@@ -1315,6 +1321,12 @@ spec:
             drop:
             - ALL
           readOnlyRootFilesystem: true
+        startupProbe:
+          failureThreshold: 30
+          httpGet:
+            path: /healthz
+            port: 8080
+          periodSeconds: 10
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -1400,6 +1412,11 @@ spec:
             drop:
             - ALL
           readOnlyRootFilesystem: true
+        startupProbe:
+          failureThreshold: 30
+          periodSeconds: 10
+          tcpSocket:
+            port: 8443
         volumeMounts:
         - mountPath: /etc/token-service/tls
           name: tls
