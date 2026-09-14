@@ -41,6 +41,15 @@ security:
 namespace: ctxmesh
 
 controllerManager:
+  # Container resources — see the note on bff.resources. Defaults are what the
+  # chart shipped before M178 made them tunable, so an upgrade changes nothing.
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 10m
+      memory: 64Mi
   # --- Egress durability knobs (M148, m52 Theme M143-knobs) -------------------
   # Passed through to each agent's egress sidecar. Both have been READ by the
   # sidecar since M126 and set by nothing, so the failure they exist for had no
@@ -143,6 +152,14 @@ componentPodDisruptionBudgets:
 # absent (NEVER re-keys) so OBO works out-of-box. Set false to BYO (pre-create the bff-capability Secret;
 # production should BYO a managed key — the generated key is a getting-started default).
 capabilityKey:
+  # Container resources — see the note on bff.resources. Defaults are what the
+  # chart shipped before M178 made them tunable, so an upgrade changes nothing.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
   generate: true
   # Bounds a HUNG keygen, but Kubernetes counts it from Job creation, so it also has to cover the image
   # pull. Sized for the slowest realistic cold pull, not the warm one — at 120s a first install on a
@@ -155,6 +172,14 @@ capabilityKey:
 # ON by default now that the env is derived (Fork 2) + the keypair is provisioned (Fork 1) — a correct
 # install PASSES it; a wrong one fails at install. Helm hooks are excluded from the no-drift diff (Fork 3).
 preflight:
+  # Container resources — see the note on bff.resources. Defaults are what the
+  # chart shipped before M178 made them tunable, so an upgrade changes nothing.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
   enabled: true
   # See capabilityKey.activeDeadlineSeconds — same cold-start reasoning.
   activeDeadlineSeconds: 900
@@ -168,8 +193,26 @@ preflight:
 # by design: its in-process run path needs the durable run-worker (runWorkerDispatch,
 # ADR 0034) before it is HA-safe, so it stays single-replica.
 gateway:
+  # Container resources — see the note on bff.resources. Defaults are what the
+  # chart shipped before M178 made them tunable, so an upgrade changes nothing.
+  resources:
+    limits:
+      cpu: '2'
+      memory: 1536Mi
+    requests:
+      cpu: 50m
+      memory: 512Mi
   replicas: 1
 tokenService:
+  # Container resources — see the note on bff.resources. Defaults are what the
+  # chart shipped before M178 made them tunable, so an upgrade changes nothing.
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 10m
+      memory: 64Mi
   # The token-service is the SOLE holder of the pgvector knowledge + long-term-memory
   # stores and embeds the QUERY through the gateway. Both WithMemory and WithKnowledge
   # hang off a single "is the gateway set" condition, so leaving this empty does not
@@ -198,6 +241,15 @@ tokenService:
 # is the DEV posture only (single-node kind, no drains). Enforcing this HA at the
 # default cutover is tracked in m52 Theme D (control-plane HA completion).
 statelayerProxy:
+  # Container resources — see the note on bff.resources. Defaults are what the
+  # chart shipped before M178 made them tunable, so an upgrade changes nothing.
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 10m
+      memory: 64Mi
   replicas: 1
   image:
     # The state-layer proxy image. Empty tag → Chart.appVersion ("latest"), matching
@@ -215,6 +267,36 @@ crds:
 # DETERMINISTIC dev credentials (never real secrets). In production set
 # `enabled: false` and point the controller at an externally-managed data plane.
 devDataPlane:
+  # Container resources for the bundled dev data plane. Same contract as the
+  # control-plane components: today's numbers, overridable per component.
+  nats:
+    resources:
+      limits:
+        memory: 512Mi
+      requests:
+        cpu: 50m
+        memory: 64Mi
+  objectstore:
+    resources:
+      limits:
+        memory: 512Mi
+      requests:
+        cpu: 50m
+        memory: 128Mi
+  postgres:
+    resources:
+      limits:
+        memory: 2Gi
+      requests:
+        cpu: 100m
+        memory: 256Mi
+  statelayer:
+    resources:
+      limits:
+        memory: 256Mi
+      requests:
+        cpu: 50m
+        memory: 128Mi
   enabled: true
 
 # --- Control-plane / run-store PostgreSQL (M148, ADR 0130) -------------------
@@ -287,7 +369,18 @@ statelayer:
     # node, so a reschedule sticks Pending; see ADR 0047).
     storageClassName: ""
     # CPU limit on the Valkey container (bound it — the ClickHouse-heat lesson).
-    cpuLimit: "1"
+    # cpuLimit was the chart's only resource dial before M178 gave every workload a
+    # full `resources` map. It is kept ONLY so an operator who set it gets a loud
+    # failure naming the replacement — a silently ignored CPU limit on the state
+    # layer is the kind of change that gets discovered in production.
+    cpuLimit: ""
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: "1"
+        memory: 256Mi
 
 # --- Prometheus wiring -------------------------------------------------------
 # The controller-manager exposes HTTPS metrics on :8443 (already in the
@@ -352,6 +445,23 @@ ui:
 # `helm install --set bff.providerConnect.enabled=false` renders "false" to
 # disable it — the ADR 0015 hardened-install path.
 bff:
+  # Container resources. An operator cannot size the control plane for their
+  # cluster if these are baked into the template, and until M178 every workload
+  # in this chart had them hardcoded — 31 limits/requests blocks, none of them
+  # reachable from values, while the same templates read .Values 219 times for
+  # everything else.
+  #
+  # The defaults below are exactly what the chart shipped before they became
+  # tunable, so `helm upgrade` at default values changes no limit on any
+  # cluster. Override per component; an empty map removes the block entirely,
+  # which is what a cluster with its own LimitRange wants.
+  resources:
+    limits:
+      cpu: 500m
+      memory: 1Gi
+    requests:
+      cpu: 10m
+      memory: 192Mi
   # --- Model-service + async wiring (M148, m52 M141-install) -----------------
   # Before M148 none of these had a chart home, so four features that exist in
   # the code could not be turned on from the product's only documented install
@@ -363,6 +473,13 @@ bff:
   # so KB ingestion and generation work out of the box. Override to point at an
   # external gateway.
   modelGatewayURL: ""
+  # How long one run advance may take, and the ceiling that kills a wedged run
+  # regardless (ADR 0093). Both were readable by the process and settable by nobody:
+  # no chart value templated them, so a Helm install — the only documented install
+  # path — could not change a 10m default it might badly need to. Empty uses the
+  # compiled defaults, 10m and 60m.
+  runExecTimeout: ""
+  runExecMaxTimeout: ""
   # The offline OCR + reranker services (M140) are deployed separately; empty
   # keeps their honest degradation (a scanned PDF stays PartiallyIngested; the
   # rerank stage is skipped) rather than pretending they exist.
@@ -440,6 +557,12 @@ bff:
   # OFF ⇒ in-process / mem-store, single-pod (the dev default) — helm-default renders
   # NO worker + no BFF run-store env == `kustomize build config/default` (no-drift).
   runStore:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        memory: 1Gi
     enabled: false
     dsnSecretName: run-store
     worker:
@@ -571,3 +694,12 @@ auth:
     # Leaving this false is what keeps the tenant-isolation precondition true.
     demoBindingClusterWide: false
     usernamePrefix: "oidc:"
+
+# The pre-delete hook that cleans up per-tenant validating webhook configurations.
+tenantCleanup:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
