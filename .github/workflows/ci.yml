@@ -303,6 +303,12 @@ jobs:
       # minutes exhausted once (m52.G3). Carded for M150.
       - name: Install-truth gate (the chart provisions what it consumes)
         run: ./hack/install-truth.sh
+      # M178 — an operator could not size ANY part of this install: 31 limits/requests blocks
+      # hardcoded across the chart, none reachable from values, while the same templates read
+      # .Values 219 times for everything else. The templates are fixed; this guards the NEXT
+      # workload, which gets copied from an old one and quietly reopens the gap.
+      - name: Chart resources are tunable (no baked-in limits)
+        run: ./hack/chart-resources-tunable.sh
       # M149 m149.3 — least privilege, asserted on what we SHIP.
       #
       # M146's acceptance found ctxmesh-operator holding verbs:["*"] on agentdeployments,

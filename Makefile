@@ -467,6 +467,10 @@ release-truth: ## Assert the release publishes every artifact an install needs, 
 provider-parity: ## Assert the console offers exactly the providers the BFF supports (M153). Static, no cluster.
 	./hack/provider-parity.sh
 
+.PHONY: chart-resources-tunable
+chart-resources-tunable: ## Assert no container's resources are baked into a template (M178). Static.
+	./hack/chart-resources-tunable.sh
+
 .PHONY: install-truth
 install-truth: ## Assert the chart provisions what it consumes (M148). Render-only, no cluster.
 	./hack/install-truth.sh

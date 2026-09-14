@@ -225,11 +225,7 @@ spec:
           initialDelaySeconds: 3
           periodSeconds: 5
         resources:
-          limits:
-            memory: 512Mi
-          requests:
-            cpu: 50m
-            memory: 64Mi
+          {{- toYaml .Values.devDataPlane.nats.resources | nindent 10 }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -314,11 +310,7 @@ spec:
             port: 9000
           periodSeconds: 5
         resources:
-          limits:
-            memory: 512Mi
-          requests:
-            cpu: 50m
-            memory: 128Mi
+          {{- toYaml .Values.devDataPlane.objectstore.resources | nindent 10 }}
         volumeMounts:
         - mountPath: /data
           name: data
@@ -398,11 +390,7 @@ spec:
           periodSeconds: 5
           timeoutSeconds: 3
         resources:
-          limits:
-            memory: 2Gi
-          requests:
-            cpu: 100m
-            memory: 256Mi
+          {{- toYaml .Values.devDataPlane.postgres.resources | nindent 10 }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -492,11 +480,7 @@ spec:
           tcpSocket:
             port: 6379
         resources:
-          limits:
-            memory: 256Mi
-          requests:
-            cpu: 50m
-            memory: 128Mi
+          {{- toYaml .Values.devDataPlane.statelayer.resources | nindent 10 }}
         volumeMounts:
         - mountPath: /data
           name: data
