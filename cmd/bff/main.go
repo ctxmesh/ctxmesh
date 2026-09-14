@@ -25,7 +25,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -397,7 +396,17 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	var runStore runstore.Store
 	var convStore runstore.ConversationStore
 	if runDSN := strings.TrimSpace(os.Getenv("RUN_STORE_DSN")); runDSN != "" {
-		db, dbErr := sql.Open("pgx", runDSN)
+		// Wait for Postgres rather than exiting on a dependency that is merely slow. The
+		// control-plane DB has done this since OpenDBWaiting was written -- its comment describes
+		// the same failure, "a first helm install a coin flip decided by image-pull speed" -- and
+		// the run store simply never adopted it. Measured on a cold install of the published
+		// chart: the BFF exited on "connection refused" and Kubernetes restarted it FIVE times,
+		// each restart backing off further, which is a crash-loop used as a retry loop and is
+		// minutes of a first install spent looking broken.
+		db, dbErr := controlplane.OpenDBWaiting(context.Background(), runDSN,
+			func(err error, wait time.Duration) {
+				log.Info("run-store postgres not ready yet, waiting", "retryIn", wait.String(), "err", err.Error())
+			})
 		if dbErr != nil {
 			return fmt.Errorf("open run-store postgres: %w", dbErr)
 		}
