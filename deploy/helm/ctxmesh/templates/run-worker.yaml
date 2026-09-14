@@ -123,13 +123,7 @@ spec:
               drop:
                 - ALL
           resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              # Raised 256Mi -> 1Gi to MATCH the BFF: this container runs the same
-              # ingestion path, so it needs the same measured headroom (M148 B3).
-              memory: 1Gi
+            {{- toYaml .Values.bff.runStore.resources | nindent 12 }}
 ---
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
