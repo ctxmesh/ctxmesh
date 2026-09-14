@@ -26,15 +26,55 @@
 #   VALKEY_STS=statelayer           the Valkey StatefulSet/pod name prefix
 set -euo pipefail
 
+log() { printf '>> %s\n' "$*" >&2; }
+
+# EVERY default below is DISCOVERED from the cluster, not assumed.
+#
+# They used to be literals, and on 2026-09-14 all three were checked against a stock install and
+# all three were wrong: PG_POD=runstore-pg did not exist (the chart ships ctxmesh-postgres),
+# PG_USER/PG_DB=postgres/runs could not connect (the chart generates them into a Secret), and
+# KEK_SECRET=ctxmesh-credstore-kek existed nowhere. So the disaster-recovery tool could not run
+# against the product it recovers, and nothing had ever noticed, because nothing had ever run it.
+#
+# The KEK is the sharpest case. Three different names were in circulation -- cred-kek in the
+# published runbook, ctxmesh-credstore-kek here, pg-kek in an integration test -- and none of them
+# is real: the name is whatever the operator put in the CredentialStore's localKEKSecretRef. A
+# guessed name fails as NotFound on the one asset without which credential ciphertext is
+# permanently inert, at the exact moment somebody is restoring.
 NS="${NS:-ctxmesh}"
 CRED_NS="${CRED_NS:-ctxmesh}"
-KEK_SECRET="${KEK_SECRET:-ctxmesh-credstore-kek}"
-PG_POD="${PG_POD:-runstore-pg}"
-PG_USER="${PG_USER:-postgres}"
-PG_DB="${PG_DB:-runs}"
 VALKEY_STS="${VALKEY_STS:-statelayer}"
 
-log() { printf '>> %s\n' "$*" >&2; }
+discover() {  # discover <var> <description> <command...>
+  local var="$1" what="$2"; shift 2
+  local cur="${!var:-}"
+  [ -n "$cur" ] && return 0
+  local val; val="$("$@" 2>/dev/null || true)"
+  [ -n "$val" ] || return 1
+  printf -v "$var" '%s' "$val"
+  log "  discovered $what: $val"
+}
+
+discover PG_POD "control-plane Postgres pod" \
+  kubectl -n "$NS" get pod -l control-plane=postgres -o jsonpath='{.items[0].metadata.name}' \
+  || { echo "no Postgres pod labelled control-plane=postgres in $NS; set PG_POD" >&2; exit 1; }
+
+PG_SECRET="${PG_SECRET:-$(kubectl -n "$NS" get secret -o name 2>/dev/null \
+  | grep -m1 'postgres' | cut -d/ -f2 || true)}"
+if [ -n "$PG_SECRET" ]; then
+  discover PG_USER "Postgres user" sh -c \
+    "kubectl -n '$NS' get secret '$PG_SECRET' -o jsonpath='{.data.username}' | base64 -d" || true
+  discover PG_DB "Postgres database" sh -c \
+    "kubectl -n '$NS' get secret '$PG_SECRET' -o jsonpath='{.data.database}' | base64 -d" || true
+fi
+PG_USER="${PG_USER:-postgres}"
+PG_DB="${PG_DB:-postgres}"
+
+# The KEK's name is on the CredentialStore, because the operator chose it there.
+KEK_SECRET="${KEK_SECRET:-$(kubectl get clustercredentialstores,credentialstores -A \
+  -o jsonpath='{.items[*].spec.provider.postgres.encryption.localKEKSecretRef.name}' 2>/dev/null \
+  | awk '{print $1}' || true)}"
+
 
 valkey_pod() { kubectl -n "$NS" get pod -l control-plane=statelayer -o jsonpath='{.items[0].metadata.name}'; }
 
