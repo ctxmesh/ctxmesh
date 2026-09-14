@@ -3,8 +3,8 @@ package controller
 import (
 	"fmt"
 
-	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
