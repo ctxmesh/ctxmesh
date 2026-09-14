@@ -467,6 +467,10 @@ release-truth: ## Assert the release publishes every artifact an install needs, 
 provider-parity: ## Assert the console offers exactly the providers the BFF supports (M153). Static, no cluster.
 	./hack/provider-parity.sh
 
+.PHONY: prereqs-are-real
+prereqs-are-real: ## Assert declared prerequisites match what the controllers watch (M179). Needs the docs checkout.
+	./hack/prereqs-are-real.sh
+
 .PHONY: chart-resources-tunable
 chart-resources-tunable: ## Assert no container's resources are baked into a template (M178). Static.
 	./hack/chart-resources-tunable.sh
