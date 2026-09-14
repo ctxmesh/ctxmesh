@@ -705,7 +705,7 @@ function BoundMeter({ bound }: { bound: Bound }) {
 
 /** Kept as `DashboardPage`: it is the name `App.tsx` mounts at `/`. */
 export function DashboardPage() {
-  const { namespace } = useNamespace();
+  const { namespace, workingNamespace } = useNamespace();
   const { can, canFlow } = useCapabilities();
   const canCreate = can(RES_AGENTS, "create");
   // canFlow fails CLOSED: an unprobed or refused flow means the entry point is
@@ -840,7 +840,7 @@ export function DashboardPage() {
         });
 
       api
-        .listProviders(controller.signal)
+        .listProviders(workingNamespace, controller.signal)
         .then((res) => {
           if (live()) setProviders({ kind: "ready", data: res.providers.length });
         })
@@ -857,7 +857,7 @@ export function DashboardPage() {
           if (live()) setRuns(toFailure(err));
         });
     },
-    [namespace],
+    [namespace, workingNamespace],
   );
 
   useEffect(() => {

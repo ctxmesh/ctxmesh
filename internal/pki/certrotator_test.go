@@ -75,3 +75,35 @@ func TestRotatorFor_InjectsNamedValidatingWebhook(t *testing.T) {
 	assert.Equal(t, rotator.Validating, cr.Webhooks[0].Type,
 		"the tenant-label webhook is a ValidatingWebhook — its caBundle gets injected")
 }
+
+// The renewal window must never reach the expiry it is meant to precede.
+//
+// This is the defect that shipped: LookaheadInterval was left unset, so cert-controller applied its
+// 90d default — exactly our ServerCertDuration. validServerCert verifies the cert as of
+// now+lookahead, a fresh cert expires at now+duration, so with the two equal the cert is ALWAYS
+// judged expiring. Measured live: the webhook Secret was rewritten ~13 times a second forever,
+// and every Secret-watching controller reconciled on each write.
+//
+// The existing test asserted ServerCertDuration and never the lookahead, which is precisely why
+// nothing caught it — the value that was wrong was the one nobody looked at.
+func TestLookaheadIsShorterThanTheCertItRenews(t *testing.T) {
+	cr := WebhookCertConfig{
+		Namespace:          "ctxmesh",
+		ServiceName:        "ctxmesh-webhook-service",
+		SecretName:         "ctxmesh-webhook-server-cert",
+		CAName:             "ctxmesh-ca",
+		CAOrganization:     "ctxmesh",
+		CADuration:         5 * 365 * 24 * time.Hour,
+		ServerCertDuration: 90 * 24 * time.Hour,
+	}.rotatorFor(make(chan struct{}))
+
+	if cr.LookaheadInterval <= 0 {
+		t.Fatal("LookaheadInterval is unset, so cert-controller applies its 90d default — equal to " +
+			"our cert lifetime, which makes every freshly-minted cert instantly 'expiring'")
+	}
+	if cr.LookaheadInterval >= cr.ServerCertDuration {
+		t.Fatalf("lookahead %v >= cert lifetime %v: a cert can never satisfy a renewal window equal "+
+			"to or longer than its own life, so the rotator refreshes forever",
+			cr.LookaheadInterval, cr.ServerCertDuration)
+	}
+}

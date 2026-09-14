@@ -57,10 +57,13 @@ export function NamespaceProvider({ children }: { children: React.ReactNode }) {
   const [namespace, setNamespaceState] = React.useState(
     () => localStorage.getItem(NS_KEY) ?? "",
   );
+  // An explicit pick is ALWAYS persisted, "All workspaces" included. Removing the key for ""
+  // made a deliberate choice of the cluster-wide scope indistinguishable from never having
+  // chosen, and the auto-seed below needs to tell those apart or it would silently overrule the
+  // user on every reload.
   const setNamespace = React.useCallback((ns: string) => {
     setNamespaceState(ns);
-    if (ns) localStorage.setItem(NS_KEY, ns);
-    else localStorage.removeItem(NS_KEY);
+    localStorage.setItem(NS_KEY, ns);
   }, []);
   const [list, setList] = React.useState<NamespaceListState>({ kind: "loading" });
 
@@ -93,6 +96,32 @@ export function NamespaceProvider({ children }: { children: React.ReactNode }) {
     return () => controller.abort();
   }, [reload]);
 
+  // FIRST VISIT LANDS IN A CONCRETE WORKSPACE, NOT "All workspaces".
+  //
+  // "" asks every list endpoint for a cluster-wide read, which a caller bound per-namespace —
+  // the shape the chart ships and ADR 0046 requires — cannot do. So a fresh browser opened on a
+  // scope the user can never satisfy: all 13 namespaced list endpoints returned 403, and the
+  // console rendered "You don't have permission to view agents" to someone holding full rights
+  // in their own namespace. Worse, reads used `namespace` while writes used `workingNamespace`,
+  // so the same user was told they could not read agents and allowed to create one.
+  //
+  // `scopeDecided` is state rather than a ref because children are gated on it: the resolution
+  // has to trigger a render even in the branches that leave the namespace "".
+  const [scopeDecided, setScopeDecided] = React.useState(
+    () => localStorage.getItem(NS_KEY) !== null,
+  );
+  React.useEffect(() => {
+    if (scopeDecided || list.kind === "loading") return;
+    // Only an untouched selection is seeded. A user who deliberately picks "All workspaces"
+    // keeps it — that is what persisting "" above is for — and a caller with no namespace at all
+    // stays "", which the shell renders as manual entry rather than inventing a "default" they
+    // may not hold.
+    if (list.kind === "ready" && list.namespaces.length > 0) {
+      setNamespaceState(list.namespaces[0].name);
+    }
+    setScopeDecided(true);
+  }, [scopeDecided, list]);
+
   // The concrete namespace writes land in. An explicit selection wins; otherwise the first
   // namespace the caller can actually use. Resolving to a hardcoded "default" would be wrong
   // in the same way the empty probe was — asserting a namespace the caller may not hold.
@@ -107,9 +136,20 @@ export function NamespaceProvider({ children }: { children: React.ReactNode }) {
     [namespace, workingNamespace, list, reload],
   );
 
+  // Hold the first render until the scope is DECIDED.
+  //
+  // Children read `namespace` the moment they mount. Before the scope resolves that is "", so
+  // every page fired a cluster-wide request, took a 403 no per-namespace caller can avoid, and
+  // re-fired the same request correctly a beat later. Measured on a first visit: six doomed
+  // requests per console load, and long enough for "You don't have permission to view agents" to
+  // paint before the real data replaced it.
+  //
+  // Gating on the list state alone was not enough — there is one render where the list is ready
+  // but the seed effect has not run yet, and six requests escaped through exactly that gap.
+  // `scopeDecided` closes it: it flips in the same effect that seeds, in every branch.
   return (
     <NamespaceContext.Provider value={value}>
-      {children}
+      {scopeDecided ? children : null}
     </NamespaceContext.Provider>
   );
 }

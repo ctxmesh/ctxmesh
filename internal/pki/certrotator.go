@@ -91,6 +91,18 @@ func (c WebhookCertConfig) rotatorFor(ready chan struct{}) *rotator.CertRotator 
 	}
 	if c.ServerCertDuration > 0 {
 		cr.ServerCertDuration = c.ServerCertDuration
+		// LookaheadInterval MUST be shorter than the cert's own lifetime, and the library will not
+		// do that for you: unset, it defaults to 90d (defaultLookaheadInterval), which is EXACTLY
+		// our ServerCertDuration. validServerCert then verifies the cert as of now+90d, a freshly
+		// minted cert expires at now+90d, so it is always judged expiring — mint, judge expiring,
+		// mint again. Measured on a live cluster before this was set: the webhook Secret was
+		// rewritten ~13 times per SECOND, indefinitely, and because every controller watching
+		// Secrets reconciles on each write it also drove one ModelRoute to 167 reconciles in 30s.
+		// A third of a core and thousands of API writes a minute, on an idle cluster.
+		//
+		// A third of the lifetime is the usual shape: rotate with plenty of runway, and never
+		// let the renewal window meet the expiry it is supposed to precede.
+		cr.LookaheadInterval = c.ServerCertDuration / 3
 	}
 	return cr
 }

@@ -270,7 +270,7 @@ export function ProvidersPage() {
     abortRef.current = controller;
     setState({ kind: "loading" });
     api
-      .listProviders(controller.signal)
+      .listProviders(workingNamespace, controller.signal)
       .then((res) => {
         if (controller.signal.aborted) return;
         // Read `items` (the console key), fall back to `providers`, default [].
@@ -289,7 +289,7 @@ export function ProvidersPage() {
           forbidden,
         });
       });
-  }, []);
+  }, [workingNamespace]);
 
   useEffect(() => {
     load();

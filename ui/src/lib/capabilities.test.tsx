@@ -25,7 +25,11 @@ function stubCapabilities(
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ namespaces: [] }),
+          // A REAL namespace, because the provider no longer probes without one: a
+          // namespace-less SSAR asks "may I do this in every namespace at once", and its
+          // definite all-false was read as a verdict about the caller (M177). An empty list
+          // here left workingNamespace "" and silently exercised exactly that path.
+          json: async () => ({ namespaces: [{ name: "team-a" }] }),
         } as Response);
       }
       // /api/capabilities?namespace=<ns>
