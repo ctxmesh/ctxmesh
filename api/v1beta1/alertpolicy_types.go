@@ -36,6 +36,7 @@ type AlertSelector struct {
 
 	// names lists explicit AgentDeployment names to watch. Takes union with matchLabels.
 	// +optional
+	// +kubebuilder:validation:MaxItems=128
 	Names []string `json:"names,omitempty"`
 }
 
@@ -80,6 +81,7 @@ type AlertCondition struct {
 	// window is the evaluation look-back window (e.g. "5m", "1h"). Ignored by regressionDetected and
 	// approvalWaiting (both event-driven, not window-based).
 	// +optional
+	// +kubebuilder:validation:MaxLength=32
 	Window string `json:"window,omitempty"`
 }
 
@@ -132,6 +134,7 @@ type EmailChannel struct {
 type AlertRoute struct {
 	// channels is the list of notification destinations. At least one is required.
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=16
 	Channels []AlertChannel `json:"channels"`
 }
 
@@ -145,6 +148,7 @@ type AlertPolicySpec struct {
 	// conditions is the list of threshold rules. The policy fires when ANY condition is breached.
 	// At least one condition is required.
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=32
 	Conditions []AlertCondition `json:"conditions"`
 
 	// route describes where fired alerts are delivered.

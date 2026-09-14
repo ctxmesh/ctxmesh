@@ -114,11 +114,13 @@ spec:
                       description: |-
                         window is the evaluation look-back window (e.g. "5m", "1h"). Ignored by regressionDetected and
                         approvalWaiting (both event-driven, not window-based).
+                      maxLength: 32
                       type: string
                   required:
                   - name
                   - type
                   type: object
+                maxItems: 32
                 minItems: 1
                 type: array
               route:
@@ -182,6 +184,7 @@ spec:
                       required:
                       - type
                       type: object
+                    maxItems: 16
                     minItems: 1
                     type: array
                 required:
@@ -203,6 +206,7 @@ spec:
                       Takes union with matchLabels.
                     items:
                       type: string
+                    maxItems: 128
                     type: array
                 type: object
             required:
