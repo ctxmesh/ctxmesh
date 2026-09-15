@@ -19,4 +19,13 @@ FROM debian:12-slim
 COPY --from=upstream /otelcol-contrib /otelcol-contrib
 # distroless upstream ships default config at /etc/otelcol-contrib/config.yaml;
 # the controller mounts ours at /etc/otel/config.yaml and passes --config.
+# Run as the same non-root uid as the agent container beside it. The collector had NO USER and no
+# SecurityContext, so a "hardened" agent pod carried a root, un-seccomped, caps-intact container
+# next to the hardened one -- and PodSecurity `restricted` rejects a POD for its worst container,
+# so agents would not run at all on a cluster that enforces it.
+#
+# Safe here: the collector only READS its config, which the controller mounts read-only, and writes
+# nothing to the filesystem. /otelcol-contrib is copied 0755 from upstream, so 65532 can execute it.
+USER 65532:65532
+
 ENTRYPOINT ["/otelcol-contrib"]
