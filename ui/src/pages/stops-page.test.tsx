@@ -134,6 +134,12 @@ describe("the in-force list", () => {
     renderPage();
 
     const table = await screen.findByRole("table", { name: "Active stops" });
+    // waitFor, not a synchronous read: DataTable renders the <table> WITH its aria-label while
+    // loading (a single skeleton <tr> in the tbody), so findByRole("table") resolves on the
+    // loading state and a synchronous row count sees 1. That is the M176 tier0 flake — "1
+    // failed | 1440 passed", passing on re-run of the identical tree, unnamed until M180's
+    // retained transcripts named it. Wait for the real rows, not merely for the table.
+    await waitFor(() => expect(within(table).getAllByRole("row")).toHaveLength(4)); // 3 + header
     const rows = within(table).getAllByRole("row").slice(1); // drop the header row
     expect(rows).toHaveLength(3);
     // A fleet stop holds more than a workspace stop, which holds more than one agent.
@@ -333,6 +339,8 @@ describe("the full record", () => {
     renderPage();
 
     const table = await screen.findByRole("table", { name: "Active stops" });
+    // Same race as the in-force list: clicking row[1] while the skeleton is up clicks the skeleton.
+    await waitFor(() => expect(within(table).getAllByRole("row")).toHaveLength(2)); // 1 + header
     fireEvent.click(within(table).getAllByRole("row")[1]);
 
     const drawer = await screen.findByRole("dialog");
@@ -363,6 +371,8 @@ describe("the lifted trail", () => {
     renderPage();
 
     const table = await screen.findByRole("table", { name: "Recently lifted stops" });
+    // Same race: the skeleton row is indistinguishable from one real row by count alone.
+    await waitFor(() => expect(within(table).getByText("namespace:team-a")).toBeInTheDocument());
     const rows = within(table).getAllByRole("row").slice(1);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toHaveTextContent("namespace:team-a");
