@@ -11,7 +11,13 @@ FROM base-python:latest
 WORKDIR /app
 
 COPY examples/langchain-agent/requirements.txt /app/requirements.txt
+# THE PATTERN for a derived image that needs root at BUILD time. base-python ends as uid 65532
+# (the controller sets RunAsNonRoot=true on every agent container, so a root image never starts),
+# and site-packages is root-owned — so pip install must step up and back down. Step back down:
+# whatever uid the image ENDS on is the uid the container runs as.
+USER root
 RUN pip install --no-cache-dir -r /app/requirements.txt
+USER 65532:65532
 
 COPY examples/langchain-agent/agent.py /app/agent.py
 

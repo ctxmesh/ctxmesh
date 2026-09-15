@@ -73,6 +73,30 @@ RUN pip install --no-cache-dir /tmp/ctxmesh-sdk/ \
 COPY images/base-python/sitecustomize.py \
      /usr/local/lib/python3.12/site-packages/sitecustomize.py
 
+# Run as a NON-ROOT uid. The controller hardens every agent container with
+# RunAsNonRoot=true by default (ADR 0142's sibling, M162), and kubelet refuses to start an image
+# whose user is root: "container has runAsNonRoot and image will run as root". Without this, every
+# agent built the documented way — FROM this image — fails to start on a default install.
+#
+# 65532 SPECIFICALLY, and numerically:
+#   - it is the distroless `nonroot` uid every other non-root image here already uses, and
+#     internal/controller/egress_redirect.go reserves 64535 for the egress sidecar *because* agents
+#     are expected to be 65532. Using 64535 here would silently exempt agents from the structural
+#     tool-deny that the redirect exists to enforce.
+#   - numerically, never `USER nonroot`: kubelet cannot verify a NON-NUMERIC image user against
+#     RunAsNonRoot and fails with its own CreateContainerConfigError, trading one for another.
+#
+# useradd -m + HOME because a uid with no passwd entry gets an unset or unwritable $HOME, which
+# breaks any library that caches there (huggingface, tiktoken) at RUNTIME rather than at start —
+# a quiet failure in place of a loud one.
+#
+# A derived image that needs to write root-owned paths (pip install into site-packages, chown of
+# WORKDIR) wraps that step: `USER root` … `USER 65532:65532`. See examples/langchain-agent.
+RUN groupadd -g 65532 nonroot \
+ && useradd -u 65532 -g 65532 -d /home/nonroot -m -s /usr/sbin/nologin nonroot
+ENV HOME=/home/nonroot
+USER 65532:65532
+
 # OTEL_EXPORTER_OTLP_ENDPOINT: gRPC address for the OTel collector sidecar.
 # Default matches the controller-injected sidecar (localhost:4317 in the pod).
 # Override in derived images or at runtime if the collector is elsewhere.
