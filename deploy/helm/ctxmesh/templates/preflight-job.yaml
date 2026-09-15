@@ -65,7 +65,7 @@ spec:
             - name: MCP_OBO_EGRESS_ENABLED
               value: {{ .Values.controllerManager.oboEgress.enabled | quote }}
             - name: EGRESS_SIDECAR_IMAGE
-              value: {{ .Values.controllerManager.oboEgress.sidecarImage | default "" | quote }}
+              value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.oboEgress.sidecarImage "ctx" $) | quote }}
             - name: MCP_CREDENTIAL_NAMESPACE
               value: {{ .Values.bff.mcp.credentialNamespace | default .Values.namespace }}
             - name: TOKEN_SERVICE_URL

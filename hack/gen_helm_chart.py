@@ -298,14 +298,14 @@ COLLECTOR_IMAGE_ENV_KUSTOMIZE = (
 )
 COLLECTOR_IMAGE_ENV_HELM = (
     "        - name: COLLECTOR_IMAGE\n"
-    '          value: {{ .Values.controllerManager.injectedImages.collector | default "" | quote }}'
+    '          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.injectedImages.collector "ctx" $) | quote }}'
 )
 DISCOVERY_IMAGE_ENV_KUSTOMIZE = (
     '        - name: DISCOVERY_IMAGE\n' '          value: ""'
 )
 DISCOVERY_IMAGE_ENV_HELM = (
     "        - name: DISCOVERY_IMAGE\n"
-    '          value: {{ .Values.controllerManager.injectedImages.discovery | default "" | quote }}'
+    '          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.injectedImages.discovery "ctx" $) | quote }}'
 )
 MCP_OBO_EGRESS_ENABLED_ENV_KUSTOMIZE = (
     '        - name: MCP_OBO_EGRESS_ENABLED\n' '          value: "false"'
@@ -319,7 +319,7 @@ EGRESS_SIDECAR_IMAGE_ENV_KUSTOMIZE = (
 )
 EGRESS_SIDECAR_IMAGE_ENV_HELM = (
     "        - name: EGRESS_SIDECAR_IMAGE\n"
-    '          value: {{ .Values.controllerManager.oboEgress.sidecarImage | default "" | quote }}'
+    '          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.oboEgress.sidecarImage "ctx" $) | quote }}'
 )
 # MCP_CAPABILITY_PUBLIC_KEY is NO LONGER templated (M124/Gate A): config/manager now reads it from the
 # bff-capability Secret via valueFrom.secretKeyRef (the keygen hook provisions it). The chart copies that

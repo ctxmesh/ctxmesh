@@ -49,6 +49,26 @@ jobs:
           - image: statelayer-proxy
             target: docker-build-statelayer-proxy
             local: statelayer-proxy:latest
+          # The three images the CONTROLLER injects into agent pods. None was published, while
+          # the matrix comment above claims "every first-party image an install needs" — so a
+          # default install could not run a single agent to Ready:
+          #   agent-otel-collector — injected into EVERY agent pod; the unpublished default is
+          #       dev.local/... so it ImagePullBackOffs on any real cluster, tools or not.
+          #   agent-discovery — injected whenever an agent has a tool binding; same dead end.
+          #   egress-sidecar — the ALWAYS-ON tool-call chokepoint since M82, and its image has NO
+          #       fallback at all, so an empty value makes Knative reject the Service with
+          #       `missing field(s): spec.template.spec.containers[N].image` — a container INDEX,
+          #       with no status condition and no event to explain it.
+          # Exactly the reasoning the managed-agent entry below already records.
+          - image: agent-otel-collector
+            target: docker-build-collector
+            local: dev.local/agent-otel-collector:0.116.0
+          - image: agent-discovery
+            target: docker-build-discovery
+            local: dev.local/agent-discovery:0.1.0
+          - image: egress-sidecar
+            target: docker-build-egress-sidecar
+            local: egress-sidecar:latest
           # managed-agent is not in the chart's image values — the CONTROLLER injects it
           # from a compiled-in default. It is still an image every managed agent needs,
           # and an unpublished default is precisely the ContainerMissing dead end M153
