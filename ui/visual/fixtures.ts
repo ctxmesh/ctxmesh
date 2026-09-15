@@ -24,6 +24,7 @@
 // route would render the login wall and the sweep would screenshot nothing.
 
 import type {
+  CensusResponse,
   AgentDetailResponse,
   AgentListResponse,
   AgentMemoryListResponse,
@@ -2141,6 +2142,19 @@ const ROUTES: FixtureRoute[] = [
   { match: /^\/api\/kill\/lift$/, methods: POST, populated: () => ({ scope: "ns:team-b", level: "namespace", applied: true }) },
 
   // ── Agents: suffixed paths before the bare detail path ────────────────────
+  // GET /api/agents/census — internal/bff/census.go. Missing entirely until M180, so it fell through
+  // to the generic `{ items: [] }` fallback: a 200 whose shape no CensusResponse consumer can use.
+  // dashboard-page's `for (const g of c.groups)` then threw on every run of the home page, and the
+  // report recorded it without failing anything.
+  { match: /^\/api\/agents\/census$/, populated: (): CensusResponse => ({
+      total: 7, complete: true, groupsComplete: true,
+      groups: [
+        { ready: true,  isDraft: false, count: 4 },
+        { ready: false, isDraft: false, count: 2, phase: "Progressing", reason: "RolloutInProgress" },
+        { ready: false, isDraft: true,  count: 1, phase: "Draft" },
+      ],
+    }),
+    empty: (): CensusResponse => ({ total: 0, complete: true, groupsComplete: true, groups: [] }) },
   { match: /^\/api\/agents\/generate$/, populated: () => ({ agentYAML: "name: support-assistant\nmodel:\n  route: anthropic-primary\ntools:\n  - search_documents\n", expanded: "apiVersion: agents.ctxmesh.ai/v1alpha1\nkind: AgentDeployment\n", model: "claude-opus-4", warnings: ["No guardrail policy was requested — the namespace default applies."] }) },
   { match: /^\/api\/agents\/refine$/, populated: () => ({ agentYAML: "name: support-assistant\nmodel:\n  route: anthropic-primary\n", diff: ["- scaling: {min: 1, max: 4}", "+ scaling: {min: 2, max: 8}"], model: "claude-opus-4", provider: "anthropic", warnings: [] }) },
   { match: /^\/api\/agents\/check-requirements$/, populated: (): CheckRequirementsResponse => ({ model: { required: true, connected: true, route: "anthropic-primary" }, tools: [{ name: "search_documents", status: "ready" }, { name: "create_refund", status: "needs-approval" }, { name: "post_message", status: "needs-consent" }, { name: "ledger_write", status: "not-found" }] }) },
