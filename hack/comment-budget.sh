@@ -32,7 +32,6 @@ root, limit = pathlib.Path(sys.argv[1]), int(sys.argv[2])
 # Blocks over the limit that predate the gate. Shrink this list; never grow it.
 GRANDFATHERED = {
     "internal/controller/agentregistry_controller.go",
-    "internal/bff/server.go",
     "internal/ingest/ingest.go",
     "internal/credresolve/doc.go",
     "cmd/launcher/objectstore.go",

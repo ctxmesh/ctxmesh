@@ -28,6 +28,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -213,6 +214,16 @@ func Container(configMapName string, langfuseEnv []corev1.EnvVar, image string) 
 			Limits: corev1.ResourceList{
 				corev1.ResourceMemory: resource.MustParse("256Mi"),
 			},
+		},
+		// The same profile the agent's own container gets. Without it a "hardened" agent pod
+		// carried one hardened container and one un-hardened root one, and PodSecurity
+		// `restricted` judges a pod by its worst container -- so agents would not run at all on a
+		// cluster that enforces it. The collector only reads its config, mounted read-only below.
+		SecurityContext: &corev1.SecurityContext{
+			RunAsNonRoot:             ptr.To(true),
+			AllowPrivilegeEscalation: ptr.To(false),
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: collectorConfigVolume, MountPath: collectorConfigMountPath, ReadOnly: true},

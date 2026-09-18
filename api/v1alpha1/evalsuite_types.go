@@ -60,6 +60,7 @@ type EvalSuiteSpec struct {
 	// scorers is the list of scorers to apply. At least one scorer is required.
 	// Each scorer yields a 0..1 score; the suite score is the weighted mean.
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=32
 	Scorers []ScorerSpec `json:"scorers"`
 
 	// threshold is the minimum weighted-mean score required for the gate to
@@ -104,6 +105,7 @@ type OnlineScoringSpec struct {
 	// window is the aggregation window per scoring pass (a Go duration string, e.g. "1h", "24h").
 	// Empty ⇒ the platform default (1h). Validated by the worker (a bad duration ⇒ the default, logged).
 	// +optional
+	// +kubebuilder:validation:MaxLength=32
 	Window string `json:"window,omitempty"`
 
 	// minSamples is the minimum number of scored runs in a window before a component yields a verdict —

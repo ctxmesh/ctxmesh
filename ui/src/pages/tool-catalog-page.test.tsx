@@ -191,6 +191,13 @@ function renderPage(
 
 afterEach(() => {
   vi.restoreAllMocks();
+  // ALWAYS restore real timers. This file calls vi.useFakeTimers() and restored it INLINE only, so
+  // a test that threw before its restore left fake timers active for the rest of the worker — and
+  // fake timers block waitFor/findBy*, which then time out in LATER FILES. That is the intermittent
+  // "1 failed | 1440 passed" tier0 flake: stops-page never saw its rows, app-shell never saw its
+  // dialog, both passing in isolation. topology-page.test.tsx already carries this exact fix and
+  // the comment explaining it; this file simply never got it.
+  vi.useRealTimers();
   localStorage.clear();
   sessionStorage.clear();
 });

@@ -115,6 +115,7 @@ spec:
                     description: |-
                       window is the aggregation window per scoring pass (a Go duration string, e.g. "1h", "24h").
                       Empty ⇒ the platform default (1h). Validated by the worker (a bad duration ⇒ the default, logged).
+                    maxLength: 32
                     type: string
                 type: object
               scorers:
@@ -154,6 +155,7 @@ spec:
                   - name
                   - type
                   type: object
+                maxItems: 32
                 minItems: 1
                 type: array
               threshold:
@@ -332,6 +334,7 @@ spec:
                     description: |-
                       window is the aggregation window per scoring pass (a Go duration string, e.g. "1h", "24h").
                       Empty ⇒ the platform default (1h). Validated by the worker (a bad duration ⇒ the default, logged).
+                    maxLength: 32
                     type: string
                 type: object
               scorers:
@@ -371,6 +374,7 @@ spec:
                   - name
                   - type
                   type: object
+                maxItems: 32
                 minItems: 1
                 type: array
               threshold:

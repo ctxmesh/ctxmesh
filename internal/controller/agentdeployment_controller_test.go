@@ -57,9 +57,15 @@ func newReconciler() *AgentDeploymentReconciler {
 		// the correct production default and exactly what broke three registry and two exec-model
 		// tests until each construction site was made explicit.
 		EventingAvailable: true,
-		Client:            k8sClient,
-		Scheme:            k8sClient.Scheme(),
-		Registry:          NewPostgresRegistryReader(testRegStore),
+		// A tool-having agent now REFUSES to build a pod template without an egress-sidecar image,
+		// because the sidecar is the always-on tool-call chokepoint and an empty image made Knative
+		// reject the Service by container index. Tests must therefore supply one -- same shape of
+		// lesson as EventingAvailable above: a production-correct default that every construction
+		// site has to state.
+		OBOEgress: OBOEgressConfig{SidecarImage: "test.local/egress-sidecar:test"},
+		Client:    k8sClient,
+		Scheme:    k8sClient.Scheme(),
+		Registry:  NewPostgresRegistryReader(testRegStore),
 		// Dev posture (OPS-2): the envtest suite seeds the bundled dev data plane (dev Langfuse
 		// Secret, dev MinIO), so the reconciler injects the dev object-store + feedback creds — the
 		// behavior these suites assert. A production render sets this false (no dev-cred injection);

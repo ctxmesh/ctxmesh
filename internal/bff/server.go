@@ -1653,42 +1653,21 @@ func (s *Server) Handler() http.Handler {
 	return root
 }
 
-// contentSecurityPolicy is the strict CSP served with the SPA (ADR 0012).
-// sessionStorage holds the caller's bearer token, so an XSS foothold could
-// exfiltrate it; the CSP is the primary mitigation (alongside short-TTL tokens).
-// Each directive is deliberately minimal — only what the Vite build genuinely
-// needs (the built index.html loads a same-origin module script + a same-origin
-// stylesheet from /assets; no third-party origins, no inline <script>). Why each
-// directive exists:
+// contentSecurityPolicy is the strict CSP served with the SPA (ADR 0012). sessionStorage holds the
+// caller's bearer token, so an XSS foothold could exfiltrate it and this is the primary mitigation.
 //
-//	default-src 'self'      deny everything by default; only same-origin, which
-//	                        alone blocks third-party script/connect/img/etc.
-//	script-src 'self'       the bundle is same-origin /assets/*.js only; NO
-//	                        'unsafe-inline'/'unsafe-eval' — inline scripts and
-//	                        eval are forbidden (the strongest anti-XSS lever).
-//	style-src 'self' 'unsafe-inline'
-//	                        same-origin CSS + inline style ATTRIBUTES, which
-//	                        React emits for style-prop elements (the topology
-//	                        graph positions nodes via element style). No
-//	                        third-party stylesheets. Revisit at OIDC/M18 —
-//	                        a nonce could drop 'unsafe-inline'.
-//	img-src 'self' data:    same-origin images + data: URIs (inline SVG icons /
-//	                        tiny data-URL assets Vite may inline).
-//	font-src 'self'         fonts are same-origin only (none are third-party).
-//	connect-src 'self'      XHR/fetch (the /api/* calls) to the serving origin,
-//	                        PLUS the configured OIDC issuer ORIGIN(s) and nothing
-//	                        else — see cspWithConnectSrc. The bearer token can
-//	                        never be POSTed to an arbitrary third party even if
-//	                        injected script tried.
-//	frame-ancestors 'none'  the console is never framed (clickjacking guard).
-//	base-uri 'self'         a <base> injection can't repoint relative asset URLs.
-//	form-action 'self'      a stolen form can't submit off-origin.
-//	object-src 'none'       no plugins/embeds (legacy XSS vector).
+// Three things here are not obvious from the string itself:
 //
-// It is set on EVERY SPA response (the index document AND the hashed assets),
-// never on /api/* responses (those keep their own headers — the SPA handler is a
-// separate branch of the root mux). Kept as a single const so the value and the
-// unit test reference the exact same string.
+//	style-src 'unsafe-inline'  is REQUIRED, not laziness: React emits inline style ATTRIBUTES for
+//	                           style-prop elements and the topology graph positions nodes that way.
+//	                           A nonce could drop it; script-src deliberately has no such escape.
+//	connect-src 'self'         is widened at runtime to include the configured OIDC issuer
+//	                           origin(s) — see cspWithConnectSrc. Nothing else is ever added, so an
+//	                           injected script cannot POST the bearer token to a third party.
+//
+// It is set on every SPA response (document AND hashed assets) and never on /api/*, which keeps its
+// own headers on a separate branch of the root mux. Kept as one const so the value and the unit
+// test reference the same string.
 const contentSecurityPolicy = "default-src 'self'; " +
 	"script-src 'self'; " +
 	"style-src 'self' 'unsafe-inline'; " +

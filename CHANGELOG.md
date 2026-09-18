@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.1.0-beta.7 — the install works where nobody prepared the ground
+
+The first release cut because a gate walked a stranger's path and refused to go green.
+
+**The documented first command failed, and now does not.** `helm install --create-namespace` — copied
+verbatim from the getting-started page — could not complete on a cold cluster: the chart templated its
+own release namespace carrying `managed-by: kustomize`, so Helm could not adopt the namespace it had
+just created. The chart no longer owns that namespace, which is also what Helm prescribes:
+`--create-namespace` deliberately creates an *unowned* namespace so `helm uninstall` can never delete
+it, taking the state-layer PVCs with it.
+
+**No agent could start.** Every agent pod runs three controller-injected sidecars, and beta.6's
+release matrix had eight entries — `agent-otel-collector`, `agent-discovery` and `egress-sidecar` were
+never built at all. They are in this release. Separately, the base images ran as root while the
+controller sets `runAsNonRoot`, so the kubelet refused the container outright; the published
+managed-agent reported `User=[]` where the repaired build reports `65532:65532`.
+
+**The control plane crash-looped on the documented prerequisites.** A cluster with Knative *Serving*
+and nothing else could not start the manager: it hard-watched Knative Eventing and KEDA types that
+were not there, failed its cache sync, and exited — while `helm install --wait` reported success,
+because the crash comes after the first startup window.
+
+**A tool call is proven, not assumed.** The stock managed loop silently dropped tool calls whenever a
+token sink was wired: the model gateway streams, and a non-streaming upstream proxied into SSE emits
+an empty delta, so the loop saw a turn with no content and no tool calls and called it the final
+answer. A turn with neither is now a failed turn rather than an empty answer, and the loop reports how
+many tools it discovered and how many the model asked for — diagnostics that had never reached a log,
+because nothing in the runtime configured logging at all.
+
+**Traces arrive as one tree.** The example agent never adopted the inbound `traceparent`, so every span
+it emitted became its own root and a single run showed up as five sibling traces. The launcher's
+forwarding memory path emitted no spans whatsoever, so on a durable-store deployment every memory
+write was invisible.
+
+**Console and docs.** A retired CRD's console surface — five calls to a route the BFF stopped serving,
+every action gated on a capability string that can no longer exist — is gone. The helm-values
+reference no longer names a value the chart does not have.
+
+Found by `make -C harness stranger`: a cold cluster, the published artifacts, the public docs, to a
+Ready agent, a tool call, and a visible trace. It reports `FIRST CONTACT: 1097s from an empty cluster
+to a reconciled agent`.
+
 ## v0.1.0-beta.6 — the release reports itself
 
 The first release verified by a gate instead of by hand.
