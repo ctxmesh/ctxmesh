@@ -142,8 +142,14 @@ spec:
             value: ""
           - name: MCP_OBO_EGRESS_ENABLED
             value: "false"
+          # EGRESS_SIDECAR_IMAGE is NOT empty, unlike COLLECTOR_IMAGE and DISCOVERY_IMAGE above:
+          # the controller falls back to dev.local constants for those two, and the egress sidecar
+          # has NO fallback, so an empty value makes Knative reject every tool-having agent's
+          # Service with `missing field(s): ... containers[N].image`. This is the kustomize DEV
+          # posture, naming the image the harness builds and kind-loads; hack/gen_helm_chart.py
+          # swaps this exact two-line block for the chart's published ref, so keep them in step.
           - name: EGRESS_SIDECAR_IMAGE
-            value: ""
+            value: "dev.local/egress-sidecar:demo"
           # MCP_CAPABILITY_PUBLIC_KEY — read from the bff-capability Secret (the keygen hook generates
           # both keys there; the BFF signs with the private seed, the controller injects this public key
           # into agent egress-sidecars to VERIFY capabilities). optional: absent Secret ⇒ unset env,

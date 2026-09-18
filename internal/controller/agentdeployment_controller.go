@@ -1771,6 +1771,21 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// adds RECORD_CAPABLE + the object-store env (fail-closed C2 sink) to the container. A non-tool
 	// agent gets no routes and no sidecar — byte-for-byte unchanged.
 	if len(egressRoutes) > 0 {
+		// Fail LOUD, naming the cause. With no image the container is emitted with an empty
+		// Image and Knative's webhook refuses the whole Service with
+		// `missing field(s): spec.template.spec.containers[N].image` — a container INDEX, logged
+		// only, with no status condition and no event, because this returns before syncStatus.
+		// Same reasoning as the skill-store check below: an agent whose tool-call chokepoint is
+		// silently missing is worse than one that refuses to deploy. NOT a dev.local fallback:
+		// that would trade an admission reject for a quieter ImagePullBackOff, and the sidecar
+		// has no floor beneath it the way egress-redirect has the sidecar's own wire-deny.
+		if r.OBOEgress.SidecarImage == "" {
+			return podTemplate{}, fmt.Errorf(
+				"agent %s/%s has %d tool route(s) but this install has no egress-sidecar image: "+
+					"set EGRESS_SIDECAR_IMAGE on the controller (chart: controllerManager.oboEgress.sidecarImage). "+
+					"The egress sidecar is the always-on tool-call chokepoint, so it cannot be skipped",
+				deploy.Namespace, deploy.Name, len(egressRoutes))
+		}
 		agentIdentity := deploy.Namespace + "/" + deploy.Name
 		containers = append(containers, egressSidecarContainer(
 			r.OBOEgress, deploy.Namespace, agentIdentity, agentEgressBoundary(deploy, membership),

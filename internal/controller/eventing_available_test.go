@@ -2,8 +2,12 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 )
@@ -71,5 +75,77 @@ func TestReconcileBrokerRefusesWithoutEventing(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Knative Eventing") {
 		t.Errorf("the refusal must name the missing prerequisite; got: %v", err)
+	}
+}
+
+// ── the DETECTION, which had no test until close gate (d) found the crash ────────────────────────
+//
+// Both functions decide whether the manager may register a watch. Registering one for a kind the
+// cluster does not serve does not degrade a feature -- controller-runtime fails the cache sync and
+// the manager EXITS, so nothing reconciles at all. That is what a cold cluster with only Knative
+// Serving (the documented prerequisite) got from the PUBLISHED v0.1.0-beta.6: CrashLoopBackOff on
+// "failed to wait for agentdeployment caches to sync kind source: *v1.Trigger". The guard that
+// prevents it landed after that tag, so the defect is in the artifact, not in this logic -- which
+// is why the tests below cover the decision AND both of its failure directions, rather than
+// asserting the bug that was already fixed.
+
+// absentMapper answers NoMatch for everything, like a cluster without the optional CRDs.
+type absentMapper struct{ meta.RESTMapper }
+
+func (absentMapper) RESTMapping(gk schema.GroupKind, _ ...string) (*meta.RESTMapping, error) {
+	return nil, &meta.NoKindMatchError{GroupKind: gk}
+}
+
+// unanswerableMapper fails with something that is NOT NoMatch -- a discovery endpoint we could not
+// reach. "Could not ask" is not "absent", but the two failures are not symmetric, and the safe
+// resolution is the one that still lets the manager start.
+type unanswerableMapper struct{ meta.RESTMapper }
+
+func (unanswerableMapper) RESTMapping(schema.GroupKind, ...string) (*meta.RESTMapping, error) {
+	return nil, errors.New("discovery unreachable")
+}
+
+// presentMapper answers successfully, like a cluster that has the CRDs.
+type presentMapper struct{ meta.RESTMapper }
+
+func (presentMapper) RESTMapping(gk schema.GroupKind, vs ...string) (*meta.RESTMapping, error) {
+	v := "v1"
+	if len(vs) > 0 {
+		v = vs[0]
+	}
+	return &meta.RESTMapping{GroupVersionKind: gk.WithVersion(v)}, nil
+}
+
+func TestEventingDetectionSaysAbsentWhenTheKindsAreAbsent(t *testing.T) {
+	if eventingAvailableVia(absentMapper{}) {
+		t.Fatal("eventing reported AVAILABLE on a cluster serving no eventing kinds — the manager would " +
+			"register a Trigger watch, fail its cache sync, and exit")
+	}
+	if kedaAvailableVia(absentMapper{}) {
+		t.Fatal("KEDA reported AVAILABLE on a cluster serving no keda.sh kinds")
+	}
+}
+
+func TestOptionalDetectionFailsSAFEWhenDiscoveryCannotBeAsked(t *testing.T) {
+	// The old code assumed PRESENT here and said so: "let the watch fail loudly instead". The watch
+	// failing loudly means the manager exits and the whole control plane is down, which is strictly
+	// worse than one execution model being unavailable until a restart.
+	if eventingAvailableVia(unanswerableMapper{}) {
+		t.Fatal("an unanswerable discovery question resolved to AVAILABLE — that takes the manager down " +
+			"rather than degrading one execution model")
+	}
+	if kedaAvailableVia(unanswerableMapper{}) {
+		t.Fatal("an unanswerable discovery question resolved to AVAILABLE for KEDA")
+	}
+}
+
+func TestOptionalDetectionSaysPresentWhenTheKindsResolve(t *testing.T) {
+	// The other direction, so the fail-safe above cannot be satisfied by always answering absent.
+	if !eventingAvailableVia(presentMapper{}) {
+		t.Fatal("eventing reported ABSENT on a cluster that serves the kinds — the eventing execution " +
+			"model would be silently disabled")
+	}
+	if !kedaAvailableVia(presentMapper{}) {
+		t.Fatal("KEDA reported ABSENT on a cluster that serves ScaledObject")
 	}
 }

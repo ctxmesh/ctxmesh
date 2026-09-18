@@ -850,6 +850,15 @@ def run_managed_loop(
     tools = client.tools.list()
     tool_names = {t.name for t in tools}
     tool_schemas = [_tool_schema(t) for t in tools]
+    # Say what was discovered. A run that calls no tool is indistinguishable from a run that had
+    # none to call, and both look like "the agent just answered" -- which is how a bound tool that
+    # never gets dispatched reads as normal behaviour in a pod log. These two numbers are the whole
+    # diagnosis: how many tools this run could offer, and (below) how many the model asked for.
+    _log.info(
+        "run: %d tool(s) discovered%s",
+        len(tools),
+        (": " + ", ".join(sorted(tool_names))) if tools else "",
+    )
 
     # Conversation threading (m29.6): when the caller supplied a conversation id — the
     # console chat sends one stable id per session via X-Conversation-Id — AND this agent
@@ -1718,6 +1727,31 @@ def _drive_loop(
             )
             model_index += 1
 
+            _log.info(
+                "step %d: model asked for %d tool call(s)%s",
+                step, len(resp.tool_calls),
+                (": " + ", ".join(_call_name(c) for c in resp.tool_calls))
+                if resp.tool_calls
+                else "",
+            )
+            # A turn with NO content AND no tool calls is not a final answer -- it is a broken
+            # response, and returning it hands the caller an empty string with no signal. Close
+            # gate (d) spent six runs on one: LiteLLM proxying a non-streaming upstream into an
+            # SSE stream emitted an empty delta with finish_reason stop, the tool call vanished,
+            # and the loop reported a successful run whose output was "". A real provider can
+            # produce this too -- a dropped stream, a proxy that swallows a body. Say what
+            # happened instead of passing the emptiness along.
+            if not resp.has_tool_calls and not (resp.text or "").strip():
+                _log.warning(
+                    "step %d: the model returned neither content nor tool calls "
+                    "(route=%s) — treating as a failed turn, not an answer",
+                    step, config.model_route,
+                )
+                raise EndpointError(
+                    "the model gateway returned an empty turn: no content and no tool calls "
+                    f"(route {config.model_route!r}). A provider that cannot stream, or a proxy "
+                    "that drops the message body, produces exactly this."
+                )
             if not resp.has_tool_calls:
                 # The model stopped calling tools → this is the final answer.
                 # Structured-output schema validation + bounded repair (m65.5, ADR 0058).

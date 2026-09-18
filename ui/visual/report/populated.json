@@ -1,7 +1,7 @@
 {
   "label": "populated",
   "mode": "populated",
-  "generated": "2026-09-02T05:13:29.619Z",
+  "generated": "2026-09-15T06:25:26.386Z",
   "totals": {
     "renders": 416,
     "clean": 416,
@@ -19,7 +19,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/agent-detail__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -32,7 +33,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/agent-detail__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -45,7 +47,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/agent-detail__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -58,7 +61,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/agent-detail__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -71,7 +75,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/agent-detail__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -84,7 +89,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/agent-detail__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -97,7 +103,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/agent-detail__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -110,7 +117,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/agent-detail__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -123,7 +131,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/agents__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -136,7 +145,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/agents__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -149,7 +159,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/agents__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -162,7 +173,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/agents__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -175,7 +187,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/agents__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -188,7 +201,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/agents__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -201,7 +215,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/agents__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -214,7 +229,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/agents__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -227,7 +243,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/agents-new__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -240,7 +257,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/agents-new__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -253,7 +271,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/agents-new__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -266,7 +285,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/agents-new__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -279,7 +299,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/agents-new__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -292,7 +313,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/agents-new__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -305,7 +327,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/agents-new__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -318,7 +341,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/agents-new__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -331,7 +355,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/alerts__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -344,7 +369,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/alerts__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -357,7 +383,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/alerts__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -370,7 +397,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/alerts__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -383,7 +411,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/alerts__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -396,7 +425,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/alerts__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -409,7 +439,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/alerts__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -422,7 +453,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/alerts__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -435,7 +467,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/approvals__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -448,7 +481,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/approvals__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -461,7 +495,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/approvals__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -474,7 +509,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/approvals__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -487,7 +523,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/approvals__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -500,7 +537,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/approvals__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -513,7 +551,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/approvals__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -526,7 +565,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/approvals__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -539,7 +579,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/audit__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -552,7 +593,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/audit__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -565,7 +607,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/audit__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -578,7 +621,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/audit__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -591,7 +635,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/audit__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -604,7 +649,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/audit__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -617,7 +663,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/audit__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -630,7 +677,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/audit__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -643,7 +691,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/auth-callback__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -656,7 +705,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/auth-callback__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -669,7 +719,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/auth-callback__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -682,7 +733,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/auth-callback__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -695,7 +747,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/auth-callback__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -708,7 +761,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/auth-callback__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -721,7 +775,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/auth-callback__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -734,7 +789,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/auth-callback__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -747,7 +803,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/chat__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -760,7 +817,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/chat__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -773,7 +831,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/chat__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -786,7 +845,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/chat__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -799,7 +859,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/chat__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -812,7 +873,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/chat__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -825,7 +887,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/chat__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -838,7 +901,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/chat__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -851,7 +915,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/config__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -864,7 +929,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/config__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -877,7 +943,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/config__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -890,7 +957,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/config__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -903,7 +971,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/config__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -916,7 +985,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/config__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -929,7 +999,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/config__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -942,7 +1013,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/config__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -955,7 +1027,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/cost__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -968,7 +1041,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/cost__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -981,7 +1055,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/cost__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -994,7 +1069,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/cost__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1007,7 +1083,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/cost__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1020,7 +1097,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/cost__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1033,7 +1111,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/cost__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1046,7 +1125,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/cost__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1059,7 +1139,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/dataset-detail__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1072,7 +1153,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/dataset-detail__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1085,7 +1167,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/dataset-detail__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1098,7 +1181,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/dataset-detail__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1111,7 +1195,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/dataset-detail__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1124,7 +1209,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/dataset-detail__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1137,7 +1223,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/dataset-detail__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1150,7 +1237,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/dataset-detail__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1163,7 +1251,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/datasets__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1176,7 +1265,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/datasets__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1189,7 +1279,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/datasets__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1202,7 +1293,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/datasets__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1215,7 +1307,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/datasets__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1228,7 +1321,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/datasets__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1241,7 +1335,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/datasets__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1254,7 +1349,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/datasets__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1267,7 +1363,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/evals__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1280,7 +1377,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/evals__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1293,7 +1391,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/evals__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1306,7 +1405,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/evals__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1319,7 +1419,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/evals__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1332,7 +1433,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/evals__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1345,7 +1447,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/evals__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1358,7 +1461,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/evals__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1371,7 +1475,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/gallery__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1384,7 +1489,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/gallery__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1397,7 +1503,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/gallery__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1410,7 +1517,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/gallery__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1423,7 +1531,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/gallery__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1436,7 +1545,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/gallery__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1449,7 +1559,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/gallery__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1462,7 +1573,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/gallery__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1475,7 +1587,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/guardrails__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1488,7 +1601,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/guardrails__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1501,7 +1615,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/guardrails__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1514,7 +1629,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/guardrails__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1527,7 +1643,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/guardrails__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1540,7 +1657,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/guardrails__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1553,7 +1671,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/guardrails__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1566,7 +1685,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/guardrails__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1579,7 +1699,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/home__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1592,7 +1713,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/home__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1605,7 +1727,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/home__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1618,7 +1741,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/home__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1631,7 +1755,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/home__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1644,7 +1769,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/home__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1657,7 +1783,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/home__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1670,7 +1797,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/home__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1683,7 +1811,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/kb-detail__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1696,7 +1825,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/kb-detail__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1709,7 +1839,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/kb-detail__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1722,7 +1853,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/kb-detail__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1735,7 +1867,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/kb-detail__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1748,7 +1881,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/kb-detail__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1761,7 +1895,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/kb-detail__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1774,7 +1909,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/kb-detail__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1787,7 +1923,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/knowledgebases__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1800,7 +1937,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/knowledgebases__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1813,7 +1951,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/knowledgebases__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1826,7 +1965,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/knowledgebases__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1839,7 +1979,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/knowledgebases__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1852,7 +1993,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/knowledgebases__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1865,7 +2007,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/knowledgebases__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1878,7 +2021,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/knowledgebases__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1893,7 +2037,8 @@
       "shot": "visual/shots/populated/login__768__dark.png",
       "consoleErrors": [
         "Failed to load resource: the server responded with a status of 404 (Not Found)"
-      ]
+      ],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1908,7 +2053,8 @@
       "shot": "visual/shots/populated/login__768__light.png",
       "consoleErrors": [
         "Failed to load resource: the server responded with a status of 404 (Not Found)"
-      ]
+      ],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1923,7 +2069,8 @@
       "shot": "visual/shots/populated/login__1024__dark.png",
       "consoleErrors": [
         "Failed to load resource: the server responded with a status of 404 (Not Found)"
-      ]
+      ],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1938,7 +2085,8 @@
       "shot": "visual/shots/populated/login__1024__light.png",
       "consoleErrors": [
         "Failed to load resource: the server responded with a status of 404 (Not Found)"
-      ]
+      ],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1953,7 +2101,8 @@
       "shot": "visual/shots/populated/login__1280__dark.png",
       "consoleErrors": [
         "Failed to load resource: the server responded with a status of 404 (Not Found)"
-      ]
+      ],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1968,7 +2117,8 @@
       "shot": "visual/shots/populated/login__1280__light.png",
       "consoleErrors": [
         "Failed to load resource: the server responded with a status of 404 (Not Found)"
-      ]
+      ],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1983,7 +2133,8 @@
       "shot": "visual/shots/populated/login__1440__dark.png",
       "consoleErrors": [
         "Failed to load resource: the server responded with a status of 404 (Not Found)"
-      ]
+      ],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -1998,7 +2149,8 @@
       "shot": "visual/shots/populated/login__1440__light.png",
       "consoleErrors": [
         "Failed to load resource: the server responded with a status of 404 (Not Found)"
-      ]
+      ],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2011,7 +2163,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/mcp-add__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2024,7 +2177,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/mcp-add__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2037,7 +2191,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/mcp-add__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2050,7 +2205,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/mcp-add__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2063,7 +2219,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/mcp-add__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2076,7 +2233,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/mcp-add__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2089,7 +2247,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/mcp-add__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2102,7 +2261,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/mcp-add__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2115,7 +2275,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/mcp-approvals__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2128,7 +2289,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/mcp-approvals__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2141,7 +2303,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/mcp-approvals__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2154,7 +2317,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/mcp-approvals__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2167,7 +2331,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/mcp-approvals__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2180,7 +2345,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/mcp-approvals__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2193,7 +2359,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/mcp-approvals__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2206,7 +2373,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/mcp-approvals__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2219,7 +2387,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/mcp-servers__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2232,7 +2401,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/mcp-servers__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2245,7 +2415,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/mcp-servers__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2258,7 +2429,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/mcp-servers__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2271,7 +2443,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/mcp-servers__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2284,7 +2457,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/mcp-servers__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2297,7 +2471,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/mcp-servers__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2310,7 +2485,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/mcp-servers__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2323,7 +2499,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/my-shares__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2336,7 +2513,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/my-shares__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2349,7 +2527,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/my-shares__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2362,7 +2541,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/my-shares__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2375,7 +2555,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/my-shares__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2388,7 +2569,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/my-shares__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2401,7 +2583,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/my-shares__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2414,7 +2597,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/my-shares__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2427,7 +2611,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/notfound__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2440,7 +2625,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/notfound__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2453,7 +2639,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/notfound__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2466,7 +2653,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/notfound__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2479,7 +2667,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/notfound__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2492,7 +2681,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/notfound__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2505,7 +2695,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/notfound__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2518,7 +2709,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/notfound__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2531,7 +2723,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/playground__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2544,7 +2737,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/playground__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2557,7 +2751,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/playground__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2570,7 +2765,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/playground__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2583,7 +2779,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/playground__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2596,7 +2793,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/playground__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2609,7 +2807,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/playground__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2622,7 +2821,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/playground__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2635,7 +2835,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/prompts__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2648,7 +2849,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/prompts__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2661,7 +2863,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/prompts__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2674,7 +2877,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/prompts__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2687,7 +2891,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/prompts__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2700,7 +2905,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/prompts__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2713,7 +2919,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/prompts__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2726,7 +2933,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/prompts__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2739,7 +2947,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/providers__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2752,7 +2961,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/providers__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2765,7 +2975,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/providers__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2778,7 +2989,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/providers__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2791,7 +3003,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/providers__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2804,7 +3017,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/providers__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2817,7 +3031,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/providers__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2830,7 +3045,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/providers__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2843,7 +3059,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/providers-connect__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2856,7 +3073,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/providers-connect__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2869,7 +3087,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/providers-connect__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2882,7 +3101,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/providers-connect__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2895,7 +3115,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/providers-connect__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2908,7 +3129,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/providers-connect__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2921,7 +3143,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/providers-connect__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2934,7 +3157,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/providers-connect__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2947,7 +3171,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/registries__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2960,7 +3185,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/registries__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2973,7 +3199,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/registries__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2986,7 +3213,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/registries__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -2999,7 +3227,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/registries__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3012,7 +3241,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/registries__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3025,7 +3255,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/registries__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3038,7 +3269,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/registries__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3051,7 +3283,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/registries-new__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3064,7 +3297,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/registries-new__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3077,7 +3311,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/registries-new__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3090,7 +3325,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/registries-new__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3103,7 +3339,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/registries-new__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3116,7 +3353,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/registries-new__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3129,7 +3367,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/registries-new__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3142,7 +3381,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/registries-new__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3155,7 +3395,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/registry-detail__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3168,7 +3409,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/registry-detail__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3181,7 +3423,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/registry-detail__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3194,7 +3437,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/registry-detail__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3207,7 +3451,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/registry-detail__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3220,7 +3465,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/registry-detail__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3233,7 +3479,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/registry-detail__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3246,7 +3493,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/registry-detail__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3259,7 +3507,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/route-detail__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3272,7 +3521,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/route-detail__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3285,7 +3535,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/route-detail__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3298,7 +3549,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/route-detail__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3311,7 +3563,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/route-detail__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3324,7 +3577,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/route-detail__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3337,7 +3591,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/route-detail__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3350,7 +3605,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/route-detail__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3363,7 +3619,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/routes-list__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3376,7 +3633,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/routes-list__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3389,7 +3647,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/routes-list__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3402,7 +3661,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/routes-list__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3415,7 +3675,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/routes-list__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3428,7 +3689,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/routes-list__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3441,7 +3703,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/routes-list__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3454,7 +3717,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/routes-list__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3467,7 +3731,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/routes-new__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3480,7 +3745,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/routes-new__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3493,7 +3759,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/routes-new__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3506,7 +3773,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/routes-new__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3519,7 +3787,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/routes-new__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3532,7 +3801,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/routes-new__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3545,7 +3815,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/routes-new__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3558,7 +3829,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/routes-new__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3571,7 +3843,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/run-detail__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3584,7 +3857,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/run-detail__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3597,7 +3871,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/run-detail__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3610,7 +3885,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/run-detail__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3623,7 +3899,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/run-detail__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3636,7 +3913,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/run-detail__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3649,7 +3927,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/run-detail__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3662,7 +3941,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/run-detail__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3675,7 +3955,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/runs__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3688,7 +3969,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/runs__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3701,7 +3983,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/runs__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3714,7 +3997,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/runs__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3727,7 +4011,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/runs__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3740,7 +4025,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/runs__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3753,7 +4039,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/runs__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3766,7 +4053,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/runs__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3779,7 +4067,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/secret-detail__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3792,7 +4081,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/secret-detail__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3805,7 +4095,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/secret-detail__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3818,7 +4109,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/secret-detail__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3831,7 +4123,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/secret-detail__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3844,7 +4137,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/secret-detail__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3857,7 +4151,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/secret-detail__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3870,7 +4165,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/secret-detail__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3883,7 +4179,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/secrets__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3896,7 +4193,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/secrets__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3909,7 +4207,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/secrets__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3922,7 +4221,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/secrets__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3935,7 +4235,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/secrets__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3948,7 +4249,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/secrets__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3961,7 +4263,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/secrets__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3974,7 +4277,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/secrets__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -3987,7 +4291,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/secrets-new__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4000,7 +4305,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/secrets-new__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4013,7 +4319,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/secrets-new__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4026,7 +4333,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/secrets-new__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4039,7 +4347,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/secrets-new__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4052,7 +4361,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/secrets-new__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4065,7 +4375,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/secrets-new__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4078,7 +4389,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/secrets-new__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4091,7 +4403,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/shared-run__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4104,7 +4417,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/shared-run__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4117,7 +4431,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/shared-run__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4130,7 +4445,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/shared-run__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4143,7 +4459,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/shared-run__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4156,7 +4473,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/shared-run__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4169,7 +4487,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/shared-run__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4182,7 +4501,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/shared-run__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4195,7 +4515,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/soon__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4208,7 +4529,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/soon__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4221,7 +4543,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/soon__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4234,7 +4557,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/soon__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4247,7 +4571,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/soon__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4260,7 +4585,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/soon__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4273,7 +4599,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/soon__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4286,7 +4613,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/soon__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4299,7 +4627,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/stops__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4312,7 +4641,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/stops__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4325,7 +4655,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/stops__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4338,7 +4669,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/stops__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4351,7 +4683,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/stops__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4364,7 +4697,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/stops__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4377,7 +4711,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/stops__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4390,7 +4725,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/stops__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4403,7 +4739,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/team-detail-large__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4416,7 +4753,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/team-detail-large__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4429,7 +4767,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/team-detail-large__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4442,7 +4781,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/team-detail-large__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4455,7 +4795,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/team-detail-large__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4468,7 +4809,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/team-detail-large__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4481,7 +4823,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/team-detail-large__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4494,7 +4837,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/team-detail-large__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4507,7 +4851,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/team-detail-small__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4520,7 +4865,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/team-detail-small__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4533,7 +4879,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/team-detail-small__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4546,7 +4893,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/team-detail-small__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4559,7 +4907,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/team-detail-small__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4572,7 +4921,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/team-detail-small__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4585,7 +4935,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/team-detail-small__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4598,7 +4949,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/team-detail-small__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4611,7 +4963,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/teams__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4624,7 +4977,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/teams__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4637,7 +4991,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/teams__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4650,7 +5005,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/teams__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4663,7 +5019,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/teams__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4676,7 +5033,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/teams__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4689,7 +5047,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/teams__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4702,7 +5061,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/teams__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4715,7 +5075,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/teams-new__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4728,7 +5089,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/teams-new__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4741,7 +5103,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/teams-new__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4754,7 +5117,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/teams-new__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4767,7 +5131,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/teams-new__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4780,7 +5145,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/teams-new__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4793,7 +5159,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/teams-new__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4806,7 +5173,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/teams-new__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4819,7 +5187,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/tenants__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4832,7 +5201,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/tenants__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4845,7 +5215,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/tenants__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4858,7 +5229,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/tenants__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4871,7 +5243,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/tenants__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4884,7 +5257,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/tenants__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4897,7 +5271,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/tenants__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4910,7 +5285,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/tenants__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4923,7 +5299,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/tools-catalog__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4936,7 +5313,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/tools-catalog__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4949,7 +5327,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/tools-catalog__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4962,7 +5341,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/tools-catalog__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4975,7 +5355,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/tools-catalog__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -4988,7 +5369,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/tools-catalog__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5001,7 +5383,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/tools-catalog__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5014,7 +5397,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/tools-catalog__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5027,7 +5411,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/topology__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5040,7 +5425,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/topology__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5053,7 +5439,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/topology__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5066,7 +5453,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/topology__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5079,7 +5467,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/topology__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5092,7 +5481,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/topology__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5105,7 +5495,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/topology__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5118,7 +5509,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/topology__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5131,7 +5523,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/trace__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5144,7 +5537,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/trace__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5157,7 +5551,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/trace__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5170,7 +5565,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/trace__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5183,7 +5579,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/trace__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5196,7 +5593,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/trace__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5209,7 +5607,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/trace__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5222,7 +5621,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/trace__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5235,7 +5635,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/workflow-detail__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5248,7 +5649,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/workflow-detail__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5261,7 +5663,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/workflow-detail__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5274,7 +5677,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/workflow-detail__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5287,7 +5691,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/workflow-detail__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5300,7 +5705,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/workflow-detail__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5313,7 +5719,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/workflow-detail__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5326,7 +5733,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/workflow-detail__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5339,7 +5747,8 @@
       "width": 768,
       "theme": "dark",
       "shot": "visual/shots/populated/workflows__768__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5352,7 +5761,8 @@
       "width": 768,
       "theme": "light",
       "shot": "visual/shots/populated/workflows__768__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5365,7 +5775,8 @@
       "width": 1024,
       "theme": "dark",
       "shot": "visual/shots/populated/workflows__1024__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5378,7 +5789,8 @@
       "width": 1024,
       "theme": "light",
       "shot": "visual/shots/populated/workflows__1024__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5391,7 +5803,8 @@
       "width": 1280,
       "theme": "dark",
       "shot": "visual/shots/populated/workflows__1280__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5404,7 +5817,8 @@
       "width": 1280,
       "theme": "light",
       "shot": "visual/shots/populated/workflows__1280__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5417,7 +5831,8 @@
       "width": 1440,
       "theme": "dark",
       "shot": "visual/shots/populated/workflows__1440__dark.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     },
     {
       "documentScrollsX": false,
@@ -5430,7 +5845,8 @@
       "width": 1440,
       "theme": "light",
       "shot": "visual/shots/populated/workflows__1440__light.png",
-      "consoleErrors": []
+      "consoleErrors": [],
+      "pageErrors": []
     }
   ]
 }

@@ -75,7 +75,6 @@ export const RES_SECRETS = "secretbindings";
 // Distinct from RES_SECRETS above, which is the SecretBinding CRD.
 export const RES_CORE_SECRETS = "secrets";
 export const RES_REGISTRIES = "agentregistries";
-export const RES_MEMORY = "memorybindings";
 export const RES_SCALING = "agentscalingpolicies";
 export const RES_EVALSUITES = "evalsuites";
 export const RES_PROMPTVERSIONS = "promptversions";

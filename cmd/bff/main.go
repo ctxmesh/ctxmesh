@@ -136,9 +136,16 @@ func runPreflight(ctx context.Context) int {
 		"MCP_CREDENTIAL_NAMESPACE": os.Getenv("MCP_CREDENTIAL_NAMESPACE"),
 		"COST_ROLLUP_ENABLED":      os.Getenv("COST_ROLLUP_ENABLED"),
 	}
+	// EGRESS_SIDECAR_IMAGE is NOT OBO-scoped and has not been since M82: the egress sidecar became
+	// the always-on tool-call chokepoint, injected for every agent with >=1 tool regardless of this
+	// flag (which now gates nothing but a log line). This gate still asked for it only when
+	// oboOn — and the chart defaults MCP_OBO_EGRESS_ENABLED to "false" — so the install's own
+	// fail-loud preflight CERTIFIED the config that makes Knative reject every tool-having agent.
+	// A gate that passes while failing, in the gate built to stop exactly that.
+	required["EGRESS_SIDECAR_IMAGE"] = os.Getenv("EGRESS_SIDECAR_IMAGE")
 	if oboOn {
-		// OBO tool calls additionally need the sidecar image + the capability public key:
-		required["EGRESS_SIDECAR_IMAGE"] = os.Getenv("EGRESS_SIDECAR_IMAGE")
+		// The capability public key IS genuinely OBO-scoped: a non-OBO route forwards with no
+		// credential injection, so it needs no key.
 		required["MCP_CAPABILITY_PUBLIC_KEY"] = os.Getenv("MCP_CAPABILITY_PUBLIC_KEY")
 	}
 	cfg := preflight.Config{

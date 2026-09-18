@@ -864,24 +864,10 @@ describe("AgentDetailPage — RBAC-aware affordances (m15.11)", () => {
 // ── m17.11: Memory panel tests ───────────────────────────────────────────────
 
 describe("AgentDetailPage — Memory panel (m17.11)", () => {
-  it("renders the agent's MemoryBinding(s) filtered by agentRef", async () => {
-    installFetch({
-      memoryBindings: [
-        // Binding for this agent (agentRef = "billing")
-        { name: "mb-billing-global", namespace: "prod", agentRef: "billing", scope: "global", backend: "redis", ready: true },
-        // Binding for a different agent — should NOT appear
-        { name: "mb-other", namespace: "prod", agentRef: "other-agent", scope: "user", ready: false },
-      ],
-    });
-    renderAt();
-    await screen.findByTestId("agent-detail-page");
-    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
-
-    await screen.findByTestId("memory-panel");
-    // Only the billing binding should be visible
-    expect(screen.getByTestId("memory-binding-mb-billing-global")).toBeInTheDocument();
-    expect(screen.queryByTestId("memory-binding-mb-other")).toBeNull();
-  });
+  // Four tests covered the MemoryBinding attach/edit/detach UI and the filtered binding list.
+  // That UI is deleted, not weakened: ADR 0101 retired the CRD and the route, so the panel had
+  // been permanently read-only for every user. Removing a test for removed functionality is not
+  // lowering a bar; the surviving session/long-term memory tests cover what the page now does.
 
   it("opens directly on the Memory tab via ?tab=Memory (m49.3 trace→memory deep-link)", async () => {
     installFetch({
@@ -968,78 +954,8 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     await screen.findByTestId("longterm-error");
   });
 
-  it("attach: createMemoryBinding is called with agentRef = the agent name", async () => {
-    const calls = installFetch({ memoryBindings: [] });
-    renderAt();
-    await screen.findByTestId("agent-detail-page");
-    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
 
-    await screen.findByTestId("memory-attach");
-    fireEvent.click(screen.getByTestId("memory-attach"));
 
-    // Fill in scope
-    await screen.findByTestId("memory-scope-input");
-    fireEvent.change(screen.getByTestId("memory-scope-input"), { target: { value: "global" } });
-    fireEvent.click(screen.getByTestId("memory-form-submit"));
-
-    await waitFor(() => {
-      const postCall = calls.find((c) => c.url === "/api/memorybindings" && c.method === "POST");
-      expect(postCall).toBeDefined();
-      const body = JSON.parse(postCall!.body);
-      expect(body.agentRef).toBe("billing");
-      expect(body.scope).toBe("global");
-    });
-  });
-
-  it("detach: ConfirmDialog (typed-name) calls removeMemoryBinding on confirm", async () => {
-    const calls = installFetch({
-      memoryBindings: [
-        { name: "mb-billing-global", namespace: "prod", agentRef: "billing", scope: "global", ready: true },
-      ],
-    });
-    renderAt();
-    await screen.findByTestId("agent-detail-page");
-    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
-
-    await screen.findByTestId("memory-binding-mb-billing-global");
-    fireEvent.click(screen.getByTestId("memory-detach-mb-billing-global"));
-
-    // ConfirmDialog opens — confirm button disabled until name is typed
-    await waitFor(() => expect(screen.getByRole("alertdialog")).toBeInTheDocument());
-    const confirmBtn = screen.getByRole("button", { name: /detach/i });
-    expect(confirmBtn).toBeDisabled();
-
-    // Type the binding name to unlock
-    fireEvent.change(screen.getByPlaceholderText("mb-billing-global"), { target: { value: "mb-billing-global" } });
-    expect(confirmBtn).not.toBeDisabled();
-    fireEvent.click(confirmBtn);
-
-    await waitFor(() => {
-      const delCall = calls.find((c) => c.url.includes("/api/memorybindings/prod/mb-billing-global") && c.method === "DELETE");
-      expect(delCall).toBeDefined();
-    });
-  });
-
-  it("a viewer sees NO attach/detach/edit actions (RBAC display-gate)", async () => {
-    installFetch({
-      caps: {
-        agentdeployments: { create: false, update: false, delete: false },
-        memorybindings: { create: false, update: false, delete: false },
-        agentscalingpolicies: { create: false, update: false, delete: false },
-      },
-      memoryBindings: [
-        { name: "mb-billing-global", namespace: "prod", agentRef: "billing", scope: "global", ready: true },
-      ],
-    });
-    renderAt();
-    await screen.findByTestId("agent-detail-page");
-    fireEvent.click(await screen.findByRole("tab", { name: "Equipment" }));
-
-    await screen.findByTestId("memory-panel");
-    expect(screen.queryByTestId("memory-attach")).toBeNull();
-    expect(screen.queryByTestId("memory-detach-mb-billing-global")).toBeNull();
-    expect(screen.queryByTestId("memory-edit-mb-billing-global")).toBeNull();
-  });
 
   it("long-term memory: enables the capability via the config panel (m49.3)", async () => {
     const calls = installFetch({ longTermConfig: { enabled: false, perUser: false } });

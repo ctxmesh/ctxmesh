@@ -154,7 +154,7 @@ export interface AgentScaling {
 }
 
 // AgentBinding is one entry in the agent's bindings list — an MCPToolBinding
-// ("tool") or a MemoryBinding ("memory"). `detail` is the human subject (the
+// ("tool") or the folded spec.sessionMemory field ("memory"). `detail` is the human subject (the
 // tool name / memory scope); `ready` mirrors the binding's own Ready condition.
 export interface AgentBinding {
   kind: string;
@@ -1605,57 +1605,8 @@ export interface ToolListResponse {
   tools: CatalogTool[];
 }
 
-// --- MemoryBinding DTOs (m17.6) -----------------------------------------------
-// A MemoryBinding attaches a memory store (scope) to an AgentDeployment so the
-// agent can read/write long-term memory. The SPA never sees the raw memory data —
-// only the binding's identity + status. One agent may have at most one binding
-// per scope; the controller sets a Ready condition on reconciliation.
-
-export interface MemoryBindingSummary {
-  name: string;
-  namespace: string;
-  /** agentRef.name — the AgentDeployment this binding attaches to. */
-  agentRef: string;
-  /** The memory scope (e.g. "global", "user", or a custom scope name). */
-  scope: string;
-  /** backend is the memory provider (e.g. "redis", "in-cluster"). */
-  backend?: string;
-  ready: boolean;
-}
-
-export interface MemoryBindingDetail {
-  name: string;
-  namespace: string;
-  agentRef: string;
-  scope: string;
-  backend?: string;
-  ready: boolean;
-}
-
-export interface MemoryBindingListResponse {
-  items: MemoryBindingSummary[];
-  nextCursor: string;
-}
-
-export interface MemoryBindingListParams {
-  limit?: number;
-  cursor?: string;
-  namespace?: string;
-}
-
-export interface MemoryBindingCreateRequest {
-  name?: string;
-  namespace?: string;
-  /** agentRef.name — the AgentDeployment to attach to. */
-  agentRef: string;
-  scope: string;
-  backend?: string;
-}
-
-export interface MemoryBindingUpdateRequest {
-  scope?: string;
-  backend?: string;
-}
+// MemoryBinding DTOs lived here. Retired with the CRD by ADR 0101 — session memory is
+// AgentDeployment.spec.sessionMemory, projected into the agent-detail bindings list.
 
 // --- EvalSuite DTOs (m17.7) ---------------------------------------------------
 // An EvalSuite bundles a dataset reference + scorers + a gate/threshold.
@@ -4842,94 +4793,9 @@ export const api = {
       signal,
     ),
 
-  // --- MemoryBinding CRUD (m17.6) -----------------------------------------------
-  // listMemoryBindings reads one page window of MemoryBindings. Pass namespace to
-  // scope to a namespace. Filter by agentRef client-side (the list returns all in
-  // the namespace; callers filter .items by agentRef === agentName).
-  listMemoryBindings: (
-    params?: MemoryBindingListParams,
-    signal?: AbortSignal,
-  ): Promise<MemoryBindingListResponse> => {
-    const qs = new URLSearchParams();
-    if (params?.limit && params.limit > 0)
-      qs.set("limit", String(params.limit));
-    if (params?.cursor) qs.set("cursor", params.cursor);
-    if (params?.namespace) qs.set("namespace", params.namespace);
-    const suffix = qs.toString() ? `?${qs.toString()}` : "";
-    return getJSON<MemoryBindingListResponse>(
-      `/api/memorybindings${suffix}`,
-      signal,
-    );
-  },
-
-  memoryBindingDetail: (ns: string, name: string, signal?: AbortSignal) =>
-    getJSON<MemoryBindingDetail>(
-      `/api/memorybindings/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
-      signal,
-    ),
-
-  // createMemoryBinding attaches a memory scope to an agent. A 403 (viewer),
-  // 409 (already exists), or 422 (validation) surfaces via ApiError.
-  createMemoryBinding: async (
-    req: MemoryBindingCreateRequest,
-    signal?: AbortSignal,
-  ): Promise<MemoryBindingDetail> => {
-    const res = await apiFetch("/api/memorybindings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(req),
-      signal,
-    });
-    if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `create memory binding failed (${res.status})`),
-        res.status,
-      );
-    }
-    return (await res.json()) as MemoryBindingDetail;
-  },
-
-  updateMemoryBinding: async (
-    ns: string,
-    name: string,
-    req: MemoryBindingUpdateRequest,
-    signal?: AbortSignal,
-  ): Promise<MemoryBindingDetail> => {
-    const res = await apiFetch(
-      `/api/memorybindings/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req),
-        signal,
-      },
-    );
-    if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `update memory binding failed (${res.status})`),
-        res.status,
-      );
-    }
-    return (await res.json()) as MemoryBindingDetail;
-  },
-
-  removeMemoryBinding: async (
-    ns: string,
-    name: string,
-    signal?: AbortSignal,
-  ): Promise<void> => {
-    const res = await apiFetch(
-      `/api/memorybindings/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
-      { method: "DELETE", signal },
-    );
-    if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `delete memory binding failed (${res.status})`),
-        res.status,
-      );
-    }
-  },
-
+  // MemoryBinding CRUD lived here. Retired with the CRD by ADR 0101; session memory is a field
+  // on AgentDeployment now and the agent-detail payload projects it. The routes stopped existing
+  // in the BFF and these five callers outlived them by a milestone.
   // --- AgentScalingPolicy CRUD (m17.6) ------------------------------------------
   // listAgentScalingPolicies reads one page window of AgentScalingPolicies.
   // Filter client-side by agentRef for the agent detail panel.

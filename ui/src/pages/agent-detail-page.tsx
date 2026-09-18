@@ -80,7 +80,6 @@ import {
   type AgentScalingPolicySummary,
   type AgentSimplifiedSpec,
   type LogEventType,
-  type MemoryBindingSummary,
   type OnlineScoreResponse,
   type OnlineScoreWindow,
   type PublishTemplateResponse,
@@ -93,7 +92,7 @@ const LABEL_FORK_ORIGIN_NAME = "agents.ctxmesh.ai/fork-origin-name";
 const LABEL_FORK_ORIGIN_VERSION = "agents.ctxmesh.ai/fork-origin-version";
 import { useCapabilities } from "@/lib/capabilities";
 import { formatDateTime, formatLatency, formatUSD } from "@/lib/format";
-import { navRoute, RES_AGENTS, RES_LOGS, RES_MEMORY, RES_SCALING } from "@/lib/nav";
+import { navRoute, RES_AGENTS, RES_LOGS, RES_SCALING } from "@/lib/nav";
 
 // AgentDetailPage — the landing page for ONE agent, and the second-most-read
 // surface in the console (M151, spec §6.1 archetype A2 + the §6.2 row for this
@@ -2755,295 +2754,21 @@ function BindingsList({
   );
 }
 
-// ── Memory panel (m17.11) ────────────────────────────────────────────────────
-// Shows the MemoryBinding(s) that reference this agent (filtered by agentRef).
-// Supports attach (create), edit, and detach (typed-name delete). RBAC-aware:
-//   • attach/edit/detach are gated on can("memorybindings", verb)
-//   • a forced 403 surfaces honestly in the form; viewers see read-only.
-
-type MemoryForm = {
-  scope: string;
-  backend: string;
-};
-
-type MemoryActionState =
-  | { kind: "idle" }
-  | { kind: "attach-open"; busy: boolean; error: string | null; forbidden: boolean }
-  | { kind: "edit-open"; binding: MemoryBindingSummary; busy: boolean; error: string | null; forbidden: boolean }
-  | { kind: "detach-open"; binding: MemoryBindingSummary; busy: boolean };
-
-type MemoryPanelLoad =
-  | { kind: "loading" }
-  | { kind: "ready"; bindings: MemoryBindingSummary[] }
-  | { kind: "error"; message: string; forbidden: boolean };
-
+// ── Memory panel ─────────────────────────────────────────────────────────────
+// Frames the three live memory surfaces. The MemoryBinding list/attach/edit/detach that used to
+// live here was the m17.6 console half of ADR 0101's retirement, specified for deletion and never
+// deleted: it called /api/memorybindings, which the BFF stopped serving, and gated every action on
+// can("memorybindings", …), a resource string that can no longer appear in the capability map — so
+// it rendered permanently read-only for every user, wrapped around the panels that work.
+// Session memory lives on AgentDeployment.spec.sessionMemory now, and the agent-detail payload
+// already projects it as a "memory" binding row (internal/bff/dto.go).
 function MemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
-  const { can, reprobe } = useCapabilities();
-  const { toast } = useToast();
-  const canCreate = can(RES_MEMORY, "create");
-  const canUpdate = can(RES_MEMORY, "update");
-  const canDelete = can(RES_MEMORY, "delete");
-
-  const [load, setLoad] = React.useState<MemoryPanelLoad>({ kind: "loading" });
-  const [action, setAction] = React.useState<MemoryActionState>({ kind: "idle" });
-  const [form, setForm] = React.useState<MemoryForm>({ scope: "", backend: "" });
-
-  const fetchBindings = React.useCallback(() => {
-    const controller = new AbortController();
-    setLoad({ kind: "loading" });
-    api
-      .listMemoryBindings({ namespace: ns }, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        const mine = res.items.filter((b) => b.agentRef === agentName);
-        setLoad({ kind: "ready", bindings: mine });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setLoad({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load memory bindings",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-    return () => controller.abort();
-  }, [ns, agentName]);
-
-  React.useEffect(() => {
-    const cancel = fetchBindings();
-    return cancel;
-  }, [fetchBindings]);
-
-  function openAttach() {
-    setForm({ scope: "", backend: "" });
-    setAction({ kind: "attach-open", busy: false, error: null, forbidden: false });
-  }
-
-  function openEdit(binding: MemoryBindingSummary) {
-    setForm({ scope: binding.scope, backend: binding.backend ?? "" });
-    setAction({ kind: "edit-open", binding, busy: false, error: null, forbidden: false });
-  }
-
-  function openDetach(binding: MemoryBindingSummary) {
-    setAction({ kind: "detach-open", binding, busy: false });
-  }
-
-  async function doAttach() {
-    if (action.kind !== "attach-open") return;
-    setAction({ ...action, busy: true, error: null });
-    try {
-      await api.createMemoryBinding({
-        namespace: ns,
-        agentRef: agentName,
-        scope: form.scope.trim(),
-        backend: form.backend.trim() || undefined,
-      });
-      toast({ variant: "success", title: "Memory binding attached", description: `Scope "${form.scope}" attached to ${agentName}.` });
-      setAction({ kind: "idle" });
-      fetchBindings();
-    } catch (err) {
-      if (err instanceof ApiError && err.isForbidden) reprobe();
-      setAction({
-        ...action,
-        busy: false,
-        error: err instanceof Error ? err.message : "attach failed",
-        forbidden: err instanceof ApiError && err.isForbidden,
-      });
-    }
-  }
-
-  async function doEdit() {
-    if (action.kind !== "edit-open") return;
-    setAction({ ...action, busy: true, error: null });
-    try {
-      await api.updateMemoryBinding(ns, action.binding.name, {
-        scope: form.scope.trim(),
-        backend: form.backend.trim() || undefined,
-      });
-      toast({ variant: "success", title: "Memory binding updated" });
-      setAction({ kind: "idle" });
-      fetchBindings();
-    } catch (err) {
-      if (err instanceof ApiError && err.isForbidden) reprobe();
-      setAction({
-        ...action,
-        busy: false,
-        error: err instanceof Error ? err.message : "update failed",
-        forbidden: err instanceof ApiError && err.isForbidden,
-      });
-    }
-  }
-
-  async function doDetach() {
-    if (action.kind !== "detach-open") return;
-    setAction({ ...action, busy: true });
-    try {
-      await api.removeMemoryBinding(ns, action.binding.name);
-      toast({ variant: "success", title: "Memory binding detached", description: `Binding "${action.binding.name}" removed.` });
-      setAction({ kind: "idle" });
-      fetchBindings();
-    } catch (err) {
-      toast({ variant: "error", title: "Detach failed", description: err instanceof Error ? err.message : "detach failed" });
-      setAction({ kind: "idle" });
-    }
-  }
-
-  const isAttachOpen = action.kind === "attach-open";
-  const isEditOpen = action.kind === "edit-open";
-  const isDetachOpen = action.kind === "detach-open";
-  const formError = (action.kind === "attach-open" || action.kind === "edit-open") ? action.error : null;
-  const formForbidden = (action.kind === "attach-open" || action.kind === "edit-open") ? action.forbidden : false;
-  const formBusy = (action.kind === "attach-open" || action.kind === "edit-open" || action.kind === "detach-open") ? action.busy : false;
-
   return (
     <div data-testid="memory-panel">
       <SectionHeader
         title="Memory"
         lede="The session and shared memory backends wired to this agent. This is its configuration, not its contents."
-        actions={
-          canCreate ? (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={openAttach}
-              data-testid="memory-attach"
-            >
-              <Plus className="h-4 w-4" />
-              Attach
-            </Button>
-          ) : undefined
-        }
       />
-
-      {load.kind === "loading" && (
-        <p className="text-sm text-muted-foreground" data-testid="memory-loading">Loading…</p>
-      )}
-      {load.kind === "error" && load.forbidden && (
-        <ForbiddenInline
-          title="Not allowed to list memory bindings"
-          description="Your account can't read MemoryBindings in this namespace."
-          detail={load.message}
-        />
-      )}
-      {load.kind === "error" && !load.forbidden && (
-        <p className="text-sm text-destructive" role="alert" data-testid="memory-error">
-          {load.message}
-        </p>
-      )}
-      {load.kind === "ready" && load.bindings.length === 0 && (
-        <EmptyState
-          icon={Boxes}
-          title="No memory bindings"
-          description="Attach a memory binding to configure this agent's session and shared memory backend. (Long-term, semantically-retrievable memory is shown separately below.)"
-        />
-      )}
-      {load.kind === "ready" && load.bindings.length > 0 && (
-        <ul className="space-y-2">
-          {load.bindings.map((b) => (
-            <li
-              key={b.name}
-              className="flex items-center justify-between gap-3 rounded-md border bg-surface-2 px-4 py-3 text-sm"
-              data-testid={`memory-binding-${b.name}`}
-            >
-              <div className="flex min-w-0 items-center gap-3">
-                <Badge variant="muted">scope</Badge>
-                <span className="font-medium">{b.scope}</span>
-                {b.backend && (
-                  <span className="text-xs text-muted-foreground">via {b.backend}</span>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                <Badge variant={b.ready ? "ok" : "progressing"}>
-                  {b.ready ? "ready" : "pending"}
-                </Badge>
-                {canUpdate && (
-                  <Button variant="ghost" size="sm" onClick={() => openEdit(b)} data-testid={`memory-edit-${b.name}`}>
-                    <Pencil className="h-3.5 w-3.5" />
-                  </Button>
-                )}
-                {canDelete && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => openDetach(b)}
-                    className="text-destructive hover:text-destructive"
-                    data-testid={`memory-detach-${b.name}`}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </Button>
-                )}
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {/* Attach / edit form inline */}
-      {(isAttachOpen || isEditOpen) && (
-        <div className="mt-4 rounded-lg border bg-card p-4">
-          <p className="mb-3 text-sm font-medium">{isAttachOpen ? "Attach memory binding" : "Edit memory binding"}</p>
-          <div className="space-y-3">
-            <FormField id="memory-scope" label="Scope">
-              <Input
-                id="memory-scope"
-                value={form.scope}
-                onChange={(e) => setForm((f) => ({ ...f, scope: e.target.value }))}
-                placeholder="global"
-                data-testid="memory-scope-input"
-              />
-            </FormField>
-            <FormField id="memory-backend" label="Backend (optional)">
-              <Input
-                id="memory-backend"
-                value={form.backend}
-                onChange={(e) => setForm((f) => ({ ...f, backend: e.target.value }))}
-                placeholder="redis"
-                data-testid="memory-backend-input"
-              />
-            </FormField>
-            {formForbidden && (
-              <ForbiddenInline
-                title="Not allowed to manage memory bindings"
-                description="Your account can't create or update MemoryBindings."
-                detail={formError ?? undefined}
-              />
-            )}
-            {formError && !formForbidden && (
-              <p className="text-sm text-destructive" role="alert" data-testid="memory-form-error">
-                {formError}
-              </p>
-            )}
-            <div className="flex justify-end gap-2">
-              <Button variant="ghost" size="sm" onClick={() => setAction({ kind: "idle" })} disabled={formBusy}>
-                Cancel
-              </Button>
-              <Button
-                size="sm"
-                onClick={isAttachOpen ? doAttach : doEdit}
-                disabled={!form.scope.trim() || formBusy}
-                data-testid="memory-form-submit"
-              >
-                {formBusy ? "Saving…" : isAttachOpen ? "Attach" : "Save"}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Typed-name detach confirmation */}
-      {isDetachOpen && action.kind === "detach-open" && (
-        <ConfirmDialog
-          open={true}
-          onCancel={() => setAction({ kind: "idle" })}
-          onConfirm={doDetach}
-          title={`Detach memory binding?`}
-          description={`This will remove the binding "${action.binding.name}" from ${agentName}. The agent will lose access to the "${action.binding.scope}" memory scope.`}
-          confirmText={action.binding.name}
-          confirmLabel="Detach"
-          busy={action.busy}
-        />
-      )}
-
       <SessionMemoryConfigPanel ns={ns} agentName={agentName} />
       <LongTermMemoryConfigPanel ns={ns} agentName={agentName} />
       <LongTermMemoryPanel ns={ns} agentName={agentName} />

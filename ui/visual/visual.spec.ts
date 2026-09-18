@@ -35,6 +35,8 @@ interface Row extends FitResult {
   theme: Theme;
   shot: string;
   consoleErrors: string[];
+  /** Uncaught exceptions. Non-empty means the page did not render; the gate fails on it. */
+  pageErrors: string[];
 }
 
 const rows: Row[] = [];
@@ -63,10 +65,14 @@ for (const route of ROUTES) {
     for (const theme of THEMES) {
       test(`${route.id} @ ${width} ${theme}`, async ({ page }) => {
         const consoleErrors: string[] = [];
+        const pageErrors: string[] = [];
         page.on("console", (m) => {
           if (m.type() === "error") consoleErrors.push(m.text().slice(0, 200));
         });
-        page.on("pageerror", (e) => consoleErrors.push(`pageerror: ${String(e).slice(0, 200)}`));
+        page.on("pageerror", (e) => {
+          pageErrors.push(String(e).slice(0, 200));
+          consoleErrors.push(`pageerror: ${String(e).slice(0, 200)}`);
+        });
 
         await page.setViewportSize({ width, height: 1000 });
 
@@ -149,11 +155,20 @@ for (const route of ROUTES) {
           theme,
           shot: path.relative(process.cwd(), shot),
           consoleErrors,
+          pageErrors,
         });
 
         // The gate. Baseline runs record failures instead of failing, so the
         // pre-redesign state can be captured honestly; the redesign must pass.
         if (process.env.VISUAL_BASELINE !== "1") {
+          // An uncaught exception means this page did NOT render, whatever the screenshot shows.
+          // These were collected into the report and never asserted on, so `TypeError: ae.groups
+          // is not iterable` blanked the dashboard on all eight runs and sat in a committed file
+          // with nothing red anywhere. A signal recorded but never checked is not a check.
+          expect(
+            pageErrors,
+            `${route.path} @ ${width}/${theme} threw: ${pageErrors.join(" | ")}`,
+          ).toEqual([]);
           expect(
             fit.documentScrollsX,
             `${route.path} @ ${width}/${theme} scrolls sideways by ${fit.documentOverflowPx}px`,
