@@ -24,6 +24,7 @@
 // route would render the login wall and the sweep would screenshot nothing.
 
 import type {
+  CensusResponse,
   AgentDetailResponse,
   AgentListResponse,
   AgentMemoryListResponse,
@@ -69,7 +70,6 @@ import type {
   McpServerReferencesResponse,
   MCPToolBindingDetail,
   MCPToolBindingListResponse,
-  MemoryBindingListResponse,
   ModelRouteDetail,
   ModelRouteListResponse,
   MySharesItem,
@@ -857,7 +857,6 @@ const CAPABILITIES: CapabilitiesResponse = {
       "modelroutes",
       "secretbindings",
       "agentregistries",
-      "memorybindings",
       "agentscalingpolicies",
       "evalsuites",
       "promptversions",
@@ -1535,19 +1534,10 @@ const PROMPT_DIFF: Omit<PromptDiffResponse, "lines"> = {
     "+Escalate to a human whenever the refund exceeds EUR 500.",
   ].join("\n"),
 };
-const MEMORY_BINDINGS: MemoryBindingListResponse = {
-  items: [
-    { name: "demo-assistant-session", namespace: NS_DEFAULT, agentRef: "demo-assistant", scope: "session", backend: "redis", ready: true },
-    { name: "demo-assistant-longterm", namespace: NS_DEFAULT, agentRef: "demo-assistant", scope: "global", backend: "postgres", ready: true },
-    { name: "onboarding-bot-user", namespace: NS_D, agentRef: "onboarding-bot", scope: "user", backend: "postgres", ready: true },
-    { name: "support-triage-session", namespace: NS_D, agentRef: "support-triage", scope: "session", backend: "in-cluster", ready: false },
-    { name: "eu-invoice-classifier-global", namespace: NS_DEEP, agentRef: "eu-invoice-classifier", scope: "global", backend: "postgres", ready: true },
-    { name: "billing-agent-session", namespace: NS_B, agentRef: "billing-agent", scope: "session", backend: "redis", ready: false },
-    { name: "demo-researcher-global", namespace: NS_A, agentRef: "demo-researcher", scope: "global", backend: "postgres", ready: true },
-    { name: "customer-onboarding-document-verification-longterm-memory", namespace: NS_D, agentRef: NAME_63, scope: "global", backend: "postgres", ready: true },
-  ],
-  nextCursor: "",
-};
+// MEMORY_BINDINGS lived here. It mocked /api/memorybindings with eight realistic bindings AND
+// granted "memorybindings" in the allowed-capabilities map, so every visual review saw a fully
+// working Memory panel for a CRD retired by ADR 0101 and a route the BFF does not serve. This is
+// why the console half of that retirement survived a milestone: the fake answered for it.
 
 const SCALING_POLICIES: AgentScalingPolicyListResponse = {
   items: [
@@ -2051,8 +2041,6 @@ const AGENT_REFERENCES: AgentReferencesResponse = {
     { kind: "MCPToolBinding", name: "acme-crm-search", namespace: NS_DEFAULT, disposition: "gc" },
     { kind: "MCPToolBinding", name: "acme-crm-read", namespace: NS_DEFAULT, disposition: "gc" },
     { kind: "MCPToolBinding", name: "acme-crm-refund", namespace: NS_DEFAULT, disposition: "gc" },
-    { kind: "MemoryBinding", name: "demo-assistant-session", namespace: NS_DEFAULT, disposition: "gc" },
-    { kind: "MemoryBinding", name: "demo-assistant-longterm", namespace: NS_DEFAULT, disposition: "gc" },
     { kind: "AgentScalingPolicy", name: "demo-assistant-business-hours", namespace: NS_DEFAULT, disposition: "gc" },
     { kind: "AgentTeam", name: "support-pod", namespace: NS_DEFAULT, disposition: "orphan" },
     { kind: "Workflow", name: "demo-flow", namespace: NS_DEFAULT, disposition: "orphan" },
@@ -2141,6 +2129,19 @@ const ROUTES: FixtureRoute[] = [
   { match: /^\/api\/kill\/lift$/, methods: POST, populated: () => ({ scope: "ns:team-b", level: "namespace", applied: true }) },
 
   // ── Agents: suffixed paths before the bare detail path ────────────────────
+  // GET /api/agents/census — internal/bff/census.go. Missing entirely until M180, so it fell through
+  // to the generic `{ items: [] }` fallback: a 200 whose shape no CensusResponse consumer can use.
+  // dashboard-page's `for (const g of c.groups)` then threw on every run of the home page, and the
+  // report recorded it without failing anything.
+  { match: /^\/api\/agents\/census$/, populated: (): CensusResponse => ({
+      total: 7, complete: true, groupsComplete: true,
+      groups: [
+        { ready: true,  isDraft: false, count: 4 },
+        { ready: false, isDraft: false, count: 2, phase: "Progressing", reason: "RolloutInProgress" },
+        { ready: false, isDraft: true,  count: 1, phase: "Draft" },
+      ],
+    }),
+    empty: (): CensusResponse => ({ total: 0, complete: true, groupsComplete: true, groups: [] }) },
   { match: /^\/api\/agents\/generate$/, populated: () => ({ agentYAML: "name: support-assistant\nmodel:\n  route: anthropic-primary\ntools:\n  - search_documents\n", expanded: "apiVersion: agents.ctxmesh.ai/v1alpha1\nkind: AgentDeployment\n", model: "claude-opus-4", warnings: ["No guardrail policy was requested — the namespace default applies."] }) },
   { match: /^\/api\/agents\/refine$/, populated: () => ({ agentYAML: "name: support-assistant\nmodel:\n  route: anthropic-primary\n", diff: ["- scaling: {min: 1, max: 4}", "+ scaling: {min: 2, max: 8}"], model: "claude-opus-4", provider: "anthropic", warnings: [] }) },
   { match: /^\/api\/agents\/check-requirements$/, populated: (): CheckRequirementsResponse => ({ model: { required: true, connected: true, route: "anthropic-primary" }, tools: [{ name: "search_documents", status: "ready" }, { name: "create_refund", status: "needs-approval" }, { name: "post_message", status: "needs-consent" }, { name: "ledger_write", status: "not-found" }] }) },
@@ -2159,7 +2160,7 @@ const ROUTES: FixtureRoute[] = [
   { match: /^\/api\/agents\/([^/]+)\/([^/]+)\/logs$/, populated: () => "" },
   { match: /^\/api\/agents\/([^/]+)\/([^/]+)$/, populated: agentDetail, empty: emptyAgentDetail },
   { match: /^\/api\/agents$/, methods: GET, populated: agentList },
-  { match: /^\/api\/agents$/, populated: (): CreateAgentResponse => ({ created: [{ kind: "AgentDeployment", name: "support-assistant", namespace: NS_DEFAULT }, { kind: "MCPToolBinding", name: "support-assistant-docs-search", namespace: NS_DEFAULT }, { kind: "MemoryBinding", name: "support-assistant-session", namespace: NS_DEFAULT }] }) },
+  { match: /^\/api\/agents$/, populated: (): CreateAgentResponse => ({ created: [{ kind: "AgentDeployment", name: "support-assistant", namespace: NS_DEFAULT }, { kind: "MCPToolBinding", name: "support-assistant-docs-search", namespace: NS_DEFAULT }] }) },
   { match: /^\/api\/expand$/, populated: () => "apiVersion: agents.ctxmesh.ai/v1alpha1\nkind: AgentDeployment\nmetadata:\n  name: support-assistant\n  namespace: default\nspec:\n  image: ghcr.io/acme/support-assistant:1.0.0\n  modelRoute: anthropic-primary\n" },
 
   // ── Teams, guardrails, workflows ──────────────────────────────────────────
@@ -2227,8 +2228,6 @@ const ROUTES: FixtureRoute[] = [
   { match: /^\/api\/usedby$/, populated: () => USED_BY },
 
   // ── Memory bindings, scaling policies, evals, prompts ─────────────────────
-  { match: /^\/api\/memorybindings\/([^/]+)\/([^/]+)$/, populated: () => MEMORY_BINDINGS.items[0] },
-  { match: /^\/api\/memorybindings$/, populated: () => MEMORY_BINDINGS },
   { match: /^\/api\/agentscalingpolicies\/([^/]+)\/([^/]+)$/, populated: () => SCALING_POLICIES.items[0] },
   { match: /^\/api\/agentscalingpolicies$/, populated: () => SCALING_POLICIES },
   { match: /^\/api\/evalsuites\/([^/]+)\/([^/]+)\/results$/, populated: () => EVAL_RESULTS },

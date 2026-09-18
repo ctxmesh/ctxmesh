@@ -102,7 +102,14 @@ def _run_invoke(user_input: str, headers: Dict[str, str]) -> Dict[str, Any]:
 
     Returns a dict with ``output`` (the final answer) and ``word_count`` (int).
     """
-    with _client.trace.loop("sdk-custom-agent", headers=headers) as root:
+    # request_scope binds the invoking user's run capability from the inbound headers into a
+    # ContextVar. The SDK's own docstring says a CUSTOM loop MUST enter it — "otherwise the
+    # ContextVar is unset, so every tool-call egress relays NO run capability". This example is a
+    # hand-rolled loop and never did, so since M82 made the egress sidecar front EVERY tool its
+    # tools/call arrived with no capability and the sidecar answered 401 no_capability. It is not a
+    # regression: the example predates request_scope, and before M82 an in-pod tool never went
+    # through the sidecar at all, so nothing required the relay.
+    with _client.request_scope(headers), _client.trace.loop("sdk-custom-agent", headers=headers) as root:
         root.set_input(user_input)
 
         # ── step 1: plan ─────────────────────────────────────────────────────

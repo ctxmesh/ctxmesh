@@ -301,8 +301,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// sidecar never trusts a name the agent supplies.
 	token := r.Header.Get(runcap.HeaderName)
 	if token == "" {
-		// No capability ⇒ an unattended / direct call. Personal OBO needs the invoker's
-		// identity; org/public (no-capability) resolution lands in m25.9.
+		// No capability ⇒ an unattended / direct call.
+		//
+		// This is CORRECT for OBO (ADR 0039: refusing is the only thing stopping an unauthenticated
+		// caller from spending a user's credential), but since M82 made the sidecar front EVERY
+		// tool it also refuses in-pod tools that never touch a credential — so job/cron/eventing
+		// agents, which the CRD forbids from having an end-user identity at all, cannot call any
+		// tool. See ADR 0143. The previous forwarding address here was "lands in m25.9"; M25 closed
+		// with that item unfinished and nothing carried it, which is how the gap stayed invisible.
 		writeError(w, http.StatusUnauthorized, "no_capability", "this tool call carries no run capability")
 		return
 	}

@@ -298,14 +298,14 @@ COLLECTOR_IMAGE_ENV_KUSTOMIZE = (
 )
 COLLECTOR_IMAGE_ENV_HELM = (
     "        - name: COLLECTOR_IMAGE\n"
-    '          value: {{ .Values.controllerManager.injectedImages.collector | default "" | quote }}'
+    '          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.injectedImages.collector "ctx" $) | quote }}'
 )
 DISCOVERY_IMAGE_ENV_KUSTOMIZE = (
     '        - name: DISCOVERY_IMAGE\n' '          value: ""'
 )
 DISCOVERY_IMAGE_ENV_HELM = (
     "        - name: DISCOVERY_IMAGE\n"
-    '          value: {{ .Values.controllerManager.injectedImages.discovery | default "" | quote }}'
+    '          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.injectedImages.discovery "ctx" $) | quote }}'
 )
 MCP_OBO_EGRESS_ENABLED_ENV_KUSTOMIZE = (
     '        - name: MCP_OBO_EGRESS_ENABLED\n' '          value: "false"'
@@ -314,12 +314,18 @@ MCP_OBO_EGRESS_ENABLED_ENV_HELM = (
     "        - name: MCP_OBO_EGRESS_ENABLED\n"
     "          value: {{ .Values.controllerManager.oboEgress.enabled | quote }}"
 )
+# The kustomize posture names dev.local/egress-sidecar:demo (the sidecar has no compiled-in
+# fallback, so an empty value makes Knative reject every tool-having agent). The chart replaces it
+# with the published ref; this is the string that must match for that swap to happen.
 EGRESS_SIDECAR_IMAGE_ENV_KUSTOMIZE = (
-    '        - name: EGRESS_SIDECAR_IMAGE\n' '          value: ""'
+    '        - name: EGRESS_SIDECAR_IMAGE\n'
+    # UNQUOTED: kustomize strips the quotes from manager.yaml's value, so matching the quoted
+    # form silently matches nothing and the chart ships the dev.local image to users.
+    '          value: dev.local/egress-sidecar:demo'
 )
 EGRESS_SIDECAR_IMAGE_ENV_HELM = (
     "        - name: EGRESS_SIDECAR_IMAGE\n"
-    '          value: {{ .Values.controllerManager.oboEgress.sidecarImage | default "" | quote }}'
+    '          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.oboEgress.sidecarImage "ctx" $) | quote }}'
 )
 # MCP_CAPABILITY_PUBLIC_KEY is NO LONGER templated (M124/Gate A): config/manager now reads it from the
 # bff-capability Secret via valueFrom.secretKeyRef (the keygen hook provisions it). The chart copies that
@@ -599,14 +605,8 @@ def substitute(doc: str) -> str:
     return doc
 
 
-def substitute_namespace_object(doc: str) -> str:
-    """For the Namespace resource, its `name:` is the install namespace too."""
-    return re.sub(
-        rf"(^  name:\s*){re.escape(NS_KUSTOMIZE)}\b",
-        r"\1{{ .Values.namespace }}",
-        doc,
-        flags=re.MULTILINE,
-    )
+# substitute_namespace_object lived here. The release Namespace is no longer emitted into the
+# chart at all (see the generate loop), so there is nothing left to rewrite.
 
 
 def subject_namespace(doc: str) -> str:
@@ -695,8 +695,28 @@ def main() -> None:
         doc = substitute(doc)
         if kind in ("Deployment", "StatefulSet") and cp in RESOURCE_DIALS:
             doc = template_resources(doc, RESOURCE_DIALS[cp])
+        # The release Namespace is NOT the chart's to own (2026-09-18). It came through from
+        # config/default carrying `app.kubernetes.io/managed-by: kustomize`, and with
+        # `--create-namespace` -- the flag the public docs tell every user to pass -- Helm creates the
+        # namespace itself and then cannot adopt its own templated copy of it, so the documented
+        # first command failed on a cold cluster. Close gate (d) found it on its first run.
+        #
+        # Dropping it is also what Helm prescribes and what every mature chart does (cert-manager,
+        # kube-prometheus-stack, the Bitnami catalog): `--create-namespace` deliberately creates an
+        # UNOWNED namespace so that `helm uninstall` can never delete it. A release-owned namespace
+        # re-creates the Helm 2 hazard -- uninstall would cascade away the state-layer and
+        # dev-data-plane PVCs and any user CRs colocated there.
+        #
+        # The chart still creates the mcp-credentials namespace (templates/mcp-credentials.yaml),
+        # which is correct: that is a namespace the release does not live in.
+        #
+        # What is lost is the Pod Security Admission labels this object carried. The enforced tier
+        # was `baseline`, the weakest useful one, and every control-plane workload already sets
+        # runAsNonRoot + allowPrivilegeEscalation:false + dropped capabilities + seccompProfile in
+        # its own spec -- so this was defence-in-depth over pods that already comply, not the
+        # control. The hardening docs carry the one-line `kubectl label` for installs that want it.
         if kind == "Namespace":
-            doc = substitute_namespace_object(doc)
+            continue
         doc = subject_namespace(doc)
 
         if kind == "CustomResourceDefinition":

@@ -28,10 +28,25 @@ Runtime contract (mirrors every other agent — echo-agent / sdk-custom-agent):
 
 from __future__ import annotations
 
+import logging
+import os
+
 import ctxmesh
 
 
 def main() -> None:
+    # Configure logging before anything imports its way into a run. Nothing did, and Python's root
+    # logger defaults to WARNING -- so every logger.info in the SDK was dropped on the floor and an
+    # operator debugging a managed agent saw warnings and nothing else. That is how a run which
+    # discovered its tools, called none, and answered emptily looked identical to a run that had no
+    # tools bound: the two facts that tell them apart were both logged, and neither was emitted.
+    #
+    # LOG_LEVEL overrides; INFO is the default because the loop's per-run and per-step lines are
+    # what makes an agent diagnosable at all, and they are a handful of lines per run.
+    logging.basicConfig(
+        level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     # No handler ⇒ the stock managed loop, config from the environment. serve() reads
     # $AGENT_NAME / $AGENT_PORT and builds the client via ctxmesh.agent.from_env() (which
     # fails fast with NotInPodError at start-up if the launcher env is absent).

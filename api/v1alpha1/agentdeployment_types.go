@@ -221,6 +221,7 @@ type AgentDeploymentSpec struct {
 	// the agent container alongside the controller-managed variables such as
 	// $AGENT_PORT. Uses the standard Kubernetes EnvVar schema.
 	// +optional
+	// +kubebuilder:validation:MaxItems=64
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
 	// scaling configures the Knative autoscaler bounds for this agent.
@@ -601,6 +602,7 @@ type ToolPolicySpec struct {
 	// +optional
 	// +listType=map
 	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=64
 	Overrides []ToolPolicyOverride `json:"overrides,omitempty"`
 
 	// forcedChoice steers tool selection: "" or "auto" lets the model choose,

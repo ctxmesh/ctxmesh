@@ -45,6 +45,14 @@ def normalize(doc: str) -> list[str]:
         # Drop the cosmetic provenance label line entirely.
         if stripped.startswith("app.kubernetes.io/managed-by:"):
             continue
+        # An env `value:` is a string either way, so quoting is not a difference. kustomize emits
+        # image refs bare while the chart pipes them through `| quote`; comparing the two as text
+        # reported that as drift. Scoped to `value:` deliberately -- elsewhere "true" and true are
+        # not the same thing, and this must not start pretending they are.
+        m = re.match(r'^(\s*value:\s*)(["\'])(.*)\2\s*$', ln)
+        if m:
+            lines.append(m.group(1).rstrip() + " " + m.group(3))
+            continue
         lines.append(ln.rstrip())
     return lines
 
@@ -79,7 +87,27 @@ def main() -> None:
         helm = bucket(f.read())
 
     problems = []
+    # The RELEASE Namespace is deliberately kustomize-only (2026-09-18). The chart used to template
+    # it, carrying `managed-by: kustomize` from config/, and with `--create-namespace` -- which the
+    # public docs tell every user to pass -- Helm creates the namespace itself and then cannot adopt
+    # its own copy, so the documented first command failed on a cold cluster. `--create-namespace`
+    # owns it now, as Helm prescribes and as every mature chart does.
+    #
+    # This ALLOWANCE is narrow and the bar is net stronger, not weaker: the exception is keyed to
+    # exactly one resource, and the assertion below turns it into a positive one -- the chart must
+    # contain NO release-namespace object, so the thing that broke the install cannot creep back in
+    # unnoticed. Every other resource is still compared byte for byte.
+    release_ns = ("Namespace", "", "ctxmesh")
+    if release_ns in helm:
+        problems.append(
+            "FORBIDDEN in helm: the chart templates the RELEASE Namespace again. That object broke "
+            "`helm install --create-namespace` on a cold cluster; `--create-namespace` owns it."
+        )
+    ns_only_in_kustomize = release_ns in kustomize and release_ns not in helm
+
     for k in sorted(set(kustomize) - set(helm)):
+        if k == release_ns and ns_only_in_kustomize:
+            continue
         problems.append(f"MISSING in helm:  {k}")
     for k in sorted(set(helm) - set(kustomize)):
         problems.append(f"EXTRA in helm:    {k}")

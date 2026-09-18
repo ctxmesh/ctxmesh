@@ -27,18 +27,40 @@ import (
 // per-reconcile would hide a capability change inside an unrelated code path and cost an API call
 // every time.
 func EventingAvailable(mgr ctrl.Manager) bool {
-	rm := mgr.GetRESTMapper()
+	return eventingAvailableVia(mgr.GetRESTMapper())
+}
+
+// eventingAvailableVia is the testable half. EventingAvailable takes a ctrl.Manager, which cannot be
+// constructed in a unit test without a cluster, so the function deciding whether the manager can
+// START had no test at all -- only its downstream guards did. The seam gives it one.
+//
+// The detection itself is correct, and was measured to be: close gate (d) found the PUBLISHED
+// v0.1.0-beta.6 controller in CrashLoopBackOff on a cold cluster carrying the documented
+// prerequisites, exiting on
+//
+//	failed to wait for agentdeployment caches to sync kind source: *v1.Trigger
+//
+// and the cause was not this logic but its absence from that artifact -- the guard landed after the
+// tag. Probing the same cold cluster with the same RESTMapper returns NoMatch correctly. The lesson
+// belongs to the release, not the code: a repair on a branch repairs nothing.
+func eventingAvailableVia(rm meta.RESTMapper) bool {
 	for _, kind := range []string{"Trigger", "Broker"} {
 		gk := eventingv1.SchemeGroupVersion.WithKind(kind).GroupKind()
 		if _, err := rm.RESTMapping(gk, eventingv1.SchemeGroupVersion.Version); err != nil {
 			if meta.IsNoMatchError(err) {
 				return false
 			}
-			// Any other error means we could not ASK, which is not the same as "absent". Treating an
-			// unreachable discovery endpoint as "no eventing" would silently disable a capability the
-			// cluster has, so assume present and let the watch fail loudly instead.
-			ctrl.Log.WithName("eventing").Error(err, "could not determine whether Knative Eventing is installed; assuming it is")
-			return true
+			// We could not ASK, which is not the same as "absent" -- but the two guesses are not
+			// symmetric. Guessing ABSENT disables one execution model until a restart. Guessing
+			// PRESENT registers a watch on a kind that may not exist, controller-runtime then fails
+			// the cache sync, and the manager EXITS: nothing reconciles at all. The old code guessed
+			// present and said so ("let the watch fail loudly instead"), which trades one degraded
+			// feature for the entire control plane. So an unanswerable question resolves to absent.
+			ctrl.Log.WithName("eventing").Error(err,
+				"could not determine whether Knative Eventing is installed; treating it as ABSENT so the "+
+					"manager can still start — install Knative Eventing and restart the controller to enable "+
+					"the eventing execution model")
+			return false
 		}
 	}
 	return true
@@ -87,13 +109,20 @@ func eventingUnavailableErr(what string) error {
 // controller owning that kind never reconciles anything, which is a subtler and worse failure than
 // refusing to boot: everything looks healthy and nothing happens.
 func KEDAAvailable(mgr ctrl.Manager) bool {
+	return kedaAvailableVia(mgr.GetRESTMapper())
+}
+
+// kedaAvailableVia is the testable half, same seam and same asymmetry as eventingAvailableVia.
+func kedaAvailableVia(rm meta.RESTMapper) bool {
 	gk := schema.GroupKind{Group: kedatypes.GroupVersion.Group, Kind: "ScaledObject"}
-	if _, err := mgr.GetRESTMapper().RESTMapping(gk, kedatypes.GroupVersion.Version); err != nil {
+	if _, err := rm.RESTMapping(gk, kedatypes.GroupVersion.Version); err != nil {
 		if meta.IsNoMatchError(err) {
 			return false
 		}
-		ctrl.Log.WithName("keda").Error(err, "could not determine whether KEDA is installed; assuming it is")
-		return true
+		ctrl.Log.WithName("keda").Error(err,
+			"could not determine whether KEDA is installed; treating it as ABSENT so the manager can still "+
+				"start — install KEDA and restart the controller to enable autoscaling")
+		return false
 	}
 	return true
 }

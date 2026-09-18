@@ -330,6 +330,7 @@ spec:
                       required:
                       - name
                       type: object
+                    maxItems: 64
                     type: array
                   evalSuiteRef:
                     description: |-
@@ -778,6 +779,7 @@ spec:
                               - name
                               - rule
                               type: object
+                            maxItems: 64
                             type: array
                             x-kubernetes-list-map-keys:
                             - name
@@ -1283,6 +1285,7 @@ spec:
                       required:
                       - name
                       type: object
+                    maxItems: 64
                     type: array
                   evalSuiteRef:
                     description: |-
@@ -1731,6 +1734,7 @@ spec:
                               - name
                               - rule
                               type: object
+                            maxItems: 64
                             type: array
                             x-kubernetes-list-map-keys:
                             - name

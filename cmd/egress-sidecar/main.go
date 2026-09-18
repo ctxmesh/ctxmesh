@@ -218,7 +218,15 @@ func run(log logr.Logger) error {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		log.Info("egress-sidecar listening", "addr", listenAddr, "routes", len(routes), "agent", expectedAgent)
+		// Count the table actually in force. This logged len(routes) -- the STATIC EGRESS_ROUTES
+		// table -- while the controller mounts EGRESS_ROUTES_FILE, whose entries live in the holder.
+		// So a correctly-wired sidecar announced "routes: 0" and read like the defect during a live
+		// tool-path investigation, immediately after truthfully logging "routes loaded from file: 1".
+		liveRoutes := len(routes)
+		if routesHolder != nil {
+			liveRoutes = len(routesHolder.Load())
+		}
+		log.Info("egress-sidecar listening", "addr", listenAddr, "routes", liveRoutes, "agent", expectedAgent)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 		}

@@ -498,10 +498,15 @@ func (m *memoryServer) handler() http.Handler {
 	// long-term memory (neither store nor forward), so both are guarded.
 	switch {
 	case m.forward != nil:
-		mux.Handle("GET /memory/{conversationId}", m.forward)
-		mux.Handle("PUT /memory/{conversationId}", m.forward)
-		mux.Handle("POST /memory/{conversationId}/append", m.forward)
-		mux.Handle("GET /memory/{conversationId}/search", m.forward)
+		// TRACED, exactly like the in-process store below. These were bare m.forward handlers, so a
+		// deployment using the durable store emitted no memory.* spans at all: the writes worked and
+		// were invisible. The m5 acceptance asserts a memory.append span as its turn-1 write proof
+		// and could not pass in this mode -- and the gap is the product's, not the test's, because
+		// "every memory write is visible" is a claim the forwarding path has to keep too.
+		mux.HandleFunc("GET /memory/{conversationId}", m.tracedForward("get"))
+		mux.HandleFunc("PUT /memory/{conversationId}", m.tracedForward("put"))
+		mux.HandleFunc("POST /memory/{conversationId}/append", m.tracedForward("append"))
+		mux.HandleFunc("GET /memory/{conversationId}/search", m.tracedForward("search"))
 	case m.store != nil:
 		mux.HandleFunc("GET /memory/{conversationId}", m.traced("get", m.handleGet))
 		mux.HandleFunc("PUT /memory/{conversationId}", m.traced("put", m.handlePut))
@@ -536,6 +541,16 @@ type memHandlerFunc func(ctx context.Context, span trace.Span, convID string, w 
 // too — the spec requires a span with status Error even when the op fails),
 // and rejects invalid conversation ids before they can reach a Redis key or
 // span attribute downstream.
+// tracedForward wraps the forwarding proxy in the same span the in-process handlers emit, so the
+// two storage modes are indistinguishable in a trace. It reuses traced() rather than duplicating the
+// span bookkeeping; the forward handler ignores the ctx/span/convID it is handed and serves the
+// request itself, which is what a proxy does.
+func (m *memoryServer) tracedForward(op string) http.HandlerFunc {
+	return m.traced(op, func(_ context.Context, _ trace.Span, _ string, w http.ResponseWriter, r *http.Request) {
+		m.forward.ServeHTTP(w, r)
+	})
+}
+
 func (m *memoryServer) traced(op string, fn memHandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		convID := r.PathValue("conversationId")

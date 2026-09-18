@@ -54,6 +54,11 @@ NS="${NS:-ctxmesh}"
 CRED_NS="${CRED_NS:-ctxmesh}"
 VALKEY_STS="${VALKEY_STS:-statelayer}"
 
+# secret_value — one key out of a Secret, through the context-pinned kubectl above.
+secret_value() {
+  kubectl -n "$NS" get secret "$1" -o jsonpath="{.data.$2}" 2>/dev/null | base64 -d 2>/dev/null
+}
+
 discover() {  # discover <var> <description> <command...>
   local var="$1" what="$2"; shift 2
   local cur="${!var:-}"
@@ -71,10 +76,14 @@ discover PG_POD "control-plane Postgres pod" \
 PG_SECRET="${PG_SECRET:-$(kubectl -n "$NS" get secret -o name 2>/dev/null \
   | grep -m1 'postgres' | cut -d/ -f2 || true)}"
 if [ -n "$PG_SECRET" ]; then
-  discover PG_USER "Postgres user" sh -c \
-    "kubectl -n '$NS' get secret '$PG_SECRET' -o jsonpath='{.data.username}' | base64 -d" || true
-  discover PG_DB "Postgres database" sh -c \
-    "kubectl -n '$NS' get secret '$PG_SECRET' -o jsonpath='{.data.database}' | base64 -d" || true
+  # NOT `sh -c`. A subshell does not inherit the kubectl() wrapper above, so these discoveries ran
+  # against the AMBIENT context -- and when that context is empty or points elsewhere they fail and
+  # fall back to postgres/postgres, which looks plausible and is wrong. That is the same
+  # wrong-cluster failure KUBE_CONTEXT was added to close, reintroduced one line below the fix.
+  PG_USER="${PG_USER:-$(secret_value "$PG_SECRET" username)}"
+  PG_DB="${PG_DB:-$(secret_value "$PG_SECRET" database)}"
+  [ -n "$PG_USER" ] && log "  discovered Postgres user: $PG_USER"
+  [ -n "$PG_DB" ] && log "  discovered Postgres database: $PG_DB"
 fi
 PG_USER="${PG_USER:-postgres}"
 PG_DB="${PG_DB:-postgres}"

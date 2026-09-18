@@ -23,6 +23,16 @@ controllerManager:
   image:
     repository: controller
     tag: latest
+  # The three CONTROLLER-INJECTED images are the same intended difference as the four above: the
+  # dev path leaves collector and discovery empty (the controller falls back) and pins the egress
+  # sidecar to a locally-loaded dev.local tag, while the chart names published references at
+  # Chart.AppVersion. Without these three the no-drift gate reported the intended difference as
+  # drift -- which is exactly what it did between the injectedImage change and this line.
+  injectedImages:
+    collector: ""
+    discovery: ""
+  oboEgress:
+    sidecarImage: dev.local/egress-sidecar:demo
 bff:
   image:
     repository: bff
