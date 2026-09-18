@@ -72,6 +72,16 @@ console;^config/(bff|run-worker)/;ux-review install-truth helm-generate tier1
 # here is an install change even though no chart file was edited.
 install;^config/(nats|objectstore|postgres|statelayer|statelayer-proxy|token-service)/;install-truth helm-generate tier1
 install;^internal/controlplane/migrations/;tier1 install-truth
+# The CRD types themselves. A field added, defaulted or validated here reaches THREE surfaces at
+# once: the API a user writes (so the schema must regenerate into the chart), the controller that
+# reconciles it, and the console form that renders it -- and api/*_types.go comments become the CRD
+# field descriptions a user reads. This was unmapped, which is how a diff touching four types files
+# could report "no gates required".
+api;^api/;tier0 tier1 helm-generate crd-version-parity ux-review
+# The telemetry sidecar the controller injects into every agent pod. It is not under cmd/ or
+# internal/controller/, and its config decides whether a run is visible at all -- the gap that hid a
+# trace-fragmentation defect and a memory path that emitted no spans.
+runtime;^internal/telemetry/;tier0 tier1 tier2
 runtime;^cmd/launcher/;tier0 tier1 sdk-live
 runtime;^internal/controller/;tier0 tier1 tier2 prereqs-are-real
 runtime;^internal/(run|gateway|egress|pki|statelayer)/;tier0 tier1
