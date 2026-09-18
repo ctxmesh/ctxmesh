@@ -165,6 +165,16 @@ grep -q 'managed' "$RELEASE_WF" \
 # managed agent can start from published artifacts at all. The local build reports 65532:65532. The
 # repair is real and unshipped, same as the other seven.
 newest_tag="$(git -C "$ROOT" tag --list 'v*' --sort=-v:refname 2>/dev/null | head -1 || true)"
+# A RELEASE IN FLIGHT is not a stranded fix. Without this the gate makes the release PR itself
+# unmergeable: the fixes cannot be in a tag until the PR merges, and the PR cannot merge until the
+# fixes are in a tag. The state this check exists to catch is "fixes exist beyond the newest tag AND
+# nothing is being cut" -- and a CHANGELOG naming a version newer than the newest tag is exactly the
+# signal that something is. Say so and pass; the tag that follows closes the loop.
+changelog_ver="$(grep -m1 -oE '^## v[0-9][^ ]*' "$ROOT/CHANGELOG.md" 2>/dev/null | sed 's/^## //' || true)"
+if [ -n "$newest_tag" ] && [ -n "$changelog_ver" ] && [ "$changelog_ver" != "$newest_tag" ]; then
+  echo "ok: a release is in flight — CHANGELOG names $changelog_ver, newest tag is $newest_tag; unreleased fixes are being carried, not stranded"
+  newest_tag=""
+fi
 if [ -n "$newest_tag" ] && [ "$(git -C "$ROOT" rev-parse "$newest_tag^{commit}" 2>/dev/null)" != "$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)" ]; then
   unreleased="$(git -C "$ROOT" log --format='%h %s' "$newest_tag..HEAD" \
       --  cmd/main.go internal/controller/eventing_available.go deploy/helm hack/gen_helm_chart.py images 2>/dev/null \
