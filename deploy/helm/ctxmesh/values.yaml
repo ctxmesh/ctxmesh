@@ -102,9 +102,13 @@ controllerManager:
   # injectedImages: the collector + tool-discovery sidecar images the controller injects into EVERY
   # agent pod. Empty ⇒ the controller's dev.local defaults, which ImagePullBackOff off a real
   # cluster — a PRODUCTION install MUST point these at your registry, digest-pinned (OPS-1).
+  # Empty ⇒ the controller's compiled-in dev.local constants, which ImagePullBackOff on any real
+  # cluster. Both are now PUBLISHED and defaulted here, because "empty" meant a default install
+  # could not run a single agent to Ready: the collector is injected into EVERY agent pod and the
+  # discovery sidecar into every tool-having one. PRODUCTION: pin to an immutable digest (OPS-1).
   injectedImages:
-    collector: ""
-    discovery: ""
+    collector: ghcr.io/ctxmesh/agent-otel-collector
+    discovery: ghcr.io/ctxmesh/agent-discovery
 
   # oboEgress: on-behalf-of egress-sidecar injection (ADR 0030) — injects an egress sidecar into agents
   # with remote OBO tools so tool calls are made as the end-user. For a WORKING OBO install set
@@ -114,8 +118,13 @@ controllerManager:
   # install ns); leave them empty unless overriding. Setting the retired capabilityPublicKey is a hard
   # error (the tombstone in templates/capability-keygen-job.yaml) — put the key in the Secret instead.
   oboEgress:
+    # enabled: gates OBO CREDENTIAL INJECTION only. It has NOT gated sidecar injection since M82 —
+    # the egress sidecar is the always-on tool-call chokepoint, injected for every agent with >=1
+    # tool whatever this says. sidecarImage is therefore required by any install that uses tools,
+    # not just OBO ones, which is why it is defaulted rather than empty: an empty value makes
+    # Knative reject the Service with `missing field(s): ... containers[N].image`.
     enabled: false
-    sidecarImage: ""
+    sidecarImage: ghcr.io/ctxmesh/egress-sidecar
     capabilityAudience: ""
     tokenServiceURL: ""
     # The two tool-call timeouts (M146.7 / m52.M143-knobs). They bound DIFFERENT hangs and are not

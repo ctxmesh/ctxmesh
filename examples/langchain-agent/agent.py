@@ -77,6 +77,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote
 from urllib.request import urlopen, Request
@@ -190,12 +191,18 @@ def _memory_get(conv_id: str) -> list | None:
     try:
         with urlopen(url, timeout=MEMORY_TIMEOUT) as resp:  # noqa: S310
             if resp.status != 200:
+                print(f"memory read refused: GET {url} -> {resp.status}", file=sys.stderr, flush=True)
                 return None
             data = json.loads(resp.read())
             if isinstance(data, list):
                 return data
+            print(f"memory read returned a non-list body: GET {url}", file=sys.stderr, flush=True)
             return None
-    except Exception:  # noqa: BLE001 — best-effort
+    except HTTPError as err:
+        print(f"memory read failed: GET {url} -> HTTP {err.code}", file=sys.stderr, flush=True)
+        return None
+    except Exception as err:  # noqa: BLE001 — best-effort
+        print(f"memory read failed: GET {url} -> {type(err).__name__}: {err}", file=sys.stderr, flush=True)
         return None
 
 
@@ -205,14 +212,26 @@ def _memory_append(conv_id: str, entry: dict) -> bool:
     Returns True only when the endpoint acknowledged the append with a 2xx;
     False on any error (connection refused, timeout, non-2xx). Never raises.
     Uses compacted JSON (no extra whitespace) per the m5.4 contract.
+
+    Best-effort is about the RETURN, not about the record: a swallowed reason made the m5 failure
+    undiagnosable, because the only evidence was an absent memory.append span and a turn reporting
+    memory "unavailable" — two symptoms and no cause. The reason goes to stderr, which is the pod
+    log the acceptance can read, while the turn still succeeds.
     """
     url = f"{MEMORY_BASE_URL}/memory/{quote(conv_id, safe='')}/append"
     payload = json.dumps(entry, separators=(",", ":")).encode()
     req = Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")  # noqa: S310
     try:
         with urlopen(req, timeout=MEMORY_TIMEOUT) as resp:  # noqa: S310
-            return 200 <= resp.status < 300
-    except Exception:  # noqa: BLE001 — best-effort
+            if 200 <= resp.status < 300:
+                return True
+            print(f"memory append refused: POST {url} -> {resp.status}", file=sys.stderr, flush=True)
+            return False
+    except HTTPError as err:
+        print(f"memory append failed: POST {url} -> HTTP {err.code}", file=sys.stderr, flush=True)
+        return False
+    except Exception as err:  # noqa: BLE001 — best-effort
+        print(f"memory append failed: POST {url} -> {type(err).__name__}: {err}", file=sys.stderr, flush=True)
         return False
 
 
@@ -289,7 +308,7 @@ def _a2a_call(target_agent: str, payload: dict, traceparent: str | None, conv_id
 # MCP call (streamable-http, no SDK)
 # ---------------------------------------------------------------------------
 
-def _call_mcp_word_count(endpoint: str, text: str) -> dict:
+def _call_mcp_word_count(endpoint: str, text: str, capability: str | None = None) -> dict:
     """Call the remote word-count MCP tool via streamable-http.
 
     *endpoint* is taken verbatim from the manifest (already includes /mcp per
@@ -306,7 +325,13 @@ def _call_mcp_word_count(endpoint: str, text: str) -> dict:
     import anyio  # noqa: PLC0415
 
     async def _run() -> str:
-        async with streamablehttp_client(endpoint) as (read, write, _):
+        # Relay the invoking user's run capability. Since M82 the egress sidecar fronts EVERY tool
+        # and rejects a call carrying none with 401 no_capability — so without this header the tool
+        # call fails inside anyio's TaskGroup and surfaces only as "unhandled errors in a
+        # TaskGroup", which is exactly how opaque this was. This example is deliberately SDK-free,
+        # so the relay is manual; an SDK agent gets it from client.request_scope().
+        headers = {"X-Ctxmesh-Run-Capability": capability} if capability else None
+        async with streamablehttp_client(endpoint, headers=headers) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 result = await session.call_tool("word_count", {"text": text})
@@ -332,7 +357,7 @@ def word_count(text: str) -> int:
 # LangChain @tool wrapper for the MCP remote tool
 # ---------------------------------------------------------------------------
 
-def _make_mcp_word_count_tool(endpoint: str):
+def _make_mcp_word_count_tool(endpoint: str, capability: str | None = None):
     """Return a LangChain @tool that calls the remote MCP word-count tool.
 
     Wrapping as a @tool ensures OpenInference emits a TOOL span with
@@ -345,7 +370,7 @@ def _make_mcp_word_count_tool(endpoint: str):
     @tool
     def mcp_word_count(text: str) -> str:
         """Count words via the remote MCP word-count tool server."""
-        raw = _call_mcp_word_count(endpoint, text)
+        raw = _call_mcp_word_count(endpoint, text, capability)
         return json.dumps(raw)
 
     return mcp_word_count
@@ -392,6 +417,7 @@ def run_agent(
     conv_id: str | None = None,
     call_agent: str | None = None,
     traceparent: str | None = None,
+    capability: str | None = None,
 ) -> dict:
     """Tool step then model step, optionally with session memory and A2A delegation.
 
@@ -420,6 +446,54 @@ def run_agent(
     ``tool_version``, ``tool_error``, ``turns``, ``memory``, ``delegated_to``,
     ``delegate_output``, ``a2a``, and ``a2a_error``.
     """
+    # --- Adopt the inbound trace context (spec §8.3, "SDK owns intra-pod") ---
+    # Without this every span this process emits starts its own trace: the launcher's agent.invoke
+    # lands in one trace and the chain / llm / tool spans in others, so Langfuse shows four or five
+    # sibling traces instead of one tree and `lf-stitched` correctly refuses them. The base image
+    # installs W3C propagation globally (sitecustomize.py) but nothing was EXTRACTING the header
+    # into the active context -- traceparent was parsed only to forward on A2A calls.
+    #
+    # This example is deliberately SDK-free, so the adoption is manual; an SDK agent gets it from
+    # client.trace.loop(headers=...). Detached in a finally so a ThreadingHTTPServer worker thread
+    # never leaks context into the next request it serves.
+    _otel_token = None
+    if traceparent:
+        try:
+            from opentelemetry import context as _otel_context  # noqa: PLC0415
+            from opentelemetry.propagate import extract as _otel_extract  # noqa: PLC0415
+
+            _otel_token = _otel_context.attach(
+                _otel_extract({"traceparent": traceparent})
+            )
+        except Exception as err:  # noqa: BLE001 — tracing must never break the agent
+            print(
+                f"trace context not adopted: {type(err).__name__}: {err}",
+                file=sys.stderr,
+                flush=True,
+            )
+    try:
+        return _run_agent_traced(
+            user_input, conv_id=conv_id, call_agent=call_agent,
+            traceparent=traceparent, capability=capability,
+        )
+    finally:
+        if _otel_token is not None:
+            try:
+                from opentelemetry import context as _otel_context  # noqa: PLC0415
+
+                _otel_context.detach(_otel_token)
+            except Exception:  # noqa: BLE001, S110 — detach failure must not break the response
+                pass
+
+
+def _run_agent_traced(
+    user_input: str,
+    conv_id: str | None = None,
+    call_agent: str | None = None,
+    traceparent: str | None = None,
+    capability: str | None = None,
+) -> dict:
+    """The agent body. Split from run_agent so the trace-context attach/detach wraps it exactly."""
     extra: dict = {}
 
     # --- Session memory: validate id + fetch prior context (m5.6) ---
@@ -445,7 +519,7 @@ def run_agent(
     # --- Tool call ---
     if wc_entry is not None:
         endpoint = wc_entry["endpoint"]
-        mcp_wc_tool = _make_mcp_word_count_tool(endpoint)
+        mcp_wc_tool = _make_mcp_word_count_tool(endpoint, capability)
         try:
             raw_result = mcp_wc_tool.invoke({"text": user_input})
             parsed = json.loads(raw_result)
@@ -548,10 +622,15 @@ def _run_with_incoming_context(
     # Header lookup is case-insensitive in HTTP/1.1; http.server preserves the
     # original case, so we normalise to lowercase for a reliable lookup.
     traceparent: str | None = None
+    # The run capability arrives on the same inbound request (the BFF sets it, the launcher passes
+    # it through). Lower-cased lookup for the same reason as traceparent: header case is not stable.
+    capability: str | None = None
     for k, v in headers.items():
-        if k.lower() == "traceparent":
+        kl = k.lower()
+        if kl == "traceparent":
             traceparent = v
-            break
+        elif kl == "x-ctxmesh-run-capability":
+            capability = v
 
     try:
         from opentelemetry import context as otel_context  # noqa: PLC0415
@@ -559,11 +638,11 @@ def _run_with_incoming_context(
 
         token = otel_context.attach(extract(headers))
         try:
-            return run_agent(user_input, conv_id=conv_id, call_agent=call_agent, traceparent=traceparent)
+            return run_agent(user_input, conv_id=conv_id, call_agent=call_agent, traceparent=traceparent, capability=capability)
         finally:
             otel_context.detach(token)
     except ImportError:
-        return run_agent(user_input, conv_id=conv_id, call_agent=call_agent, traceparent=traceparent)
+        return run_agent(user_input, conv_id=conv_id, call_agent=call_agent, traceparent=traceparent, capability=capability)
 
 
 # ---------------------------------------------------------------------------

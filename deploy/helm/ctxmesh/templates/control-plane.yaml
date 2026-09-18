@@ -4,19 +4,6 @@
 # No-drift is enforced by `make helm-verify` (chart == kustomize).
 # ============================================================================
 apiVersion: v1
-kind: Namespace
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: ctxmesh
-    control-plane: controller-manager
-    pod-security.kubernetes.io/audit: restricted
-    pod-security.kubernetes.io/enforce: baseline
-    pod-security.kubernetes.io/enforce-version: latest
-    pod-security.kubernetes.io/warn: restricted
-  name: {{ .Values.namespace }}
----
-apiVersion: v1
 kind: ServiceAccount
 metadata:
   labels:
@@ -1097,13 +1084,13 @@ spec:
         - name: CONSOLE_URL
           value: {{ .Values.bff.consoleURL | default "" | quote }}
         - name: COLLECTOR_IMAGE
-          value: {{ .Values.controllerManager.injectedImages.collector | default "" | quote }}
+          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.injectedImages.collector "ctx" $) | quote }}
         - name: DISCOVERY_IMAGE
-          value: {{ .Values.controllerManager.injectedImages.discovery | default "" | quote }}
+          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.injectedImages.discovery "ctx" $) | quote }}
         - name: MCP_OBO_EGRESS_ENABLED
           value: {{ .Values.controllerManager.oboEgress.enabled | quote }}
         - name: EGRESS_SIDECAR_IMAGE
-          value: {{ .Values.controllerManager.oboEgress.sidecarImage | default "" | quote }}
+          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.oboEgress.sidecarImage "ctx" $) | quote }}
         - name: MCP_CAPABILITY_PUBLIC_KEY
           valueFrom:
             secretKeyRef:

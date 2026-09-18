@@ -888,7 +888,10 @@ export function DashboardPage() {
     const counts = {} as Record<Bucket, number>;
     for (const b of BUCKETS) counts[b.id] = 0;
     let classified = 0;
-    for (const g of c.groups) {
+    // `?? []` because the landing page must not white-screen on a malformed payload. The
+    // sibling topology surface already defends this same field that way; this one did not,
+    // so a census response without `groups` threw an uncaught TypeError and blanked it.
+    for (const g of c.groups ?? []) {
       counts[bucketOf(g)] += g.count;
       classified += g.count;
     }

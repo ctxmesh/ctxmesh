@@ -103,6 +103,18 @@ ENV NODE_PATH=/usr/local/lib/node_modules
 # OTEL_EXPORTER_OTLP_ENDPOINT: gRPC address for the OTel collector sidecar.
 # Default matches the controller-injected sidecar (localhost:4317 in the pod).
 # Override in derived images or at runtime if the collector is elsewhere.
+# Run as a NON-ROOT uid — same reason and same uid as images/base-python (see that file for the
+# full rationale). The controller sets RunAsNonRoot=true on every agent container by default, so a
+# root image never starts.
+#
+# NOT node:22-slim's built-in `node` user (uid 1000): 1000 is the most commonly aliased uid in
+# existence — typical host user, typical app-image user — and 65532 is what egress_redirect.go's
+# sidecar exemption is designed around. Numeric, never `USER nonroot` by name.
+RUN groupadd -g 65532 nonroot \
+ && useradd -u 65532 -g 65532 -d /home/nonroot -m -s /usr/sbin/nologin nonroot
+ENV HOME=/home/nonroot
+USER 65532:65532
+
 ENV OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317
 
 # Launcher is PID 1.  Derived images set AGENT_ENTRYPOINT (node) + AGENT_ENTRYPOINT_ARGS
