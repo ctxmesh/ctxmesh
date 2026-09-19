@@ -2767,7 +2767,7 @@ function MemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
     <div data-testid="memory-panel">
       <SectionHeader
         title="Memory"
-        lede="The session and shared memory backends wired to this agent. This is its configuration, not its contents."
+        lede="The session and shared memory backends wired to this agent, and the facts it has remembered."
       />
       <SessionMemoryConfigPanel ns={ns} agentName={agentName} />
       <LongTermMemoryConfigPanel ns={ns} agentName={agentName} />
@@ -2812,10 +2812,31 @@ function SessionMemoryConfigPanel({ ns, agentName }: { ns: string; agentName: st
     api
       .sessionMemoryConfig(ns, agentName, controller.signal)
       .then((c) => !controller.signal.aborted && apply(c))
-      .catch(() => !controller.signal.aborted && setConfig(null));
+      .catch((e: unknown) => {
+        if (controller.signal.aborted) return;
+        // A 403/404 means "not yours to see" and hides, as before. Anything else -- a 500, a
+        // network blip -- used to hide too, so a backend failure looked exactly like "this agent
+        // has no session memory", and with both config panels failing the whole Memory section
+        // rendered a bare header over nothing. LongTermMemoryPanel nine lines below already
+        // distinguishes these; this is the same rule, applied to its siblings.
+        if (!(e instanceof ApiError) || e.isForbidden || e.status === 404) {
+          setConfig(null);
+          return;
+        }
+        setErr(e instanceof Error ? e.message : "could not load");
+      });
     return () => controller.abort();
   }, [ns, agentName, apply]);
 
+  // A load error is SAID, not swallowed: "could not look" and "nothing here" must not render
+  // identically (the same rule the harness gates hold, applied to the console).
+  if (config === null && err) {
+    return (
+      <p className="text-sm text-destructive" role="alert" data-testid="memory-config-load-error">
+        Could not load this agent&apos;s memory configuration: {err}
+      </p>
+    );
+  }
   if (config === null) return null; // unreadable (403/404) — hide, no noise
   if (!config.enabled) return null; // no session memory ⇒ nothing to isolate; hide the toggle
   const shared = config.scope === "shared";
@@ -2904,7 +2925,19 @@ function LongTermMemoryConfigPanel({ ns, agentName }: { ns: string; agentName: s
     api
       .longTermMemoryConfig(ns, agentName, controller.signal)
       .then((c) => !controller.signal.aborted && apply(c))
-      .catch(() => !controller.signal.aborted && setConfig(null));
+      .catch((e: unknown) => {
+        if (controller.signal.aborted) return;
+        // A 403/404 means "not yours to see" and hides, as before. Anything else -- a 500, a
+        // network blip -- used to hide too, so a backend failure looked exactly like "this agent
+        // has no session memory", and with both config panels failing the whole Memory section
+        // rendered a bare header over nothing. LongTermMemoryPanel nine lines below already
+        // distinguishes these; this is the same rule, applied to its siblings.
+        if (!(e instanceof ApiError) || e.isForbidden || e.status === 404) {
+          setConfig(null);
+          return;
+        }
+        setErr(e instanceof Error ? e.message : "could not load");
+      });
     return () => controller.abort();
   }, [ns, agentName, apply]);
 
@@ -2922,6 +2955,15 @@ function LongTermMemoryConfigPanel({ ns, agentName }: { ns: string; agentName: s
       .finally(() => setBusy(false));
   }
 
+  // A load error is SAID, not swallowed: "could not look" and "nothing here" must not render
+  // identically (the same rule the harness gates hold, applied to the console).
+  if (config === null && err) {
+    return (
+      <p className="text-sm text-destructive" role="alert" data-testid="memory-config-load-error">
+        Could not load this agent&apos;s memory configuration: {err}
+      </p>
+    );
+  }
   if (config === null) return null; // unreadable (403/404) — hide, no noise
 
   return (

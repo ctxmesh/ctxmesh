@@ -30,6 +30,7 @@ import {
   type RunDetail,
   type WorkflowNodeStatus,
 } from "@/lib/api";
+import { markRunCompleted } from "@/lib/first-run";
 import { useDurableRun } from "@/lib/use-durable-run";
 import {
   isValidHttpUrl,
@@ -309,7 +310,14 @@ export function PlaygroundPage() {
   // workflow nodes) so the define/run/export chrome is unchanged.
   const runEngine = useDurableRun({
     onForbidden: () => reprobe(),
-    onFinalized: (detail) => setRun(finalizedRun(detail)),
+    onFinalized: (detail) => {
+      // The Home checklist's "Run your agent" step reads a Langfuse-backed feed that is ready and
+      // EMPTY on a default install, so it never checked off for a user who had just watched a run
+      // finish. Record what the browser saw. Any terminal result counts: the step asks the user to
+      // send a message and watch the trace, which a failed run also satisfies.
+      markRunCompleted(namespace);
+      setRun(finalizedRun(detail));
+    },
     onFinalizeError: (err) => setRun(errorRun(err)),
   });
 

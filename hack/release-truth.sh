@@ -175,8 +175,30 @@ if [ -n "$newest_tag" ] && [ -n "$changelog_ver" ] && [ "$changelog_ver" != "$ne
   echo "ok: a release is in flight — CHANGELOG names $changelog_ver, newest tag is $newest_tag; unreleased fixes are being carried, not stranded"
   newest_tag=""
 fi
-if [ -n "$newest_tag" ] && [ "$(git -C "$ROOT" rev-parse "$newest_tag^{commit}" 2>/dev/null)" != "$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)" ]; then
-  unreleased="$(git -C "$ROOT" log --format='%h %s' "$newest_tag..HEAD" \
+# The range start is normally the tag itself. It is NOT when history has been rewritten: main's
+# commits then carry new SHAs while the tag still names the original, the two are disjoint, and
+# `$newest_tag..HEAD` degenerates to EVERY commit — so every install-critical fix ever made reads
+# as unreleased and the gate is permanently, uselessly red. That happened here when main was
+# rewritten to correct an author identity (2026-09-19); the tags were deliberately left in place
+# because proxy.golang.org has the sdk/go tags cached against their original commits.
+#
+# Ancestry was only ever a proxy for the real question: what is on HEAD that is not in the tree we
+# published. So ask that directly — find the commit on HEAD whose TREE matches the tag's. It is the
+# same answer when nothing was rewritten, exact when something was, and it fails CLOSED: with no
+# tree-equivalent commit the tag is used unchanged and the gate reports as before.
+range_start="$newest_tag"
+if [ -n "$newest_tag" ] && ! git -C "$ROOT" merge-base --is-ancestor "$newest_tag" HEAD 2>/dev/null; then
+  tag_tree="$(git -C "$ROOT" rev-parse "$newest_tag^{tree}" 2>/dev/null || true)"
+  # No early `exit` in awk: it closes the pipe, git log takes SIGPIPE, and pipefail turns a
+  # successful lookup into exit 141. Take the first match after awk has read the whole stream.
+  twin="$(git -C "$ROOT" log HEAD --format='%H %T' 2>/dev/null | awk -v t="$tag_tree" '$2==t {print $1}' | head -1 || true)"
+  if [ -n "$twin" ]; then
+    echo "note: $newest_tag is not an ancestor of HEAD (history was rewritten); comparing against ${twin:0:8}, the commit carrying the same tree"
+    range_start="$twin"
+  fi
+fi
+if [ -n "$newest_tag" ] && [ "$(git -C "$ROOT" rev-parse "$range_start^{commit}" 2>/dev/null)" != "$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)" ]; then
+  unreleased="$(git -C "$ROOT" log --format='%h %s' "$range_start..HEAD" \
       --  cmd/main.go internal/controller/eventing_available.go deploy/helm hack/gen_helm_chart.py images 2>/dev/null \
     | grep -E '^[0-9a-f]+ fix(\(|:)' || true)"
   if [ -n "$unreleased" ]; then

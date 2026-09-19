@@ -175,6 +175,9 @@ type PageState =
   | { kind: "loading" }
   | { kind: "unconfigured" } // 501 → no trace backend wired; calm degrade, not a failure
   | { kind: "ready"; detail: TraceDetailResponse; langfuseUrl: string | null }
+  // The run exists and is ours, but its spans have not reached the trace backend yet (the BFF's
+  // trace_pending code). Distinct from "error": nothing is wrong, and it resolves on its own.
+  | { kind: "pending" }
   | { kind: "error"; message: string; forbidden: boolean };
 
 /**
@@ -189,6 +192,20 @@ const UNATTRIBUTED_TITLE =
   "The trace backend attributed no figure here. It is unknown — not zero.";
 
 /** A span the backend marked as failed. Drives the header tag and the closing line. */
+/** The BFF's reason code for "this trace is real, its spans have not arrived yet". */
+const TRACE_PENDING_CODE = "trace_pending";
+
+/**
+ * How long to keep watching for a pending trace before handing back to a manual Retry.
+ *
+ * A cold pod's first spans can take minutes (the OTLP exporter's gRPC retry backs off against a
+ * collector that was not listening when it started, m52.G30), so this cannot wait it out. It
+ * covers the common case — a warm path lands in seconds — and then says plainly that it is still
+ * waiting rather than pretending to fail.
+ */
+const PENDING_POLL_MS = 3000;
+const PENDING_MAX_TRIES = 10;
+
 function failedSpans(spans: SpanSummary[]): number {
   return spans.filter((s) => s.status === "error" || s.level === "ERROR").length;
 }
@@ -200,6 +217,23 @@ export function TracePage() {
   // Retry is a re-run of the same effect, not a second fetch path — §7 A5's
   // "ErrorState + Retry" with exactly one place that knows how to load a trace.
   const [attempt, setAttempt] = React.useState(0);
+  // How many times the pending state has re-checked. Also the flicker guard: the fetch effect
+  // resets to "loading", so without it the panel would blink between "still recording" and a
+  // spinner every few seconds.
+  const [pendingTries, setPendingTries] = React.useState(0);
+
+  React.useEffect(() => {
+    setPendingTries(0);
+  }, [id]);
+
+  React.useEffect(() => {
+    if (state.kind !== "pending" || pendingTries >= PENDING_MAX_TRIES) return;
+    const t = window.setTimeout(() => {
+      setPendingTries((n) => n + 1);
+      setAttempt((n) => n + 1);
+    }, PENDING_POLL_MS);
+    return () => window.clearTimeout(t);
+  }, [state.kind, pendingTries]);
 
   React.useEffect(() => {
     if (!id) return;
@@ -227,6 +261,15 @@ export function TracePage() {
           setState({ kind: "unconfigured" });
           return;
         }
+        // A 404 the BFF marked trace_pending is "not yet", not "never": the id resolved to a run
+        // the caller may read, and only the spans are missing. This is the ordinary state seconds
+        // after a first run on a cold pod, where the agent's OTLP exporter is still backing off
+        // against a collector that was not listening yet (m52.G30). Showing "The trace didn't
+        // load" there tells a new user their first run broke, immediately after it succeeded.
+        if (err instanceof ApiError && err.code === TRACE_PENDING_CODE) {
+          setState({ kind: "pending" });
+          return;
+        }
         const forbidden = err instanceof ApiError && err.isForbidden;
         setState({
           kind: "error",
@@ -237,6 +280,33 @@ export function TracePage() {
 
     return () => controller.abort();
   }, [id, attempt]);
+
+  // ── Pending: the trace is real, its spans have not landed yet ───────────────
+  // Rendered for the silent re-check too (pendingTries > 0 while the effect refetches), or the
+  // panel would blink to a spinner every few seconds. A new user reaches this page seconds after
+  // their first successful run; "The trace didn't load" would tell them it broke.
+  if (state.kind === "pending" || (state.kind === "loading" && pendingTries > 0)) {
+    const gaveUp = pendingTries >= PENDING_MAX_TRIES;
+    return (
+      <div className="min-w-0 space-y-6" data-testid="trace-page-pending">
+        <PageHeader
+          title="Trace"
+          lede="The step-by-step record of one run."
+        />
+        <QuietNote title="This trace is still recording.">
+          The run is real and this page is watching for it — the agent's spans just haven't reached
+          the trace backend yet. The first run on a freshly started agent is the slow one, because
+          its exporter retries until the collector beside it is listening. Nothing is lost; the
+          record arrives.
+        </QuietNote>
+        {gaveUp && (
+          <Button variant="outline" onClick={() => setAttempt((n) => n + 1)}>
+            Check again
+          </Button>
+        )}
+      </div>
+    );
+  }
 
   // ── Loading (§7 A5) ─────────────────────────────────────────────────────────
   if (state.kind === "loading") {

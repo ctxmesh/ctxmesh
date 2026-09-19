@@ -406,6 +406,11 @@ func (r *AgentDeploymentReconciler) registryReader() RegistryReader {
 // PromptVersion retired to Postgres (ADR 0044) — the controller reads the resolved-prompt annotation, no CRD RBAC.
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=evalsuites,verbs=get;list;watch
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=services,verbs=get;list;watch;create;update;patch;delete
+// Revisions are READ-ONLY here: the prompt-ConfigMap GC (prompt_inject.go) lists the live Revisions of an
+// agent's ksvc so a ConfigMap a running revision still mounts is never pruned. Knative owns Revisions;
+// ctxmesh must never write them. Without this rule the cached List can never sync, and because the client
+// blocks on that sync the single agentdeployment worker wedges permanently — no agent reconciles at all.
+// +kubebuilder:rbac:groups=serving.knative.dev,resources=revisions,verbs=get;list;watch
 // +kubebuilder:rbac:groups=eventing.knative.dev,resources=triggers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
