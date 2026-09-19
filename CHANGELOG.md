@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.1.0-beta.8 — the controller stopped reconciling, and nothing said so
+
+A one-line RBAC fix, cut as its own release because the version it replaces is known-broken.
+
+**The control plane could stop reconciling entirely, silently.** The prompt-ConfigMap garbage
+collector lists Knative `Revision`s so it never prunes a ConfigMap a live revision still mounts —
+and the ClusterRole granted `serving.knative.dev` → `services` only. The consequence is worse than
+a denied call: controller-runtime's *cached* client blocks waiting for an informer to sync, an
+informer without `list`+`watch` can never sync, and with a worker count of 1 the first agent to
+reach that line wedged the `agentdeployment` controller permanently. Every agent after it stopped
+reconciling too.
+
+Nothing in the usual places said so. The pod was Ready with zero restarts, `Starting workers` was
+logged for the controller, and no error mentioned the object. The only honest signal was
+`status.observedGeneration` sitting empty on a freshly created agent.
+
+If you are on `v0.1.0-beta.7` or earlier and any agent uses `promptRef`, upgrade. If your agents
+have stopped picking up changes — a prompt swap that never reaches the pod is the usual first
+symptom — this is why.
+
+**A prompt swap reaches the serving revision again.** With the grant in place, changing
+`spec.promptRef` rolls a new Knative revision mounting the new prompt, with a byte-identical
+container image digest.
+
+**The console tells the truth in two more places.** The Home checklist's "Run your agent" step now
+checks off after a Playground run even where the trace feed is empty — on a default install it is
+ready and empty, so the step could never complete. And a trace whose spans have not arrived yet
+reads as *still recording* rather than "The trace didn't load": the backend returns the same 404
+for a trace that will never exist and one that is seconds away, and the two are now distinguished
+on the wire.
+
+**Also fixed:** the `awaiting-promotion` condition told operators to annotate
+`agents.ctxmesh.ai/promote=true`, which stopped working when approval began naming the candidate
+revision it authorizes. Following the product's own instruction did nothing, and the condition then
+repeated it.
+
 ## v0.1.0-beta.7 — the install works where nobody prepared the ground
 
 The first release cut because a gate walked a stranger's path and refused to go green.
