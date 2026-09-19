@@ -766,7 +766,11 @@ func (s *Server) handleTraceDetail(w http.ResponseWriter, r *http.Request) {
 	detail, err := s.adapters.Langfuse.TraceDetail(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, ErrTraceNotFound) {
-			writeError(w, http.StatusNotFound, "trace not found")
+			// The caller already proved a run maps this trace, so the id is real and theirs; the
+			// spans have not arrived. Still 404 (there is no representation to serve, and changing
+			// the status would break every shipped SDK), but the code says which 404 it is.
+			writeErrorCode(w, http.StatusNotFound, errCodeTracePending,
+				"trace not recorded yet — the agent's spans have not reached the trace backend")
 			return
 		}
 		s.log.Error(err, "fetch trace detail failed", "traceID", id)
@@ -920,6 +924,15 @@ const (
 	// errCodeStorageQuotaExceeded is returned when a tenant is at/over its corpus storage hard cap
 	// (m80.3, ADR 0061 governance #7): an upload is rejected 413 and an ingestion run fails fast.
 	errCodeStorageQuotaExceeded = "storage_quota_exceeded"
+
+	// errCodeTracePending distinguishes the two 404s a trace fetch can produce. authorizeRunAccess
+	// 404s when NO run maps the id — an unknown trace, and the answer is final. This one means the
+	// run exists and is ours, and the backend simply has no spans for it YET: the agent's OTLP
+	// exporter starts beside its collector sidecar, the first exports fail because nothing is
+	// listening, and the gRPC retry backs off, so a cold pod's spans can land minutes later
+	// (m52.G30). Same status, opposite meaning — one is "never", the other is "not yet", and a
+	// client cannot tell them apart without this.
+	errCodeTracePending = "trace_pending"
 )
 
 // msgInvalidJSONBody is the client-safe message for an unparseable request body,
