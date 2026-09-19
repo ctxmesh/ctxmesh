@@ -11,6 +11,7 @@ import {
   census,
 } from "@/pages/dashboard-page";
 import { UNKNOWN, isKnown } from "@/components/kit";
+import { markRunCompleted } from "@/lib/first-run";
 import type { AgentSummary } from "@/lib/api";
 
 // Home (route "/", archetype A11) — the page a person judges the product by.
@@ -741,6 +742,42 @@ describe("Home — the first-run path (the aha entry point)", () => {
 
     const pill = await screen.findByTestId("home-setup-progress");
     expect(pill).toHaveTextContent(/Setup 2 \/ 3/);
+  });
+
+  // The step above is the defect m181.2 fixes: /api/runs is Langfuse-backed, and on a default
+  // install it answers READY and EMPTY, so a user who ran an agent in the Playground, saw a real
+  // response and a trace id, and came back to Home found the circle still open — permanently. The
+  // existing DX-4 escape hatch covers an UNAVAILABLE feed (501), not a feed that answers correctly
+  // with nothing in it. A run the browser witnessed now counts too.
+  it("checks the run step off after a Playground run, even when the runs feed is ready and empty", async () => {
+    window.localStorage.clear();
+    markRunCompleted(""); // the all-workspaces scope this harness renders under
+    routeFetch({
+      "/api/agents": agentsResponse(FLEET),
+      "/api/providers": providersConnected,
+      "/api/runs": { runs: [] },
+    });
+    renderHome();
+
+    await screen.findByTestId("home-page");
+    await waitFor(() => expect(screen.queryByTestId("first-run-checklist")).toBeNull());
+    expect(screen.queryByTestId("home-setup-progress")).toBeNull();
+    window.localStorage.clear();
+  });
+
+  it("does not let a run in another workspace check the step off here", async () => {
+    window.localStorage.clear();
+    markRunCompleted("team-b"); // a different workspace from the one being rendered
+    routeFetch({
+      "/api/agents": agentsResponse(FLEET),
+      "/api/providers": providersConnected,
+      "/api/runs": { runs: [] },
+    });
+    renderHome();
+
+    const pill = await screen.findByTestId("home-setup-progress");
+    expect(pill).toHaveTextContent(/Setup 2 \/ 3/);
+    window.localStorage.clear();
   });
 
   it("renders the checklist when setup is incomplete (no providers)", async () => {
