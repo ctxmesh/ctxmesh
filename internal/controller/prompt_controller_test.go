@@ -341,3 +341,88 @@ func TestReconcile_PromptUnresolvable(t *testing.T) {
 	err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &ksvc)
 	assert.Error(t, err, "no ksvc must be created when the git pointer is unresolvable")
 }
+
+// TestReconcile_PromptOnlyDeploy_PromptRefSwapRollsRevision covers the case the live authoring
+// path actually takes and the swap test above does NOT: spec.PromptRef itself changes
+// (prompt-v1 → prompt-v2), so specHash changes too — a new AgentVersion AND a new revision
+// prefix — while the resolved pointer is re-stamped in the same edit. The sibling test holds
+// spec.PromptRef fixed and moves only the annotation, which exercises the "-h" suffix alone and
+// asserts both revisions share ONE specHash prefix. Nothing covered the two moving together,
+// and that is the combination every console/CLI edit produces.
+func TestReconcile_PromptOnlyDeploy_PromptRefSwapRollsRevision(t *testing.T) {
+	const (
+		name      = "refswap-agent"
+		namespace = "default"
+		image     = "ghcr.io/ctxmesh/example-agent@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	)
+
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image:     image,
+			PromptRef: "prompt-v1",
+		},
+	}
+	stampPrompt(t, deploy, "prompt-v1", echoGit("v1"))
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+
+	r := newReconciler()
+
+	reconcileNN(t, r, name, namespace)
+	var ksvc1 servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: name, Namespace: namespace}, &ksvc1))
+	rev1 := ksvc1.Spec.Template.Name
+	image1 := ksvc1.Spec.Template.Spec.Containers[0].Image
+	cm1 := promptCMByLabel(t, name, namespace)
+	hash1, err := specHash(deploy.Spec)
+	require.NoError(t, err)
+
+	// ── The live edit: spec.PromptRef AND the stamped pointer both move ────────
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+	deploy.Spec.PromptRef = "prompt-v2"
+	stampPrompt(t, deploy, "prompt-v2", echoGit("v2"))
+	require.NoError(t, k8sClient.Update(testCtx, deploy))
+
+	reconcileNN(t, r, name, namespace)
+	var ksvc2 servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: name, Namespace: namespace}, &ksvc2))
+	rev2 := ksvc2.Spec.Template.Name
+	image2 := ksvc2.Spec.Template.Spec.Containers[0].Image
+	cm2 := promptCMByLabel(t, name, namespace)
+
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+	hash2, err := specHash(deploy.Spec)
+	require.NoError(t, err)
+
+	// specHash MUST move: promptRef is part of the spec it marshals.
+	assert.NotEqual(t, hash1, hash2, "specHash must change when spec.PromptRef changes")
+
+	// The AgentVersion for the NEW spec must exist — it is what status.latestVersion tracks.
+	var av agentsv1alpha1.AgentVersion
+	assert.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: name + "-" + hash2, Namespace: namespace}, &av),
+		"a promptRef swap must produce a new AgentVersion %s-%s", name, hash2)
+
+	// The pod template must actually roll, and must mount the NEW prompt ConfigMap.
+	assert.NotEqual(t, cm1.Name, cm2.Name, "a promptRef swap must create a new content-addressed CM")
+	assert.NotEqual(t, rev1, rev2, "a promptRef swap must roll the Knative revision")
+	assert.True(t, strings.HasPrefix(rev2, name+"-"+hash2+"-h"),
+		"revision 2 must carry the NEW spec hash: rev2=%s want prefix %s-%s-h", rev2, name, hash2)
+
+	mounted := ksvc2.Spec.Template.Spec.Volumes
+	var mountedCM string
+	for _, v := range mounted {
+		if v.Name == "agent-prompt" && v.ConfigMap != nil {
+			mountedCM = v.ConfigMap.Name
+		}
+	}
+	assert.Equal(t, cm2.Name, mountedCM,
+		"the serving revision must mount the POST-swap prompt ConfigMap, not the pre-swap one")
+
+	// The prompt-only invariant still holds: no image rebuild.
+	assert.Equal(t, image1, image2, "prompt-only deploy: the image digest must not change")
+}
