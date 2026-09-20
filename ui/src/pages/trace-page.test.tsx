@@ -190,6 +190,55 @@ describe("TracePage (m16.7)", () => {
     );
   });
 
+  // A 404 is two different answers. The BFF marks the one that resolves itself (m181.3).
+  function stub404(body: Record<string, string>) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/detail")) {
+          return Promise.resolve({
+            ok: false,
+            status: 404,
+            json: async () => body,
+            text: async () => JSON.stringify(body),
+          } as Response);
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ traceId: "t1", url: "https://lf/trace/t1" }),
+          text: async () => "{}",
+        } as Response);
+      }),
+    );
+  }
+
+  it("says a pending trace is still recording, not that it failed", async () => {
+    // The ordinary state seconds after a first run on a cold pod: the run is real, the spans are
+    // still in the exporter's retry backoff. Calling that "The trace didn't load" tells a new user
+    // their first successful run broke.
+    stub404({ error: "trace not recorded yet", code: "trace_pending" });
+    renderPage();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("trace-page-pending")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("trace-page-error")).toBeNull();
+  });
+
+  it("still treats an UNMARKED 404 as an error — an unknown trace never arrives", async () => {
+    // The discrimination, in the other direction: without the code this is a trace no run maps,
+    // and waiting for it would be a lie. Same status, opposite meaning.
+    stub404({ error: "trace not found" });
+    renderPage();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("trace-page-error")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("trace-page-pending")).toBeNull();
+  });
+
   it("renders ForbiddenInline on a 403", async () => {
     installFetch({ detailOk: false, detailStatus: 403 });
     renderPage();

@@ -716,7 +716,7 @@ export function RunsPage() {
           icon: MessagesSquare,
           title: "No runs yet",
           description:
-            "A run is one traced conversation with an agent — what it was asked, what it did, what it cost. Send an agent something from the Playground and it appears here.",
+            "A run is one traced conversation with an agent — what it was asked, what it did, what it cost. Send an agent something from the Playground to make one. This list is built from your tracing backend, so on a default install a run you just sent may not appear here — the run itself, and its trace, are unaffected.",
         };
 
   // 501 — the trace backend is not configured. This is the calm

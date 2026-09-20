@@ -416,7 +416,12 @@ func (r *AgentDeploymentReconciler) recordHeldGate(
 		}
 	} else { // awaiting-promotion
 		condStatus = metav1.ConditionFalse
-		condMsg = fmt.Sprintf("deploy gate: candidate %q passed (score %s >= threshold %s); awaiting human promotion (annotate %s=true)", gs.ScoredRevision, gs.Score, gs.Threshold, promoteAnnotation)
+		// The instruction names the CANDIDATE REVISION, because that is what promotionApproved
+		// compares against (audit FUNC-4). It used to say "=true", which stopped working when the
+		// approval began naming the revision it authorizes: an operator following this message
+		// annotated a value that matches nothing and fails safe, so the agent sat at
+		// awaiting-promotion with the condition still telling them to do the thing they just did.
+		condMsg = fmt.Sprintf("deploy gate: candidate %q passed (score %s >= threshold %s); awaiting human promotion (annotate %s=%s)", gs.ScoredRevision, gs.Score, gs.Threshold, promoteAnnotation, gs.ScoredRevision)
 	}
 	apimeta.SetStatusCondition(&deploy.Status.Conditions, metav1.Condition{
 		Type:               conditionReady,

@@ -39,6 +39,7 @@ import {
   type TenantUsageItem,
 } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
+import { hasCompletedRun } from "@/lib/first-run";
 import { useNamespace } from "@/lib/namespace";
 import { formatRelativeTime, formatUSD } from "@/lib/format";
 import { FIRST_RUN_CHECKLIST, RES_AGENTS } from "@/lib/nav";
@@ -968,7 +969,12 @@ export function DashboardPage() {
   // a run, so we must not nag about it forever.
   const hasProvider = isReady(providers) && providers.data > 0;
   const hasAgent = fleetData !== null && fleetData.items.length > 0;
-  const hasRun = isReady(runs) && runs.data > 0;
+  // The runs feed is Langfuse-backed, and on a default install it is READY and EMPTY: traces are
+  // not exported, so a user who ran an agent in the Playground and came back found this step still
+  // open, permanently. The branch below covers only an UNAVAILABLE feed (501) — not a feed that
+  // answers correctly with nothing in it. So a completed run the browser witnessed also counts.
+  // It can only ever turn the step ON; a ready feed reporting runs still checks it off by itself.
+  const hasRun = (isReady(runs) && runs.data > 0) || hasCompletedRun(namespace);
   const gateReady = isReady(providers) && fleetData !== null;
   const showChecklist =
     gateReady && !(hasProvider && hasAgent && (hasRun || runs.kind === "unavailable"));

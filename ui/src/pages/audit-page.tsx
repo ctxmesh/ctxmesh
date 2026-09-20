@@ -117,7 +117,7 @@ const AUDIT_ACTIONS = [
 //     "SharedRun"      — shares.go:auditKindSharedRun
 //   Controller rows (internal/audit/auditor.go:auditedTypes — the scheme-resolved Kind):
 //     "AgentDeployment", "AgentVersion", "ModelRoute", "SecretBinding",
-//     "MCPToolBinding", "MemoryBinding", "AgentRegistry", "AgentScalingPolicy",
+//     "MCPToolBinding", "AgentRegistry", "AgentScalingPolicy",   (MemoryBinding retired, ADR 0101)
 //     "EvalSuite"
 // NOTE: "PromptVersion"/"ToolRegistry" were retired to Postgres (ADR 0044) and are
 // no longer CRDs — they are NOT in auditedTypes() and produce no controller rows.
@@ -133,7 +133,6 @@ const AUDIT_KINDS = [
   "ModelRoute",
   "SecretBinding",
   "MCPToolBinding",
-  "MemoryBinding",
   "AgentRegistry",
   "AgentScalingPolicy",
   "EvalSuite",

@@ -353,10 +353,38 @@ func TestTraceDetailRouteServes501WhenAdapterNil(t *testing.T) {
 }
 
 func TestTraceDetailRouteServes404WhenTraceNotFound(t *testing.T) {
+	// No seeded run, so this never reaches the Langfuse adapter: authorizeRunAccess 404s because
+	// no run maps the id. This is the "never" 404 -- an unknown trace, a final answer -- and it
+	// carries NO code, so a client renders the ordinary error state.
 	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{detailErr: ErrTraceNotFound}})
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/traces/missing/detail", nil))
 	assert.Equal(t, http.StatusNotFound, rec.Code, "a genuinely-missing trace is a 404")
+	assert.NotContains(t, rec.Body.String(), errCodeTracePending,
+		"an unknown trace must NOT be reported as still-arriving -- it never arrives")
+}
+
+// The other 404: the run exists and is the caller's, and only the spans are missing. Same status,
+// opposite meaning. The agent's OTLP exporter starts beside its collector sidecar and its gRPC
+// retry backs off against a listener that was not up yet, so a cold pod's first spans can land
+// minutes later (m52.G30) -- which is exactly when a new user opens this page, seconds after their
+// first successful run. Without the code a client cannot tell "not yet" from "never" and must call
+// a healthy first run a failure.
+func TestTraceDetailRoutePendingWhenRunExistsButSpansHaveNotLanded(t *testing.T) {
+	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{detailErr: ErrTraceNotFound}})
+	seedRunForTrace(t, s, "t1")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/traces/t1/detail", nil))
+
+	require.Equal(t, http.StatusNotFound, rec.Code,
+		"still a 404 -- there is no representation to serve, and changing the status would break every shipped SDK")
+	var body struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, errCodeTracePending, body.Code, "the reason must be machine-readable, not parsed out of prose")
+	assert.NotEmpty(t, body.Error, "and still carry a human message")
 }
 
 func TestTraceDetailRouteServes502OnUpstreamError(t *testing.T) {

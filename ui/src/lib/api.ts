@@ -2175,6 +2175,9 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /** The BFF's machine-readable reason (writeErrorCode), when it sent one. Branch on this
+     *  rather than the message: two responses can share a status and mean opposite things. */
+    readonly code?: string,
   ) {
     super(message);
     this.name = "ApiError";
@@ -2232,13 +2235,36 @@ export function setSessionExpiredHandler(fn: () => void): void {
 // errorMessage extracts the BFF's JSON {"error": "..."} body when present, so a
 // validation 400 / RBAC 403 surfaces its real reason (not just a status code).
 async function errorMessage(res: Response, fallback: string): Promise<string> {
+  return (await errorDetail(res, fallback)).message;
+}
+
+/**
+ * The BFF's error body: a human `error` and an optional machine-readable `code` (writeErrorCode).
+ * The code is what lets a caller branch on the REASON without parsing prose — two responses can
+ * share a status and mean opposite things (a trace that will never exist vs one whose spans have
+ * not arrived yet). Parsing the message to tell them apart would break on any rewording.
+ */
+async function errorDetail(
+  res: Response,
+  fallback: string,
+): Promise<{ message: string; code?: string }> {
   try {
-    const body = (await res.json()) as { error?: string };
-    if (body && typeof body.error === "string" && body.error) return body.error;
+    const body = (await res.json()) as { error?: string; code?: string };
+    const code = body && typeof body.code === "string" && body.code ? body.code : undefined;
+    if (body && typeof body.error === "string" && body.error) {
+      return { message: body.error, code };
+    }
+    return { message: fallback, code };
   } catch {
     // Non-JSON body — fall through to the generic message.
   }
-  return fallback;
+  return { message: fallback };
+}
+
+/** Build the typed error for a non-2xx, carrying the BFF's reason code when it sent one. */
+async function apiError(res: Response, fallback: string): Promise<ApiError> {
+  const { message, code } = await errorDetail(res, fallback);
+  return new ApiError(message, res.status, code);
 }
 
 // RequestExtras lets a caller override the token (login-validation, which runs
@@ -2297,10 +2323,7 @@ async function getJSON<T>(
     extras,
   );
   if (!res.ok) {
-    throw new ApiError(
-      await errorMessage(res, `${path} failed (${res.status})`),
-      res.status,
-    );
+    throw await apiError(res, `${path} failed (${res.status})`);
   }
   return (await res.json()) as T;
 }
@@ -2323,10 +2346,7 @@ async function postJSON<TReq, TRes>(
     signal,
   });
   if (!res.ok) {
-    throw new ApiError(
-      await errorMessage(res, `${path} failed (${res.status})`),
-      res.status,
-    );
+    throw await apiError(res, `${path} failed (${res.status})`);
   }
   return (await res.json()) as TRes;
 }
@@ -3145,10 +3165,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `set display-name failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `set display-name failed (${res.status})`);
     }
     return (await res.json()) as NamespaceSummary;
   },
@@ -3206,10 +3223,7 @@ export const api = {
     // 502 = Langfuse configured but upstream fetch failed — real error, throw.
     if (res.status === 501) return null;
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `runs failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `runs failed (${res.status})`);
     }
     return (await res.json()) as RunListResponse;
   },
@@ -3240,10 +3254,7 @@ export const api = {
     });
     if (res.status === 501) return null; // audit store not configured — calm sentinel
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `audit failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `audit failed (${res.status})`);
     }
     return (await res.json()) as AuditListResponse;
   },
@@ -3268,10 +3279,7 @@ export const api = {
     });
     if (res.status === 501) return null; // alert store not configured — calm sentinel
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `alerts failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `alerts failed (${res.status})`);
     }
     return (await res.json()) as AlertListResponse;
   },
@@ -3326,10 +3334,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `expand failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `expand failed (${res.status})`);
     }
     return res.text();
   },
@@ -3361,10 +3366,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `create failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `create failed (${res.status})`);
     }
     return (await res.json()) as CreateAgentResponse;
   },
@@ -3384,10 +3386,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `invoke failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `invoke failed (${res.status})`);
     }
     return (await res.json()) as InvokeResponse;
   },
@@ -3406,10 +3405,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `run failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `run failed (${res.status})`);
     }
     return (await res.json()) as RunHandle;
   },
@@ -3419,10 +3415,7 @@ export const api = {
   getRun: async (id: string, signal?: AbortSignal): Promise<RunDetail> => {
     const res = await apiFetch(`/api/runs/${encodeURIComponent(id)}`, { signal });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `get run failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `get run failed (${res.status})`);
     }
     return (await res.json()) as RunDetail;
   },
@@ -3432,10 +3425,7 @@ export const api = {
   getRunTree: async (id: string, signal?: AbortSignal): Promise<RunTree> => {
     const res = await apiFetch(`/api/runs/${encodeURIComponent(id)}/tree`, { signal });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `get run tree failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `get run tree failed (${res.status})`);
     }
     return (await res.json()) as RunTree;
   },
@@ -3452,10 +3442,7 @@ export const api = {
       { signal },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `get workflow failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `get workflow failed (${res.status})`);
     }
     return (await res.json()) as WorkflowDetailResponse;
   },
@@ -3479,10 +3466,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `resume failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `resume failed (${res.status})`);
     }
     return (await res.json()) as RunHandle;
   },
@@ -3494,10 +3478,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `cancel failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `cancel failed (${res.status})`);
     }
     return (await res.json()) as RunHandle;
   },
@@ -3569,10 +3550,7 @@ export const api = {
       { method: "DELETE", headers: { Accept: "application/json" }, signal },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `disconnect failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `disconnect failed (${res.status})`);
     }
   },
 
@@ -3616,10 +3594,7 @@ export const api = {
     if (res.status === 202) {
       return (await res.json()) as OAuthInitResponse;
     }
-    throw new ApiError(
-      await errorMessage(res, `beginMcpGrant failed (${res.status})`),
-      res.status,
-    );
+    throw await apiError(res, `beginMcpGrant failed (${res.status})`);
   },
 
   // addMcpServerOAuth starts the OAuth 2.1 MCP connect flow. The BFF returns 202
@@ -3646,10 +3621,7 @@ export const api = {
       return (await res.json()) as OAuthInitResponse;
     }
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `addMcpServerOAuth failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `addMcpServerOAuth failed (${res.status})`);
     }
     // A 200/201 means the BFF treated the OAuth request as key-auth (unexpected)
     // — surface it as a protocol error so the caller doesn't silently mishandle.
@@ -3709,10 +3681,7 @@ export const api = {
     if (res.ok) {
       return (await res.json()) as ConnectMcpResponse;
     }
-    throw new ApiError(
-      await errorMessage(res, `connectMcpServer failed (${res.status})`),
-      res.status,
-    );
+    throw await apiError(res, `connectMcpServer failed (${res.status})`);
   },
 
   // setOrgCredential promotes an MCP server to ORG scope and sets its shared
@@ -3731,10 +3700,7 @@ export const api = {
     if (res.ok) {
       return (await res.json()) as SetOrgCredentialResponse;
     }
-    throw new ApiError(
-      await errorMessage(res, `setOrgCredential failed (${res.status})`),
-      res.status,
-    );
+    throw await apiError(res, `setOrgCredential failed (${res.status})`);
   },
 
   // mcpServerReferences returns the delete-impact for an MCP server (m26.3) — the
@@ -3756,10 +3722,7 @@ export const api = {
     if (res.ok) {
       return (await res.json()) as DeleteMcpServerResponse;
     }
-    throw new ApiError(
-      await errorMessage(res, `deleteMcpServer failed (${res.status})`),
-      res.status,
-    );
+    throw await apiError(res, `deleteMcpServer failed (${res.status})`);
   },
 
   // mcpApprovals lists the pending MCP servers awaiting operator approval
@@ -3786,10 +3749,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `approve failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `approve failed (${res.status})`);
     }
   },
 
@@ -3810,10 +3770,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `reject failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `reject failed (${res.status})`);
     }
   },
 
@@ -3860,10 +3817,7 @@ export const api = {
       if (body.regenerate) return body;
       throw new ApiError(body.error || body.reason || "generation failed", 422);
     }
-    throw new ApiError(
-      await errorMessage(res, `generate failed (${res.status})`),
-      res.status,
-    );
+    throw await apiError(res, `generate failed (${res.status})`);
   },
 
   // refineAgent calls the conversational refine endpoint (POST /api/agents/refine, m71.1).
@@ -3887,10 +3841,7 @@ export const api = {
       if (body.regenerate) return body;
       throw new ApiError(body.error || body.reason || "refinement failed", 422);
     }
-    throw new ApiError(
-      await errorMessage(res, `refine failed (${res.status})`),
-      res.status,
-    );
+    throw await apiError(res, `refine failed (${res.status})`);
   },
 
   // publishAgent flips the draft label off (POST /api/agents/{ns}/{name}/publish, m71.2).
@@ -3910,10 +3861,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `publish failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `publish failed (${res.status})`);
     }
     return (await res.json()) as PublishAgentResponse;
   },
@@ -3941,10 +3889,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `update failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `update failed (${res.status})`);
     }
     return (await res.json()) as UpdateAgentResponse;
   },
@@ -3970,10 +3915,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `update failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `update failed (${res.status})`);
     }
     return (await res.json()) as UpdateAgentResponse;
   },
@@ -4005,10 +3947,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `update failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `update failed (${res.status})`);
     }
     return (await res.json()) as LongTermMemoryConfig;
   },
@@ -4040,10 +3979,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `update failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `update failed (${res.status})`);
     }
     return (await res.json()) as SessionMemoryConfig;
   },
@@ -4074,10 +4010,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `update failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `update failed (${res.status})`);
     }
     return (await res.json()) as TracePolicyResponse;
   },
@@ -4104,10 +4037,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `delete failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `delete failed (${res.status})`);
     }
     // A delete may legitimately return 204 No Content or an empty body — reading it
     // as JSON would throw "Unexpected end of JSON input" even though the delete
@@ -4174,10 +4104,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `create model route failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `create model route failed (${res.status})`);
     }
     return (await res.json()) as ModelRouteDetail;
   },
@@ -4200,10 +4127,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `update model route failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `update model route failed (${res.status})`);
     }
     return (await res.json()) as ModelRouteDetail;
   },
@@ -4220,10 +4144,7 @@ export const api = {
       { method: "DELETE", signal },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `delete model route failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `delete model route failed (${res.status})`);
     }
   },
 
@@ -4256,10 +4177,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `create secret binding failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `create secret binding failed (${res.status})`);
     }
     return (await res.json()) as SecretBindingDetail;
   },
@@ -4280,10 +4198,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `update secret binding failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `update secret binding failed (${res.status})`);
     }
     return (await res.json()) as SecretBindingDetail;
   },
@@ -4298,10 +4213,7 @@ export const api = {
       { method: "DELETE", signal },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `delete secret binding failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `delete secret binding failed (${res.status})`);
     }
   },
 
@@ -4359,10 +4271,7 @@ export const api = {
       if (body.regenerate) return body;
       throw new ApiError(body.error || body.reason || "team generation failed", 422);
     }
-    throw new ApiError(
-      await errorMessage(res, `generateTeam failed (${res.status})`),
-      res.status,
-    );
+    throw await apiError(res, `generateTeam failed (${res.status})`);
   },
 
   // createTeam applies a reviewed AgentTeam YAML via the caller-scoped K8s create
@@ -4381,10 +4290,7 @@ export const api = {
     if (res.ok) {
       return (await res.json()) as AgentTeamSummary;
     }
-    throw new ApiError(
-      await errorMessage(res, `createTeam failed (${res.status})`),
-      res.status,
-    );
+    throw await apiError(res, `createTeam failed (${res.status})`);
   },
 
   // listGuardrailPolicies reads the GuardrailPolicies (m66.10, ADR 0059) — content-governance
@@ -4451,10 +4357,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `upload document failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `upload document failed (${res.status})`);
     }
     return (await res.json()) as { documentRef: string; key: string; size: number };
   },
@@ -4472,10 +4375,7 @@ export const api = {
       { method: "POST", signal },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `start ingestion failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `start ingestion failed (${res.status})`);
     }
     return (await res.json()) as { runId: string; status: string; documentCount: number };
   },
@@ -4494,10 +4394,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `create workflow run failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `create workflow run failed (${res.status})`);
     }
     return (await res.json()) as { id: string; status: string };
   },
@@ -4525,10 +4422,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `create agent registry failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `create agent registry failed (${res.status})`);
     }
     return (await res.json()) as AgentRegistryDetail;
   },
@@ -4549,10 +4443,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `update agent registry failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `update agent registry failed (${res.status})`);
     }
     return (await res.json()) as AgentRegistryDetail;
   },
@@ -4567,10 +4458,7 @@ export const api = {
       { method: "DELETE", signal },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `delete agent registry failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `delete agent registry failed (${res.status})`);
     }
   },
 
@@ -4592,10 +4480,7 @@ export const api = {
     // falls through to throw below — a real error the user should see + retry.
     if (res.status === 501) return null;
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `feedback failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `feedback failed (${res.status})`);
     }
     return (await res.json()) as FeedbackResponse;
   },
@@ -4627,10 +4512,7 @@ export const api = {
     // 502 = Langfuse configured but upstream fetch failed — real error, throw.
     if (res.status === 501) return null;
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `cost breakdown failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `cost breakdown failed (${res.status})`);
     }
     return (await res.json()) as CostBreakdownResponse;
   },
@@ -4655,10 +4537,7 @@ export const api = {
     // empty run list ([] is a valid empty list; null = not-available).
     if (res.status === 501) return null;
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `runs failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `runs failed (${res.status})`);
     }
     return (await res.json()) as AgentRunListResponse;
   },
@@ -4677,10 +4556,7 @@ export const api = {
     );
     if (res.status === 501) return null;
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `agent memory failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `agent memory failed (${res.status})`);
     }
     return (await res.json()) as AgentMemoryListResponse;
   },
@@ -4701,10 +4577,7 @@ export const api = {
     );
     if (res.status === 501) return null;
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `online score failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `online score failed (${res.status})`);
     }
     return (await res.json()) as OnlineScoreResponse;
   },
@@ -4730,10 +4603,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `rollback failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `rollback failed (${res.status})`);
     }
     return (await res.json()) as RollbackResponse;
   },
@@ -4775,10 +4645,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `create binding failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `create binding failed (${res.status})`);
     }
     return (await res.json()) as MCPToolBindingDetail;
   },
@@ -4835,10 +4702,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `create scaling policy failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `create scaling policy failed (${res.status})`);
     }
     return (await res.json()) as AgentScalingPolicyDetail;
   },
@@ -4859,10 +4723,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `update scaling policy failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `update scaling policy failed (${res.status})`);
     }
     return (await res.json()) as AgentScalingPolicyDetail;
   },
@@ -4877,10 +4738,7 @@ export const api = {
       { method: "DELETE", signal },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `delete scaling policy failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `delete scaling policy failed (${res.status})`);
     }
   },
 
@@ -4918,10 +4776,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `create eval suite failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `create eval suite failed (${res.status})`);
     }
     return (await res.json()) as EvalSuiteDetail;
   },
@@ -4942,10 +4797,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `update eval suite failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `update eval suite failed (${res.status})`);
     }
     return (await res.json()) as EvalSuiteDetail;
   },
@@ -4960,10 +4812,7 @@ export const api = {
       { method: "DELETE", signal },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `delete eval suite failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `delete eval suite failed (${res.status})`);
     }
   },
 
@@ -5014,10 +4863,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `create prompt version failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `create prompt version failed (${res.status})`);
     }
     return (await res.json()) as PromptVersionDetail;
   },
@@ -5038,10 +4884,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `update prompt version failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `update prompt version failed (${res.status})`);
     }
     return (await res.json()) as PromptVersionDetail;
   },
@@ -5056,10 +4899,7 @@ export const api = {
       { method: "DELETE", signal },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `delete prompt version failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `delete prompt version failed (${res.status})`);
     }
   },
 
@@ -5087,10 +4927,7 @@ export const api = {
     if (!res.ok) {
       // 404 = version/ref not found; 502 = resolver failed. Both throw — the
       // UI renders distinct honest states for each (not fabricated diffs).
-      throw new ApiError(
-        await errorMessage(res, `diff failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `diff failed (${res.status})`);
     }
     const body = (await res.json()) as PromptDiffResponse;
     // Derive `lines` when the server did not send them, which is every real
@@ -5121,10 +4958,7 @@ export const api = {
     const res = await apiFetch(path, { signal });
     if (res.status === 501) return { items: [] }; // calm unconfigured degrade
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `list datasets failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `list datasets failed (${res.status})`);
     }
     return (await res.json()) as DatasetListResponse;
   },
@@ -5143,10 +4977,7 @@ export const api = {
     );
     if (res.status === 501) return { datasetId: "", name, cases: [] }; // calm degrade
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `list dataset cases failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `list dataset cases failed (${res.status})`);
     }
     return (await res.json()) as DatasetCasesResponse;
   },
@@ -5171,10 +5002,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `append label failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `append label failed (${res.status})`);
     }
   },
 
@@ -5198,10 +5026,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `add run to dataset failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `add run to dataset failed (${res.status})`);
     }
     return (await res.json()) as { caseId: string };
   },
@@ -5220,10 +5045,7 @@ export const api = {
       signal: opts?.signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `eval-gated metric failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `eval-gated metric failed (${res.status})`);
     }
     return (await res.json()) as EvalGatedMetricResponse;
   },
@@ -5243,10 +5065,7 @@ export const api = {
     );
     if (res.status === 501) return null;
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `cost forecast failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `cost forecast failed (${res.status})`);
     }
     return (await res.json()) as CostForecastResponse;
   },
@@ -5266,10 +5085,7 @@ export const api = {
     });
     if (res.status === 501) return null;
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `cost chargeback failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `cost chargeback failed (${res.status})`);
     }
     return (await res.json()) as ChargebackResponse;
   },
@@ -5288,10 +5104,7 @@ export const api = {
     const res = await apiFetch("/api/recipes", { signal });
     if (res.status === 404) return { recipes: [] };
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `list recipes failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `list recipes failed (${res.status})`);
     }
     return (await res.json()) as RecipeListResponse;
   },
@@ -5309,10 +5122,7 @@ export const api = {
     const res = await apiFetch(path, { signal });
     if (res.status === 404) return [];
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `getTemplates failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `getTemplates failed (${res.status})`);
     }
     const data = (await res.json()) as TemplateListResponse;
     return data.templates ?? [];
@@ -5346,10 +5156,7 @@ export const api = {
       { method: "DELETE" },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `unpublishTemplate failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `unpublishTemplate failed (${res.status})`);
     }
   },
 
@@ -5377,10 +5184,7 @@ export const api = {
     if (res.ok) {
       return (await res.json()) as ForkAgentResponse;
     }
-    throw new ApiError(
-      await errorMessage(res, `forkAgent failed (${res.status})`),
-      res.status,
-    );
+    throw await apiError(res, `forkAgent failed (${res.status})`);
   },
 
   // checkRequirements runs the advisory pre-flight against a candidate agent.yaml
@@ -5402,10 +5206,7 @@ export const api = {
       return { model: { required: false, connected: true }, tools: [] };
     }
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `check-requirements failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `check-requirements failed (${res.status})`);
     }
     return (await res.json()) as CheckRequirementsResponse;
   },
@@ -5431,10 +5232,7 @@ export const api = {
       },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `createRunShare failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `createRunShare failed (${res.status})`);
     }
     return (await res.json()) as CreateRunShareResponse;
   },
@@ -5450,10 +5248,7 @@ export const api = {
       { headers: { Accept: "application/json" }, signal },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `listRunShares failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `listRunShares failed (${res.status})`);
     }
     const data = (await res.json()) as { shares?: RunShare[]; items?: RunShare[] } | RunShare[];
     if (Array.isArray(data)) return data;
@@ -5471,10 +5266,7 @@ export const api = {
       { method: "DELETE", signal },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `revokeRunShare failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `revokeRunShare failed (${res.status})`);
     }
   },
 
@@ -5487,10 +5279,7 @@ export const api = {
       { headers: { Accept: "application/json" }, signal },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `listMyShares failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `listMyShares failed (${res.status})`);
     }
     const data = (await res.json()) as MySharesItem[] | { items?: MySharesItem[] };
     if (Array.isArray(data)) return data;
@@ -5511,10 +5300,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `listApprovals failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `listApprovals failed (${res.status})`);
     }
     return (await res.json()) as ApprovalQueueItem[];
   },
@@ -5531,10 +5317,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `listStops failed (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `listStops failed (${res.status})`);
     }
     const data = (await res.json()) as ActiveStop[] | null;
     return Array.isArray(data) ? data : [];
@@ -5556,10 +5339,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `the stop was not recorded (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `the stop was not recorded (${res.status})`);
     }
     return (await res.json()) as StopScopeResponse;
   },
@@ -5587,10 +5367,7 @@ export const api = {
       signal,
     });
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `the stop was not lifted (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `the stop was not lifted (${res.status})`);
     }
     return (await res.json()) as StopScopeResponse;
   },
@@ -5610,10 +5387,7 @@ export const api = {
       { headers: { Accept: "application/json" }, signal },
     );
     if (!res.ok) {
-      throw new ApiError(
-        await errorMessage(res, `shared run unavailable (${res.status})`),
-        res.status,
-      );
+      throw await apiError(res, `shared run unavailable (${res.status})`);
     }
     return (await res.json()) as SharedRunView;
   },
