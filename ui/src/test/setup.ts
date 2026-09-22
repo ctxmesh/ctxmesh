@@ -29,6 +29,13 @@ afterEach(() => {
 // Pinning a namespace here keeps each test in the scope a real session has. A test that is
 // specifically about the all-workspaces scope sets it back explicitly.
 beforeEach(() => {
+  // CLEAR first. localStorage is shared state that outlives a test, and the console keeps real
+  // state there — ctxmesh.session.token, ctxmesh.theme, ctxmesh.oidc.flow, ctxmesh.firstRun.*.
+  // A test that leaves a session token behind changes whether the NEXT test renders an
+  // authenticated shell, which is how two suites failed only under shuffled file order and passed
+  // every time in isolation (M182). restoreMocks/unstubGlobals already reset the mock surface;
+  // nothing reset this one.
+  localStorage.clear();
   localStorage.setItem("ctxmesh.namespace", "default");
 });
 
