@@ -609,15 +609,21 @@ func TestPlanApprovalResume_Approve_RunsGraph(t *testing.T) {
 	rec := postResume(t, s, runID, "approve")
 	require.Equal(t, http.StatusAccepted, rec.Code, "approve resumes the run")
 
-	// The resume drove the executor in-process (a goroutine); wait for node 1 to launch.
+	// The resume drove the executor in-process (a goroutine); wait for the state this test actually
+	// asserts — node 1 launched AND the parent parked on it. These are two separate writes by that
+	// goroutine, and waiting only for the child made the parent's status a race: the child exists
+	// for a moment while the parent is still "running", so the assertion below read "running" on a
+	// loaded machine and "waiting" everywhere else. Synchronise on the whole condition, not half of
+	// it. A plan that never launches node 1, or a parent that never parks, still fails here.
 	require.Eventually(t, func() bool {
+		launched := false
 		for _, r := range s.runStore.List() {
 			if r.ParentRunID == runID {
-				return true
+				launched = true
 			}
 		}
-		return false
-	}, 2*time.Second, 10*time.Millisecond, "the approved plan must launch node 1")
+		return launched && mustGetRun(t, s, runID).Status == run.StatusWaiting
+	}, 2*time.Second, 10*time.Millisecond, "the approved plan must launch node 1 and park the run on it")
 
 	// Exactly one node sub-run (node "one") is now in flight; the workflow run is waiting on it.
 	var child *run.Run

@@ -266,7 +266,11 @@ func TestResumeRun_Unauthorized403(t *testing.T) {
 				return cl.Get(ctx, key, obj, opts...)
 			},
 		}).Build()
-	s := newInvokeServer(t, newFakeFactory(c), &fakeInvokeAdapter{})
+	// No run workers: this test SEEDS a run and asserts an unauthorized deny leaves it untouched.
+	// With workers live, one can claim the freshly-created run and finish it before the Update below
+	// parks it at requires_action — the test then reads "succeeded" from state it had just written.
+	// Nothing here exercises execution, so the pool is pure race surface.
+	s := newInvokeServerNoWorkers(t, newFakeFactory(c), &fakeInvokeAdapter{})
 
 	// Seed a paused mid-run approval run owned by ANOTHER principal, directly (create would hit the
 	// forbidden Get). This is exactly the deny-path target Fable flagged.
