@@ -65,6 +65,26 @@ func (f *fakeInvokeAdapter) Invoke(ctx context.Context, endpoint string, body []
 // newInvokeServer builds a Server whose /api/invoke runs through the fake caller
 // factory + the given fake InvokeAdapter. AllowAll edge auth so the factory/handler
 // drive the token flow.
+// newInvokeServerNoWorkers is newInvokeServer WITHOUT the background run-worker pool.
+//
+// A test that SEEDS run state into the store must not have live workers attached while it does so:
+// the run is created in a claimable state, and a worker can pick it up and drive it to completion
+// before the test's follow-up Update parks it where the test wants it. That is a race the test can
+// never win reliably — observed as TestResumeRun_Unauthorized403 reading "succeeded" where it had
+// just written "requires_action". Tests that exercise AUTHORIZATION rather than execution want this
+// one; the workers are pure race surface for them.
+func newInvokeServerNoWorkers(t *testing.T, factory CallerClientFactory, inv InvokeAdapter) *Server {
+	t.Helper()
+	return NewServer(Options{
+		CallerClients: factory,
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		Adapters:      Adapters{Invoke: inv},
+		Version:       "test",
+		Log:           logr.Discard(),
+	})
+}
+
 func newInvokeServer(t *testing.T, factory CallerClientFactory, inv InvokeAdapter) *Server {
 	t.Helper()
 	s := NewServer(Options{
