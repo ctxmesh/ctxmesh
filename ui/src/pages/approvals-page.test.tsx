@@ -209,8 +209,11 @@ describe("ApprovalsPage — waitingSince column (M113)", () => {
     renderPage();
 
     await screen.findByTestId("approvals-page");
-    // The "—" dash for the waiting-since cell
-    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+    // findAllByText, not getAllByText. The PAGE CONTAINER renders before its fetched rows, so
+    // awaiting the container and then asserting a cell synchronously is a race between two
+    // different things — the same "wait for one, assert another" shape that made two bff tests
+    // flaky in M181. getBy -> findBy only adds retry: a genuinely absent dash still fails.
+    expect((await screen.findAllByText("—")).length).toBeGreaterThan(0);
   });
 
   it("renders a relative time string for a waitingSince timestamp", async () => {
