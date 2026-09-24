@@ -2610,7 +2610,7 @@ describe("AgentDetailPage — lifecycle stage (M151 §5.20)", () => {
     // No stage is marked — a guessed position is the one thing §5.20 forbids …
     expect(document.querySelectorAll('[aria-current="step"]')).toHaveLength(0);
     // … and the page says so rather than leaving a strip that looks broken.
-    expect(screen.getByText(/No stage is lit, on purpose\./)).toBeInTheDocument();
+    expect(await screen.findByText(/No stage is lit, on purpose\./)).toBeInTheDocument();
   });
 
   it("lights the stage it can place, with a fact the backend actually sent", async () => {

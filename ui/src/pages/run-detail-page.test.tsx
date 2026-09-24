@@ -206,7 +206,7 @@ describe("RunDetailPage (V5, M112)", () => {
       renderPage(APPROVAL_RUN.id);
 
       await screen.findByTestId("run-approval-panel");
-      expect(screen.getByText(/send email to user@example.com/i)).toBeInTheDocument();
+      expect(await screen.findByText(/send email to user@example.com/i)).toBeInTheDocument();
     });
 
     it("clicking Approve POSTs decision=approve to /api/runs/{id}/resume", async () => {
