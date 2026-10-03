@@ -96,10 +96,27 @@ build;^(Dockerfile|images/);tier0 tier2
 release;^(CHANGELOG\.md|Makefile|NOTICE)$;release-truth tier0
 '
 
+# Test sources under ui/ are not shipped: vitest files and the test harness are never bundled into
+# the console, so no human walking the console can be affected by them. They still need tier0 and
+# tier2-ui -- those DO catch a weakened assertion, which is the real risk here; a UX walk does not.
+#
+# This is the narrowing the header asks for ("when a required gate turns out not to have been
+# needed, narrow the pattern here rather than ignoring the output"). M183's engine diff was two
+# *.test.tsx files changing getByText to await findByText, and it demanded the multi-agent review.
+#
+# Scoped deliberately: the carve-out applies PER FILE. A diff that touches a real UI file alongside
+# its test still matches ^ui/ on that file and still demands ux-review. It only bites when a change
+# is purely test code.
+TEST_ONLY='^ui/(src/test/|.*\.(test|spec)\.(ts|tsx)$)'
+
 required=""; unmapped=""; surfaces=""
 while IFS= read -r f; do
   [ -n "$f" ] || continue
   hit=0
+  if printf '%s' "$f" | grep -qE "$TEST_ONLY"; then
+    required="$required tier0 tier2-ui"; surfaces="$surfaces console-tests"
+    continue
+  fi
   while IFS=';' read -r surface pattern gates; do
     [ -n "${pattern:-}" ] || continue
     if printf '%s' "$f" | grep -qE "$pattern"; then
