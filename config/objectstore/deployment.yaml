@@ -7,15 +7,29 @@
 # is a product workload the engine deploys, exactly like the dedicated dev Valkey
 # state layer (config/statelayer/).
 #
-# Pulled from quay.io, NOT Docker Hub: minio/minio on Docker Hub is not anonymously
-# pullable -- even :latest returns insufficient_scope -- so a stock helm install left
-# the objectstore in permanent ImagePullBackOff. The M179 cold-install gate caught it on
-# its first real run against the published chart. The DIGEST is unchanged and identical
-# on both registries, so this is the same bytes from a host that serves them.
-# Image pinned by digest at quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z (newest
-# stable as of 2026-07-09; verified multi-arch amd64/arm64 via
-# `docker manifest inspect`). The tag is retained alongside the digest for
-# human readability; the digest is what actually pins the pull.
+# SeaweedFS, NOT MinIO (2026-10-03, ADR 0145). MinIO's container images are no longer
+# anonymously pullable ANYWHERE: Docker Hub closed first (M179 caught that on the cold-install
+# gate's first real run, and the fix was to move to quay.io), and quay.io has since closed too --
+# by digest, by tag, on every release tested including :latest. Because devDataPlane.enabled
+# defaults to true, that left EVERY new user's first `helm install` failing on a permanently
+# unpullable image. Close gate (d) caught it against the published 0.1.0-beta.8 chart.
+#
+# Chasing a third registry would be the same bet a third time. SeaweedFS is Apache-2.0, multi-arch
+# (amd64/arm64/arm/386 verified) and freely pullable, and it speaks the S3 API our client already
+# uses -- internal/objectstore is minio-go/v7, a Go MODULE from the proxy, entirely unaffected by
+# the image lockdown, so the client did not change at all. Verified end to end before the swap:
+# MakeBucket + PutObject + GetObject + RemoveObject all succeed via minio-go against SeaweedFS.
+#
+# S3 on 9000 deliberately (-s3.port=9000), so the port contract, the Service, the NetworkPolicy
+# and every OBJECT_STORE_ADDR in the tree are unchanged by this swap.
+#
+# Credentials come from a config FILE, not env vars -- SeaweedFS has no MINIO_ROOT_USER
+# equivalent. The identities JSON lives in the same objectstore-dev Secret as the client keys so
+# the two halves of one credential pair cannot drift apart.
+#
+# Probes: /healthz on the S3 port returns 200 unauthenticated (measured; `/status` also works,
+# while the MinIO paths /minio/health/{live,ready} return 403 here). Startup took ~24s warm, so
+# the 300s startup budget below stays as it was.
 #
 # Dev posture: emptyDir (blobs are dev-ephemeral — an async payload lives only
 # for its delivery window; losing offloaded blobs on a MinIO restart is accepted,
@@ -48,37 +62,40 @@ spec:
         control-plane: objectstore
         app.kubernetes.io/name: ctxmesh
     spec:
+      # PodSecurity "restricted" compliance. This was ABSENT before the SeaweedFS swap -- the
+      # objectstore was one of two dev-data-plane components with no securityContext at all, so a
+      # namespace labelled restricted warned on every apply. Measured, not assumed: SeaweedFS runs
+      # clean as uid 10001 with capabilities dropped, and the S3 round trip still passes.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        # /data is an emptyDir; fsGroup is what makes it writable to a non-root uid.
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
-        - name: minio
-          image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+        - name: objectstore
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          image: chrislusf/seaweedfs:3.80@sha256:1055999e08eed1789b0ae45d235126e4495e23d3fb9d6396293fd42539b1ae6a
           args:
             - server
-            - /data
-            # Console on 9001 is dev-only convenience; the launcher uses the S3
-            # API on 9000 exclusively.
-            - --console-address
-            - ":9001"
-          env:
-            - name: MINIO_ROOT_USER
-              valueFrom:
-                secretKeyRef:
-                  name: objectstore-dev
-                  key: rootUser
-            - name: MINIO_ROOT_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: objectstore-dev
-                  key: rootPassword
+            - -dir=/data
+            - -s3
+            # Keep S3 on 9000: the Service, the NetworkPolicy and every OBJECT_STORE_ADDR in
+            # the tree are written against that port, so the swap stays invisible to callers.
+            - -s3.port=9000
+            - -s3.config=/etc/seaweedfs/s3.json
           ports:
             - name: s3
               containerPort: 9000
               protocol: TCP
-            - name: console
-              containerPort: 9001
-              protocol: TCP
           readinessProbe:
             httpGet:
-              path: /minio/health/ready
+              path: /healthz
               port: 9000
             periodSeconds: 5
             failureThreshold: 3
@@ -87,13 +104,13 @@ spec:
           # which is a crash-loop caused by the probe rather than by anything being wrong.
           startupProbe:
             httpGet:
-              path: /minio/health/live
+              path: /healthz
               port: 9000
             periodSeconds: 10
             failureThreshold: 30
           livenessProbe:
             httpGet:
-              path: /minio/health/live
+              path: /healthz
               port: 9000
             periodSeconds: 15
             failureThreshold: 3
@@ -106,7 +123,16 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            - name: s3-config
+              mountPath: /etc/seaweedfs
+              readOnly: true
       volumes:
         - name: data
           emptyDir: {}
+        - name: s3-config
+          secret:
+            secretName: objectstore-dev
+            items:
+              - key: s3.json
+                path: s3.json
       terminationGracePeriodSeconds: 10
