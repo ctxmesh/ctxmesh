@@ -18,10 +18,13 @@ jobs:
   # images, to a Ready agent, a tool call and a visible run (CLAUDE.md close
   # gate (d)).
   #
-  # It is EXPECTED RED until agent-otel-collector, agent-discovery and
-  # egress-sidecar are anonymously pullable. That red is the point; it is not
-  # continue-on-error, because a gate allowed to fail silently is the defect
-  # class this whole arc exists to kill.
+  # A RED HERE IS A BUG, ALWAYS. This header used to say the job was "EXPECTED RED", and that one
+  # sentence cost eight days. The job then failed 30 nights running for a completely different
+  # reason -- it never checked out the docs site, so docs-site-truth SKIPped (exit 3) and the job
+  # died in preflight without ever reaching `make stranger`. A gate declared red by design is
+  # indistinguishable from a gate that is broken, so nobody looked, and MinIO revoking anonymous
+  # image pulls went unnoticed until someone ran the gate by hand at a milestone close.
+  # There is no expected-red state here: either this passes, or something is wrong and is fixed.
   stranger:
     name: nightly-stranger-path
     runs-on: ubuntu-latest
@@ -40,6 +43,14 @@ jobs:
           path: agent-brain
           persist-credentials: false
           ref: ${{ github.ref_name }}
+      - name: Check out the public docs site (docs-site-truth reads it)
+        # Public repo, so no token. Without this the gate SKIPs, a SKIP is exit 3, and the job
+        # dies here having proven nothing -- which is what happened 30 nights running.
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ctxmesh/ctxmesh.github.io
+          path: ctxmesh.github.io
+          persist-credentials: false
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
           go-version-file: go.mod
@@ -66,6 +77,7 @@ jobs:
       - name: The public site must name only installable versions
         env:
           AGENT_ENGINE: ${{ github.workspace }}
+          DOCS_SITE: ${{ github.workspace }}/ctxmesh.github.io
         run: make -C agent-brain/harness docs-site-truth
       - name: Close gate (d) — a stranger's path, end to end
         env:
