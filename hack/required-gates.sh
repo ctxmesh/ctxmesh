@@ -45,11 +45,22 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BASE="${1:-origin/main}"
-git rev-parse --verify "$BASE" >/dev/null 2>&1 || { echo "FAIL: no such base '$BASE'" >&2; exit 1; }
+if [ "$BASE" != "--stdin" ]; then
+  git rev-parse --verify "$BASE" >/dev/null 2>&1 || { echo "FAIL: no such base '$BASE'" >&2; exit 1; }
+fi
 
+# --stdin maps an ARBITRARY file list instead of a git range. The three-dot diff above sees
+# committed content only, so work in progress — the moment the question "which gate does this
+# need?" matters most — is invisible to it. gates-owed.sh pipes the dirty set through here.
+if [ "${1:-}" = "--stdin" ]; then
+  CHANGED="$(cat)"
+  [ -n "$CHANGED" ] || { echo "no paths on stdin — no gates required"; exit 0; }
+  echo "changed files from stdin: $(printf '%s\n' "$CHANGED" | wc -l | tr -d ' ')"
+else
 CHANGED="$(git diff --name-only "$BASE"...HEAD)"
 [ -n "$CHANGED" ] && echo "changed files vs $BASE: $(printf '%s\n' "$CHANGED" | wc -l | tr -d ' ')" \
                   || { echo "no changes vs $BASE — no gates required"; exit 0; }
+fi
 
 # surface;path-regex;gates   (';' not '|': the patterns themselves contain alternation)
 #
@@ -86,6 +97,14 @@ runtime;^cmd/launcher/;tier0 tier1 sdk-live
 runtime;^internal/controller/;tier0 tier1 tier2 prereqs-are-real
 runtime;^internal/(run|gateway|egress|pki|statelayer)/;tier0 tier1
 sdk;^sdk/;sdk-contract sdk-readme-truth tier0
+# The DEPENDENCY surface. go.mod/go.sum were unmapped, so a dependency bump required NOTHING --
+# found 2026-10-03 by gates-owed.sh, which propagates the fail-closed exit of this script. That is
+# change class most likely to introduce a supply-chain problem, and the one that had just shipped a
+# reachable CVE (GO-2026-6505, a diff touching only these two files). govulncheck is reachability,
+# not presence: it fails only when the code actually CALLS the vulnerable path.
+deps;^(go\.mod|go\.sum)$;tier0 tier1 govulncheck
+# The SDK lockfiles, same argument on the other side of the wire.
+deps;^(sdk/.*/(package-lock\.json|pnpm-lock\.yaml|poetry\.lock|Gemfile\.lock|Cargo\.lock))$;sdk-contract tier0
 release;^\.github/workflows/;release-truth tier0
 release;^(CHANGELOG\.md|Makefile)$;release-truth tier0
 docs;\.(md|mdx)$;docs-site-truth
