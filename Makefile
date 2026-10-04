@@ -125,6 +125,18 @@ test-conformance: ## Run the credential-store backend conformance suite (ADR 003
 # (ADR 0004); this repo's pyramid stops at envtest (test-integration).
 
 .PHONY: lint
+govulncheck: ## Fail if the code CALLS a known vulnerability (reachability, not just presence).
+	@GVC="$$(command -v govulncheck || echo "$$(go env GOPATH)/bin/govulncheck")"; \
+	if [ ! -x "$$GVC" ]; then \
+	  echo "RESULT: FAIL (govulncheck is not installed — the check cannot be vacuously green)"; exit 1; \
+	fi; \
+	out="$$($$GVC ./... 2>&1 || true)"; \
+	case "$$out" in \
+	  *"affected by 0 vulnerabilities"*) echo "RESULT: PASS (govulncheck: zero reachable vulnerabilities)" ;; \
+	  *) printf '%s\n' "$$out" | grep -E '^Vulnerability|Fixed in|Your code is affected' || true; \
+	     echo "RESULT: FAIL (govulncheck reports vulnerabilities the code actually calls)"; exit 1 ;; \
+	esac
+
 lint: golangci-lint py-lint ui-lint sdk-ts-lint ## Run linters (Go golangci-lint + Python ruff + UI eslint + tsc + TS SDK eslint + tsc)
 	"$(GOLANGCI_LINT)" run
 

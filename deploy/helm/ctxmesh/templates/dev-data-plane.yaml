@@ -39,6 +39,18 @@ metadata:
 stringData:
   rootPassword: ctxmesh-dev-secret
   rootUser: ctxmesh-dev
+  s3.json: |
+    {
+      "identities": [
+        {
+          "name": "ctxmesh-dev",
+          "credentials": [
+            { "accessKey": "ctxmesh-dev", "secretKey": "ctxmesh-dev-secret" }
+          ],
+          "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+        }
+      ]
+    }
 type: Opaque
 ---
 apiVersion: v1
@@ -280,56 +292,63 @@ spec:
       containers:
       - args:
         - server
-        - /data
-        - --console-address
-        - :9001
-        env:
-        - name: MINIO_ROOT_USER
-          valueFrom:
-            secretKeyRef:
-              key: rootUser
-              name: ctxmesh-objectstore-dev
-        - name: MINIO_ROOT_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              key: rootPassword
-              name: ctxmesh-objectstore-dev
-        image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+        - -dir=/data
+        - -s3
+        - -s3.port=9000
+        - -s3.config=/etc/seaweedfs/s3.json
+        image: chrislusf/seaweedfs:3.80@sha256:1055999e08eed1789b0ae45d235126e4495e23d3fb9d6396293fd42539b1ae6a
         livenessProbe:
           failureThreshold: 3
           httpGet:
-            path: /minio/health/live
+            path: /healthz
             port: 9000
           periodSeconds: 15
-        name: minio
+        name: objectstore
         ports:
         - containerPort: 9000
           name: s3
           protocol: TCP
-        - containerPort: 9001
-          name: console
-          protocol: TCP
         readinessProbe:
           failureThreshold: 3
           httpGet:
-            path: /minio/health/ready
+            path: /healthz
             port: 9000
           periodSeconds: 5
         resources:
           {{- toYaml .Values.devDataPlane.objectstore.resources | nindent 10 }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
         startupProbe:
           failureThreshold: 30
           httpGet:
-            path: /minio/health/live
+            path: /healthz
             port: 9000
           periodSeconds: 10
         volumeMounts:
         - mountPath: /data
           name: data
+        - mountPath: /etc/seaweedfs
+          name: s3-config
+          readOnly: true
+      securityContext:
+        fsGroup: 10001
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
       terminationGracePeriodSeconds: 10
       volumes:
       - emptyDir: {}
         name: data
+      - name: s3-config
+        secret:
+          items:
+          - key: s3.json
+            path: s3.json
+          secretName: ctxmesh-objectstore-dev
 ---
 apiVersion: apps/v1
 kind: Deployment
