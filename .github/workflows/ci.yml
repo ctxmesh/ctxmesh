@@ -549,6 +549,32 @@ jobs:
             fi
           done < <(git log --format=%s "origin/${BASE_REF}..HEAD")
           exit "$bad"
+      - name: PR commits add no second identity to the public contributor graph
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        # GitHub's contributor GRAPH counts Co-Authored-By trailers, even though the REST
+        # /contributors endpoint does not -- which is how `claude` came to sit on the public repo
+        # page while the API reported a single contributor. 1211 of 1368 commits on main carried
+        # the trailer before anyone noticed, and removing it costs a full-history rewrite of a
+        # public repo: every SHA, every permalink, and the old commits survive in refs/pull/*
+        # regardless. The local commit-msg hook (harness/hooks/ctxmesh-commit-msg) refuses these,
+        # but hooks are per-clone and a fresh clone has none -- so this is the layer that holds.
+        # agent-brain is private and deliberately has no equivalent check.
+        run: |
+          bad=0
+          while IFS= read -r line; do
+            case "$line" in
+              Co-Authored-By:*|Claude-Session:*) echo "forbidden trailer: $line"; bad=1 ;;
+              *anujsharma411*) echo "forbidden identity: $line"; bad=1 ;;
+            esac
+          done < <(git log --format=%B "origin/${BASE_REF}..HEAD")
+          if [ "$bad" = 1 ]; then
+            echo ""
+            echo "ctxmesh is public and must show only sharma-anuj-se as a contributor."
+            echo "Remove the trailers, or set in ~/.claude/settings.json:"
+            echo '  "attribution": {"commit":"","pr":"","sessionUrl":false}'
+          fi
+          exit "$bad"
 
   dco:
     name: dco
