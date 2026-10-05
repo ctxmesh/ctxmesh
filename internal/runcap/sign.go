@@ -18,6 +18,7 @@ package runcap
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -74,6 +75,10 @@ func (s *Signer) Mint(req MintRequest) (string, error) {
 	if req.TTL <= 0 {
 		return "", fmt.Errorf("runcap: capability TTL must be positive")
 	}
+	jti := make([]byte, 16)
+	if _, err := rand.Read(jti); err != nil {
+		return "", fmt.Errorf("runcap: generating a capability id: %w", err)
+	}
 	now := s.now()
 	claims := jwtClaims{
 		Sub: req.User,
@@ -82,6 +87,7 @@ func (s *Signer) Mint(req MintRequest) (string, error) {
 		Bnd: req.Boundary,
 		Iat: now.Unix(),
 		Exp: now.Add(req.TTL).Unix(),
+		Jti: b64(jti),
 	}
 	if strings.TrimSpace(req.Agent) != "" {
 		claims.Act = &actClaim{Sub: req.Agent}
@@ -234,6 +240,7 @@ func (v *Verifier) Verify(token string) (Capability, error) {
 		Audience:  claims.Aud,
 		RunID:     claims.Run,
 		Boundary:  claims.Bnd,
+		ID:        claims.Jti,
 		IssuedAt:  time.Unix(claims.Iat, 0),
 		ExpiresAt: time.Unix(claims.Exp, 0),
 	}

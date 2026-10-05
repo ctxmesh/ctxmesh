@@ -426,32 +426,49 @@ func TestReconcile_GuardedSupervisorGetsBFFURLOnce(t *testing.T) {
 		"BFF_INTERNAL_URL must appear exactly once for a guarded supervisor (no duplicate env — K8s/Knative rejects it)")
 }
 
-// TestReconcile_UnguardedAgentNoBFFURL proves the regression guard: an unguarded
-// (no guardrailPolicyRef), non-delegate agent must NOT get BFF_INTERNAL_URL (m66.15 — no
-// behavior change for the unguarded path).
-func TestReconcile_UnguardedAgentNoBFFURL(t *testing.T) {
-	const (
-		name      = "unguarded-no-bff"
-		namespace = "default"
-	)
-
-	deploy := &agentsv1alpha1.AgentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
-			Image: "ghcr.io/ctxmesh/example-agent:latest",
+// TestReconcile_EveryAgentGetsBFFURL: an unguarded, non-delegate agent gets BFF_INTERNAL_URL too.
+//
+// This replaces TestReconcile_UnguardedAgentNoBFFURL, which asserted the opposite. That test guarded
+// m66.15's scope (only guarded agents gained the variable), not a security property. Since ADR 0124's
+// amendment (m184.9) every launcher binds its run capability at the BFF before the agent sees it, and a
+// launcher without the BFF's address hands its agent a bearer capability anyone could bind first. The
+// property worth guarding is now the inverse: every agent has it, exactly once, and a user's own value
+// wins.
+func TestReconcile_EveryAgentGetsBFFURL(t *testing.T) {
+	const namespace = "default"
+	for _, tc := range []struct {
+		name    string
+		userEnv []corev1.EnvVar
+		want    string
+	}{
+		{name: "unguarded-gets-bff", want: bffInternalURL},
+		{
+			name: "unguarded-own-bff", userEnv: []corev1.EnvVar{{Name: "BFF_INTERNAL_URL", Value: "http://own:9090"}},
+			want: "http://own:9090",
 		},
+	} {
+		deploy := &agentsv1alpha1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: tc.name, Namespace: namespace},
+			Spec: agentsv1alpha1.AgentDeploymentSpec{
+				Image: "ghcr.io/ctxmesh/example-agent:latest",
+				Env:   tc.userEnv,
+			},
+		}
+		require.NoError(t, k8sClient.Create(testCtx, deploy))
+		t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+
+		reconcileNN(t, newReconciler(), tc.name, namespace)
+
+		var ksvc servingv1.Service
+		require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: tc.name, Namespace: namespace}, &ksvc))
+		var values []string
+		for _, e := range ksvc.Spec.Template.Spec.Containers[0].Env {
+			if e.Name == "BFF_INTERNAL_URL" {
+				values = append(values, e.Value)
+			}
+		}
+		assert.Equal(t, []string{tc.want}, values, "%s: BFF_INTERNAL_URL exactly once, the user's value winning", tc.name)
 	}
-	require.NoError(t, k8sClient.Create(testCtx, deploy))
-	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
-	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
-
-	reconcileNN(t, newReconciler(), name, namespace)
-
-	env, _ := ksvcEnvMap(t, name, namespace)
-
-	_, ok := env["BFF_INTERNAL_URL"]
-	assert.False(t, ok,
-		"BFF_INTERNAL_URL must NOT be injected for an unguarded non-delegate agent (regression guard)")
 }
 
 // TestGuardrailPolicyController_ValidatesAndHashes exercises the minimal GuardrailPolicy status

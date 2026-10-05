@@ -1044,22 +1044,18 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// (buildPodTemplate returned a *guardrailResolveError), so we never reach here with an unenforceable
 	// policy. The env carries only the static FILE PATH (no valueFrom — the m5.7 Knative landmine).
 	//
-	// BFF_INTERNAL_URL (m66.15): the guardrail block audit POST (m66.9) targets BFF_INTERNAL_URL to write
-	// the durable guardrail.block audit row. The delegate path (delegateEnv) injects it for supervisors,
-	// but a PLAIN guarded agent (guardrailPolicyRef set, not a delegate supervisor) never enters that
-	// branch — its block audit is span-only and the durable row is silently skipped. Fix: inject
-	// BFF_INTERNAL_URL whenever a guardrailPolicyRef is present, using envVarPresent() to dedup so a
-	// guarded supervisor (both paths active) gets it exactly once. Unguarded non-delegate agents are
-	// unchanged (no BFF_INTERNAL_URL injected).
 	guardrailVol, guardrailMount, guardrailEnv, err := r.reconcileGuardrailConfigMap(ctx, deploy, gr)
 	if err != nil {
 		return podTemplate{}, err
 	}
 	if gr.referenced {
 		env = append(env, guardrailEnv...)
-		if !envVarPresent(env, "BFF_INTERNAL_URL") && !envVarPresent(deploy.Spec.Env, "BFF_INTERNAL_URL") {
-			env = append(env, corev1.EnvVar{Name: "BFF_INTERNAL_URL", Value: bffInternalURL})
-		}
+	}
+	// BFF_INTERNAL_URL goes to EVERY agent: its launcher binds the run capability at the BFF before the
+	// agent's code sees it (ADR 0124), and guardrail audits and delegation call the BFF too. An agent
+	// without it would hand its code a bearer capability anyone could bind first.
+	if !envVarPresent(env, "BFF_INTERNAL_URL") && !envVarPresent(deploy.Spec.Env, "BFF_INTERNAL_URL") {
+		env = append(env, corev1.EnvVar{Name: "BFF_INTERNAL_URL", Value: bffInternalURL})
 	}
 
 	// Record mode (M78, ADR 0071 §1): a record-capable agent gets RECORD_CAPABLE=true, which flips
@@ -2043,22 +2039,21 @@ func langfuseSecretRequests(ctx context.Context, c client.Reader, obj client.Obj
 	return reqs
 }
 
-// langfuseEnvContractVersion names the shape of the Langfuse env an agent pod reads — the
-// collector's export env and config keys, and the feedback hook's scores keys. Bump it when that
-// shape changes. The collector's ConfigMap is rewritten in place, but env reaches a pod only on a
-// new revision — so without a bump, a running collector that restarts reads a config expecting env
-// it was never given and exports with an empty credential, and a changed key source never lands.
-// v2: every Langfuse credential moved from a literal to a secretKeyRef.
-const langfuseEnvContractVersion = "v2"
+// injectedEnvVersion names the shape of the env the platform injects that a change must reach every
+// running agent with: an env change that keeps the revision name is dropped by the controller, and the
+// collector's ConfigMap is rewritten in place while its env is not. Bump it when that shape changes.
+//   - v2: every Langfuse credential became an optional secretKeyRef (ADR 0148).
+//   - v3: every agent gets BFF_INTERNAL_URL, so its launcher can bind the run capability (ADR 0124).
+const injectedEnvVersion = "v3"
 
-// traceExportFold folds the Langfuse env contract into the revision digest. Whether export is on
+// traceExportFold folds the injected env contract into the revision digest. Whether export is on
 // is part of it so that creating, completing or deleting a namespace's langfuse-otlp Secret reaches
 // running agents: their collectors loaded the old config at start, and the feedback hook's env
 // exists only while export is on.
 //
 // Shared with the tests, like hardeningFold.
 func traceExportFold(digest string, exporting bool) string {
-	sum := sha256.Sum256([]byte(digest + "|langfuse-env:" + langfuseEnvContractVersion + ":" + strconv.FormatBool(exporting)))
+	sum := sha256.Sum256([]byte(digest + "|injected-env:" + injectedEnvVersion + ":" + strconv.FormatBool(exporting)))
 	return fmt.Sprintf("%x", sum[:])[:8]
 }
 

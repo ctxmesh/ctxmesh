@@ -136,8 +136,9 @@ type httpSpawnClient struct {
 func newHTTPSpawnClient(bffURL string) *httpSpawnClient {
 	return &httpSpawnClient{
 		bffURL: strings.TrimRight(bffURL, "/"),
-		hc:     &http.Client{Timeout: 30 * time.Second, CheckRedirect: refuseRedirect},
-		poll:   500 * time.Millisecond,
+		hc: withRuncapProof(&http.Client{Timeout: 30 * time.Second, CheckRedirect: refuseRedirect},
+			processRuncapBinder()),
+		poll: 500 * time.Millisecond,
 	}
 }
 

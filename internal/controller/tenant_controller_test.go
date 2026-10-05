@@ -321,7 +321,7 @@ func TestTenant_NetworkIsolationPolicy(t *testing.T) {
 
 	// Serving-safe: egress allows the model gateway AND the state-layer proxy :8080
 	// (the m53.7 cutover default — omitting it 402s a member's quota, audit SEC-1).
-	allowsGateway, allowsProxy, allowsRawValkey := false, false, false
+	allowsGateway, allowsProxy, allowsRawValkey, allowsBFF := false, false, false, false
 	for _, rule := range np.Spec.Egress {
 		for _, p := range rule.Ports {
 			if p.Port == nil {
@@ -334,11 +334,14 @@ func TestTenant_NetworkIsolationPolicy(t *testing.T) {
 				allowsProxy = true
 			case memoryBackendPort:
 				allowsRawValkey = true
+			case bffPort:
+				allowsBFF = true
 			}
 		}
 	}
 	assert.True(t, allowsGateway, "egress must allow the model gateway port")
 	assert.True(t, allowsProxy, "egress MUST allow the state-layer proxy :8080 (audit SEC-1)")
+	assert.True(t, allowsBFF, "egress MUST allow the BFF: every launcher binds its run capability there (ADR 0124)")
 	assert.False(t, allowsRawValkey, "egress MUST NOT allow raw Valkey :6379 (audit P1-2, M94 — agents use the :8080 proxy, incl. the spawn guard)")
 
 	// Toggle isolation off → the policy is pruned.

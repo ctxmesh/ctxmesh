@@ -114,6 +114,11 @@ spec:
           value: {{ .Values.statelayer.externalAddr | default (printf "ctxmesh-statelayer.%s.svc:6379" .Values.namespace) }}
         - name: COST_ROLLUP_ENABLED
           value: {{ .Values.bff.costRollupEnabled | quote }}
+        {{- $pop := (.Values.bff.runCapabilities | default dict).requireProofOfPossession }}
+        {{- if or (kindIs "bool" $pop) (and (kindIs "string" $pop) (ne $pop "")) }}
+        - name: RUNCAP_REQUIRE_POP
+          value: {{ $pop | toString | quote }}
+        {{- end }}
         - name: PLATFORM_GENERATION_MODELS
           value: {{ .Values.bff.generation.platformModels | quote }}
         - name: MCP_ENABLED

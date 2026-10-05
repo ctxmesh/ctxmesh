@@ -454,6 +454,13 @@ ui:
 # `helm install --set bff.providerConnect.enabled=false` renders "false" to
 # disable it — the ADR 0015 hardened-install path.
 bff:
+  # Run capabilities are sender-constrained (ADR 0124): the launcher binds each one to a
+  # key only it holds, and the BFF refuses an unbound (bearer) capability at spawn, handoff, discover,
+  # async publish and guardrail events. Empty follows whether binding is possible (it needs the state
+  # layer). Set false only while agents built on an older base image, whose launcher cannot bind, are
+  # still running: false lets a copied capability be spent.
+  runCapabilities:
+    requireProofOfPossession: ""
   # Container resources. An operator cannot size the control plane for their
   # cluster if these are baked into the template, and until M178 every workload
   # in this chart had them hardcoded — 31 limits/requests blocks, none of them

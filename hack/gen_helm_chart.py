@@ -233,6 +233,18 @@ COST_ROLLUP_ENABLED_ENV_HELM = (
     "          value: {{ .Values.bff.costRollupEnabled | quote }}"
 )
 
+# RUNCAP_REQUIRE_POP (ADR 0124): config/bff leaves it unset, so the BFF requires proof-of-possession
+# whenever it can bind (it has the state layer). bff.runCapabilities.requireProofOfPossession sets it
+# explicitly, true or false, and an empty value renders nothing (== kustomize, no drift). It has no
+# kustomize literal to replace, so it is appended after COST_ROLLUP_ENABLED, which only the BFF has.
+RUNCAP_REQUIRE_POP_ENV_HELM = (
+    "\n        {{- $pop := (.Values.bff.runCapabilities | default dict).requireProofOfPossession }}"
+    '\n        {{- if or (kindIs "bool" $pop) (and (kindIs "string" $pop) (ne $pop "")) }}'
+    "\n        - name: RUNCAP_REQUIRE_POP"
+    "\n          value: {{ $pop | toString | quote }}"
+    "\n        {{- end }}"
+)
+
 # MCP_OBO_REQUIRED (M124/Gate A, ADR 0095 §2): config/bff hardcodes "false" (no-OBO install
 # unaffected). Templated from controllerManager.oboEgress.enabled — when the operator turns ON OBO
 # egress, the BFF/worker fail CLOSED at start-up if capability minting is disabled (else per-user OBO
@@ -594,7 +606,7 @@ def substitute(doc: str) -> str:
     # MCP_CAPABILITY_PUBLIC_KEY is now a secretKeyRef in config/manager, copied verbatim (no replace).
     doc = doc.replace(MCP_CAPABILITY_AUDIENCE_ENV_KUSTOMIZE, MCP_CAPABILITY_AUDIENCE_ENV_HELM)
     doc = doc.replace(TOKEN_SERVICE_URL_ENV_KUSTOMIZE, TOKEN_SERVICE_URL_ENV_HELM)
-    doc = doc.replace(COST_ROLLUP_ENABLED_ENV_KUSTOMIZE, COST_ROLLUP_ENABLED_ENV_HELM)
+    doc = doc.replace(COST_ROLLUP_ENABLED_ENV_KUSTOMIZE, COST_ROLLUP_ENABLED_ENV_HELM + RUNCAP_REQUIRE_POP_ENV_HELM)
     doc = doc.replace(MCP_OBO_REQUIRED_ENV_KUSTOMIZE, MCP_OBO_REQUIRED_ENV_HELM)
     # OPS-2 — the dev-data-plane gate -> Helm value. Default "true" renders == kustomize (no drift);
     # profile=production sets devDataPlane.enabled=false so the controller injects no dev creds.

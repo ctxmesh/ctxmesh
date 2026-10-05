@@ -23,6 +23,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -288,7 +289,11 @@ func (v *ProofVerifier) spend(jti string, now time.Time) error {
 		// the eviction — there is no sweeper to run and none to forget to run.
 		ctx, cancel := context.WithTimeout(context.Background(), sharedSpendTimeout)
 		defer cancel()
-		return v.shared.Spend(ctx, jti, popMaxAge+clockSkew)
+		err := v.shared.Spend(ctx, jti, popMaxAge+clockSkew)
+		if err != nil && !errors.Is(err, ErrProofReplayed) {
+			return fmt.Errorf("%w: %w", ErrProofUnchecked, err)
+		}
+		return err
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -302,4 +307,34 @@ func (v *ProofVerifier) spend(jti string, now time.Time) error {
 	}
 	v.seen[jti] = now
 	return nil
+}
+
+// Unverified is what a HOLDER may read from a capability it was handed, without checking the
+// signature: whether it is bound, and when it expires. It decides how to SEND a token — bind it,
+// attach a proof, cache it — never what the token authorizes. Only Verifier.Verify answers that.
+type Unverified struct {
+	KeyThumbprint string
+	ExpiresAt     time.Time
+}
+
+// InspectUnverified decodes a capability's claims WITHOUT verifying it. See Unverified for the one
+// use it is fit for.
+func InspectUnverified(token string) (Unverified, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return Unverified{}, ErrMalformed
+	}
+	claimsBytes, err := b64d(parts[1])
+	if err != nil {
+		return Unverified{}, ErrMalformed
+	}
+	var claims jwtClaims
+	if jErr := json.Unmarshal(claimsBytes, &claims); jErr != nil {
+		return Unverified{}, ErrMalformed
+	}
+	u := Unverified{ExpiresAt: time.Unix(claims.Exp, 0)}
+	if claims.Cnf != nil {
+		u.KeyThumbprint = claims.Cnf.JKT
+	}
+	return u, nil
 }

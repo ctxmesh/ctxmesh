@@ -102,6 +102,21 @@ func (gp *gatewayProxy) fireGuardrailBlockAudit(r *http.Request, dec guardrailDe
 	}
 	url := gp.bffInternalURL + guardrailAuditIngestPath
 
+	// A capability relayed to this agent over AMP is bound to the CALLER's key (ADR 0124), and this
+	// launcher cannot prove possession of it, so the BFF would refuse the POST. Say so here, at error
+	// level, with what the durable record would have held — not as a refused request that reads like an
+	// attack. Authenticating the audit ingest by pod identity instead is m184.37.
+	if b := processRuncapBinder(); b != nil {
+		if u, err := runcap.InspectUnverified(capToken); err == nil && u.KeyThumbprint != "" &&
+			u.KeyThumbprint != b.signer.Thumbprint() {
+			gp.logf("launcher: ERROR guardrail audit: the run capability is bound to another agent's key "+
+				"(relayed over AMP), so no durable block record can be written (detector=%s scan_point=%s "+
+				"content_hash=%s agent=%s; the span event is the only record)",
+				evt.Detector, evt.ScanPoint, evt.ContentHash, evt.Agent)
+			return
+		}
+	}
+
 	// Fire-and-forget: launch the HTTP POST in a goroutine. The goroutine owns its context
 	// (independent of r.Context() which closes when the request is done). The block response
 	// has already been written above, so this goroutine's lifetime is decoupled from the caller.
@@ -123,7 +138,8 @@ func (gp *gatewayProxy) fireGuardrailBlockAudit(r *http.Request, dec guardrailDe
 		req.Header.Set(runcap.HeaderName, capToken)
 
 		// Reuse the gateway's HTTP client (same timeout pool), but with the goroutine's ctx.
-		hc := &http.Client{Timeout: guardrailAuditTimeout, CheckRedirect: refuseRedirect}
+		hc := withRuncapProof(&http.Client{Timeout: guardrailAuditTimeout, CheckRedirect: refuseRedirect},
+			processRuncapBinder())
 		resp, err := hc.Do(req)
 		if err != nil {
 			gp.logf("launcher: guardrail audit: POST %s: %v (block already sent; durable record skipped)", url, err)

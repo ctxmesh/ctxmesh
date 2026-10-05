@@ -545,6 +545,11 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// (judge OFF) — the fail-safe. Wired from the SAME cpDB store as onlineStore: no new dep, no agent-CRD RBAC.
 	onlineResolver := bff.NewDBOnlineConfigResolver(onlineStore)
 
+	bindStore := runcapBindStore(log)
+	requirePoP, err := requireProofOfPossession(log, os.Getenv("RUNCAP_REQUIRE_POP"), bindStore != nil)
+	if err != nil {
+		return err
+	}
 	srv := bff.NewServer(bff.Options{
 		TokenServiceURL:        strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")),
 		TokenServiceHTTPClient: tsHTTPClient,
@@ -573,14 +578,14 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		// Sender-constrained run capabilities (M142.5, ADR 0124). The bind store rides the shared
 		// state-layer Valkey so "already bound" is the same answer on every replica; without an addr
 		// there is no exchange edge, and capabilities stay bearer.
-		RuncapBind:   runcapBindStore(log),
+		RuncapBind:   bindStore,
 		ProofSpender: proofSpender(log),
 		SpawnBudgets: spawnbudget.NewPostgresStore(cpDB),
 		// The scoped kill switch (M146, ADR 0126). This is the FAIL-CLOSED half: the worker reads it
 		// before claiming and the run-create edge reads it before accepting, and neither consults the
 		// state layer — so an unreachable Valkey cannot resurrect a killed scope.
 		KillScopes:               killscope.NewPostgresStore(cpDB),
-		RequireProofOfPossession: strings.TrimSpace(os.Getenv("RUNCAP_REQUIRE_POP")) == "true",
+		RequireProofOfPossession: requirePoP,
 		ConvStore:                convStore,
 		PromptStore:              promptStore,
 		// Production git-pointer prompt resolver (m121.3, ADR 0008) — the drop-in for the
@@ -874,6 +879,30 @@ const defaultRunWorkerConcurrency = 2
 // ADR 0124). It must be SHARED across BFF replicas: the binding is single-use, and a per-replica record
 // would let the same capability be bound once on each replica — which is not a boundary at all. No
 // STATELAYER_ADDR ⇒ nil ⇒ the exchange edge is not registered and capabilities remain bearer tokens.
+// requireProofOfPossession decides whether an unbound (bearer) run capability is refused at the
+// capability-authenticated edges (ADR 0124). Unset, it follows whether binding is possible: a launcher can
+// only present a proof after exchanging its capability, and the exchange needs the state layer. An
+// explicit "true" with no state layer is refused: it would turn away every capability, with no way for any
+// launcher to satisfy it.
+func requireProofOfPossession(log logr.Logger, raw string, canBind bool) (bool, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return canBind, nil
+	}
+	require, err := strconv.ParseBool(raw)
+	switch {
+	case err != nil:
+		return false, fmt.Errorf("RUNCAP_REQUIRE_POP=%q is not a boolean", raw)
+	case require && !canBind:
+		return false, errors.New("RUNCAP_REQUIRE_POP=true needs the state layer (STATELAYER_ADDR) to bind " +
+			"run capabilities; without it every spawn, handoff, discover, async publish and guardrail event " +
+			"would be refused")
+	case !require:
+		log.Info("RUNCAP_REQUIRE_POP=false: bearer run capabilities are accepted — a copied capability can be spent")
+	}
+	return require, nil
+}
+
 func runcapBindStore(log logr.Logger) bff.RuncapBindStore {
 	addr := strings.TrimSpace(os.Getenv("STATELAYER_ADDR"))
 	if addr == "" {

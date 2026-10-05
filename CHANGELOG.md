@@ -26,6 +26,29 @@ any other bound route. Every bound route's gateway variable is renamed, so the g
 Every agent rolls one new revision on upgrade, so an agent behind an approval gate waits for
 promotion.
 
+**Security: a copied run capability can no longer be spent.** The platform's proof-of-possession
+design had never taken effect: nothing bound capabilities, and the BFF accepted bearer tokens. Now
+each agent's launcher binds the capability to a key that exists only in its memory, before the
+agent's code receives it. It then proves possession on every call to spawn, handoff, discover,
+async publish and guardrail events. Every agent now gets `BFF_INTERNAL_URL`, and a Tenant's network
+policy allows it.
+
+**Fixed: the bundled state layer refused six of the platform's key spaces.** Its ACL admitted
+neither run-capability binding nor the proof replay set. So binding failed, and so did the
+platform's fast paths for run cancel and the kill switch (cancel still worked; it was just slower),
+along with per-user quotas and per-conversation spend. **If you run your own Valkey with an ACL**
+(`statelayer.externalAddr`), it must admit `~mem:* ~tenant:* ~a2a:seen:* ~spawn:* ~agent:* ~runcap:*
+~run:* ~ns:* ~fleet:* ~user:* ~conv:*`.
+
+**Breaking:** with a state layer present (the default), the BFF refuses unbound capabilities.
+- **Older agents:** an agent built on an older base image has a launcher that cannot bind, so those
+  calls fail until it is rebuilt. To run older agents meanwhile, set
+  `bff.runCapabilities.requireProofOfPossession=false`; a copied capability can then be spent.
+- **AMP callees:** an agent called over AMP can no longer spend the capability its caller relayed.
+  That capability belongs to the caller's run, so spending it acted as the caller.
+- **Guarded AMP callees:** a guarded agent called over AMP logs its blocks but cannot yet write a
+  durable audit record for them.
+
 ## v0.1.0-beta.9 — the first install stopped working, and the gate that would have said so had never run
 
 **Every new install of `v0.1.0-beta.8` fails.** The bundled dev object store is MinIO, and MinIO

@@ -96,6 +96,9 @@ runtime;^internal/telemetry/;tier0 tier1 tier2
 runtime;^cmd/launcher/;tier0 tier1 sdk-live
 runtime;^internal/controller/;tier0 tier1 tier2 prereqs-are-real
 runtime;^internal/(run|gateway|egress|pki|statelayer)/;tier0 tier1
+# The run-capability wire format and proof-of-possession, ADR 0124: minted and bound by the BFF,
+# held and proven by the launcher, verified by the egress sidecar and the state-layer proxy.
+runtime;^internal/runcap/;tier0 tier1 tier2 sdk-live
 sdk;^sdk/;sdk-contract sdk-readme-truth tier0
 # The DEPENDENCY surface. go.mod/go.sum were unmapped, so a dependency bump required NOTHING --
 # found 2026-10-03 by gates-owed.sh, which propagates the fail-closed exit of this script. That is
