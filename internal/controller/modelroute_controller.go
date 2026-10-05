@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -496,6 +497,9 @@ func (r *ModelRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	)
 
 	return ctrl.NewControllerManagedBy(mgr).
+		// One worker, deliberately: every route renders into the ONE gateway ConfigMap and Deployment, so
+		// concurrent reconciles of different routes would only race each other's writes.
+		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		For(&agentsv1alpha1.ModelRoute{}).
 		Watches(&agentsv1alpha1.SecretBinding{}, enqueueAll).
 		// SEC-3: metadata-only Secret watch — the informer caches PartialObjectMetadata

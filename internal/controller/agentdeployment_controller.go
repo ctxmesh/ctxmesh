@@ -41,6 +41,7 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -3177,6 +3178,9 @@ func envVarPresent(env []corev1.EnvVar, name string) bool {
 	return false
 }
 
+// agentDeploymentWorkers is how many agents reconcile at once.
+const agentDeploymentWorkers = 4
+
 // SetupWithManager sets up the controller with the Manager.
 // The controller owns AgentVersion and Knative Service so that changes to either
 // (e.g. a Knative controller updating ksvc status) requeue the parent deployment.
@@ -3331,6 +3335,10 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// manager from starting at all, so a user running nothing but serving agents -- the default, and
 	// the whole quickstart -- had to install a second Knative component first.
 	b := ctrl.NewControllerManagedBy(mgr).
+		// More than one worker: with one, a single reconcile that blocks (an informer that cannot sync,
+		// a slow store) stops every agent from reconciling — the M181 wedge. Reconciles of different
+		// agents share no mutable state (the reconciler holds configuration and pool-backed stores).
+		WithOptions(controller.Options{MaxConcurrentReconciles: agentDeploymentWorkers}).
 		For(&agentsv1alpha1.AgentDeployment{}).
 		Owns(&agentsv1alpha1.AgentVersion{}).
 		Owns(&servingv1.Service{})
