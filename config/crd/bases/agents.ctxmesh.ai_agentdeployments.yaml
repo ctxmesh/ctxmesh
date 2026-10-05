@@ -797,6 +797,15 @@ spec:
                   scaling configures the Knative autoscaler bounds for this agent.
                   When omitted, defaults to min=0 (scale-to-zero) and max=3.
                 properties:
+                  concurrency:
+                    description: |-
+                      concurrency is the most runs one replica handles at once (Knative containerConcurrency). A run
+                      beyond it waits for a free slot or a new replica instead of joining an overloaded pod. 0 means
+                      no limit: the pod takes every run it is sent and the autoscaler scales only on its soft target.
+                    format: int32
+                    maximum: 1000
+                    minimum: 0
+                    type: integer
                   max:
                     default: 3
                     description: max is the maximum number of replicas the autoscaler
@@ -810,6 +819,27 @@ spec:
                       to enable scale-to-zero.
                     format: int32
                     minimum: 0
+                    type: integer
+                  targetBurstCapacity:
+                    description: |-
+                      targetBurstCapacity is how much spare capacity Knative keeps routed through its activator
+                      (autoscaling.knative.dev/target-burst-capacity). 0 takes the activator out of the request path
+                      once a replica is up; -1 keeps it in the path always, where it queues runs that find every slot
+                      taken. Unset, it follows concurrency: 0 when concurrency is unlimited, -1 when it is bounded,
+                      because a bounded pod with the activator out of the path drops the runs it has no slot for.
+                    format: int32
+                    minimum: -1
+                    type: integer
+                  timeoutSeconds:
+                    default: 600
+                    description: |-
+                      timeoutSeconds is the longest one run may take before its request is cut off (Knative
+                      timeoutSeconds). It defaults to 600, matching the platform's run limit; left unset, Knative would
+                      end every run at 300 seconds. A value above the cluster's Knative max-revision-timeout-seconds
+                      (600 unless raised) is rejected by Knative.
+                    format: int64
+                    maximum: 3600
+                    minimum: 1
                     type: integer
                 type: object
               sessionMemory:
@@ -2022,6 +2052,15 @@ spec:
                   scaling configures the Knative autoscaler bounds for this agent.
                   When omitted, defaults to min=0 (scale-to-zero) and max=3.
                 properties:
+                  concurrency:
+                    description: |-
+                      concurrency is the most runs one replica handles at once (Knative containerConcurrency). A run
+                      beyond it waits for a free slot or a new replica instead of joining an overloaded pod. 0 means
+                      no limit: the pod takes every run it is sent and the autoscaler scales only on its soft target.
+                    format: int32
+                    maximum: 1000
+                    minimum: 0
+                    type: integer
                   max:
                     default: 3
                     description: max is the maximum number of replicas the autoscaler
@@ -2035,6 +2074,27 @@ spec:
                       to enable scale-to-zero.
                     format: int32
                     minimum: 0
+                    type: integer
+                  targetBurstCapacity:
+                    description: |-
+                      targetBurstCapacity is how much spare capacity Knative keeps routed through its activator
+                      (autoscaling.knative.dev/target-burst-capacity). 0 takes the activator out of the request path
+                      once a replica is up; -1 keeps it in the path always, where it queues runs that find every slot
+                      taken. Unset, it follows concurrency: 0 when concurrency is unlimited, -1 when it is bounded,
+                      because a bounded pod with the activator out of the path drops the runs it has no slot for.
+                    format: int32
+                    minimum: -1
+                    type: integer
+                  timeoutSeconds:
+                    default: 600
+                    description: |-
+                      timeoutSeconds is the longest one run may take before its request is cut off (Knative
+                      timeoutSeconds). It defaults to 600, matching the platform's run limit; left unset, Knative would
+                      end every run at 300 seconds. A value above the cluster's Knative max-revision-timeout-seconds
+                      (600 unless raised) is rejected by Knative.
+                    format: int64
+                    maximum: 3600
+                    minimum: 1
                     type: integer
                 type: object
               sessionMemory:

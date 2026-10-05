@@ -33,6 +33,17 @@ agent's code receives it. It then proves possession on every call to spawn, hand
 async publish and guardrail events. Every agent now gets `BFF_INTERNAL_URL`, and a Tenant's network
 policy allows it.
 
+**Fixed: every agent run was cut off at five minutes.** Knative's default request timeout is 300
+seconds, and the platform never set one, while a run may take 600. A run that sends nothing until
+it is done also hit Knative's separate time-to-first-byte limit at the same 300 seconds. Every
+agent's revision now carries both, from the new `spec.scaling.timeoutSeconds` (default 600; above
+600 requires raising Knative's `max-revision-timeout-seconds`). Existing agents roll one new revision.
+
+**New: `spec.scaling.concurrency` bounds how many runs one replica handles at once.** Unset, it stays
+unlimited, as before. When it is bounded, `spec.scaling.targetBurstCapacity` defaults to -1, keeping
+Knative's activator in the path to queue runs that find every slot taken. Measured: with concurrency
+1 and the activator out of the path, half of a burst was dropped; with it in, none was.
+
 **Fixed: the bundled state layer refused six of the platform's key spaces.** Its ACL admitted
 neither run-capability binding nor the proof replay set. So binding failed, and so did the
 platform's fast paths for run cancel and the kill switch (cancel still worked; it was just slower),

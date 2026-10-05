@@ -84,6 +84,33 @@ type ScalingSpec struct {
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=1
 	Max int32 `json:"max,omitempty"`
+
+	// concurrency is the most runs one replica handles at once (Knative containerConcurrency). A run
+	// beyond it waits for a free slot or a new replica instead of joining an overloaded pod. 0 means
+	// no limit: the pod takes every run it is sent and the autoscaler scales only on its soft target.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1000
+	Concurrency *int32 `json:"concurrency,omitempty"`
+
+	// timeoutSeconds is the longest one run may take before its request is cut off (Knative
+	// timeoutSeconds). It defaults to 600, matching the platform's run limit; left unset, Knative would
+	// end every run at 300 seconds. A value above the cluster's Knative max-revision-timeout-seconds
+	// (600 unless raised) is rejected by Knative.
+	// +optional
+	// +kubebuilder:default=600
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=3600
+	TimeoutSeconds *int64 `json:"timeoutSeconds,omitempty"`
+
+	// targetBurstCapacity is how much spare capacity Knative keeps routed through its activator
+	// (autoscaling.knative.dev/target-burst-capacity). 0 takes the activator out of the request path
+	// once a replica is up; -1 keeps it in the path always, where it queues runs that find every slot
+	// taken. Unset, it follows concurrency: 0 when concurrency is unlimited, -1 when it is bounded,
+	// because a bounded pod with the activator out of the path drops the runs it has no slot for.
+	// +optional
+	// +kubebuilder:validation:Minimum=-1
+	TargetBurstCapacity *int32 `json:"targetBurstCapacity,omitempty"`
 }
 
 // SessionMemorySpec is the session-memory config expressed as an AgentDeployment field (ADR 0037,

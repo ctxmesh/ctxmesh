@@ -2073,21 +2073,23 @@ func langfuseSecretRequests(ctx context.Context, c client.Reader, obj client.Obj
 	return reqs
 }
 
-// injectedEnvVersion names the shape of the env the platform injects that a change must reach every
-// running agent with: an env change that keeps the revision name is dropped by the controller, and the
-// collector's ConfigMap is rewritten in place while its env is not. Bump it when that shape changes.
+// podContractVersion names the shape of what the platform renders into every agent's revision that a
+// change must reach every running agent with: a pod-template change that keeps the revision name is
+// dropped by the controller, and the collector's ConfigMap is rewritten in place while its env is not.
+// Bump it when that shape changes.
 //   - v2: every Langfuse credential became an optional secretKeyRef (ADR 0148).
 //   - v3: every agent gets BFF_INTERNAL_URL, so its launcher can bind the run capability (ADR 0124).
-const injectedEnvVersion = "v3"
+//   - v4: every revision carries a run timeout and a target-burst-capacity (ADR 0147).
+const podContractVersion = "v4"
 
-// traceExportFold folds the injected env contract into the revision digest. Whether export is on
+// traceExportFold folds the pod contract into the revision digest. Whether export is on
 // is part of it so that creating, completing or deleting a namespace's langfuse-otlp Secret reaches
 // running agents: their collectors loaded the old config at start, and the feedback hook's env
 // exists only while export is on.
 //
 // Shared with the tests, like hardeningFold.
 func traceExportFold(digest string, exporting bool) string {
-	sum := sha256.Sum256([]byte(digest + "|injected-env:" + injectedEnvVersion + ":" + strconv.FormatBool(exporting)))
+	sum := sha256.Sum256([]byte(digest + "|pod-contract:" + podContractVersion + ":" + strconv.FormatBool(exporting)))
 	return fmt.Sprintf("%x", sum[:])[:8]
 }
 
@@ -2468,6 +2470,12 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 						Containers:         pod.containers,
 						Volumes:            pod.volumes,
 					},
+					ContainerConcurrency: runConcurrency(deploy),
+					TimeoutSeconds:       runTimeoutSeconds(deploy),
+					// A run that answers only when it is done sends no byte until then, so the time to the
+					// first byte must allow the whole run; left unset it falls back to Knative's 300s and cuts
+					// off every run past five minutes regardless of timeoutSeconds (measured, ADR 0147).
+					ResponseStartTimeoutSeconds: runTimeoutSeconds(deploy),
 				},
 			},
 		},
@@ -2501,6 +2509,41 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	return ksvc, pod.resolvedSkills, nil
 }
 
+// An agent run is a session, not a request (ADR 0147): it can run for minutes, so the revision's request
+// timeout must cover the platform's run limit, and how many runs one pod holds must be something an
+// operator can bound. These read spec.scaling and apply the defaults when it is absent, since the CRD's
+// defaults reach only an object that has a scaling stanza.
+const defaultRunTimeoutSeconds = int64(600) // the BFF's default run limit (RUN_EXEC_TIMEOUT) and Knative's default maximum
+
+func runConcurrency(deploy *agentsv1alpha1.AgentDeployment) *int64 {
+	if deploy.Spec.Scaling == nil || deploy.Spec.Scaling.Concurrency == nil {
+		return nil
+	}
+	cc := int64(*deploy.Spec.Scaling.Concurrency)
+	return &cc
+}
+
+func runTimeoutSeconds(deploy *agentsv1alpha1.AgentDeployment) *int64 {
+	t := defaultRunTimeoutSeconds
+	if deploy.Spec.Scaling != nil && deploy.Spec.Scaling.TimeoutSeconds != nil {
+		t = *deploy.Spec.Scaling.TimeoutSeconds
+	}
+	return &t
+}
+
+// targetBurstCapacity defaults by concurrency (measured, ADR 0147): with concurrency unlimited the
+// activator can leave the path (0); with concurrency bounded it must stay (-1) and queue the runs that
+// find every slot taken — at concurrency 1 with 0, half of a 12-run burst against 4 pods was dropped.
+func targetBurstCapacity(deploy *agentsv1alpha1.AgentDeployment) int32 {
+	if deploy.Spec.Scaling != nil && deploy.Spec.Scaling.TargetBurstCapacity != nil {
+		return *deploy.Spec.Scaling.TargetBurstCapacity
+	}
+	if cc := runConcurrency(deploy); cc != nil && *cc > 0 {
+		return -1
+	}
+	return 0
+}
+
 // autoscalingAnnotations returns the Knative autoscaling annotations for the
 // ksvc revision template. The min/max scale defaults come from spec.scaling; a
 // request-rate / custom-metric AgentScalingPolicy that targets the agent
@@ -2519,8 +2562,9 @@ func (r *AgentDeploymentReconciler) autoscalingAnnotations(
 	}
 
 	annotations := map[string]string{
-		"autoscaling.knative.dev/min-scale": strconv.Itoa(int(minScale)),
-		"autoscaling.knative.dev/max-scale": strconv.Itoa(int(maxScale)),
+		"autoscaling.knative.dev/min-scale":             strconv.Itoa(int(minScale)),
+		"autoscaling.knative.dev/max-scale":             strconv.Itoa(int(maxScale)),
+		"autoscaling.knative.dev/target-burst-capacity": strconv.Itoa(int(targetBurstCapacity(deploy))),
 	}
 
 	policy, err := r.knativeScalingPolicy(ctx, deploy)
