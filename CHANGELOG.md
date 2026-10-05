@@ -11,6 +11,15 @@ gateway and the feedback hook. Only the agent's own namespace counts.
 **If you configured a `langfuse-otlp` Secret, rotate that Langfuse key.** Knative keeps old
 revisions, and those still hold the key as a literal.
 
+**Security: a model route could resolve to a Secret outside its namespace.** The gateway copied
+each provider Secret into its own namespace under the Secret's bare name. Anyone allowed to create
+ModelRoutes and SecretBindings, which includes the `developer` role, could name a Secret after a
+platform Secret, set the route's `apiBase` to a host they control, and receive the platform
+Secret's value as the API key. Two namespaces with a binding of the same name also shared one
+credential. Copies and their environment variables are now named per namespace. A route whose
+copy cannot be written is not served. A route with both `apiBase` and a binding is checked like
+any other bound route. Every bound route's gateway variable is renamed, so the gateway rolls once.
+
 **Behaviour change:** an agent exports traces only if its own namespace holds a complete
 `langfuse-otlp` Secret, with keys `otlp-endpoint`, `public-key` and `secret-key`. The new
 `TraceExport` condition on each AgentDeployment says whether it is exporting and, if not, why.

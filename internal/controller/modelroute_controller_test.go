@@ -237,7 +237,7 @@ func TestModelRoute_RealProviderRendered(t *testing.T) {
 		types.NamespacedName{Name: gateway.GatewayConfigMapName, Namespace: gwNS}, &cm))
 
 	configYAML := cm.Data["config.yaml"]
-	evName := gateway.EnvVarName(bindingName) // e.g. "SB_TEST_BINDING_REAL"
+	evName := gateway.EnvVarName(gwNS, bindingName)
 	assert.Contains(t, configYAML, "os.environ/"+evName,
 		"config.yaml must reference the secret via os.environ/SB_*")
 
@@ -331,17 +331,18 @@ func TestModelRoute_GatewaySecretSync(t *testing.T) {
 	// The provider Secret is mirrored into the gateway namespace with the same data.
 	var mirror corev1.Secret
 	require.NoError(t, k8sClient.Get(testCtx,
-		types.NamespacedName{Name: secretName, Namespace: gwNS}, &mirror),
+		types.NamespacedName{Name: gateway.MirrorSecretName(srcNS, secretName), Namespace: gwNS}, &mirror),
 		"the provider Secret must be mirrored into the gateway namespace")
 	assert.Equal(t, apiKey, string(mirror.Data["api-key"]), "the mirror carries the same key data")
 	assert.Equal(t, gatewaySyncValue, mirror.Labels[gatewaySyncLabel], "the mirror is labelled for GC")
+	assert.Equal(t, srcNS+"/"+secretName, mirror.Annotations[mirrorSourceAnnotation], "the mirror names its source")
 
 	// GC: deleting the route removes the now-unreferenced mirror on the next reconcile.
 	require.NoError(t, k8sClient.Delete(testCtx, route))
 	routeDeleted = true
 	reconcileMR(t, r, srcNS, routeName)
 
-	err := k8sClient.Get(testCtx, types.NamespacedName{Name: secretName, Namespace: gwNS}, &corev1.Secret{})
+	err := k8sClient.Get(testCtx, types.NamespacedName{Name: gateway.MirrorSecretName(srcNS, secretName), Namespace: gwNS}, &corev1.Secret{})
 	assert.True(t, apierrors.IsNotFound(err), "the mirror must be GC'd when no route references it")
 }
 
