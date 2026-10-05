@@ -17,8 +17,9 @@ cd "$(dirname "$0")/.."
 LAUNCHER="cmd/launcher"
 OUT="sdk/launcher-routes.json"
 
-routes="$(grep -rhoE 'mux\.Handle(Func)?\("(GET |POST |PUT |DELETE |PATCH )?[^"]+"' "$LAUNCHER"/*.go \
-  | grep -v '_test' \
+# Test files are excluded by NAME. The previous filter was a `grep -v '_test'` on grep -h output, which
+# carries no filenames, so it filtered nothing, and a test's fake BFF read as launcher routes.
+routes="$(grep -rhoE --exclude='*_test.go' 'mux\.Handle(Func)?\("(GET |POST |PUT |DELETE |PATCH )?[^"]+"' "$LAUNCHER"/*.go \
   | sed -E 's/.*mux\.Handle(Func)?\("//; s/"$//' \
   | grep -v '/healthz' \
   | sort -u)"
