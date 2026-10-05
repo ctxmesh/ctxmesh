@@ -6,7 +6,18 @@ name: Nightly
 on:
   schedule:
     - cron: "17 3 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      stranger_version:
+        description: run the stranger path against this published release (vX.Y.Z) instead of the newest
+        type: string
+        required: false
+        default: ""
+      stranger_only:
+        description: run only the stranger path, not the full e2e
+        type: boolean
+        required: false
+        default: false
 
 permissions: {}
 
@@ -26,69 +37,21 @@ jobs:
   # image pulls went unnoticed until someone ran the gate by hand at a milestone close.
   # There is no expected-red state here: either this passes, or something is wrong and is fixed.
   stranger:
-    name: nightly-stranger-path
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    uses: ./.github/workflows/stranger.yml
     permissions:
       contents: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - name: Check out agent-brain (harness owns e2e — ADR 0004)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: ctxmesh/agent-brain
-          token: ${{ secrets.BRAIN_CHECKOUT_TOKEN }}
-          path: agent-brain
-          persist-credentials: false
-          ref: ${{ github.ref_name }}
-      - name: Check out the public docs site (docs-site-truth reads it)
-        # Public repo, so no token. Without this the gate SKIPs, a SKIP is exit 3, and the job
-        # dies here having proven nothing -- which is what happened 30 nights running.
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: ctxmesh/ctxmesh.github.io
-          path: ctxmesh.github.io
-          persist-credentials: false
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
-        with:
-          go-version-file: go.mod
-      - name: Install kind
-        run: |
-          curl -fsSLo ./kind "https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-$(go env GOARCH)"
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
-          kind version
-      - name: Install helm and kubectl explicitly
-        # The gate SKIPs if either is missing, and a SKIP is one of the four
-        # escapes close gate (d) forbids -- so do not rely on the runner image.
-        run: |
-          command -v helm >/dev/null || curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-          command -v kubectl >/dev/null || {
-            curl -fsSLo kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/$(go env GOARCH)/kubectl"
-            chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
-          }
-          helm version --short && kubectl version --client=true 2>/dev/null | head -1
-      - name: Published artifacts must match what the release claims
-        env:
-          AGENT_ENGINE: ${{ github.workspace }}
-        run: ./hack/release-truth.sh
-      - name: The public site must name only installable versions
-        env:
-          AGENT_ENGINE: ${{ github.workspace }}
-          DOCS_SITE: ${{ github.workspace }}/ctxmesh.github.io
-        run: make -C agent-brain/harness docs-site-truth
-      - name: Close gate (d) — a stranger's path, end to end
-        env:
-          AGENT_ENGINE: ${{ github.workspace }}
-        # No COLD_IMAGES=local here on purpose: local images are the escape that
-        # let this gate report PASS for five releases against a version nobody
-        # was running.
-        run: make -C agent-brain/harness stranger
+    with:
+      # Brain ref mirrors the engine branch (nightly runs on main <-> main).
+      brain_ref: ${{ github.ref_name }}
+      # Empty on the schedule: the newest CHANGELOG release, checked against the published site.
+      version: ${{ inputs.stranger_version }}
+      install_doc: site
+    secrets:
+      BRAIN_CHECKOUT_TOKEN: ${{ secrets.BRAIN_CHECKOUT_TOKEN }}
 
   full-e2e:
     name: nightly-full-e2e
+    if: ${{ !inputs.stranger_only }}
     runs-on: ubuntu-latest
     # Bumped 45→60 (m5-memory), 60→75 (m6-mesh), 75→120 (m7-eventing + the
     # heavier M=7 stack: Calico + KEDA + Eventing + MinIO install on top of m3-m6),

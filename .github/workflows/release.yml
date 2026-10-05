@@ -24,8 +24,78 @@ on:
 permissions: {}
 
 jobs:
+  # ── The notes, first ───────────────────────────────────────────────────────
+  # Built before anything is published, so a tag with no CHANGELOG section, or a README that pins
+  # another version, fails without leaving artifacts behind. The install command is the README's,
+  # verbatim: the stranger job below runs that same command, so the command the Release page shows
+  # is the command that was proven.
+  notes:
+    name: release-notes-draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build notes.md from the CHANGELOG section and the README install command
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # The section runs from its own heading to the next one at the same level.
+          awk -v tag="$tag" '
+            $0 ~ "^## " tag "( |$)" { inside = 1; next }
+            inside && /^## / { exit }
+            inside { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::CHANGELOG.md has no '## ${tag}' section — the release would have no notes."
+            exit 1
+          fi
+          # The first OCI install command in the README and its continuation lines.
+          awk '
+            /^helm install ctxmesh oci:\/\// { on = 1 }
+            on { print; if ($0 !~ /\\$/) exit }
+          ' README.md > install.txt
+          if [ ! -s install.txt ]; then
+            echo "::error::README.md has no 'helm install ctxmesh oci://' command to announce."
+            exit 1
+          fi
+          if ! grep -qE -- "--version ${tag#v}( |\\|$)" install.txt; then
+            echo "::error::README.md installs $(grep -oE -- '--version [^ ]+' install.txt || echo 'no --version'), not ${tag#v}."
+            exit 1
+          fi
+          {
+            echo
+            echo "---"
+            echo
+            echo '```sh'
+            cat install.txt
+            echo '```'
+            echo
+            echo "> **The first install pulls nine images and takes several minutes.** \`--wait\` without"
+            echo "> \`--timeout\` uses Helm's 5-minute default, which a cold cluster does not meet — the"
+            echo "> postgres image alone can take longer than that. The timeout above is a ceiling, not a"
+            echo "> wait: a warm cluster finishes in well under it."
+            echo
+            echo '```sh'
+            echo "# afterwards, confirm the release actually landed"
+            echo "helm status ctxmesh -n ctxmesh"
+            echo '```'
+            echo
+            echo "Compatibility: https://ctxmesh.github.io/reference/compatibility/"
+          } >> notes.md
+          echo "--- notes.md ---"; cat notes.md
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-notes
+          path: notes.md
+          if-no-files-found: error
+
   images:
     name: release-images
+    needs: notes
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -149,62 +219,40 @@ jobs:
           v="${GITHUB_REF_NAME#v}"
           helm push "dist/ctxmesh-${v}.tgz" oci://ghcr.io/ctxmesh/charts
 
-  # ── The Release page ────────────────────────────────────────────────────────
-  # Publishing images and a chart is not a release anybody can SEE. Without this the
-  # tag produces artifacts and nothing else: no notes, no install command, no link to
-  # what changed. The notes are the CHANGELOG section for this tag — one source of
-  # truth, so the page cannot drift from the file.
+  # ── A tag that does not install is not announced ───────────────────────────
+  # The published chart and images, pulled anonymously onto a cold cluster with the README's install
+  # command, to a Ready agent, a tool call and a visible run. The artifacts are already public by
+  # now (a chart's version is baked into the package, so there is no staging copy to promote); what
+  # this job withholds is the Release page. A red here burns the version: the fix ships as the next
+  # tag (ADR 0149).
   #
-  # Runs LAST and depends on both publish jobs: a Release page pointing at artifacts
-  # that failed to push is worse than no page, because it reads as success.
+  # The harness comes from agent-brain main, which pairs with the engine's last closed milestone.
+  stranger:
+    needs: [images, chart]
+    uses: ./.github/workflows/stranger.yml
+    permissions:
+      contents: read
+    with:
+      brain_ref: main
+      version: ${{ github.ref_name }}
+      install_doc: readme
+    secrets:
+      BRAIN_CHECKOUT_TOKEN: ${{ secrets.BRAIN_CHECKOUT_TOKEN }}
+
+  # ── The Release page ────────────────────────────────────────────────────────
+  # Runs LAST: a Release page pointing at artifacts that do not install reads as success, which is
+  # worse than no page.
   github-release:
     name: release-notes
-    needs: [images, chart]
+    needs: [notes, stranger]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          persist-credentials: false
-      - name: Extract this tag's CHANGELOG section
-        run: |
-          set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
-          # The section runs from its own heading to the next one at the same level.
-          awk -v tag="$tag" '
-            $0 ~ "^## " tag "( |$)" { inside = 1; next }
-            inside && /^## / { exit }
-            inside { print }
-          ' CHANGELOG.md > notes.md
-          if [ ! -s notes.md ]; then
-            echo "::error::CHANGELOG.md has no '## ${tag}' section — the release would have no notes."
-            exit 1
-          fi
-          {
-            echo
-            echo "---"
-            echo
-            echo '```sh'
-            echo "helm install ctxmesh oci://ghcr.io/ctxmesh/charts/ctxmesh \\"
-            echo "  --version ${GITHUB_REF_NAME#v} --namespace ctxmesh --create-namespace \\"
-            echo "  --wait --timeout 20m"
-            echo '```'
-            echo
-            echo "> **The first install pulls nine images and takes several minutes.** \`--wait\` without"
-            echo "> \`--timeout\` uses Helm's 5-minute default, which a cold cluster does not meet — the"
-            echo "> postgres image alone can take longer than that. The timeout above is a ceiling, not a"
-            echo "> wait: a warm cluster finishes in well under it."
-            echo
-            echo '```sh'
-            echo "# afterwards, confirm the release actually landed"
-            echo "helm status ctxmesh -n ctxmesh"
-            echo '```'
-            echo
-            echo "Compatibility: https://ctxmesh.github.io/reference/compatibility/"
-          } >> notes.md
-          echo "--- notes.md ---"; cat notes.md
+          name: release-notes
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -213,6 +261,7 @@ jobs:
           prerelease=""
           case "${GITHUB_REF_NAME}" in *-alpha*|*-beta*|*-rc*) prerelease="--prerelease" ;; esac
           gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
             --title "${GITHUB_REF_NAME}" \
             --notes-file notes.md \
             $prerelease
