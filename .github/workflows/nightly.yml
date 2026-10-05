@@ -120,12 +120,17 @@ jobs:
           sudo mv ./kind /usr/local/bin/kind
           kind version
       - name: Bring up the harness cluster (M=7 full stack — Calico + Knative Serving/Eventing + KEDA + MinIO + Langfuse)
+        id: devup
         # M=7 ⊇ M=1..M6: the m7-eventing slice needs KEDA + Knative Eventing +
         # MinIO, so the whole nightly runs on the M=7 stack. The earlier slices
         # tolerate it (Calico enforces the m6 NetworkPolicy as a bonus). Heavy
         # for one CI job — split at the CI-revisit pass if the runner can't fit it.
         run: make -C agent-brain/harness dev-up M=7
+      # Every slice below runs even when an earlier one failed. The job still fails, but one run
+      # reports every red instead of the first: for weeks this job showed one failure and hid the
+      # rest behind it.
       - name: M3 observability e2e (light — collector debug sink, no Langfuse)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Per ADR 0006 the full Langfuse tier3 M=3 is local-only (won't fit the
@@ -133,12 +138,14 @@ jobs:
         # runs, spans flow, asserted via the collector's debug exporter.
         run: make -C agent-brain/harness tier2 SLICE=m3-trace
       - name: M4 MCP tools e2e (bind, call, hot-swap without restart)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Reuses the same cluster; asserts tool_version v1→v2 on an unchanged
         # pod UID + the mcp_word_count TOOL span via the collector debug sink.
         run: make -C agent-brain/harness tier2 SLICE=m4-tools
       - name: M5 session-memory e2e (context survives scale-to-zero)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Reuses the same cluster; the State-Layer Valkey is deployed by the
@@ -150,6 +157,7 @@ jobs:
         # as the m3-trace / m4-tools slices.
         run: make -C agent-brain/harness tier2 SLICE=m5-memory
       - name: M6 mesh e2e (A2A, cross-registry isolation, guards, child span)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Reuses the same M=1 cluster. Deploys two AgentRegistries + three
@@ -162,6 +170,7 @@ jobs:
         # enforces the NetworkPolicy defense-in-depth layer (bonus vs the M=1 run).
         run: make -C agent-brain/harness tier2 SLICE=m6-mesh
       - name: M7 async eventing e2e (event→trigger, DLQ, cron/job, scaling mechanism)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Needs the M=7 stack (KEDA + Knative Eventing + MinIO). Deploys an
@@ -174,6 +183,7 @@ jobs:
         # channel exposes no queue_depth metric) — specs/eventing-scaling.md.
         run: make -C agent-brain/harness tier2 SLICE=m7-eventing
       - name: M8 cost-governance e2e (per-agent budget — soft alert, hard-breach halt, traced)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Needs only M=3 infra (Knative + Langfuse + the gateway) but tolerates
@@ -189,6 +199,7 @@ jobs:
         # X-Conversation-Id on its LLM call) — specs/cost-governance.md.
         run: make -C agent-brain/harness tier2 SLICE=m8-budget
       - name: M9 eval/prompts/feedback e2e (deploy-gate, prompt-only swap, feedback→trace)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Needs only M=3 infra (Knative + Langfuse) but tolerates the M=7 stack.
@@ -204,6 +215,7 @@ jobs:
         # specs/eval-prompts-feedback.md, ADR 0008.
         run: make -C agent-brain/harness tier2 SLICE=m9-eval
       - name: M10 Python SDK e2e (no-framework loop → step→tool→model tree in Langfuse)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Needs only M=3 infra (Knative + Langfuse) but tolerates the M=7 stack.
@@ -217,6 +229,7 @@ jobs:
         # 307-follow fix (tools.call reaches FastMCP /mcp/). specs/python-sdk.md.
         run: make -C agent-brain/harness tier2 SLICE=m10-sdk
       - name: M11 trace-governance + security e2e (redaction / authz / audit / egress)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Needs M=6+ (Calico for the egress NetworkPolicy) — the M=7 nightly stack
@@ -233,6 +246,7 @@ jobs:
         # not e2e'd. specs/trace-governance-security.md, ADR 0009.
         run: make -C agent-brain/harness tier2 SLICE=m11-security
       - name: M12 helm install e2e (helm lint + install brings the platform + UI Ready)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Pure install-smoke, no browser: `helm lint` + `helm install` the chart
@@ -254,6 +268,7 @@ jobs:
             | PROFILE=/dev/null bash
           test -s "$HOME/.nvm/nvm.sh"
       - name: M12 deployed-UI e2e (topology / config-builder / Playground + caller-scoped 403)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Drives the helm-installed UI headless (Playwright/chromium) over the BFF
@@ -270,6 +285,7 @@ jobs:
         # agent run). specs/ui.md, ADR 0010/0011.
         run: make -C agent-brain/harness tier2 SLICE=m12-ui
       - name: M13 console-foundation e2e (token login / RBAC chrome / forced-403)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # The v2 console foundation (ADR 0012): 50-login drives the REAL login
@@ -281,6 +297,7 @@ jobs:
         # m12-ui, minting developer/operator/viewer persona tokens at runtime.
         run: make -C agent-brain/harness tier2 SLICE=m13-ui
       - name: M14 first-agent aha e2e (connect → describe → create → run → tool span)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # The aha (§28-30): connect a provider → add a keyed BYO-MCP (auth both
@@ -295,6 +312,7 @@ jobs:
         # current CRD. Runs LAST (heaviest: 4 images + 2 mock upstreams + browser).
         run: make -C agent-brain/harness tier2 SLICE=m14-ui
       - name: M15 fleet-management e2e (grouped topology at 200 agents + CRUD round-trips)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # The fleet-management 🧪 (§31): seeds a 200-agent scale fixture across 3
@@ -311,6 +329,7 @@ jobs:
         # test --list + shellcheck. (ADR 0004 gate-and-skip-gracefully applies.)
         run: make -C agent-brain/harness tier2 SLICE=m15-ui
       - name: M16 observability-depth e2e (native trace explorer + feedback + cost)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # The observability-depth 🧪 (§31, spec observability-depth-ui): reuses the
@@ -328,6 +347,7 @@ jobs:
         # the Langfuse-fed legs skip when the adapter/runs are absent.)
         run: make -C agent-brain/harness tier2 SLICE=m16-ui
       - name: M17 authoring-depth e2e (OAuth MCP + tool hot-swap + approval queue)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # The authoring-depth 🧪 (§28.2/§31, spec authoring-depth-ui): reuses the
@@ -343,6 +363,7 @@ jobs:
         # test --list + shellcheck + the fixture contract test. ADR 0004 gate-and-skip.
         run: make -C agent-brain/harness tier2 SLICE=m17-ui
       - name: M18 console-cohesion e2e (personas — providers/compose/fleet/redaction)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # The console-cohesion 🧪 (§28–31, spec console-cohesion): reuses the M16/M17
@@ -355,6 +376,7 @@ jobs:
         # tier0 + tsc --noEmit + playwright test --list + shellcheck.
         run: make -C agent-brain/harness tier2 SLICE=m18-ui
       - name: M19 dev-ui smoke (ctxmesh dev --ui — NO cluster, Docker Compose)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # The dev-ui 🧪 (ADR 0021, spec dev-ui-and-sso): the ONLY slice with NO
@@ -368,6 +390,7 @@ jobs:
         # shellcheck; the full Compose run is deferred like the other slices.
         run: make -C agent-brain/harness tier2 SLICE=m19-ui
       - name: M19 console OIDC login (Auth-Code + PKCE via Dex)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # The console SSO 🧪 (ADR 0020, spec dev-ui-and-sso): drives the REAL Auth-Code
