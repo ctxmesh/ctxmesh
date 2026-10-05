@@ -18,29 +18,59 @@ There are three ways to work with it:
 ctxmesh ships as a Helm chart in [`deploy/helm/ctxmesh`](deploy/helm/ctxmesh). It installs the
 control plane — controller-manager + CRDs, the LiteLLM model gateway, RBAC personas
 (`ctxmesh-{operator,developer,viewer}`), the operator UI + Go BFF, and (for dev/trial) a bundled
-data plane: PostgreSQL with pgvector, Valkey, MinIO and NATS JetStream.
+data plane: PostgreSQL with pgvector, Valkey, SeaweedFS (S3-compatible object storage) and NATS JetStream.
 
-**Prerequisites.** A Kubernetes cluster (≥ 1.29) with **Knative Serving + Eventing** and **KEDA**
-already installed — the controller reconciles their CRDs and agents won't come up without them
-(ctxmesh does *not* bundle them) — plus Helm 3.
+<!-- ctxmesh:prerequisites kubernetes>=1.29 knative-serving -->
+**Prerequisites.** A Kubernetes cluster with **Knative Serving** installed, and Helm 3.8 or newer.
+ctxmesh itself needs Kubernetes 1.29 or newer (the chart enforces it); your Knative Serving release
+may need newer. That is all the default install needs: agents run as Knative Services. Two add-ons
+are needed only for the features that use them:
+
+- **Knative Eventing**, only for agents with `executionModel: eventing`;
+- **KEDA**, only for queue-depth or custom-metric scaling (`AgentScalingPolicy`).
+
+ctxmesh does not bundle any of them.
 
 ```sh
-# from a clone of this repo — a dev/trial install, everything bundled, single replica
-helm install ctxmesh ./deploy/helm/ctxmesh --namespace ctxmesh --create-namespace
+helm install ctxmesh oci://ghcr.io/ctxmesh/charts/ctxmesh \
+  --version 0.1.0-beta.9 \
+  --namespace ctxmesh --create-namespace \
+  --wait --timeout 20m
 ```
 
-That is the whole install. There is **no Secret to create by hand and no environment variable to
-export** — the chart provisions the database it needs and points the control plane at it. (Until
-M148 it did not: `bff-adapters` was consumed by four templates and created by none, and nothing
-deployed PostgreSQL at all, so this command produced a CrashLoopBackOff. `harness/scripts/accept-m148.sh`
-now asserts that everything the chart consumes, the chart creates.)
+That is the whole install: a dev/trial control plane with its data plane bundled, single replica.
+There is **no Secret to create by hand and no environment variable to export** — the chart provisions
+the database it needs and points the control plane at it. On a fresh local cluster, measured runs
+took **7 to 18 minutes** from an empty cluster to a running agent (typically 7 to 11), most of it
+pulling images. Give `--wait` a real timeout: Helm's default of five minutes is shorter than a first
+install's image pulls.
 
-Wait for it to come up, then open the console:
+Then open the console:
 
 ```sh
-kubectl -n ctxmesh rollout status deploy/ctxmesh-controller-manager
 kubectl -n ctxmesh port-forward svc/ctxmesh-bff 9090:9090   # → http://localhost:9090/
 ```
+
+The console signs you in with a Kubernetes bearer token and acts with that identity's RBAC. To make
+one for a namespace you will build agents in (`default` here), bind the chart's developer role to a
+ServiceAccount and ask for a token:
+
+```sh
+kubectl -n default create serviceaccount ctxmesh-builder
+kubectl -n default create rolebinding ctxmesh-builder --clusterrole=ctxmesh-developer --serviceaccount=default:ctxmesh-builder
+kubectl -n default create token ctxmesh-builder --duration=8h
+```
+
+Paste the token into the console's sign-in. The same token reaches an agent through the control
+plane, which is the path that mints the run's capability and records the run:
+
+```sh
+curl -s -X POST http://localhost:9090/api/invoke -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"agent":"my-agent","namespace":"default","input":"hello"}'
+```
+
+Contributors installing from a clone use the chart directory instead of the OCI reference:
+`helm install ctxmesh ./deploy/helm/ctxmesh --namespace ctxmesh --create-namespace`.
 
 **What you get, and what you have to add.** The install brings up a working control plane: the
 console, the CRDs, the model gateway, the databases and the credential plane. It ships **no models** —

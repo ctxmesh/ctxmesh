@@ -1,16 +1,11 @@
 ctxmesh has been installed into namespace {{ .Values.namespace }}.
 
-PREREQUISITES (install these in the cluster BEFORE agents will reconcile):
-  The controller integrates with cluster add-ons that provide CRDs it watches
-  and creates. If they are absent you will see "no matches for kind ..." /
-  CRD-not-found errors on the agent CRDs — the platform installs, but agents
-  won't come up. Install:
-    - Knative Serving   — the agent runtime (Service; scale-to-zero data plane).
-    - Knative Eventing  — the event mesh (Broker/Trigger for event-driven agents).
-    - KEDA              — event/metric autoscaling (ScaledObject).
-  ctxmesh deploys its own controllers + gateway + (optional) dev data plane
-  and UI, but it does NOT bundle Knative or KEDA — install them separately
-  (their upstream Helm charts / release YAMLs) on the target cluster.
+PREREQUISITE: Knative Serving must be installed on the cluster — agents run as
+  Knative Services. Without it the platform installs but no agent comes up.
+  Two add-ons are needed only for the features that use them:
+    - Knative Eventing  — only for agents with executionModel: eventing.
+    - KEDA              — only for queue-depth / custom-metric scaling (AgentScalingPolicy).
+  ctxmesh bundles none of them.
 
 Control plane:
   - CRDs installed:            {{ .Values.crds.install }}
@@ -28,6 +23,10 @@ UI + Go BFF (spec §6):
                                is the single authz source.
   - reach the UI:              kubectl -n {{ .Values.namespace }} port-forward svc/ctxmesh-bff 9090:9090
                                then open http://localhost:9090/ (and /api/health)
+  - sign in (token login):     a token for a ServiceAccount bound to a persona, e.g.
+                               kubectl -n default create serviceaccount ctxmesh-builder
+                               kubectl -n default create rolebinding ctxmesh-builder --clusterrole=ctxmesh-developer --serviceaccount=default:ctxmesh-builder
+                               kubectl -n default create token ctxmesh-builder --duration=8h
   - database:                  {{ if .Values.postgres.externalDsn }}operator-managed (postgres.externalDsn){{ else }}BUNDLED dev PostgreSQL + pgvector
                                (deterministic dev credentials — NOT for production).
                                Production: devDataPlane.enabled=false and set
