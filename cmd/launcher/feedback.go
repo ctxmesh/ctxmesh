@@ -75,10 +75,8 @@ type feedbackConfig struct {
 	LangfuseHost string
 	// PublicKey / SecretKey are the Langfuse API credentials for HTTP basic
 	// auth to the scores endpoint (LANGFUSE_SCORES_PUBLIC_KEY /
-	// LANGFUSE_SCORES_SECRET_KEY). Deterministic DEV-ONLY fixed values injected
-	// by the controller as STATIC env — NEVER valueFrom (the Knative ksvc
-	// webhook landmine, M5.7). They match the dev Langfuse seeded by
-	// `make -C harness dev-up M=3`.
+	// LANGFUSE_SCORES_SECRET_KEY), referenced by the controller from the
+	// namespace's langfuse-otlp Secret.
 	PublicKey string
 	SecretKey string
 	// Port is the localhost port the listener binds (FEEDBACK_PORT, default 2995).

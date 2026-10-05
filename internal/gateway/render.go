@@ -157,9 +157,18 @@ type modelEntry struct {
 // W3C context. The zero value (empty Endpoint) disables it — e.g. in CI without
 // Langfuse, keeping the gateway config clean (M2 behavior).
 type OTelConfig struct {
-	Endpoint   string // OTLP endpoint (Langfuse /api/public/otel)
-	AuthHeader string // e.g. "Basic <base64(public:secret)>"
+	Endpoint string // OTLP endpoint (Langfuse /api/public/otel) -- not a secret
+	// HeadersSecret names a Secret in the gateway namespace whose OTelHeadersKey holds
+	// "Authorization=Basic ...". The gateway reads it by secretKeyRef: the credential never
+	// appears in the Deployment spec, which anyone with `get deployments` can read.
+	HeadersSecret string
+	// HeadersSecretRV is that Secret's resourceVersion. Env is read at container start, so it is
+	// hashed into the gateway's rollout hash: a credential rotation must roll the pod.
+	HeadersSecretRV string
 }
+
+// OTelHeadersKey is the key in OTelConfig.HeadersSecret that holds the OTEL_HEADERS value.
+const OTelHeadersKey = "headers"
 
 // OTelEnvPrefix is the env-var prefix for the gateway's OTel exporter settings.
 // syncGatewayDeployment strips these (like SB_*) before re-adding, so the render
@@ -354,12 +363,20 @@ func Render(
 		envVars[i] = evSet[k]
 	}
 
-	// LiteLLM's otel exporter reads these; only set when tracing is enabled.
+	// LiteLLM's otel exporter reads these; only set when tracing is enabled. The header reference is
+	// optional so a missing Secret costs the gateway its traces, not its ability to start.
 	if otel.Endpoint != "" {
+		optional := true
 		envVars = append(envVars,
 			corev1.EnvVar{Name: "OTEL_EXPORTER", Value: "otlp_http"},
 			corev1.EnvVar{Name: "OTEL_ENDPOINT", Value: otel.Endpoint},
-			corev1.EnvVar{Name: "OTEL_HEADERS", Value: "Authorization=" + otel.AuthHeader},
+			corev1.EnvVar{Name: "OTEL_HEADERS", ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: otel.HeadersSecret},
+					Key:                  OTelHeadersKey,
+					Optional:             &optional,
+				},
+			}},
 		)
 	}
 
@@ -380,6 +397,10 @@ func Render(
 		hashInput.WriteString(k)
 		hashInput.WriteString("=")
 		hashInput.WriteString(secretRVs[k])
+	}
+	if otel.HeadersSecretRV != "" {
+		hashInput.WriteString("\notel-headers=")
+		hashInput.WriteString(otel.HeadersSecretRV)
 	}
 	sum := sha256.Sum256([]byte(hashInput.String()))
 	hash := fmt.Sprintf("%x", sum[:])

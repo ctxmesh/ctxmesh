@@ -22,6 +22,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
@@ -411,7 +412,7 @@ func TestRender_OTelEnabledAddsCallbackAndEnv(t *testing.T) {
 			},
 		},
 	}
-	otel := gateway.OTelConfig{Endpoint: "http://langfuse/api/public/otel", AuthHeader: "Basic ZGVhZA=="}
+	otel := gateway.OTelConfig{Endpoint: "http://langfuse/api/public/otel", HeadersSecret: "gw-otel", HeadersSecretRV: "7"}
 
 	enabled := gateway.Render([]agentsv1alpha1.ModelRoute{route}, nil, nil, otel)
 	assert.Contains(t, enabled.ConfigYAML, `callbacks: ["otel"]`, "otel callback enabled")
@@ -422,11 +423,36 @@ func TestRender_OTelEnabledAddsCallbackAndEnv(t *testing.T) {
 	assert.Contains(t, enabled.ConfigYAML, "turn_off_message_logging: true",
 		"message content logging must be off when otel export is enabled (no raw PII to Langfuse)")
 	envNames := map[string]string{}
-	for _, e := range enabled.EnvVars {
+	var headers *corev1.EnvVar
+	for i, e := range enabled.EnvVars {
 		envNames[e.Name] = e.Value
+		if e.Name == "OTEL_HEADERS" {
+			headers = &enabled.EnvVars[i]
+		}
 	}
 	assert.Equal(t, "http://langfuse/api/public/otel", envNames["OTEL_ENDPOINT"], "OTEL_ENDPOINT env")
-	assert.Contains(t, envNames["OTEL_HEADERS"], "Basic ZGVhZA==", "OTEL_HEADERS carries auth")
+	// The credential must be a Secret reference, never a value: a literal here is readable by
+	// anyone who can `get deployments`. This assertion used to check that OTEL_HEADERS CONTAINED
+	// the Basic credential -- it encoded the leak as the correct behaviour.
+	require.NotNil(t, headers, "OTEL_HEADERS must be set when otel is enabled")
+	assert.Empty(t, headers.Value, "OTEL_HEADERS must not carry a literal credential")
+	require.NotNil(t, headers.ValueFrom, "OTEL_HEADERS must come from a Secret")
+	require.NotNil(t, headers.ValueFrom.SecretKeyRef, "OTEL_HEADERS must be a secretKeyRef")
+	assert.Equal(t, "gw-otel", headers.ValueFrom.SecretKeyRef.Name)
+	assert.Equal(t, gateway.OTelHeadersKey, headers.ValueFrom.SecretKeyRef.Key)
+	require.NotNil(t, headers.ValueFrom.SecretKeyRef.Optional)
+	assert.True(t, *headers.ValueFrom.SecretKeyRef.Optional, "a missing Secret must not stop the gateway starting")
+	for _, e := range enabled.EnvVars {
+		assert.NotContains(t, e.Value, "Basic ", "%s must not carry a literal credential", e.Name)
+	}
+
+	// A credential rotation changes the derived Secret's resourceVersion; the gateway reads env at
+	// start, so the rollout hash must move with it or the old credential stays live.
+	rotated := otel
+	rotated.HeadersSecretRV = "8"
+	assert.NotEqual(t, enabled.Hash,
+		gateway.Render([]agentsv1alpha1.ModelRoute{route}, nil, nil, rotated).Hash,
+		"rotating the OTel header Secret must change the rollout hash")
 
 	// Disabled (zero value) adds neither.
 	off := gateway.Render([]agentsv1alpha1.ModelRoute{route}, nil, nil, gateway.OTelConfig{})

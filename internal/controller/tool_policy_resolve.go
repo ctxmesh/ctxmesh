@@ -98,8 +98,7 @@ const (
 const (
 	// envToolPolicyFile is the STATIC env var carrying the in-container PATH to the mounted
 	// tool-policy file on the egress sidecar. Its presence is the source the sidecar reads +
-	// fsnotify-watches. NEVER valueFrom — the m5.7 Knative ksvc landmine (the webhook rejects
-	// valueFrom in a ksvc pod template); the VALUE is a static path.
+	// fsnotify-watches. The VALUE is a static path.
 	envToolPolicyFile = "TOOL_POLICY_FILE"
 
 	// toolPolicyConfigMapSuffix names the per-agent, STABLE-named ConfigMap that materialises the

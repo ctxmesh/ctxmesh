@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+**Security: the Langfuse key was readable in every agent's pod spec.** The trace collector carried
+it as a literal environment value, so anyone who could `kubectl get pods` in an agent namespace
+could read it. And an agent whose namespace had no `langfuse-otlp` Secret was given the *platform*
+namespace's key. Every Langfuse credential is now a Secret reference: on the collector, the
+gateway and the feedback hook. Only the agent's own namespace counts.
+
+**If you configured a `langfuse-otlp` Secret, rotate that Langfuse key.** Knative keeps old
+revisions, and those still hold the key as a literal.
+
+**Behaviour change:** an agent exports traces only if its own namespace holds a complete
+`langfuse-otlp` Secret, with keys `otlp-endpoint`, `public-key` and `secret-key`. The new
+`TraceExport` condition on each AgentDeployment says whether it is exporting and, if not, why.
+Every agent rolls one new revision on upgrade, so an agent behind an approval gate waits for
+promotion.
+
 ## v0.1.0-beta.9 — the first install stopped working, and the gate that would have said so had never run
 
 **Every new install of `v0.1.0-beta.8` fails.** The bundled dev object store is MinIO, and MinIO

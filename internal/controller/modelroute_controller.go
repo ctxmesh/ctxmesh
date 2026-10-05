@@ -180,7 +180,10 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 	// ── 3. Render config ──────────────────────────────────────────────────────
 	// Enable gateway trace spans when Langfuse is configured (secret present in
 	// the gateway namespace); otherwise render clean (CI has no Langfuse).
-	otel := r.resolveOTelConfig(ctx)
+	otel, staleOTelHeaders, err := r.resolveOTelConfig(ctx)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	renderResult := gateway.Render(mrList.Items, bindings, secretRVs, otel)
 
 	// ── 4. CreateOrUpdate gateway ConfigMap ───────────────────────────────────
@@ -203,6 +206,11 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 	// ── 5. Patch gateway Deployment env + pod-template annotation ─────────────
 	if err := r.syncGatewayDeployment(ctx, renderResult); err != nil {
 		return ctrl.Result{}, fmt.Errorf("syncing gateway Deployment: %w", err)
+	}
+	if staleOTelHeaders {
+		if err := r.deleteStaleOTelHeaders(ctx); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// ── 6. Update Ready conditions on all ModelRoutes ─────────────────────────
@@ -249,21 +257,93 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 	return ctrl.Result{}, nil
 }
 
-// resolveOTelConfig returns the gateway's trace-export settings from the
-// langfuse-otlp Secret in the gateway namespace. Absent secret → zero value,
-// which disables the otel callback (CI / no-Langfuse).
-func (r *ModelRouteReconciler) resolveOTelConfig(ctx context.Context) gateway.OTelConfig {
+// gatewayOTelHeadersSecret holds the gateway's pre-built OTEL_HEADERS value. LiteLLM wants the
+// whole "Authorization=Basic ..." string, so it is derived here from the langfuse-otlp Secret
+// and kept in a Secret rather than rendered into the Deployment's env as a literal.
+const gatewayOTelHeadersSecret = "ctxmesh-gateway-otel"
+
+// gatewayOTelRoleLabel marks the derived Secret as the controller's. The controller writes or
+// deletes a Secret of that name only when it carries this label.
+const (
+	gatewayOTelRoleLabel = "agents.ctxmesh.ai/role"
+	gatewayOTelRoleValue = "gateway-otel-headers"
+)
+
+// resolveOTelConfig returns the gateway's trace-export settings from the langfuse-otlp Secret in
+// the gateway namespace. An absent or incomplete Secret gives the zero value, which disables the
+// otel callback (CI / no-Langfuse). staleDerived reports a derived header Secret left from when
+// export was on; the caller deletes it once the Deployment no longer references it, so a
+// credential does not outlive the Secret it came from.
+func (r *ModelRouteReconciler) resolveOTelConfig(ctx context.Context) (gateway.OTelConfig, bool, error) {
+	derivedKey := client.ObjectKey{Namespace: gateway.GatewayNamespace, Name: gatewayOTelHeadersSecret}
+	var existing corev1.Secret
+	derivedExists := false
+	switch err := r.Get(ctx, derivedKey, &existing); {
+	case err == nil:
+		if existing.Labels[gatewayOTelRoleLabel] != gatewayOTelRoleValue {
+			return gateway.OTelConfig{}, false, fmt.Errorf(
+				"gateway namespace holds a Secret named %s that the controller does not manage; refusing to overwrite it",
+				gatewayOTelHeadersSecret)
+		}
+		derivedExists = true
+	case !apierrors.IsNotFound(err):
+		return gateway.OTelConfig{}, false, fmt.Errorf("reading gateway OTel header Secret: %w", err)
+	}
+
 	var sec corev1.Secret
 	if err := r.Get(ctx, client.ObjectKey{
 		Namespace: gateway.GatewayNamespace, Name: telemetry.LangfuseSecretName,
 	}, &sec); err != nil {
-		return gateway.OTelConfig{} // not found (or transient) → tracing off
+		if apierrors.IsNotFound(err) {
+			return gateway.OTelConfig{}, derivedExists, nil
+		}
+		// Not "tracing off": treating a transient read error as absence would roll the gateway
+		// off and back on.
+		return gateway.OTelConfig{}, false, fmt.Errorf("reading %s Secret: %w", telemetry.LangfuseSecretName, err)
+	}
+	if missing := telemetry.MissingLangfuseKeys(sec.Data); len(missing) > 0 {
+		logf.FromContext(ctx).Info("langfuse-otlp Secret is incomplete; gateway tracing stays off",
+			"namespace", gateway.GatewayNamespace, "missing", missing)
+		return gateway.OTelConfig{}, derivedExists, nil
+	}
+
+	derived := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: derivedKey.Name, Namespace: derivedKey.Namespace}}
+	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, derived, func() error {
+		if derived.Labels == nil {
+			derived.Labels = map[string]string{}
+		}
+		// Deliberately NOT gatewaySyncLabel: syncGatewaySecrets garbage-collects by that label,
+		// and this Secret is not a provider mirror.
+		derived.Labels["app.kubernetes.io/managed-by"] = "ctxmesh-controller"
+		derived.Labels[gatewayOTelRoleLabel] = gatewayOTelRoleValue
+		derived.Type = corev1.SecretTypeOpaque
+		derived.Data = map[string][]byte{gateway.OTelHeadersKey: []byte("Authorization=" + telemetry.BasicAuthHeader(
+			string(sec.Data[telemetry.LangfuseKeyPublic]), string(sec.Data[telemetry.LangfuseKeySecret])))}
+		return nil
+	}); err != nil {
+		return gateway.OTelConfig{}, false, fmt.Errorf("writing gateway OTel header Secret: %w", err)
 	}
 	return gateway.OTelConfig{
-		Endpoint: string(sec.Data["otlp-endpoint"]),
-		AuthHeader: telemetry.BasicAuthHeader(
-			string(sec.Data["public-key"]), string(sec.Data["secret-key"])),
+		Endpoint:        string(sec.Data[telemetry.LangfuseKeyEndpoint]),
+		HeadersSecret:   gatewayOTelHeadersSecret,
+		HeadersSecretRV: derived.ResourceVersion,
+	}, false, nil
+}
+
+// deleteStaleOTelHeaders removes the derived header Secret after the gateway has stopped
+// referencing it. It re-checks the label rather than trusting the earlier read.
+func (r *ModelRouteReconciler) deleteStaleOTelHeaders(ctx context.Context) error {
+	var sec corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{Namespace: gateway.GatewayNamespace, Name: gatewayOTelHeadersSecret}, &sec); err != nil {
+		return client.IgnoreNotFound(err)
 	}
+	if sec.Labels[gatewayOTelRoleLabel] != gatewayOTelRoleValue {
+		return nil
+	}
+	if err := r.Delete(ctx, &sec); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("removing stale gateway OTel header Secret: %w", err)
+	}
+	return nil
 }
 
 // syncGatewaySecrets mirrors each resolved provider Secret (mirrors, keyed by bare
