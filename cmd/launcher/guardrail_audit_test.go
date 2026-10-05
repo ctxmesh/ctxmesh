@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -310,4 +311,61 @@ func TestGuardrailAudit_FireGuardrailBlockAudit_NoRawContent(t *testing.T) {
 	assert.Contains(t, bodyStr, `"policy_action":"block"`, "policy_action must be block")
 	assert.Contains(t, bodyStr, `"detector":"credit-card"`)
 	assert.NotContains(t, bodyStr, `"content":`, "raw 'content' field must never appear in the body")
+}
+
+// relayedCap mints a capability bound to a key this launcher does not hold: what an AMP callee receives.
+func relayedCap(t *testing.T) string {
+	t.Helper()
+	_, priv, err := runcap.GenerateKeyPair()
+	require.NoError(t, err)
+	tok, err := runcap.NewSigner(priv, "", nil).Mint(runcap.MintRequest{
+		User: "u", Agent: "default/caller",
+		RunID: "run-amp", TTL: time.Minute, KeyThumbprint: "the-callers-key",
+	})
+	require.NoError(t, err)
+	return tok
+}
+
+// An AMP callee cannot prove its caller's capability, so it presents its own pod token alongside it; the
+// BFF then authenticates the pod (m184.37).
+func TestGuardrailAudit_RelayedCapabilityCarriesThePodToken(t *testing.T) {
+	headers := make(chan http.Header, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case headers <- r.Header.Clone():
+		default:
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	tokenFile := t.TempDir() + "/token"
+	require.NoError(t, os.WriteFile(tokenFile, []byte("pod-token-123\n"), 0o600))
+	t.Setenv("BFF_POD_TOKEN_PATH", tokenFile)
+
+	gp := &gatewayProxy{cfg: gatewayConfig{AgentName: "callee"}, bffInternalURL: server.URL, logf: func(string, ...any) {}}
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set(runcap.HeaderName, relayedCap(t))
+	gp.fireGuardrailBlockAudit(req, blockDecision())
+
+	select {
+	case h := <-headers:
+		assert.Equal(t, "Bearer pod-token-123", h.Get("Authorization"), "the pod authenticates as itself")
+	case <-time.After(3 * time.Second):
+		t.Fatal("no audit POST was made")
+	}
+}
+
+// Without a pod token the BFF would refuse the relayed capability, so no POST is attempted.
+func TestGuardrailAudit_RelayedCapabilityWithoutPodTokenIsNotPosted(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { calls.Add(1) }))
+	t.Cleanup(server.Close)
+	t.Setenv("BFF_POD_TOKEN_PATH", "")
+
+	gp := &gatewayProxy{cfg: gatewayConfig{AgentName: "callee"}, bffInternalURL: server.URL, logf: func(string, ...any) {}}
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set(runcap.HeaderName, relayedCap(t))
+	gp.fireGuardrailBlockAudit(req, blockDecision())
+	time.Sleep(200 * time.Millisecond)
+	assert.Zero(t, calls.Load())
 }

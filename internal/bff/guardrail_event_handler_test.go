@@ -20,11 +20,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/ctxmesh/ctxmesh/internal/statelayer"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -309,4 +312,100 @@ func TestGuardrailEvent_RealPostgresRoundTrip(t *testing.T) {
 			assert.False(t, hasRawContent, "raw content must never be stored in %s; PII-safe invariant", tc.name)
 		})
 	}
+}
+
+// ── a guarded AMP callee (m184.37) ─────────────────────────────────────────────
+
+type fakePodAuth struct {
+	id  statelayer.PodIdentity
+	err error
+}
+
+func (f fakePodAuth) Identity(context.Context, string) (statelayer.PodIdentity, error) {
+	return f.id, f.err
+}
+func (f fakePodAuth) Namespace(context.Context, string) (string, error) { return f.id.Namespace, f.err }
+
+// mintRelayedCap is what an AMP callee holds: its caller's capability, bound to the caller's key.
+func mintRelayedCap(t *testing.T, signer *runcap.Signer) string {
+	t.Helper()
+	tok, err := signer.Mint(runcap.MintRequest{
+		User: "uhash-alice", Agent: "caller", Boundary: "r:team-reg", RunID: "run-amp", TTL: time.Hour,
+		KeyThumbprint: "the-callers-key",
+	})
+	require.NoError(t, err)
+	return tok
+}
+
+func postRelayedEvent(t *testing.T, s *Server, capToken, podToken string, body guardrailEventRequest) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/internal/guardrail-event", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(runcap.HeaderName, capToken)
+	if podToken != "" {
+		req.Header.Set("Authorization", "Bearer "+podToken)
+	}
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// The callee authenticates as itself; the row names the user from the capability and the agent and
+// namespace from the pod — never the body's claim.
+func TestGuardrailEvent_RelayedCapabilityWithPodIdentityWritesTheRow(t *testing.T) {
+	s, signer, store := newGuardrailEventServer(t)
+	s.podAuth = fakePodAuth{id: statelayer.PodIdentity{Namespace: "team-b", ServiceAccount: "agent-worker"}}
+	body := validGuardrailBody()
+	body.Agent = "someone-else"
+
+	rec := postRelayedEvent(t, s, mintRelayedCap(t, signer), "pod-token", body)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	page, err := store.List(context.Background(), auditlog.Query{})
+	require.NoError(t, err)
+	require.Len(t, page.Items, 1)
+	row := page.Items[0]
+	assert.Equal(t, "uhash-alice", row.Actor, "the user comes from the verified capability")
+	assert.Equal(t, "worker", row.ResourceName, "the agent comes from the authenticated pod, not the body")
+	assert.Equal(t, "team-b", row.Namespace, "the namespace comes from the authenticated pod")
+	assert.Equal(t, "worker", row.Detail["agent"])
+}
+
+// Each way the relayed path can fail leaves the edge refusing, as before.
+func TestGuardrailEvent_RelayedCapabilityIsRefusedWithoutAValidAgentPod(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		podAuth  statelayer.PodAuthenticator
+		podToken string
+	}{
+		{"no pod authenticator", nil, "pod-token"},
+		{"no pod token", fakePodAuth{id: statelayer.PodIdentity{Namespace: "team-b", ServiceAccount: "agent-worker"}}, ""},
+		{"pod token does not authenticate", fakePodAuth{err: errors.New("token review: not authenticated")}, "pod-token"},
+		{"not an agent's ServiceAccount", fakePodAuth{id: statelayer.PodIdentity{Namespace: "team-b", ServiceAccount: "default"}}, "pod-token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, signer, store := newGuardrailEventServer(t)
+			s.podAuth = tc.podAuth
+			rec := postRelayedEvent(t, s, mintRelayedCap(t, signer), tc.podToken, validGuardrailBody())
+			assert.Equal(t, http.StatusUnauthorized, rec.Code)
+			page, err := store.List(context.Background(), auditlog.Query{})
+			require.NoError(t, err)
+			assert.Empty(t, page.Items, "no row may be written")
+		})
+	}
+}
+
+// The pod path is for a BOUND capability someone else holds. An unbound one stays the posture's call:
+// with proof-of-possession required, a pod token does not rescue a bearer capability.
+func TestGuardrailEvent_PodIdentityDoesNotRescueABearerCapability(t *testing.T) {
+	s, signer, store := newGuardrailEventServer(t)
+	s.requireProofOfPossession = true
+	s.podAuth = fakePodAuth{id: statelayer.PodIdentity{Namespace: "team-b", ServiceAccount: "agent-worker"}}
+
+	rec := postRelayedEvent(t, s, mintGuardrailCap(t, signer), "pod-token", validGuardrailBody())
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	page, err := store.List(context.Background(), auditlog.Query{})
+	require.NoError(t, err)
+	assert.Empty(t, page.Items)
 }

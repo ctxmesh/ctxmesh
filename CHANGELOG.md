@@ -46,8 +46,10 @@ along with per-user quotas and per-conversation spend. **If you run your own Val
   `bff.runCapabilities.requireProofOfPossession=false`; a copied capability can then be spent.
 - **AMP callees:** an agent called over AMP can no longer spend the capability its caller relayed.
   That capability belongs to the caller's run, so spending it acted as the caller.
-- **Guarded AMP callees:** a guarded agent called over AMP logs its blocks but cannot yet write a
-  durable audit record for them.
+- **Guarded AMP callees:** a guarded agent called over AMP authenticates to the audit edge with its
+  own pod token (BFF audience), since the capability it holds is its caller's. Its durable block
+  record names the user from the capability and the agent from the pod. The BFF gains one
+  permission for this: `create` on `tokenreviews`.
 
 ## v0.1.0-beta.9 — the first install stopped working, and the gate that would have said so had never run
 

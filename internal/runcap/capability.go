@@ -207,3 +207,8 @@ type voucherClaims struct {
 	Iat  int64  `json:"iat"`
 	Exp  int64  `json:"exp"`
 }
+
+// BFFPodAudience is the audience of the projected ServiceAccount token a guarded agent's pod presents to
+// the BFF alongside a run capability it cannot prove: one relayed to it over AMP, bound to its caller's
+// key. The controller projects the token; the BFF reviews it.
+const BFFPodAudience = "ctxmesh-bff"

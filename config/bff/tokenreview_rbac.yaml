@@ -1,0 +1,37 @@
+# TokenReview for the guardrail audit edge (m184.37, ADR 0124 amendment): a guarded agent called over
+# AMP holds its caller's capability, bound to the caller's key, and proves its OWN identity with a
+# projected token for the BFF audience. TokenReview is cluster-scoped, so this is a ClusterRole, and it
+# grants exactly that one verb. Narrower than system:auth-delegator, which would also grant
+# SubjectAccessReview.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    control-plane: bff
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/managed-by: kustomize
+  name: bff-tokenreviewer
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    control-plane: bff
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/managed-by: kustomize
+  name: bff-tokenreviewer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: bff-tokenreviewer
+subjects:
+- kind: ServiceAccount
+  name: bff
+  namespace: system

@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -512,4 +514,66 @@ func TestGuardrailPolicyController_ValidatesAndHashes(t *testing.T) {
 	require.NotNil(t, badCond, "Validated condition must be set for an invalid policy")
 	assert.Equal(t, metav1.ConditionFalse, badCond.Status, "an invalid policy is Validated=False")
 	assert.Equal(t, reasonGuardrailInvalidPattern, badCond.Reason)
+}
+
+// A guarded agent carries its own identity toward the BFF (m184.37): a projected token with the BFF's
+// audience, mounted read-only into the agent container, its path in BFF_POD_TOKEN_PATH. An unguarded
+// agent has none.
+func TestReconcile_GuardedAgentGetsABFFPodToken(t *testing.T) {
+	const namespace = "default"
+	policy := newGuardrailPolicy("pod-token-policy", namespace, "ignore.*instructions")
+	require.NoError(t, k8sClient.Create(testCtx, policy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, policy) })
+
+	for _, tc := range []struct {
+		name    string
+		guarded bool
+	}{{"guarded-pod-token", true}, {"unguarded-pod-token", false}} {
+		deploy := &agentsv1alpha1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: tc.name, Namespace: namespace},
+			Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+		}
+		if tc.guarded {
+			deploy.Spec.GuardrailPolicyRef = policy.Name
+		}
+		require.NoError(t, k8sClient.Create(testCtx, deploy))
+		t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+		reconcileNN(t, newReconciler(), tc.name, namespace)
+
+		var ksvc servingv1.Service
+		require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: tc.name, Namespace: namespace}, &ksvc))
+		var vol *corev1.Volume
+		for i := range ksvc.Spec.Template.Spec.Volumes {
+			if ksvc.Spec.Template.Spec.Volumes[i].Name == bffPodTokenVolume {
+				vol = &ksvc.Spec.Template.Spec.Volumes[i]
+			}
+		}
+		user := ksvc.Spec.Template.Spec.Containers[0]
+		mounted, envSet := false, false
+		for _, m := range user.VolumeMounts {
+			if m.Name == bffPodTokenVolume {
+				mounted = true
+				assert.True(t, m.ReadOnly, "%s: the token is mounted read-only", tc.name)
+			}
+		}
+		for _, e := range user.Env {
+			if e.Name == envBFFPodTokenPath {
+				envSet = true
+				assert.Equal(t, bffPodTokenMountPath+"/token", e.Value)
+			}
+		}
+		if !tc.guarded {
+			assert.Nil(t, vol, "an unguarded agent gets no BFF pod token")
+			assert.False(t, mounted || envSet, "an unguarded agent gets no BFF pod token")
+			continue
+		}
+		require.NotNil(t, vol, "a guarded agent gets the BFF pod token volume")
+		require.NotNil(t, vol.Projected)
+		require.Len(t, vol.Projected.Sources, 1)
+		sat := vol.Projected.Sources[0].ServiceAccountToken
+		require.NotNil(t, sat)
+		assert.Equal(t, runcap.BFFPodAudience, sat.Audience, "the audience the BFF reviews")
+		assert.True(t, mounted, "the token is mounted into the agent container")
+		assert.True(t, envSet, "the launcher is told where the token is")
+	}
 }

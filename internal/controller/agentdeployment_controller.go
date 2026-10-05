@@ -55,6 +55,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/spawnbudget"
 	"github.com/ctxmesh/ctxmesh/internal/eval"
 	"github.com/ctxmesh/ctxmesh/internal/prompt"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
@@ -192,8 +193,14 @@ const (
 	// proxy audience; the launcher presents it so the proxy derives the tenant from the
 	// pod's namespace. The mount path + audience + expiry must match the launcher
 	// (defaultPodTokenPath) and the proxy (STATELAYER_POD_AUDIENCE) respectively.
-	envStatelayerProxyURL      = "STATELAYER_PROXY_URL"
-	envStatelayerTokenPath     = "STATELAYER_TOKEN_PATH"
+	envStatelayerProxyURL  = "STATELAYER_PROXY_URL"
+	envStatelayerTokenPath = "STATELAYER_TOKEN_PATH"
+	// A guarded agent's own identity toward the BFF (m184.37): a projected token with the BFF's audience,
+	// so the guardrail audit edge can authenticate the pod that enforced a block when the run capability
+	// it holds was relayed over AMP and is bound to another agent's key.
+	envBFFPodTokenPath         = "BFF_POD_TOKEN_PATH"
+	bffPodTokenVolume          = "bff-pod-token"
+	bffPodTokenMountPath       = "/var/run/secrets/ctxmesh-bff"
 	statelayerTokenVolume      = "statelayer-proxy-token"
 	statelayerTokenMountPath   = "/var/run/secrets/statelayer-proxy"
 	statelayerPodTokenFilePath = statelayerTokenMountPath + "/token"
@@ -1050,6 +1057,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	}
 	if gr.referenced {
 		env = append(env, guardrailEnv...)
+		env = append(env, corev1.EnvVar{Name: envBFFPodTokenPath, Value: bffPodTokenMountPath + "/token"})
 	}
 	// BFF_INTERNAL_URL goes to EVERY agent: its launcher binds the run capability at the BFF before the
 	// agent's code sees it (ADR 0124), and guardrail audits and delegation call the BFF too. An agent
@@ -1633,6 +1641,11 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// the prompt CM). No image change — a pod-VOLUME + config change only.
 		userMounts = append(userMounts, *guardrailMount)
 	}
+	if guardrailMount != nil {
+		userMounts = append(userMounts, corev1.VolumeMount{
+			Name: bffPodTokenVolume, MountPath: bffPodTokenMountPath, ReadOnly: true,
+		})
+	}
 	if injectPodToken {
 		// Mount the projected proxy token read-only (M53). The launcher runs in this
 		// container (baked into the agent image), so the token is co-resident with agent
@@ -1711,6 +1724,9 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// are excluded from the egress digest, so a remote-URL edit updates this ConfigMap in place
 		// WITHOUT rolling the revision — the mount is structurally constant for any tool-having agent.
 		volumes = append(volumes, *routesVol)
+	}
+	if guardrailVol != nil {
+		volumes = append(volumes, bffPodTokenVolumeSpec())
 	}
 	if injectPodToken {
 		// Projected serviceAccountToken bound to the proxy audience (M53, ADR 0050 Amд 3).
@@ -1995,6 +2011,24 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		serviceAccountName: saName,
 		resolvedSkills:     resolvedSkills,
 	}, nil
+}
+
+// bffPodTokenVolumeSpec is a guarded agent's projected token for the BFF audience: a short-lived token
+// the kubelet rotates in place, read by the launcher on each audit write.
+func bffPodTokenVolumeSpec() corev1.Volume {
+	expiry := statelayerTokenExpirySecs
+	return corev1.Volume{
+		Name: bffPodTokenVolume,
+		VolumeSource: corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{
+				Sources: []corev1.VolumeProjection{{
+					ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+						Path: "token", Audience: runcap.BFFPodAudience, ExpirationSeconds: &expiry,
+					},
+				}},
+			},
+		},
+	}
 }
 
 // hardeningFold folds the hardened-securityContext decision into the revision digest.

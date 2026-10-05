@@ -37,6 +37,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ctxmesh/ctxmesh/internal/statelayer"
+	"k8s.io/client-go/kubernetes"
+
 	"github.com/go-logr/logr"
 	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver for the durable run store
 	"k8s.io/apimachinery/pkg/runtime"
@@ -546,6 +549,14 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	onlineResolver := bff.NewDBOnlineConfigResolver(onlineStore)
 
 	bindStore := runcapBindStore(log)
+	// Pod identity for the guardrail audit edge (m184.37): TokenReview needs the BFF's
+	// system:auth-delegator binding. A clientset that cannot be built leaves that path off.
+	var podAuth statelayer.PodAuthenticator
+	if cs, csErr := kubernetes.NewForConfig(cfg); csErr == nil {
+		podAuth = statelayer.NewTokenReviewAuthenticator(cs, runcap.BFFPodAudience, time.Now)
+	} else {
+		log.Error(csErr, "no Kubernetes clientset: a guarded AMP callee's block cannot be audited")
+	}
 	requirePoP, err := requireProofOfPossession(log, os.Getenv("RUNCAP_REQUIRE_POP"), bindStore != nil)
 	if err != nil {
 		return err
@@ -579,6 +590,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		// state-layer Valkey so "already bound" is the same answer on every replica; without an addr
 		// there is no exchange edge, and capabilities stay bearer.
 		RuncapBind:   bindStore,
+		PodAuth:      podAuth,
 		ProofSpender: proofSpender(log),
 		SpawnBudgets: spawnbudget.NewPostgresStore(cpDB),
 		// The scoped kill switch (M146, ADR 0126). This is the FAIL-CLOSED half: the worker reads it
