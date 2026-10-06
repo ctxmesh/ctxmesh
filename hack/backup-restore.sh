@@ -53,7 +53,6 @@ KUBE_CONTEXT="${KUBE_CONTEXT:-}"
 kubectl() { command kubectl ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} "$@"; }
 
 NS="${NS:-ctxmesh}"
-CRED_NS="${CRED_NS:-ctxmesh}"
 VALKEY_STS="${VALKEY_STS:-statelayer}"
 
 # secret_value — one key out of a Secret, through the context-pinned kubectl above.
@@ -92,9 +91,15 @@ PG_DB="${PG_DB:-postgres}"
 
 # The KEK's name is the token-service's own configuration, because the operator chose it there.
 # Empty on the kubernetes backend, which has no KEK, and the backup below then skips it.
-KEK_SECRET="${KEK_SECRET:-$(kubectl -n "$NS" get deploy -l control-plane=token-service \
-  -o jsonpath='{.items[0].spec.template.spec.containers[?(@.name=="token-service")].env[?(@.name=="CREDENTIAL_BACKEND_POSTGRES_LOCAL_KEK_SECRET_NAME")].value}' \
-  2>/dev/null || true)}"
+token_service_env() {
+  kubectl -n "$NS" get deploy -l control-plane=token-service \
+    -o jsonpath="{.items[0].spec.template.spec.containers[?(@.name==\"token-service\")].env[?(@.name==\"$1\")].value}" \
+    2>/dev/null || true
+}
+KEK_SECRET="${KEK_SECRET:-$(token_service_env CREDENTIAL_BACKEND_POSTGRES_LOCAL_KEK_SECRET_NAME)}"
+# The token service resolves every credential Secret, the KEK included, in its credential namespace.
+CRED_NS="${CRED_NS:-$(token_service_env MCP_CREDENTIAL_NAMESPACE)}"
+CRED_NS="${CRED_NS:-$NS}"
 
 
 valkey_pod() { kubectl -n "$NS" get pod -l control-plane=statelayer -o jsonpath='{.items[0].metadata.name}'; }
@@ -106,8 +111,11 @@ backup() {
   kubectl -n "$CRED_NS" get secret -l app.kubernetes.io/part-of=ctxmesh-credentials -o yaml \
     > "$out/credential-secrets.yaml" 2>/dev/null || log "  (no kubernetes-backend credential Secrets — postgres backend?)"
   # postgres backend: the KEK is REQUIRED to ever read the encrypted grants again.
-  if kubectl -n "$NS" get secret "$KEK_SECRET" >/dev/null 2>&1; then
-    kubectl -n "$NS" get secret "$KEK_SECRET" -o yaml > "$out/credstore-kek.yaml"
+  # A named KEK that cannot be read fails the backup: one taken without it restores ciphertext
+  # nothing can decrypt.
+  if [ -n "$KEK_SECRET" ]; then
+    kubectl -n "$CRED_NS" get secret "$KEK_SECRET" -o yaml > "$out/credstore-kek.yaml" \
+      || { echo "backup: the KEK Secret $CRED_NS/$KEK_SECRET cannot be read; refusing a backup the grants cannot be restored from" >&2; exit 1; }
     log "  KEK backed up — a postgres-backend restore is UNREADABLE without it"
   fi
   log "2/3 control-plane Postgres ($PG_DB)"
