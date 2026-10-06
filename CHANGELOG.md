@@ -119,6 +119,13 @@ It previously had no `securityContext`, so restricted namespaces warned on every
 **A reachable CVE is fixed.** `GO-2026-6505` — the OpenTelemetry OTLP exporter could leak endpoint
 URLs into info logs, reachable from the launcher and the BFF. Bumped to v1.45.0.
 
+**Security: a custom provider's key was sent to OpenAI.** An agent created in the console on a
+custom (OpenAI-compatible) connection got a model route without the connection's endpoint, so its
+calls went to the provider type's default host, `api.openai.com`, carrying the key you gave the
+custom connection. Routes now keep the connection's endpoint, and a route created before this fix is
+repaired the next time an agent is created on it. **If you connected a custom provider, rotate that
+key.**
+
 **Agents created in the console never started.** The console creates a managed agent from
 `bff.managedAgentImage`, which was empty, so the BFF used its compiled-in
 `ghcr.io/ctxmesh/managed-agent:latest`, a tag no release publishes. Every such agent waited on an

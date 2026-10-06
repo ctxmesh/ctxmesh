@@ -91,6 +91,36 @@ func TestEnsureRouteForModel(t *testing.T) {
 		assert.Equal(t, 400, cerr.status)
 	})
 
+	// A custom OpenAI-compatible connection's route must keep its endpoint: without it the agent's
+	// calls, and the connection's key, went to api.openai.com.
+	t.Run("custom connection: the route keeps the connection's apiBase, and an old route is repaired", func(t *testing.T) {
+		scheme := testScheme(t)
+		connRoute := &agentsv1alpha1.ModelRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-llm", Namespace: "default", Labels: map[string]string{labelManagedBy: managedByConnect}},
+			Spec: agentsv1alpha1.ModelRouteSpec{Providers: []agentsv1alpha1.ProviderRef{{
+				Provider: "openai", Model: "m", Priority: 1, SecretBindingRef: "my-llm", APIBase: "http://llm.internal:9099/v1",
+			}}},
+		}
+		stale := &agentsv1alpha1.ModelRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-llm-old-model", Namespace: "default", Labels: map[string]string{labelManagedBy: managedByModelPicker}},
+			Spec: agentsv1alpha1.ModelRouteSpec{Providers: []agentsv1alpha1.ProviderRef{{
+				Provider: "openai", Model: "old-model", Priority: 1, SecretBindingRef: "my-llm",
+			}}},
+		}
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(connRoute, stale).Build()
+
+		name, cerr := ensureRouteForModel(ctx, c, scheme, "default", "my-llm", "mock-large")
+		require.Nil(t, cerr)
+		var mr agentsv1alpha1.ModelRoute
+		require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: "default", Name: name}, &mr))
+		assert.Equal(t, "http://llm.internal:9099/v1", mr.Spec.Providers[0].APIBase)
+
+		name, cerr = ensureRouteForModel(ctx, c, scheme, "default", "my-llm", "old-model")
+		require.Nil(t, cerr)
+		require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: "default", Name: name}, &mr))
+		assert.Equal(t, "http://llm.internal:9099/v1", mr.Spec.Providers[0].APIBase, "a route made without the endpoint is repaired")
+	})
+
 	t.Run("named connection: resolves the provider TYPE + binding from the connection route (ADR 0026)", func(t *testing.T) {
 		scheme := testScheme(t)
 		// A named connection "anthropic-prod" of provider type "anthropic", with its
