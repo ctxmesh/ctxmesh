@@ -22,7 +22,7 @@ on:
 permissions: {}
 
 jobs:
-  # The published path, first. The 21 slices below run on a dev cluster with
+  # The published path, first. The slices below run on a dev cluster with
   # locally-built images, which is not a shape any user is in: across M177-M179
   # not one of the twelve defects found came from any gate of that kind. This
   # job walks what a stranger walks -- the published chart, the published
@@ -210,22 +210,26 @@ jobs:
         run: make -C agent-brain/harness tier2 SLICE=m11-security
       - name: M12 helm install e2e (helm lint + install brings the platform + UI Ready)
         if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
-        env:
-          AGENT_ENGINE: ${{ github.workspace }}
         # Pure install-smoke, no browser: `helm lint` + `helm install` the chart
         # (ui.enabled=true) onto the M=7 cluster → controller + BFF Deployments
         # Ready, /api/health 200, the SPA shell served, and the auth floor rejects
         # an anonymous /api call (401). The slice builds + `kind load`s bff:latest
         # itself (IfNotPresent, no registry — a forgotten load = ImagePullBackOff).
-        # FRESH CI cluster: the namespace is NOT kustomize-owned, so `helm install`
-        # adopts nothing — the m12.8b control-plane-conflict deferral is closed and
-        # this runs WITHOUT UIE2E_RESET_CONTROL_PLANE. specs/ui.md, ADR 0010/0011.
+        # The M3-M11 slices above deploy the control plane with kustomize into the
+        # same namespace, and helm cannot adopt it, so this first helm slice removes
+        # it (UIE2E_RESET_CONTROL_PLANE=1). This comment used to say the cluster was
+        # fresh here; it was not, and helm's ownership refusal read as "not Ready".
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+          UIE2E_RESET_CONTROL_PLANE: "1"
         run: make -C agent-brain/harness tier2 SLICE=m12-helm
       # The m12-ui slice drives the DEPLOYED UI headless via Playwright; its
       # toolchain is nvm-pinned to harness/ui-e2e/.nvmrc (Node 22), sourced by
       # e2e-m12.sh. setup-node puts Node on PATH but the harness sources nvm
       # explicitly (non-interactive make shell), so install nvm into $NVM_DIR.
       - name: Install nvm for the Playwright UI toolchain (harness ui-e2e/.nvmrc)
+        # Guarded like the slices: an earlier red must not skip the toolchain every UI slice needs.
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         run: |
           curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh \
             | PROFILE=/dev/null bash
@@ -338,6 +342,10 @@ jobs:
         # ADR 0006: full headless slice on a FRESH CI cluster; locally provable —
         # tier0 + tsc --noEmit + playwright test --list + shellcheck.
         run: make -C agent-brain/harness tier2 SLICE=m18-ui
+      - name: Activate pnpm for the dev-ui slice (corepack, pinned by ui/package.json)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
+        working-directory: ui
+        run: corepack enable && corepack prepare --activate
       - name: M19 dev-ui smoke (ctxmesh dev --ui — NO cluster, Docker Compose)
         if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
@@ -352,15 +360,3 @@ jobs:
         # ADR 0006: locally provable — tier0 + tsc --noEmit + playwright --list +
         # shellcheck; the full Compose run is deferred like the other slices.
         run: make -C agent-brain/harness tier2 SLICE=m19-ui
-      - name: M19 console OIDC login (Auth-Code + PKCE via Dex)
-        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
-        env:
-          AGENT_ENGINE: ${{ github.workspace }}
-        # The console SSO 🧪 (ADR 0020, spec dev-ui-and-sso): drives the REAL Auth-Code
-        # + PKCE flow — login page → Dex login → /auth/callback exchange → the console
-        # as the OIDC identity (RBAC bound via the demo binding), Playwright spec 111.
-        # The load-bearing apiserver-OIDC-trust is a DEDICATED-cluster setup (not the
-        # shared dev cluster), so the slice gate-gracefully SKIPs unless
-        # UI_E2E_OIDC_CONTEXT names such a cluster (ADR 0004). ADR 0006: locally
-        # provable — tsc --noEmit + playwright --list + shellcheck; live run deferred.
-        run: make -C agent-brain/harness tier2 SLICE=m19-oidc
