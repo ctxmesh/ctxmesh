@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -425,6 +426,16 @@ func (a *httpInvokeAdapter) InvokeStream(
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxInvokeResponseBytes))
 		return data, traceID, &invokeError{status: resp.StatusCode, body: data}
+	}
+	// Accept is a preference. An agent that does not stream answers with its whole envelope, which is
+	// the result itself (the execution contract: "token by token when the agent streams"). Reading it
+	// as a stream found no `done` frame and failed every durable run of such an agent.
+	if mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); mt != "text/event-stream" {
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxInvokeResponseBytes))
+		if err != nil {
+			return nil, traceID, fmt.Errorf("invoke: read response: %w", err)
+		}
+		return data, traceID, nil
 	}
 
 	var final []byte

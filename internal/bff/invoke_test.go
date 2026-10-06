@@ -737,6 +737,40 @@ func TestHTTPInvokeStreamToleratesNilOnStep(t *testing.T) {
 	assert.Contains(t, string(final), "ok")
 }
 
+// An agent that does not stream answers the streaming request with its whole JSON envelope. That is the
+// result, as the execution contract says; the quickstart's echo agent failed every durable run before.
+func TestHTTPInvokeStreamTakesAPlainReplyAsTheResult(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "text/event-stream", r.Header.Get("Accept"))
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(`{"output":"MOCK_OK"}`))
+	}))
+	defer srv.Close()
+
+	sa := NewInvokeAdapter(InvokeAdapterConfig{HTTPClient: srv.Client()}).(StreamingInvokeAdapter)
+	var tokens []string
+	final, traceID, err := sa.InvokeStream(context.Background(), srv.URL, []byte(`{"input":"hi"}`),
+		func(text string) { tokens = append(tokens, text) }, nil)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"output":"MOCK_OK"}`, string(final))
+	assert.NotEmpty(t, traceID)
+	assert.Empty(t, tokens, "a plain reply has no token frames")
+}
+
+// A stream is still held to its contract: one that ends without a `done` frame is a failed run.
+func TestHTTPInvokeStreamWithoutDoneStillFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"token\",\"text\":\"half\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	sa := NewInvokeAdapter(InvokeAdapterConfig{HTTPClient: srv.Client()}).(StreamingInvokeAdapter)
+	_, _, err := sa.InvokeStream(context.Background(), srv.URL, []byte(`{}`), nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no result frame")
+}
+
 // TestHTTPInvokeAdapterSurfacesNon2xx proves a non-2xx agent response is returned
 // as an *invokeError (the handler maps it to a 502) with the traceId still set —
 // a failed run is never a silent success.
