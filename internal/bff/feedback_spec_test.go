@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -32,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 // recordedScore captures one CreateScore relay so the write-path tests can assert what (if anything) was
@@ -207,4 +209,33 @@ func TestFeedbackRead_NoDeclaration_NoAttribution(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	require.Len(t, body.Scores, 1)
 	assert.Empty(t, body.Scores[0].AttributedSource, "no spec.feedback ⇒ no attribution")
+}
+
+// TestSubmitFeedback_UnreadableAgent_Refused: the run's creator may submit feedback without read on the
+// agent, but then the agent's declaration is unknown, so the score is refused and never relayed. Taking
+// the unreadable declaration as "none" would turn an Enforce agent into an open relay.
+func TestSubmitFeedback_UnreadableAgent_Refused(t *testing.T) {
+	created := &[]recordedScore{}
+	funcs := ssrInterceptor("alice@example.com", nil)
+	funcs.Get = forbidAgentGet
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(agentWithFeedback(feedbackFixture(agentsv1alpha1.FeedbackEnforce))).
+		WithInterceptorFuncs(funcs).
+		Build()
+	s := NewServer(Options{
+		CallerClients: newFakeFactory(c),
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		Adapters:      Adapters{Langfuse: recordingLangfuse{created: created}},
+		Version:       "test",
+		Log:           logr.Discard(),
+	})
+	rn := run.New("run-t1", inspectorTestAgentNs, inspectorTestAgentName, nil, "", time.Now())
+	rn.TraceID = "t1"
+	rn.CallerUsername = "alice@example.com"
+	require.NoError(t, s.runStore.Create(rn))
+
+	rec := postFeedback(t, s, SubmitFeedbackRequest{TraceID: "t1", Name: "undeclared", Value: 1})
+	assert.Equal(t, http.StatusForbidden, rec.Code, "an unreadable declaration must refuse the score")
+	assert.Empty(t, *created, "a refused score must NOT be relayed")
 }

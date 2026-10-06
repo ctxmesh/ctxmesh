@@ -17,13 +17,22 @@ limitations under the License.
 package bff
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	authnv1 "k8s.io/api/authentication/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	"github.com/ctxmesh/ctxmesh/internal/run"
@@ -115,4 +124,56 @@ func TestResumeApproval_EmptyApproversIsRBACOnly(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, resumeRun(t, s, id, `{"decision":"approve"}`).Code)
 	final := pollRun(t, s, id, func(st run.Status) bool { return st.IsTerminal() })
 	assert.Equal(t, run.StatusSucceeded, final.Status)
+}
+
+// forbidAgentGet makes every AgentDeployment Get fail with Forbidden, the way a caller without read on
+// the agent sees it; every other read passes through.
+func forbidAgentGet(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*agentsv1alpha1.AgentDeployment); ok {
+		return apierrors.NewForbidden(schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "agentdeployments"},
+			key.Name, errors.New("caller cannot get agentdeployments"))
+	}
+	return c.Get(ctx, key, obj, opts...)
+}
+
+// enforceApproversWith runs the approver gate for a paused run of approverAgent's "mailer" agent, on a
+// caller client built from funcs.
+func enforceApproversWith(t *testing.T, approvers []agentsv1alpha1.Approver, funcs interceptor.Funcs) (bool, *httptest.ResponseRecorder) {
+	t.Helper()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(approverAgent(approvers)).
+		WithInterceptorFuncs(funcs).
+		Build()
+	s := newInvokeServerNoWorkers(t, newFakeFactory(c), approvalInvokeAdapter{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/r1/resume", nil)
+	rn := run.New("r1", "prod", "mailer", nil, "", time.Now())
+	return s.enforceToolPolicyApprovers(rec, req, c, rn), rec
+}
+
+// TestEnforceApprovers_UnreadableAgentRefuses: when the agent cannot be read, its approvers are
+// unknown, so the approve is refused, even for a caller who is on the list. Falling back to RBAC-only
+// would let an unlisted caller approve whenever the read fails.
+func TestEnforceApprovers_UnreadableAgentRefuses(t *testing.T) {
+	funcs := ssrInterceptor("alice@example.com", nil)
+	funcs.Get = forbidAgentGet
+	ok, rec := enforceApproversWith(t, []agentsv1alpha1.Approver{{Kind: "User", Name: "alice@example.com"}}, funcs)
+	assert.False(t, ok, "an unreadable agent must refuse the approve")
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestEnforceApprovers_IdentityReviewErrorRefuses: when the caller's identity cannot be verified, the
+// approve is refused. Identity never comes from the request, so there is nothing else to match.
+func TestEnforceApprovers_IdentityReviewErrorRefuses(t *testing.T) {
+	funcs := interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, ok := obj.(*authnv1.SelfSubjectReview); ok {
+				return apierrors.NewServiceUnavailable("selfsubjectreviews unavailable")
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	}
+	ok, rec := enforceApproversWith(t, []agentsv1alpha1.Approver{{Kind: "User", Name: "alice@example.com"}}, funcs)
+	assert.False(t, ok, "an unverifiable identity must refuse the approve")
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
