@@ -158,9 +158,10 @@ const reasonInPodToolRequireApprovalUnsupported = "InPodToolRequireApprovalUnsup
 // shape; there are no operator-authored RE2 patterns to compile), so it never fails the reconcile:
 // it simply serializes the SAME ToolPolicySpec the SDK receives (via AGENT_RUNTIME) for delivery to
 // the sidecar. Nil runtime / nil toolPolicy ⇒ not referenced (permissive, no ConfigMap). The policy
-// has one author, the agent's own spec (ADR 0152 §2), so there is nothing to merge.
+// has one author, the agent's own spec (ADR 0152 §2), so there is nothing to merge. Approvers are
+// left out of the delivered JSON (runtimeForPod): the BFF enforces them, the sidecar never reads them.
 func resolveToolPolicy(deploy *agentsv1alpha1.AgentDeployment) (resolvedToolPolicy, error) {
-	rt := deploy.Spec.Runtime
+	rt := runtimeForPod(deploy.Spec.Runtime)
 	if rt == nil || rt.ToolPolicy == nil {
 		return resolvedToolPolicy{}, nil
 	}

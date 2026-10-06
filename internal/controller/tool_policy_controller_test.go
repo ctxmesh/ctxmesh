@@ -605,7 +605,7 @@ func TestToolPolicy_InlineApproval_DeliveredToSidecar(t *testing.T) {
 	agent := mkAgentWithToolPolicy(t, "tp-inline-approval", ns, &agentsv1alpha1.ToolPolicySpec{
 		Default:   "require-approval",
 		Overrides: []agentsv1alpha1.ToolPolicyOverride{{Name: "read_docs", Rule: "allow"}},
-		Approvers: []agentsv1alpha1.Approver{{Kind: "Group", Name: "dba"}},
+		Approvers: []agentsv1alpha1.Approver{{Kind: "Group", Name: approverSentinel}},
 	})
 	mkRegistry(t, "tp-ia-reg", ns,
 		agentsv1alpha1.ToolEntry{Name: "send_email", URL: url},
@@ -624,9 +624,24 @@ func TestToolPolicy_InlineApproval_DeliveredToSidecar(t *testing.T) {
 		client.ObjectKey{Name: toolPolicyConfigMapName(agent.Name), Namespace: ns}, &cm),
 		"the <agent>-toolpolicy ConfigMap must be created")
 	p, err := egress.ParseToolPolicy(cm.Data[toolPolicyConfigMapKey])
-	require.NoError(t, err, "the delivered policy, approvers included, must parse")
+	require.NoError(t, err, "the delivered policy must parse")
 	assert.Equal(t, "require-approval", p.RuleFor("send_email"), "the inline default requires approval")
 	assert.Equal(t, "allow", p.RuleFor("read_docs"), "an inline allow override wins over the default")
+	assert.NotContains(t, cm.Data[toolPolicyConfigMapKey], approverSentinel,
+		"approvers are enforced by the BFF; the sidecar's policy carries none")
+
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: agent.Name, Namespace: ns}, &ksvc))
+	sawRuntime := false
+	for _, c := range ksvc.Spec.Template.Spec.Containers {
+		for _, e := range c.Env {
+			if e.Name == "AGENT_RUNTIME" {
+				sawRuntime = true
+			}
+			assert.NotContains(t, e.Value, approverSentinel, "container %s env %s carries an approver", c.Name, e.Name)
+		}
+	}
+	assert.True(t, sawRuntime, "AGENT_RUNTIME is injected, without approvers")
 
 	var updated agentsv1alpha1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: agent.Name, Namespace: ns}, &updated))

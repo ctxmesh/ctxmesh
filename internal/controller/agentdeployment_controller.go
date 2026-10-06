@@ -877,7 +877,14 @@ func (r *AgentDeploymentReconciler) reconcileJob(
 // JSON encoding of spec. The JSON encoder is deterministic for Go structs
 // (fields in declaration order) and all leaf types used in AgentDeploymentSpec
 // (strings, int32, resource.Quantity) serialise deterministically.
+//
+// spec.feedback and spec.runtime.toolPolicy.approvers are left out: only the BFF
+// enforces them, so editing them changes nothing that runs and must not mint a new
+// version. An agent without them hashes exactly as before.
 func specHash(spec agentsv1alpha1.AgentDeploymentSpec) (string, error) {
+	spec = *spec.DeepCopy()
+	spec.Feedback = nil
+	spec.Runtime = runtimeForPod(spec.Runtime)
 	data, err := json.Marshal(spec)
 	if err != nil {
 		return "", fmt.Errorf("marshalling spec to JSON: %w", err)
@@ -1076,16 +1083,17 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		}
 	}
 
-	// Runtime config (M65, ADR 0058): when spec.runtime is set, marshal the entire
-	// RuntimeSpec as JSON and inject it as AGENT_RUNTIME — a STATIC platform env var
-	// (NEVER valueFrom, the m5.7 Knative landmine). The SDK parses it at startup.
+	// Runtime config (M65, ADR 0058): when spec.runtime is set, marshal the RuntimeSpec
+	// without its approvers (runtimeForPod) as JSON and inject it as AGENT_RUNTIME — a
+	// STATIC platform env var (NEVER valueFrom, the m5.7 Knative landmine). The SDK parses
+	// it at startup.
 	// Injected before spec.env, which is appended last; by the platform convention a
 	// user's spec.env may override a platform default (K8s uses the last value for a
 	// duplicate name). That's harmless here — the authoritative output-schema validator
 	// reads spec.runtime from the CRD (m65.4), not this env var. When nil, inject
 	// nothing — the no-runtime path is byte-for-byte unchanged (backward-compat).
 	if deploy.Spec.Runtime != nil {
-		rtBytes, err := json.Marshal(deploy.Spec.Runtime)
+		rtBytes, err := json.Marshal(runtimeForPod(deploy.Spec.Runtime))
 		if err != nil {
 			return podTemplate{}, fmt.Errorf("marshaling spec.runtime: %w", err)
 		}
@@ -3146,7 +3154,7 @@ func runtimeDigest(rt *agentsv1alpha1.RuntimeSpec) string {
 	if rt == nil {
 		return ""
 	}
-	b, err := json.Marshal(rt)
+	b, err := json.Marshal(runtimeForPod(rt))
 	if err != nil {
 		// Marshal of a well-typed struct should never fail; treat as empty to
 		// avoid a silent break in the digest path (the injection path returns
@@ -3155,6 +3163,20 @@ func runtimeDigest(rt *agentsv1alpha1.RuntimeSpec) string {
 	}
 	h := sha256.Sum256(b)
 	return fmt.Sprintf("%x", h[:])[:8]
+}
+
+// runtimeForPod returns a copy of rt without spec.runtime.toolPolicy.approvers. Approvers are
+// enforced by the BFF alone, so they never reach the pod (AGENT_RUNTIME, the sidecar's policy
+// ConfigMap) or a digest that would roll it. Nil stays nil.
+func runtimeForPod(rt *agentsv1alpha1.RuntimeSpec) *agentsv1alpha1.RuntimeSpec {
+	if rt == nil {
+		return nil
+	}
+	out := rt.DeepCopy()
+	if out.ToolPolicy != nil {
+		out.ToolPolicy.Approvers = nil
+	}
+	return out
 }
 
 // envVarPresent reports whether name appears in the given env slice.

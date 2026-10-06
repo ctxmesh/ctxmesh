@@ -47,7 +47,8 @@ func TestResolveToolPolicy_InlineApproval(t *testing.T) {
 	assert.Equal(t, "allow", rp.ruleFor("db.read"), "an unnamed tool keeps the default")
 
 	p, err := egress.ParseToolPolicy(rp.policyJSON)
-	require.NoError(t, err, "the sidecar must parse the delivered policy, approvers included")
+	require.NoError(t, err, "the sidecar must parse the delivered policy")
+	assert.NotContains(t, rp.policyJSON, "dba", "approvers are the BFF's; the sidecar's policy carries none")
 	assert.Equal(t, "require-approval", p.RuleFor("db.delete"), "the sidecar sees the same rule as the controller")
 	assert.Equal(t, "allow", p.RuleFor("db.read"))
 }
