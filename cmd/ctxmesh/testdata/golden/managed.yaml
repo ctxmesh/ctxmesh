@@ -27,7 +27,7 @@ kind: AgentDeployment
 metadata:
   name: managed-agent
 spec:
-  image: ghcr.io/ctxmesh/managed-agent:latest
+  image: ghcr.io/ctxmesh/managed-agent:v9.9.9
   executionModel: serving
   env:
     - name: SYSTEM_PROMPT

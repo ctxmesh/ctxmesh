@@ -284,6 +284,17 @@ func buildHandler(
 		outReq := r.Clone(ctx)
 		prop.Inject(ctx, propagation.HeaderCarrier(outReq.Header))
 
+		// Bind the run capability before the agent's code sees it (ADR 0124). The exchange is single-use,
+		// so whoever binds first owns the capability — and that must never be the agent's code.
+		if !bindInboundCapability(ctx, rw, outReq, processRuncapBinder()) {
+			span.SetAttributes(
+				attribute.String("agent.name", cfg.AgentName),
+				attribute.Int("http.status_code", rw.code),
+			)
+			setAgentIdentityTag(span, cfg)
+			return
+		}
+
 		// Per-hop messageId (ADR 0035, m33.4): when this /invoke arrived via AMP, surface the
 		// envelope's messageId to the user container as X-Message-Id, so the agent's memory writes
 		// attribute to THIS hop (the :2998 endpoint stamps it, m33.1) and "who said what to whom"

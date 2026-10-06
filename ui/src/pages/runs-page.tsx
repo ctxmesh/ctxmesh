@@ -26,7 +26,8 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { api, ApiError, type RunSummary, type RunsFilteredParams } from "@/lib/api";
+import { api, ApiError, runHref, type RunSummary, type RunsFilteredParams } from "@/lib/api";
+import { useNamespace } from "@/lib/namespace";
 import { formatDateTime, formatLatency, formatRelativeTime } from "@/lib/format";
 
 // RunsPage — the global run feed, on the editorial ACTIVITY-FEED archetype
@@ -120,14 +121,22 @@ interface Row {
  * a failure — inventing an errand for either would make the column noise.
  */
 function triage(r: RunSummary): Row {
-  const to = `/traces/${encodeURIComponent(r.traceId)}`;
-  const next: NextStep =
-    r.status === "error"
-      ? // Crit is the one action hue allowed here (§2.3): the target genuinely
-        // is a failure.
-        { label: "Open the failure", tone: "crit", to }
-      : { tone: "none" };
+  const to = runHref(r);
+  let next: NextStep = { tone: "none" };
+  if (r.status === "error") {
+    // Crit is the one action hue allowed here (§2.3): the target genuinely is a failure.
+    next = { label: "Open the failure", tone: "crit", to };
+  } else if (r.status === "requires_action") {
+    // Paused for a person: an approval or a consent. It is the one other state that asks anything.
+    next = { label: "Answer the run", tone: "default", to };
+  }
   return { run: r, next };
+}
+
+// runKey identifies a run on this page: its run id when the row came from the run store (which may
+// have no trace yet), otherwise its trace id.
+function runKey(r: RunSummary): string {
+  return r.runId ?? r.traceId;
 }
 
 // ── The chip views (§5.28): one question, one answer at a time ──────────────
@@ -206,6 +215,12 @@ export function closingLine(rows: Row[], complete: boolean): string | null {
 function StateTag({ status }: { status?: string }) {
   if (status === "ok") return <Badge variant="ok">OK</Badge>;
   if (status === "error") return <Badge variant="crit">Error</Badge>;
+  // A run read from the run store (ADR 0150) can still be in motion or held for a person.
+  if (status === "requires_action") return <Badge variant="hold">Held</Badge>;
+  if (status === "queued" || status === "running" || status === "waiting")
+    return <Badge variant="progressing">{status === "waiting" ? "Waiting" : status === "queued" ? "Queued" : "Running"}</Badge>;
+  if (status === "cancelled" || status === "expired")
+    return <Badge variant="muted">{status === "cancelled" ? "Cancelled" : "Expired"}</Badge>;
   return <UnknownValue title={OUTCOME_UNKNOWN_TITLE} />;
 }
 
@@ -357,6 +372,9 @@ const LEDE =
 
 export function RunsPage() {
   const navigate = useNavigate();
+  // The shell's namespace scope: a namespace-bound caller may not list agents cluster-wide, so the
+  // unscoped list would be a 403 for them ("" = every namespace the caller can see).
+  const { namespace } = useNamespace();
 
   // Server-side filter state
   const [agentFilter, setAgentFilter] = useState("");
@@ -400,6 +418,7 @@ export function RunsPage() {
       ...(fromRfc ? { from: fromRfc } : {}),
       ...(toRfc ? { to: toRfc } : {}),
       ...(query ? { q: query } : {}),
+      ...(namespace ? { namespace } : {}),
     };
 
     api
@@ -432,7 +451,7 @@ export function RunsPage() {
           forbidden: err instanceof ApiError && err.isForbidden,
         });
       });
-  }, [cursor, agentFilter, fromFilter, toFilter, query]);
+  }, [cursor, agentFilter, fromFilter, toFilter, query, namespace]);
 
   useEffect(() => {
     load();
@@ -441,6 +460,14 @@ export function RunsPage() {
 
   // Reset to page 0 whenever any server-side filter changes or q changes.
   const resetPaging = useCallback(() => setPageStack([""]), []);
+  // A cursor belongs to the scope it was issued under; a new namespace starts again at page 0.
+  const prevNamespace = useRef(namespace);
+  useEffect(() => {
+    if (prevNamespace.current !== namespace) {
+      prevNamespace.current = namespace;
+      resetPaging();
+    }
+  }, [namespace, resetPaging]);
 
   function onAgentChange(v: string) {
     setAgentFilter(v);
@@ -491,7 +518,7 @@ export function RunsPage() {
       (a, b) =>
         b.run.timestamp.localeCompare(a.run.timestamp) ||
         nextStepRank(a.next.tone) - nextStepRank(b.next.tone) ||
-        a.run.traceId.localeCompare(b.run.traceId),
+        runKey(a.run).localeCompare(runKey(b.run)),
     );
     return rows;
   }, [runs]);
@@ -574,7 +601,7 @@ export function RunsPage() {
               // doesn't also trigger the row-click's navigate-to-trace.
               <Link
                 to={`/agents/${encodeURIComponent(r.agentNs)}/${encodeURIComponent(r.agentName)}`}
-                data-testid={`run-agent-link-${r.traceId}`}
+                data-testid={`run-agent-link-${runKey(r)}`}
                 onClick={(e) => e.stopPropagation()}
                 className="border-b border-accent text-primary hover:border-primary"
               >
@@ -609,15 +636,15 @@ export function RunsPage() {
                     that share a prefix (§4.5). */}
                 <div
                   className="truncate font-mono text-xs text-faint"
-                  title={r.traceId}
+                  title={runKey(r)}
                 >
-                  {truncateId(r.traceId)}
+                  {truncateId(runKey(r))}
                 </div>
               </>
             ) : (
               // The run's name was only the agent identity, which the Agent
               // column already renders — so the id IS the row's subject here.
-              <CellId id={r.traceId} className="text-sm" />
+              <CellId id={runKey(r)} className="text-sm" />
             )}
             {/* §4.4: below 768 the State column folds into the What line as a
                 tag. Exactly one of the two copies is ever displayed, so the
@@ -671,9 +698,9 @@ export function RunsPage() {
           to={row.next.to}
           tone={row.next.tone}
           ariaLabel={
-            row.next.label ? `${row.next.label} — run ${truncateId(row.run.traceId)}` : undefined
+            row.next.label ? `${row.next.label} — run ${truncateId(runKey(row.run))}` : undefined
           }
-          testId={`next-step-${row.run.traceId}`}
+          testId={`next-step-${runKey(row.run)}`}
         />
       ),
     },
@@ -797,7 +824,7 @@ export function RunsPage() {
       <DataTable<Row>
         columns={columns}
         rows={visible}
-        rowKey={(row) => row.run.traceId}
+        rowKey={(row) => runKey(row.run)}
         loading={loadState.kind === "loading"}
         error={error}
         query={query}
@@ -809,9 +836,9 @@ export function RunsPage() {
         onNext={onNext}
         rangeLabel={`Page ${pageNumber}`}
         ariaLabel="Runs"
-        // Row-click → the native trace page (m16.7): the run's full timeline,
-        // where every column this table drops at a narrow width still renders.
-        onRowClick={(row) => navigate(`/traces/${encodeURIComponent(row.run.traceId)}`)}
+        // Row-click → the run's own page: the trace page (m16.7) for a traced run, the run detail for a
+        // run-store row (ADR 0150). Either renders every column this table drops at a narrow width.
+        onRowClick={(row) => navigate(runHref(row.run))}
         empty={empty}
       />
 

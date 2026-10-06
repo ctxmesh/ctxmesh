@@ -122,7 +122,7 @@ func (s *Server) handleHandoffRun(w http.ResponseWriter, r *http.Request) {
 	// proof-of-possession for this request (M142.5, ADR 0124) — so a copied token is not authority.
 	capab, capErr := s.verifyRuncapWithProof(r)
 	if capErr != nil {
-		writeError(w, http.StatusUnauthorized, capErr.Error())
+		writeRuncapError(w, capErr)
 		return
 	}
 

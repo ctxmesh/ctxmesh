@@ -3,7 +3,8 @@ doc = yaml.safe_load(open(sys.argv[1])) or {}
 bad = []
 for key in ("controllerManager.injectedImages.collector",
             "controllerManager.injectedImages.discovery",
-            "controllerManager.oboEgress.sidecarImage"):
+            "controllerManager.oboEgress.sidecarImage",
+            "bff.managedAgentImage"):
     cur = doc
     for seg in key.split("."):
         cur = cur.get(seg) if isinstance(cur, dict) else None

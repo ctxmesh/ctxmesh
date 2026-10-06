@@ -22,6 +22,7 @@ package gateway
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"slices"
@@ -84,9 +85,34 @@ func SanitizeName(name string) string {
 	return nonAlphanumRe.ReplaceAllString(strings.ToUpper(name), "_")
 }
 
-// EnvVarName returns the full env var name for a SecretBinding: SB_<sanitized>.
-func EnvVarName(bindingName string) string {
-	return envVarPrefix + SanitizeName(bindingName)
+// EnvVarName returns the gateway env var that carries a SecretBinding's credential:
+// SB_<sanitized binding>_<hash of namespace/binding>. The gateway serves every namespace from one
+// Deployment, so a name derived from the binding alone let two tenants' "openai" bindings share
+// one variable — and one tenant's route carry the other's key.
+func EnvVarName(namespace, bindingName string) string {
+	return envVarPrefix + SanitizeName(bindingName) + "_" + strings.ToUpper(qualifiedHash(namespace, bindingName))
+}
+
+// mirrorSecretPrefix starts the name of every provider Secret mirrored into the gateway namespace.
+const mirrorSecretPrefix = "ctxmesh-sb-"
+
+// MirrorSecretName is the gateway-namespace Secret that holds namespace's Secret name. A Secret in
+// the gateway namespace is used where it is. Any other is mirrored under a name derived from its
+// namespace and name together: mirroring under the bare name let a tenant name a Secret after a
+// platform Secret and have its route resolve to the platform's value, or collide with another
+// tenant's mirror.
+func MirrorSecretName(namespace, name string) string {
+	if namespace == GatewayNamespace {
+		return name
+	}
+	return mirrorSecretPrefix + qualifiedHash(namespace, name)
+}
+
+// qualifiedHash is 12 hex characters of sha256("namespace/name"): distinct for every pair in
+// practice, and short enough for an env var or a Secret name.
+func qualifiedHash(namespace, name string) string {
+	sum := sha256.Sum256([]byte(namespace + "/" + name))
+	return hex.EncodeToString(sum[:6])
 }
 
 // Result holds the outputs of a Render call.
@@ -144,7 +170,8 @@ type modelEntry struct {
 //   - a provider with apiBase set renders api_base: <url> + mockDummyAPIKey and
 //     proxies to that OpenAI-compatible upstream (e.g. the tool-call mock); no
 //     SecretBinding required (keyless upstream).
-//   - non-mock renders api_key: os.environ/SB_<sanitized-binding-name>.
+//   - non-mock renders api_key: os.environ/<EnvVarName(namespace, binding)>, read from the
+//     Secret's gateway-namespace copy (MirrorSecretName).
 //   - rateLimit.tenantRPM → rpm on every provider entry for that route. NOTE (M47, ADR 0046): despite the
 //     field name this is a per-ROUTE, GLOBAL rpm cap (LiteLLM router-level, shared by ALL callers), NOT a
 //     per-tenant limit — it guards the provider org limit. True per-tenant model rate/budget is enforced
@@ -157,9 +184,18 @@ type modelEntry struct {
 // W3C context. The zero value (empty Endpoint) disables it — e.g. in CI without
 // Langfuse, keeping the gateway config clean (M2 behavior).
 type OTelConfig struct {
-	Endpoint   string // OTLP endpoint (Langfuse /api/public/otel)
-	AuthHeader string // e.g. "Basic <base64(public:secret)>"
+	Endpoint string // OTLP endpoint (Langfuse /api/public/otel) -- not a secret
+	// HeadersSecret names a Secret in the gateway namespace whose OTelHeadersKey holds
+	// "Authorization=Basic ...". The gateway reads it by secretKeyRef: the credential never
+	// appears in the Deployment spec, which anyone with `get deployments` can read.
+	HeadersSecret string
+	// HeadersSecretRV is that Secret's resourceVersion. Env is read at container start, so it is
+	// hashed into the gateway's rollout hash: a credential rotation must roll the pod.
+	HeadersSecretRV string
 }
+
+// OTelHeadersKey is the key in OTelConfig.HeadersSecret that holds the OTEL_HEADERS value.
+const OTelHeadersKey = "headers"
 
 // OTelEnvPrefix is the env-var prefix for the gateway's OTel exporter settings.
 // syncGatewayDeployment strips these (like SB_*) before re-adding, so the render
@@ -222,10 +258,11 @@ func Render(
 			if p.Provider == mockProvider {
 				continue
 			}
-			// An apiBase provider targets a keyless OpenAI-compatible upstream
-			// (e.g. the tool-call mock); it needs no SecretBinding, so it can
-			// never be excluded for a missing key.
-			if p.APIBase != "" {
+			// An apiBase provider WITHOUT a binding targets a keyless OpenAI-compatible
+			// upstream (e.g. the tool-call mock), so it can never be excluded for a missing
+			// key. One WITH a binding sends that key to the apiBase, so it resolves like any
+			// other bound provider.
+			if p.APIBase != "" && p.SecretBindingRef == "" {
 				continue
 			}
 			if p.SecretBindingRef == "" {
@@ -302,7 +339,7 @@ func Render(
 				e.apiBase = p.APIBase
 				bindingKey := r.Namespace + "/" + p.SecretBindingRef
 				sb := bindings[bindingKey]
-				evName := EnvVarName(p.SecretBindingRef)
+				evName := EnvVarName(r.Namespace, p.SecretBindingRef)
 
 				if _, seen := evSet[evName]; !seen {
 					evSet[evName] = corev1.EnvVar{
@@ -310,7 +347,7 @@ func Render(
 						ValueFrom: &corev1.EnvVarSource{
 							SecretKeyRef: &corev1.SecretKeySelector{
 								LocalObjectReference: corev1.LocalObjectReference{
-									Name: sb.Spec.SecretRef.Name,
+									Name: MirrorSecretName(r.Namespace, sb.Spec.SecretRef.Name),
 								},
 								Key: sb.Spec.SecretRef.Key,
 							},
@@ -354,12 +391,20 @@ func Render(
 		envVars[i] = evSet[k]
 	}
 
-	// LiteLLM's otel exporter reads these; only set when tracing is enabled.
+	// LiteLLM's otel exporter reads these; only set when tracing is enabled. The header reference is
+	// optional so a missing Secret costs the gateway its traces, not its ability to start.
 	if otel.Endpoint != "" {
+		optional := true
 		envVars = append(envVars,
 			corev1.EnvVar{Name: "OTEL_EXPORTER", Value: "otlp_http"},
 			corev1.EnvVar{Name: "OTEL_ENDPOINT", Value: otel.Endpoint},
-			corev1.EnvVar{Name: "OTEL_HEADERS", Value: "Authorization=" + otel.AuthHeader},
+			corev1.EnvVar{Name: "OTEL_HEADERS", ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: otel.HeadersSecret},
+					Key:                  OTelHeadersKey,
+					Optional:             &optional,
+				},
+			}},
 		)
 	}
 
@@ -380,6 +425,10 @@ func Render(
 		hashInput.WriteString(k)
 		hashInput.WriteString("=")
 		hashInput.WriteString(secretRVs[k])
+	}
+	if otel.HeadersSecretRV != "" {
+		hashInput.WriteString("\notel-headers=")
+		hashInput.WriteString(otel.HeadersSecretRV)
 	}
 	sum := sha256.Sum256([]byte(hashInput.String()))
 	hash := fmt.Sprintf("%x", sum[:])

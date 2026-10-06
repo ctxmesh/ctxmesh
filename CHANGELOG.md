@@ -1,5 +1,188 @@
 # Changelog
 
+## Unreleased
+
+**Security: the Langfuse key was readable in every agent's pod spec.** The trace collector carried
+it as a literal environment value, so anyone who could `kubectl get pods` in an agent namespace
+could read it. And an agent whose namespace had no `langfuse-otlp` Secret was given the *platform*
+namespace's key. Every Langfuse credential is now a Secret reference: on the collector, the
+gateway and the feedback hook. Only the agent's own namespace counts.
+
+**If you configured a `langfuse-otlp` Secret, rotate that Langfuse key.** Knative keeps old
+revisions, and those still hold the key as a literal.
+
+**Security: a model route could resolve to a Secret outside its namespace.** The gateway copied
+each provider Secret into its own namespace under the Secret's bare name. Anyone allowed to create
+ModelRoutes and SecretBindings, which includes the `developer` role, could name a Secret after a
+platform Secret, set the route's `apiBase` to a host they control, and receive the platform
+Secret's value as the API key. Two namespaces with a binding of the same name also shared one
+credential. Copies and their environment variables are now named per namespace. A route whose
+copy cannot be written is not served. A route with both `apiBase` and a binding is checked like
+any other bound route. Every bound route's gateway variable is renamed, so the gateway rolls once.
+
+**Behaviour change:** an agent exports traces only if its own namespace holds a complete
+`langfuse-otlp` Secret, with keys `otlp-endpoint`, `public-key` and `secret-key`. The new
+`TraceExport` condition on each AgentDeployment says whether it is exporting and, if not, why.
+Every agent rolls one new revision on upgrade, so an agent behind an approval gate waits for
+promotion.
+
+**Security: a copied run capability can no longer be spent.** The platform's proof-of-possession
+design had never taken effect: nothing bound capabilities, and the BFF accepted bearer tokens. Now
+each agent's launcher binds the capability to a key that exists only in its memory, before the
+agent's code receives it. It then proves possession on every call to spawn, handoff, discover,
+async publish and guardrail events. Every agent now gets `BFF_INTERNAL_URL`, and a Tenant's network
+policy allows it.
+
+**Fixed: every agent run was cut off at five minutes.** Knative's default request timeout is 300
+seconds, and the platform never set one, while a run may take 600. A run that sends nothing until
+it is done also hit Knative's separate time-to-first-byte limit at the same 300 seconds. Every
+agent's revision now carries both, from the new `spec.scaling.timeoutSeconds` (default 600; above
+600 requires raising Knative's `max-revision-timeout-seconds`). Existing agents roll one new revision.
+
+**New: `spec.scaling.concurrency` bounds how many runs one replica handles at once.** Unset, it stays
+unlimited, as before. When it is bounded, `spec.scaling.targetBurstCapacity` defaults to -1, keeping
+Knative's activator in the path to queue runs that find every slot taken. Measured: with concurrency
+1 and the activator out of the path, half of a burst was dropped; with it in, none was.
+
+**Fixed: the bundled state layer refused six of the platform's key spaces.** Its ACL admitted
+neither run-capability binding nor the proof replay set. So binding failed, and so did the
+platform's fast paths for run cancel and the kill switch (cancel still worked; it was just slower),
+along with per-user quotas and per-conversation spend. **If you run your own Valkey with an ACL**
+(`statelayer.externalAddr`), it must admit `~mem:* ~tenant:* ~a2a:seen:* ~spawn:* ~agent:* ~runcap:*
+~run:* ~ns:* ~fleet:* ~user:* ~conv:*`.
+
+**Fixed: a stock install's console could not list a single run.** The console's Runs list read only
+from a trace backend (Langfuse), which the chart does not bundle, so on a stock install the list, and
+each agent's Runs tab, answered "unavailable". Every install already records runs made through
+`POST /api/runs` in its Postgres run store. Without a trace backend, both lists now read from it,
+scoped to the agents the caller can see. Cost and tokens still come from a trace backend, so they read
+"—" there, never 0. Each row opens the run itself. The Runs page now sends the selected namespace, so
+a user whose role is bound to one namespace can list it.
+
+**Fixed: model calls were refused while the gateway restarted.** Every ModelRoute change restarts the
+model gateway, and the old pod stopped listening while Kubernetes was still routing to it. Calls in
+that second failed with "connection refused"; measured, three or four per restart. A first run made a
+minute after creating a ModelRoute, as the quickstart does, failed this way. The gateway now keeps
+serving for ten seconds after it is told to stop; measured afterwards, four of five restarts dropped
+nothing.
+
+**Behaviour change: a ModelRoute is Ready only once the gateway serves it.** `Ready` used to mean the
+route had been written into the gateway's config file. The gateway then took up to a minute to restart
+with it, and a call in that window failed with LiteLLM's "Invalid model name", so waiting for `Ready`
+did not make a first call safe. `Ready` now turns True (reason `Served`) once the gateway has finished
+rolling out the config that holds the route. Until then it is False, with reason `GatewayRolling`, or
+`GatewayAbsent` when the gateway Deployment does not exist. Scripts that wait on a route's `Ready`
+with a short timeout may need a longer one.
+
+**New: an agent says whether its model route can be called.** An agent that names a route in
+`MODEL_ROUTE` carries a `ModelRouteReady` condition mirroring that route's `Ready`. A route the gateway
+has never served reports `NotYetServed`; an edited route that the gateway still serves in its previous
+version reports `GatewayRolling`. The agent's own `Ready` does not change. The console's chat holds
+Send while the route is `NotYetServed`, `GatewayAbsent` or `SecretUnresolved`, and says why. Before,
+an agent created in the console answered its first message with "Invalid model name" if the gateway
+had not finished loading the new route.
+
+**Fixed: `ctxmesh expand` gave managed agents an image that does not exist.** A managed agent with no
+image of its own got `ghcr.io/ctxmesh/managed-agent:latest`, a tag no release publishes, so
+`ctxmesh expand agent.yaml | kubectl apply -f -` produced an agent that never started. `make
+build-cli` now pins the newest release tag; `MANAGED_AGENT_IMAGE` still overrides; and with neither,
+`expand` refuses and says what to set.
+
+**Fixed: durable runs of an agent that does not stream always failed.** The run worker asks agents
+for an event stream and read any reply as one. An agent that answered with plain JSON, as the
+quickstart's echo agent does, produced "stream ended with no result frame" on every run, from the
+console chat and from `POST /api/runs`. A plain reply is now taken as the result, as the execution
+contract already said.
+
+**Breaking:** with a state layer present (the default), the BFF refuses unbound capabilities.
+- **Older agents:** an agent built on an older base image has a launcher that cannot bind, so those
+  calls fail until it is rebuilt. To run older agents meanwhile, set
+  `bff.runCapabilities.requireProofOfPossession=false`; a copied capability can then be spent.
+- **AMP callees:** an agent called over AMP can no longer spend the capability its caller relayed.
+  That capability belongs to the caller's run, so spending it acted as the caller.
+- **Guarded AMP callees:** a guarded agent called over AMP authenticates to the audit edge with its
+  own pod token (BFF audience), since the capability it holds is its caller's. Its durable block
+  record names the user from the capability and the agent from the pod. The BFF gains one
+  permission for this: `create` on `tokenreviews`.
+
+**Breaking: three resource kinds are retired, and their settings move onto what they configured.**
+The API now serves 14 kinds instead of 18 (ADR 0152). Move any objects before you upgrade:
+
+- **`FeedbackStore` → the agent's `spec.feedback`.** Copy the store's `spec` (`mode`, `human`,
+  `external`) into the agent that named it in `spec.feedbackStoreRef`, and delete that field. The
+  API server now rejects a declaration with no source, or with a score name used twice.
+- **`ApprovalPolicy` → the agent's `spec.runtime.toolPolicy`.** `rules[].allTools` becomes
+  `default: require-approval`, `rules[].tools` becomes `overrides` entries with
+  `rule: require-approval`, and `approvers` moves to `toolPolicy.approvers` (empty still means
+  anyone with resume permission). Delete `spec.approvalPolicyRef`. One meaning changes: an explicit
+  `allow` override now wins over `default: require-approval`, because there is no second policy to
+  merge with.
+- **`CredentialStore` and `ClusterCredentialStore` → Helm values `tokenService.credentialBackend`.**
+  Set `type` to `kubernetes`, `postgres` or `remote`, and move the store's `spec.provider.<type>`
+  block under the matching key unchanged. The never-implemented `openbao` provider is gone, and so
+  is the per-namespace override. If you created a `ClusterCredentialStore` named `default`, the
+  token-service used it, and you must set these values to keep that backend; otherwise it runs on
+  `kubernetes` and your users reconnect their accounts. The documented `cluster-default` name was
+  never read, so those installs were already on `kubernetes`. A missing or malformed value stops
+  the token-service at startup with an error naming the setting. Its ClusterRole is removed.
+
+Helm does not delete CRDs. After moving any objects, delete the retired ones:
+
+```sh
+kubectl delete crd approvalpolicies.agents.ctxmesh.ai feedbackstores.agents.ctxmesh.ai \
+  credentialstores.agents.ctxmesh.ai clustercredentialstores.agents.ctxmesh.ai
+```
+
+**`AgentTeam` and `Workflow` are frozen.** Both stay, but neither gains a field until the install
+path is green (ADR 0152). CI fails on any change to their generated CRDs unless
+`hack/crd-freeze.sum` is updated on purpose.
+
+## v0.1.0-beta.9 — the first install stopped working, and the gate that would have said so had never run
+
+**Every new install of `v0.1.0-beta.8` fails.** The bundled dev object store is MinIO, and MinIO
+closed anonymous access to their container images. `devDataPlane.enabled` defaults to `true`, so a
+stock `helm install` renders it, the image cannot be pulled, and the install dies:
+
+```
+INSTALLATION FAILED: Deployment/ctxmesh/ctxmesh-objectstore not ready
+quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493… → unauthorized
+```
+
+Nothing we shipped caused it; the identical chart was green days earlier. Verified rather than
+assumed before concluding: quay.io by digest, by tag, three older releases and `:latest`, plus
+Docker Hub — every one denied.
+
+**This is the second occurrence.** Docker Hub closed first, which is why the image had already
+moved to quay.io. Chasing a third registry would be the same bet a third time, so the bundled
+store is now **SeaweedFS** (Apache-2.0, multi-arch, pinned by digest). S3 stays on port 9000, so
+the Service, the NetworkPolicy and every `OBJECT_STORE_ADDR` are unchanged — and **the client did
+not change at all**: `minio-go` is a Go module, immune to a container-registry lockdown. If you run
+with `devDataPlane.enabled=false` and your own S3, nothing here affects you.
+
+The object store also now runs non-root (uid 10001, capabilities dropped, seccomp `RuntimeDefault`).
+It previously had no `securityContext`, so restricted namespaces warned on every apply.
+
+**A reachable CVE is fixed.** `GO-2026-6505` — the OpenTelemetry OTLP exporter could leak endpoint
+URLs into info logs, reachable from the launcher and the BFF. Bumped to v1.45.0.
+
+**Security: a custom provider's key was sent to OpenAI.** An agent created in the console on a
+custom (OpenAI-compatible) connection got a model route without the connection's endpoint, so its
+calls went to the provider type's default host, `api.openai.com`, carrying the key you gave the
+custom connection. Routes now keep the connection's endpoint, and a route created before this fix is
+repaired the next time an agent is created on it. **If you connected a custom provider, rotate that
+key.**
+
+**Agents created in the console never started.** The console creates a managed agent from
+`bff.managedAgentImage`, which was empty, so the BFF used its compiled-in
+`ghcr.io/ctxmesh/managed-agent:latest`, a tag no release publishes. Every such agent waited on an
+image that does not exist. The chart now pins it to the release's own version, like the images it
+injects, and `release-truth` checks the value.
+
+**Why it took eight days to notice.** The nightly job that walks a stranger's path — cold cluster,
+published artifacts, public docs — had failed 30 nights running, every run dying in a preflight
+step before it ever reached the install. Its own header declared it "expected red", so nobody read
+it. Both are fixed: the job now runs, and there is no expected-red state.
+
 ## v0.1.0-beta.8 — the controller stopped reconciling, and nothing said so
 
 A one-line RBAC fix, cut as its own release because the version it replaces is known-broken.

@@ -26,7 +26,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/credprovider"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
@@ -45,7 +44,7 @@ const (
 // mTLS material from the referenced Secrets in the credential namespace. mTLS is REQUIRED
 // for a remote backend — a missing/invalid Secret fails closed (no backend is built),
 // never a plaintext dial to a credential provider.
-func buildRemoteBackend(ctx context.Context, spec *agentsv1alpha1.CredentialProviderRemote, deps Deps) (credresolve.CredentialResolver, error) {
+func buildRemoteBackend(ctx context.Context, spec *RemoteProvider, deps Deps) (credresolve.CredentialResolver, error) {
 	if spec.MTLS == nil {
 		return nil, fmt.Errorf("credstore: remote backend %q requires mtls (a remote credential provider must be mutually authenticated)", spec.Endpoint)
 	}
@@ -58,7 +57,7 @@ func buildRemoteBackend(ctx context.Context, spec *agentsv1alpha1.CredentialProv
 
 // remoteHTTPClient builds an mTLS http.Client for the provider at endpoint from the CA +
 // client-TLS Secrets in credNS.
-func remoteHTTPClient(ctx context.Context, endpoint string, mtls *agentsv1alpha1.MTLSClientConfig, reader client.Reader, credNS string) (*http.Client, error) {
+func remoteHTTPClient(ctx context.Context, endpoint string, mtls *MTLSClientConfig, reader client.Reader, credNS string) (*http.Client, error) {
 	caPEM, err := secretValue(ctx, reader, credNS, mtls.CASecretRef.Name, mtls.CASecretRef.Key)
 	if err != nil {
 		return nil, fmt.Errorf("credstore: load remote CA: %w", err)

@@ -99,9 +99,9 @@ describe("FeedbackPanel (m16.9)", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("Couldn't load feedback scores");
   });
 
-  it("attributes scores to their FeedbackStore source (M139, ADR 0112)", async () => {
-    // The read path (m139.4) tags each score with attributedSource via the agent's
-    // FeedbackStore: human / external:<channel> / unattributed. The panel surfaces it
+  it("attributes scores to their declared feedback source (ADR 0152)", async () => {
+    // The read path tags each score with attributedSource via the agent's
+    // spec.feedback: human / external:<channel> / unattributed. The panel surfaces it
     // as a friendly badge, with an explicit "Unattributed" for an undeclared name.
     stubFeedback({
       scores: [
@@ -120,7 +120,7 @@ describe("FeedbackPanel (m16.9)", () => {
     expect(screen.getByTestId("feedback-attribution-u1")).toHaveTextContent("Unattributed");
   });
 
-  it("shows no attribution badge when the agent binds no FeedbackStore", async () => {
+  it("shows no attribution badge when the agent declares no spec.feedback", async () => {
     // attributedSource absent ⇒ the panel falls back to the raw Langfuse source (unchanged).
     stubFeedback({
       scores: [{ id: "s1", name: "quality", value: 0.9, source: "API" }],

@@ -334,9 +334,14 @@ export interface AgentRunSummary {
   traceId: string;
   name: string;
   timestamp: string;
-  costUSD: number;
-  tokens: number;
-  latencyMs: number;
+  // Cost and tokens come from a trace backend; without one (a stock install, where the list is read from
+  // the run store, ADR 0150) they are absent, never 0. latencyMs is absent until the run finishes.
+  costUSD?: number;
+  tokens?: number;
+  latencyMs?: number;
+  // The run's id when the row came from the run store: link to /runs/{runId}, not the trace page.
+  runId?: string;
+  status?: string;
 }
 
 export interface AgentRunListResponse {
@@ -505,10 +510,10 @@ export interface FeedbackScore {
   stringValue?: string;
   comment?: string;
   source?: string;
-  // attributedSource is the feedback source declared by the agent's FeedbackStore
-  // (M139, ADR 0112): "human", "external:<channel>", or "unattributed". Absent when
-  // the agent binds no FeedbackStore. Distinct from `source` (the raw Langfuse origin,
-  // always "API" for platform-written scores) — this is the CRD-driven attribution.
+  // attributedSource is the feedback source the agent's spec.feedback declares
+  // (ADR 0152): "human", "external:<channel>", or "unattributed". Absent when the
+  // agent declares no spec.feedback. Distinct from `source` (the raw Langfuse origin,
+  // always "API" for platform-written scores) — this is the declaration-driven attribution.
   attributedSource?: string;
 }
 
@@ -721,9 +726,13 @@ export interface RunSummary {
   traceId: string;
   name: string;
   timestamp: string;
-  costUSD: number;
-  tokens: number;
-  latencyMs: number;
+  // Absent, never 0, when the list is read from the run store (no trace backend, ADR 0150): cost and
+  // tokens come from traces, and latencyMs exists only once the run has finished.
+  costUSD?: number;
+  tokens?: number;
+  latencyMs?: number;
+  // The run's id when the row came from the run store; such a row links to /runs/{runId}.
+  runId?: string;
   // The run's originating agent (m54.2), parsed from the trace's agent:<ns>/<name>
   // tag — lets the runs list link each row straight to the agent. Absent for an
   // ambient/untagged trace.
@@ -770,6 +779,15 @@ export interface RunsFilteredParams {
   // API cannot carry. Off (undefined) → the cheap, unenriched list. The Runs browser sets it; the
   // dashboard's recent-runs peek does not (it only needs cost/latency).
   enrich?: boolean;
+  // namespace scopes the global list to one namespace — what a namespace-bound caller needs, since the
+  // unscoped list requires cluster-wide RBAC. "" / absent = every namespace the caller can see.
+  namespace?: string;
+}
+
+// runHref is where a Runs-list row opens: the run itself when the row came from the run store (it has a
+// runId), otherwise the trace page.
+export function runHref(r: { runId?: string; traceId: string }): string {
+  return r.runId ? `/runs/${encodeURIComponent(r.runId)}` : `/traces/${encodeURIComponent(r.traceId)}`;
 }
 
 // --- Trace link (GET /api/traces/{id}) --------------------------------------
@@ -3214,6 +3232,7 @@ export const api = {
     if (params.limit && params.limit > 0) qs.set("limit", String(params.limit));
     if (params.cursor) qs.set("cursor", params.cursor);
     if (params.enrich) qs.set("enrich", "1");
+    if (params.namespace) qs.set("namespace", params.namespace);
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
     const res = await apiFetch(`/api/runs${suffix}`, {
       headers: { Accept: "application/json" },

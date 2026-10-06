@@ -61,6 +61,9 @@ type Capability struct {
 	// proof-of-possession signed by that key, so a copied token alone authorizes nothing. Empty ⇒ a
 	// legacy bearer capability.
 	KeyThumbprint string
+	// ID is the JWT `jti`, unique per minted token. A run is re-minted on every claim and resume, so a
+	// binding must be single-use per token, not per run. Empty on a token minted before ids existed.
+	ID string
 	// IssuedAt / ExpiresAt bound the validity window (JWT `iat` / `exp`). TTL is short —
 	// approximately the run timeout — so a leaked capability expires quickly.
 	IssuedAt  time.Time
@@ -93,6 +96,10 @@ var (
 	ErrProofWrongRequest    = errors.New("runcap: proof is for a different method or URI")
 	ErrProofExpired         = errors.New("runcap: proof expired")
 	ErrProofReplayed        = errors.New("runcap: proof already used")
+	// ErrProofUnchecked — the shared replay set could not be reached, so the proof could be neither
+	// accepted nor refused on its merits. The edge still refuses (fails closed), but says the platform is
+	// unavailable rather than that the caller's proof was bad.
+	ErrProofUnchecked = errors.New("runcap: the proof replay set is unavailable")
 	// ErrWrongAudience — the capability was minted for a different audience.
 	ErrWrongAudience = errors.New("runcap: capability audience mismatch")
 	// ErrIncomplete — a required claim (sub / run) is empty.
@@ -134,6 +141,7 @@ type jwtClaims struct {
 	Run string    `json:"run"`           // custom: the run id
 	Bnd string    `json:"bnd,omitempty"` // custom: the trust boundary (ADR 0033); "" = unscoped
 	Cnf *cnfClaim `json:"cnf,omitempty"` // RFC 7800 confirmation: the sender's key thumbprint
+	Jti string    `json:"jti,omitempty"` // unique per minted token; what a bind is single-use on
 	Iat int64     `json:"iat"`
 	Exp int64     `json:"exp"`
 }
@@ -199,3 +207,8 @@ type voucherClaims struct {
 	Iat  int64  `json:"iat"`
 	Exp  int64  `json:"exp"`
 }
+
+// BFFPodAudience is the audience of the projected ServiceAccount token a guarded agent's pod presents to
+// the BFF alongside a run capability it cannot prove: one relayed to it over AMP, bound to its caller's
+// key. The controller projects the token; the BFF reviews it.
+const BFFPodAudience = "ctxmesh-bff"

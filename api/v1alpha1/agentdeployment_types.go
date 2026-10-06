@@ -84,6 +84,33 @@ type ScalingSpec struct {
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=1
 	Max int32 `json:"max,omitempty"`
+
+	// concurrency is the most runs one replica handles at once (Knative containerConcurrency). A run
+	// beyond it waits for a free slot or a new replica instead of joining an overloaded pod. 0 means
+	// no limit: the pod takes every run it is sent and the autoscaler scales only on its soft target.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1000
+	Concurrency *int32 `json:"concurrency,omitempty"`
+
+	// timeoutSeconds is the longest one run may take before its request is cut off (Knative
+	// timeoutSeconds). It defaults to 600, matching the platform's run limit; left unset, Knative would
+	// end every run at 300 seconds. A value above the cluster's Knative max-revision-timeout-seconds
+	// (600 unless raised) is rejected by Knative.
+	// +optional
+	// +kubebuilder:default=600
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=3600
+	TimeoutSeconds *int64 `json:"timeoutSeconds,omitempty"`
+
+	// targetBurstCapacity is how much spare capacity Knative keeps routed through its activator
+	// (autoscaling.knative.dev/target-burst-capacity). 0 takes the activator out of the request path
+	// once a replica is up; -1 keeps it in the path always, where it queues runs that find every slot
+	// taken. Unset, it follows concurrency: 0 when concurrency is unlimited, -1 when it is bounded,
+	// because a bounded pod with the activator out of the path drops the runs it has no slot for.
+	// +optional
+	// +kubebuilder:validation:Minimum=-1
+	TargetBurstCapacity *int32 `json:"targetBurstCapacity,omitempty"`
 }
 
 // SessionMemorySpec is the session-memory config expressed as an AgentDeployment field (ADR 0037,
@@ -379,21 +406,17 @@ type AgentDeploymentSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	GuardrailPolicyRef string `json:"guardrailPolicyRef,omitempty"`
 
-	// approvalPolicyRef optionally names an ApprovalPolicy (same namespace) that declaratively requires
-	// human approval for named tool calls (and optionally narrows who may approve) — M139, ADR 0111. The
-	// controller merges its require-approval requirements into this agent's effective tool policy
-	// (reusing the pause/resume/voucher runtime); a dangling ref sets a NotReady condition on the agent.
+	// feedback declares which feedback scores this agent accepts and where each one comes from:
+	// people annotating runs in the console, or named external channels such as a CSAT webhook.
+	// When set, the feedback endpoint checks every submitted score name against it (mode Enforce
+	// rejects a name no source declares; Monitor accepts it), and the console labels each stored
+	// score with its declared source. When omitted, any score name is accepted and scores carry no
+	// source label.
+	//
+	// This is configuration only: the scores themselves are stored in Langfuse, and removing this
+	// field does not delete them.
 	// +optional
-	// +kubebuilder:validation:MaxLength=253
-	ApprovalPolicyRef string `json:"approvalPolicyRef,omitempty"`
-
-	// feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
-	// multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
-	// gates ingestion by the declared score names and the read path attributes scores to their source;
-	// Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
-	// +optional
-	// +kubebuilder:validation:MaxLength=253
-	FeedbackStoreRef string `json:"feedbackStoreRef,omitempty"`
+	Feedback *FeedbackSpec `json:"feedback,omitempty"`
 
 	// rollout optionally selects a progressive-delivery strategy for a GATED serving
 	// agent (ADR 0062 Fork 3, M69). Absent (or strategy "") ⇒ today's promote-all/hold
@@ -623,7 +646,41 @@ type ToolPolicySpec struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	MaxToolCallsPerRun int32 `json:"maxToolCallsPerRun,omitempty"`
+
+	// approvers narrows who may approve a paused tool call (rule require-approval) for this
+	// agent. A caller approving a run must hold resume permission on the agent through RBAC
+	// AND match an entry here: a User entry matches the caller's username, a Group entry any
+	// group the caller belongs to. Identity comes from the caller's own verified token, never
+	// from the request. This list can only narrow RBAC; it never grants approval to someone
+	// without it. Empty means anyone with resume permission may approve.
+	//
+	// A ServiceAccount approves through its username or group form, for example User
+	// "system:serviceaccount:<namespace>:<name>".
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=64
+	Approvers []Approver `json:"approvers,omitempty"`
 }
+
+// Approver identifies who may approve a paused tool call: a Kubernetes User or Group, spelled
+// as in an RBAC subject.
+type Approver struct {
+	// kind is "User" (matched against the caller's username) or "Group" (matched against the
+	// groups the caller belongs to).
+	// +kubebuilder:validation:Enum=User;Group
+	Kind string `json:"kind"`
+
+	// name is the username or group name to match.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=316
+	Name string `json:"name"`
+}
+
+// The Approver kinds.
+const (
+	ApproverKindUser  = "User"
+	ApproverKindGroup = "Group"
+)
 
 // ToolPolicyOverride is one named tool-level policy override.
 type ToolPolicyOverride struct {
@@ -639,6 +696,98 @@ type ToolPolicyOverride struct {
 	// tool retries are off unless the tool is explicitly declared idempotent/safe.
 	// +optional
 	Retryable bool `json:"retryable,omitempty"`
+}
+
+// FeedbackSpec declares an agent's feedback sources. At least one source is required, and a score
+// name may appear only once across all sources, because the name is what attributes a stored score
+// to its source.
+// +kubebuilder:validation:XValidation:rule="(has(self.human) && size(self.human.scores) > 0) || (has(self.external) && size(self.external) > 0)",message="feedback must declare at least one source: human.scores or an external channel"
+// +kubebuilder:validation:XValidation:rule="!has(self.human) || !has(self.external) || self.human.scores.all(s, !self.external.exists(e, e.score.name == s.name))",message="a score name is declared by both human and an external channel; score names must be unique across all sources"
+type FeedbackSpec struct {
+	// mode selects whether the declaration gates submitted scores. Enforce rejects a score whose
+	// name no source declares. Monitor accepts it, which lets an agent that already emits scores
+	// adopt a declaration without losing any. Defaults to Enforce.
+	// +optional
+	// +kubebuilder:default=Enforce
+	Mode FeedbackMode `json:"mode,omitempty"`
+
+	// human declares the scores people submit, such as thumbs and ratings in the console.
+	// +optional
+	Human *HumanSource `json:"human,omitempty"`
+
+	// external declares the external feedback channels, one score per channel.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:XValidation:rule="self.all(e, self.exists_one(f, f.score.name == e.score.name))",message="each external channel must declare a distinct score name"
+	External []ExternalSource `json:"external,omitempty"`
+}
+
+// FeedbackMode selects whether spec.feedback gates submitted scores.
+// +kubebuilder:validation:Enum=Enforce;Monitor
+type FeedbackMode string
+
+const (
+	// FeedbackEnforce rejects a submitted score whose name no source declares.
+	FeedbackEnforce FeedbackMode = "Enforce"
+	// FeedbackMonitor accepts a submitted score whose name no source declares.
+	FeedbackMonitor FeedbackMode = "Monitor"
+)
+
+// ScoreDataType is a feedback score's value type. The values are Langfuse's score data types,
+// because Langfuse stores the scores.
+// +kubebuilder:validation:Enum=NUMERIC;BOOLEAN;CATEGORICAL
+type ScoreDataType string
+
+const (
+	ScoreNumeric     ScoreDataType = "NUMERIC"
+	ScoreBoolean     ScoreDataType = "BOOLEAN"
+	ScoreCategorical ScoreDataType = "CATEGORICAL"
+)
+
+// ScoreDecl declares one feedback score.
+type ScoreDecl struct {
+	// name is the score name, as submitted and as stored in Langfuse (for example "thumbs",
+	// "accuracy" or "csat"). It must be unique across every source in spec.feedback.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	Name string `json:"name"`
+
+	// dataType is the score's value type. NUMERIC and BOOLEAN carry a number; CATEGORICAL carries
+	// a string label. Defaults to NUMERIC.
+	// +optional
+	// +kubebuilder:default=NUMERIC
+	DataType ScoreDataType `json:"dataType,omitempty"`
+
+	// categories is the allowed label set for a CATEGORICAL score. It is informational today and
+	// ignored for other data types.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=64
+	Categories []string `json:"categories,omitempty"`
+}
+
+// HumanSource declares the scores people submit.
+type HumanSource struct {
+	// scores are the human-submitted score dimensions. Names must be unique.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +listType=atomic
+	// +kubebuilder:validation:XValidation:rule="self.all(s, self.exists_one(t, t.name == s.name))",message="human score names must be unique"
+	Scores []ScoreDecl `json:"scores"`
+}
+
+// ExternalSource declares one external feedback channel, such as a webhook or an API that reports
+// a rating, a completion or a business metric.
+type ExternalSource struct {
+	// name is the channel name (for example "csat-webhook"). A score from this channel is labelled
+	// "external:<name>".
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	Name string `json:"name"`
+
+	// score is the score this channel writes.
+	Score ScoreDecl `json:"score"`
 }
 
 // ResilienceSpec configures per-turn retry and timeout behaviour for model and

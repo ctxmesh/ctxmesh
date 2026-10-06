@@ -250,6 +250,48 @@ type Store interface {
 	// a different agent. A blank callerUsername returns nothing (fail-CLOSED — never a list-all). limit>0
 	// bounds the page. Read-only; a query/scan error is returned.
 	ListByEndUser(ctx context.Context, callerUsername, namespace, agent string, limit int) ([]EndUserRun, error)
+
+	// ListRoots returns ROOT runs (no parent) of the given agents, newest first: the console's Runs list
+	// when no trace store is wired. f.Agents is the isolation boundary, filled by the BFF from the
+	// caller's own RBAC; an empty set returns nothing (fail closed, never a list-all). Paging is keyset on
+	// (CreatedAt, ID) through f.Before. Read-only; a query/scan error is returned.
+	ListRoots(ctx context.Context, f RootListFilter) ([]RootRun, error)
+}
+
+// AgentKey names one agent, the unit a Runs list is authorized at.
+type AgentKey struct {
+	Namespace string
+	Name      string
+}
+
+// RootCursor is a position in a ListRoots page: the next page holds runs strictly older than it.
+type RootCursor struct {
+	CreatedAt time.Time
+	ID        string
+}
+
+// RootListFilter selects the runs ListRoots returns.
+type RootListFilter struct {
+	// Agents is required; runs of any other agent are never returned.
+	Agents []AgentKey
+	// From and To bound CreatedAt, inclusive; a zero value leaves that side open.
+	From, To time.Time
+	// Before, when set, returns only runs older than this position.
+	Before *RootCursor
+	// Limit > 0 bounds the page.
+	Limit int
+}
+
+// RootRun is one row of a Runs list: enough to render and link it, deliberately without the input or
+// the messages (those are the run-detail read, which authorizes on its own).
+type RootRun struct {
+	ID        string
+	Namespace string
+	Agent     string
+	TraceID   string
+	Status    Status
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // EndUserRun is the projection for an end-user's "my runs" list (M137/EU1c, ADR 0107): a run the verified
@@ -808,6 +850,54 @@ func (m *memStore) ListByEndUser(_ context.Context, callerUsername, namespace, a
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+// ListRoots — see the Store interface.
+func (m *memStore) ListRoots(_ context.Context, f RootListFilter) ([]RootRun, error) {
+	if len(f.Agents) == 0 {
+		return nil, nil
+	}
+	allow := make(map[AgentKey]bool, len(f.Agents))
+	for _, a := range f.Agents {
+		allow[a] = true
+	}
+	m.mu.Lock()
+	var out []RootRun
+	for _, e := range m.entries {
+		r := e.run
+		if r.ParentRunID != "" || !allow[AgentKey{Namespace: r.Namespace, Name: r.Agent}] {
+			continue
+		}
+		if (!f.From.IsZero() && r.CreatedAt.Before(f.From)) || (!f.To.IsZero() && r.CreatedAt.After(f.To)) {
+			continue
+		}
+		if f.Before != nil && !rootOlder(r.CreatedAt, r.ID, *f.Before) {
+			continue
+		}
+		out = append(out, RootRun{
+			ID: r.ID, Namespace: r.Namespace, Agent: r.Agent, TraceID: r.TraceID, Status: r.Status,
+			CreatedAt: r.CreatedAt.UTC(), UpdatedAt: r.UpdatedAt.UTC(),
+		})
+	}
+	m.mu.Unlock()
+	slices.SortFunc(out, func(a, b RootRun) int {
+		if c := b.CreatedAt.Compare(a.CreatedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(b.ID, a.ID)
+	})
+	if f.Limit > 0 && len(out) > f.Limit {
+		out = out[:f.Limit]
+	}
+	return out, nil
+}
+
+// rootOlder reports whether (createdAt, id) sorts strictly after c in newest-first order.
+func rootOlder(createdAt time.Time, id string, c RootCursor) bool {
+	if !createdAt.Equal(c.CreatedAt) {
+		return createdAt.Before(c.CreatedAt)
+	}
+	return id < c.ID
 }
 
 func (m *memStore) AppendEvent(id string, kind EventKind, data string) error {

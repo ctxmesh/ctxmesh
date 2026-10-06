@@ -149,6 +149,9 @@ function clock(ms: number): string {
   });
 }
 
+/** ModelRouteReady reasons that mean a message would fail now (ADR 0151). */
+const ROUTE_HOLD_REASONS = new Set(["NotYetServed", "GatewayAbsent", "SecretUnresolved"]);
+
 /** The reading column (§6.1 A10). Everything the transcript owns sits inside it. */
 const COLUMN = "mx-auto w-full max-w-[46rem]";
 
@@ -158,6 +161,7 @@ export function ChatPanel({
   ready,
   memoryBound,
   onTraced,
+  modelRoute,
   audience = "operator",
   frame = "panel",
 }: {
@@ -166,6 +170,8 @@ export function ChatPanel({
   ready: boolean;
   memoryBound: boolean;
   onTraced: (traceId: string) => void;
+  /** The agent's ModelRouteReady condition, when it names a model route (ADR 0151). */
+  modelRoute?: { status: string; reason: string; message: string };
   audience?: ChatAudience;
   frame?: ChatFrame;
 }) {
@@ -728,6 +734,24 @@ export function ChatPanel({
 
   // ── The notes that sit above the composer ─────────────────────────────────
 
+  // A route the gateway does not serve yet fails every message with "Invalid model name", so hold
+  // Send until it does. An edited route (GatewayRolling) is still served by its previous version, and
+  // a route not found here may be served from elsewhere, so neither holds Send.
+  const routeHold = !!modelRoute && modelRoute.status === "False" && ROUTE_HOLD_REASONS.has(modelRoute.reason);
+  const routeNote = modelRoute && modelRoute.status === "False" && (
+    <div
+      className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border border-border bg-surface-2 px-4 py-3 text-sm text-secondary-foreground"
+      data-testid="chat-route-note"
+    >
+      <Badge variant={routeHold ? "progressing" : "warn"}>{routeHold ? "Model loading" : "Model route"}</Badge>
+      <span className="min-w-0">
+        {modelRoute.reason === "NotYetServed"
+          ? "The model gateway is loading this agent's model. That usually takes under a minute; Send unlocks when it is ready."
+          : modelRoute.message}
+      </span>
+    </div>
+  );
+
   const notReadyNote = !ready && turns.length === 0 && (
     // A pre-flight heads-up only: once a turn has been sent, the reply (or the
     // error turn) is the real signal. Converging is not a crossed bound, so this
@@ -763,9 +787,10 @@ export function ChatPanel({
   const composer = (
     <div className={cn("border-t border-border", bare ? "bg-card" : undefined)}>
       <div className={cn(bare ? cn(COLUMN, "px-4 py-4 sm:px-6") : "p-4")}>
-        {(notReadyNote || memoryNote) && (
+        {(notReadyNote || routeNote || memoryNote) && (
           <div className="mb-3 space-y-2">
             {notReadyNote}
+            {routeNote}
             {memoryNote}
           </div>
         )}
@@ -782,7 +807,7 @@ export function ChatPanel({
           />
           <Button
             onClick={() => void send()}
-            disabled={busy || draft.trim() === ""}
+            disabled={busy || routeHold || draft.trim() === ""}
             data-testid="chat-send"
             className="h-11 shrink-0"
           >

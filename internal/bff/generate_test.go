@@ -38,7 +38,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
-	"github.com/ctxmesh/ctxmesh/internal/expand"
 )
 
 // A valid managed agent.yaml the fake provider "generates" — it expand-validates
@@ -154,7 +153,11 @@ func generateBody(t *testing.T, req GenerateAgentRequest) []byte {
 // preview (a managed-runtime AgentDeployment) is returned for REVIEW. The key is
 // resolved caller-scoped, rides the chat call server-side, and appears NOWHERE in
 // the response or logs; the cost tag DOES ride the request.
+// testManagedImage is the managed-agent image the chart gives the BFF (MANAGED_AGENT_IMAGE).
+const testManagedImage = "ghcr.io/ctxmesh/managed-agent:v9.9.9"
+
 func TestGenerateHappyPathManagedPreview(t *testing.T) {
+	t.Setenv("MANAGED_AGENT_IMAGE", testManagedImage)
 	prov, lastBody := fakeChatProvider(t, validGeneratedYAML)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
 		WithObjects(connectRouteObjects("anthropic", "claude-sonnet-4-6", prov.URL)...).Build()
@@ -181,7 +184,7 @@ func TestGenerateHappyPathManagedPreview(t *testing.T) {
 	// the pinned managed image, plus the tool binding.
 	assert.Contains(t, resp.Expanded, "kind: AgentDeployment")
 	assert.Contains(t, resp.Expanded, "kind: MCPToolBinding")
-	assert.Contains(t, resp.Expanded, expand.DefaultManagedImage, "managed runtime resolves the pinned image")
+	assert.Contains(t, resp.Expanded, "image: "+testManagedImage, "managed runtime resolves the configured image")
 	assert.NotNil(t, resp.Warnings, "warnings is [] not null")
 
 	// THE CRUX: the key appears NOWHERE in the response DTO or any log line, but it

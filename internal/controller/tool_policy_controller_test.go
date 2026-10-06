@@ -593,3 +593,69 @@ func TestM82_PureAllowAgent_ByteForByte(t *testing.T) {
 	assert.Equal(t, npNames, aaNames, "a pure-allow policy advertises the same tool set as no policy")
 	assert.True(t, npNames["t1"] && npNames["t2"], "both in-pod tools are advertised under a pure-allow policy")
 }
+
+// TestToolPolicy_InlineApproval_DeliveredToSidecar proves the egress ConfigMap carries require-approval
+// from the agent's own toolPolicy (ADR 0152 §2): the approval requirement a separate approval policy used
+// to merge in is now written inline, and it reaches the sidecar the same way. A remote tool keeps the
+// agent Ready-eligible (require-approval is wire-enforced for it).
+func TestToolPolicy_InlineApproval_DeliveredToSidecar(t *testing.T) {
+	const ns = "default"
+	const url = "http://mcp-open.default.svc.cluster.local/mcp"
+
+	agent := mkAgentWithToolPolicy(t, "tp-inline-approval", ns, &agentsv1alpha1.ToolPolicySpec{
+		Default:   "require-approval",
+		Overrides: []agentsv1alpha1.ToolPolicyOverride{{Name: "read_docs", Rule: "allow"}},
+		Approvers: []agentsv1alpha1.Approver{{Kind: "Group", Name: "dba"}},
+	})
+	mkRegistry(t, "tp-ia-reg", ns,
+		agentsv1alpha1.ToolEntry{Name: "send_email", URL: url},
+		agentsv1alpha1.ToolEntry{Name: "read_docs", URL: url},
+	)
+	b := mkBinding(t, "tp-ia-b", ns, agentsv1alpha1.MCPToolBindingSpec{
+		AgentRef: agent.Name, RegistryRef: "tp-ia-reg", ToolName: "send_email",
+		Mode: toolmanifest.ModeRemote, Server: agentsv1alpha1.ToolServer{URL: url},
+	})
+
+	reconcileNN(t, newM82Reconciler(), agent.Name, ns)
+	reconcileBinding(t, newM82BindingReconciler(), b.Name, ns)
+
+	var cm corev1.ConfigMap
+	require.NoError(t, k8sClient.Get(testCtx,
+		client.ObjectKey{Name: toolPolicyConfigMapName(agent.Name), Namespace: ns}, &cm),
+		"the <agent>-toolpolicy ConfigMap must be created")
+	p, err := egress.ParseToolPolicy(cm.Data[toolPolicyConfigMapKey])
+	require.NoError(t, err, "the delivered policy, approvers included, must parse")
+	assert.Equal(t, "require-approval", p.RuleFor("send_email"), "the inline default requires approval")
+	assert.Equal(t, "allow", p.RuleFor("read_docs"), "an inline allow override wins over the default")
+
+	var updated agentsv1alpha1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: agent.Name, Namespace: ns}, &updated))
+	if cond := apimeta.FindStatusCondition(updated.Status.Conditions, conditionReady); cond != nil {
+		assert.NotEqual(t, metav1.ConditionFalse, cond.Status,
+			"a remote require-approval tool must not hold the agent NotReady: %s", cond.Message)
+	}
+}
+
+// TestToolPolicy_ApproverShapeValidatedAtAdmission: an approver kind outside User|Group, or an empty
+// name, is rejected by the API server.
+func TestToolPolicy_ApproverShapeValidatedAtAdmission(t *testing.T) {
+	const ns = "default"
+	for name, approver := range map[string]agentsv1alpha1.Approver{
+		"tp-approver-kind": {Kind: "ServiceAccount", Name: "ci"},
+		"tp-approver-name": {Kind: "User", Name: ""},
+	} {
+		agent := &agentsv1alpha1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec: agentsv1alpha1.AgentDeploymentSpec{
+				Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080,
+				Runtime: &agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{
+					Approvers: []agentsv1alpha1.Approver{approver},
+				}},
+			},
+		}
+		err := k8sClient.Create(testCtx, agent)
+		require.Error(t, err, "%s: an invalid approver must be rejected", name)
+		assert.True(t, apierrors.IsInvalid(err), "%s: rejection must be a validation error, got %v", name, err)
+		assert.Contains(t, err.Error(), "approvers")
+	}
+}

@@ -21,7 +21,8 @@
 # Env (override for your install):
 #   NS=ctxmesh          control-plane namespace
 #   CRED_NS=ctxmesh     credential (locked) namespace for kubernetes-backend Secrets
-#   KEK_SECRET=ctxmesh-credstore-kek   the KEK Secret (postgres backend, LocalSealer)
+#   KEK_SECRET=<name>   the KEK Secret (postgres backend, LocalSealer); default: read from the
+#                       token-service Deployment's CREDENTIAL_BACKEND_POSTGRES_LOCAL_KEK_SECRET_NAME
 #   PG_POD / PG_USER / PG_DB        control-plane Postgres (default: runstore-pg / postgres / runs)
 #   VALKEY_STS=statelayer           the Valkey StatefulSet/pod name prefix
 set -euo pipefail
@@ -38,7 +39,8 @@ log() { printf '>> %s\n' "$*" >&2; }
 #
 # The KEK is the sharpest case. Three different names were in circulation -- cred-kek in the
 # published runbook, ctxmesh-credstore-kek here, pg-kek in an integration test -- and none of them
-# is real: the name is whatever the operator put in the CredentialStore's localKEKSecretRef. A
+# is real: the name is whatever the operator set as tokenService.credentialBackend.postgres
+# .encryption.localKEKSecretRef, which the token-service carries in its own env (ADR 0152). A
 # guessed name fails as NotFound on the one asset without which credential ciphertext is
 # permanently inert, at the exact moment somebody is restoring.
 # KUBE_CONTEXT pins which cluster this talks to. Every kubectl below used the AMBIENT context,
@@ -88,10 +90,11 @@ fi
 PG_USER="${PG_USER:-postgres}"
 PG_DB="${PG_DB:-postgres}"
 
-# The KEK's name is on the CredentialStore, because the operator chose it there.
-KEK_SECRET="${KEK_SECRET:-$(kubectl get clustercredentialstores,credentialstores -A \
-  -o jsonpath='{.items[*].spec.provider.postgres.encryption.localKEKSecretRef.name}' 2>/dev/null \
-  | awk '{print $1}' || true)}"
+# The KEK's name is the token-service's own configuration, because the operator chose it there.
+# Empty on the kubernetes backend, which has no KEK, and the backup below then skips it.
+KEK_SECRET="${KEK_SECRET:-$(kubectl -n "$NS" get deploy -l control-plane=token-service \
+  -o jsonpath='{.items[0].spec.template.spec.containers[?(@.name=="token-service")].env[?(@.name=="CREDENTIAL_BACKEND_POSTGRES_LOCAL_KEK_SECRET_NAME")].value}' \
+  2>/dev/null || true)}"
 
 
 valkey_pod() { kubectl -n "$NS" get pod -l control-plane=statelayer -o jsonpath='{.items[0].metadata.name}'; }

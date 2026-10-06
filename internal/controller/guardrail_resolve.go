@@ -55,8 +55,7 @@ const (
 const (
 	// envGuardrailPolicyFile is the STATIC env var carrying the in-container PATH to the mounted
 	// guardrail-policy file (K3). Its presence forces the launcher's :2996 model proxy on and is
-	// the source the launcher reads + fsnotify-watches. NEVER valueFrom — the m5.7 Knative ksvc
-	// landmine (the webhook rejects valueFrom in a ksvc pod template); the VALUE is a static path.
+	// the source the launcher reads + fsnotify-watches. The VALUE is a static path.
 	envGuardrailPolicyFile = "GUARDRAIL_POLICY_FILE"
 
 	// guardrailConfigMapSuffix names the per-agent, STABLE-named ConfigMap that materialises the
@@ -272,9 +271,10 @@ func guardrailPresenceDigest(referenced bool) string {
 	if !referenced {
 		return ""
 	}
-	// A stable, arbitrary token (the sha256 of a fixed marker, truncated to 8 hex). Its VALUE never
-	// changes; only its presence/absence toggles the roll — exactly the presence semantics we want.
-	h := sha256.Sum256([]byte("guardrail:referenced"))
+	// The sha256 of a fixed marker, truncated to 8 hex: its presence toggles the roll. The marker names
+	// the pod shape a guarded agent gets, so it changes only when that shape does — the BFF pod token
+	// (m184.37) was such a change.
+	h := sha256.Sum256([]byte("guardrail:referenced:bff-pod-token"))
 	return fmt.Sprintf("%x", h[:])[:8]
 }
 

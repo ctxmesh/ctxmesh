@@ -222,8 +222,8 @@ type objectStoreConfig struct {
 	Addr string
 	// AccessKey / SecretKey are the dev object-store credentials
 	// (OBJECT_STORE_ACCESS_KEY / OBJECT_STORE_SECRET_KEY). Deterministic dev-only
-	// fixed values injected by the controller as STATIC env (no valueFrom — the
-	// Knative ksvc constraint); NEVER a real credential.
+	// fixed values injected by the controller as STATIC env (public constants,
+	// ADR 0083); NEVER a real credential.
 	AccessKey string
 	SecretKey string
 }
@@ -383,16 +383,16 @@ func shouldSpan(path string) bool {
 // own spec.env + standard OS vars + the SDK's MEMORY_PORT/FEEDBACK_PORT/AGENT_* markers), so a strict
 // allowlist would break user apps. Any NEW platform SECRET injected into the launcher container MUST be added
 // here. Verified against the SDK (sdk/): it reads none of these directly (memory/feedback go through the
-// launcher's local ports; MEMORY_PORT — always injected — carries the "memory wired" signal). Moving these
-// creds off literal env to secretKeyRef mounts is the complementary, deferred hardening (brain m52.B1b).
+// launcher's local ports; MEMORY_PORT — always injected — carries the "memory wired" signal). The Langfuse
+// scores keys arrive by secretKeyRef (ADR 0148) but are still env on this container, so they are scrubbed too.
 var platformSecretEnv = map[string]bool{
 	"OBJECT_STORE_ACCESS_KEY":    true, // dev MinIO credential (launcher-only: blob offload)
 	"OBJECT_STORE_SECRET_KEY":    true, // dev MinIO credential
 	"LANGFUSE_SCORES_PUBLIC_KEY": true, // Langfuse scores keypair (launcher-only: feedback submission)
 	"LANGFUSE_SCORES_SECRET_KEY": true, // Langfuse scores secret
-	"LANGFUSE_OTLP_AUTH":         true, // OTLP Basic-auth header (telemetry export)
-	// path to the pod's projected SA token — pod-identity is the launcher's, not the child's:
+	// paths to the pod's projected SA tokens — pod identity is the launcher's, not the child's:
 	"STATELAYER_TOKEN_PATH": true,
+	"BFF_POD_TOKEN_PATH":    true,
 }
 
 // buildChildEnv returns the environment slice for the spawned agent (child) process. Every var is inherited

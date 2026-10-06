@@ -1,0 +1,75 @@
+# Regression sweep: every shipped milestone's acceptance, re-run against a fresh full-stack cluster,
+# nightly (m184.6). It used to be close gate (c), run by hand on a laptop at every close: hours of
+# load, 0 of the 12 defects found in M177-M179, and 4 false reds at the M183 close from that load
+# alone. It runs here instead, on its own clock; a close reads its latest run and triages any red.
+#
+# Separate from the Nightly workflow on purpose: that one gates the published path and the e2e
+# slices, and its result is the close gate. This one is broader and slower.
+name: Regression sweep
+
+on:
+  schedule:
+    - cron: "47 5 * * *"
+  workflow_dispatch: {}
+  push:
+    paths:
+      - .github/workflows/regress.yml
+
+permissions: {}
+
+jobs:
+  sweep:
+    name: regress-all
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # some acceptances read tags (release-truth, the newest release)
+      - name: Check out agent-brain (harness owns e2e — ADR 0004)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ctxmesh/agent-brain
+          token: ${{ secrets.BRAIN_CHECKOUT_TOKEN }}
+          path: agent-brain
+          persist-credentials: false
+          ref: ${{ github.ref_name }}
+      - name: Check out the public docs site (the docs acceptances read it)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ctxmesh/ctxmesh.github.io
+          path: ctxmesh.github.io
+          persist-credentials: false
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+      - name: Install kind, helm and kubectl
+        run: |
+          curl -fsSLo ./kind "https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-$(go env GOARCH)"
+          chmod +x ./kind && sudo mv ./kind /usr/local/bin/kind
+          command -v helm >/dev/null || curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          command -v kubectl >/dev/null || {
+            curl -fsSLo kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/$(go env GOARCH)/kubectl"
+            chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
+          }
+      - name: Install nvm for the UI acceptances (harness ui-e2e/.nvmrc)
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh \
+            | PROFILE=/dev/null bash
+          test -s "$HOME/.nvm/nvm.sh"
+      - name: Bring up the full-stack cluster
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        run: make -C agent-brain/harness dev-up M=7
+      - name: Deploy this tree onto it
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        run: make -C agent-brain/harness dev-deploy
+      - name: Re-run every milestone acceptance
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+          DOCS_SITE: ${{ github.workspace }}/ctxmesh.github.io
+        run: make -C agent-brain/harness regress-all

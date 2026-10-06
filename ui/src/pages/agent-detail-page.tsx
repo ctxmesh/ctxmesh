@@ -280,7 +280,14 @@ export function AgentDetailPage() {
   // one surface joining them was a snapshot. So poll while the agent is UNSETTLED and
   // stop the moment it settles — no timer on a steady-state page, no websocket to keep
   // alive, and nothing to clean up but an interval.
-  const settled = state.kind === "ready" && state.detail.ready;
+  // Settled also waits for the agent's model route: a new route takes the gateway a minute to serve,
+  // and the chat panel holds Send until it does, so the page must notice when it is served.
+  const settled =
+    state.kind === "ready" &&
+    state.detail.ready &&
+    !(state.detail.conditions ?? []).some(
+      (c) => c.type === "ModelRouteReady" && c.status === "False" && c.reason === "NotYetServed",
+    );
   React.useEffect(() => {
     if (state.kind !== "ready" || settled) return;
     const id = window.setInterval(() => {
@@ -1746,6 +1753,7 @@ function OverviewTab({
         ready={detail.ready}
         memoryBound={detail.bindings.some((b) => b.kind === "memory")}
         onTraced={onTraced}
+        modelRoute={(detail.conditions ?? []).find((c) => c.type === "ModelRouteReady")}
       />
 
       <UseAgentPanel
@@ -2484,6 +2492,7 @@ function AgentRunsTab({
   name: string;
   onInspect: (traceId: string) => void;
 }) {
+  const navigate = useNavigate();
   const [state, setState] = React.useState<
     | { kind: "loading" }
     | { kind: "ready"; runs: AgentRunSummary[] }
@@ -2524,8 +2533,8 @@ function AgentRunsTab({
       header: "Run",
       priority: 1,
       cell: (r) => (
-        <span className="font-mono text-xs" title={r.traceId}>
-          {truncateId(r.traceId)}
+        <span className="font-mono text-xs" title={r.runId ?? r.traceId}>
+          {truncateId(r.runId ?? r.traceId)}
         </span>
       ),
     },
@@ -2549,8 +2558,8 @@ function AgentRunsTab({
       // share a glyph (§7.1), so a 0 renders the dash with its reason.
       cell: (r) => (
         <QuantityValue
-          value={r.tokens > 0 ? r.tokens : UNKNOWN}
-          title="Per-trace token usage isn’t carried by the runs list — unknown, not zero."
+          value={r.tokens !== undefined && r.tokens > 0 ? r.tokens : UNKNOWN}
+          title="Token usage comes from a trace backend and isn’t carried here — unknown, not zero."
         />
       ),
     },
@@ -2568,7 +2577,7 @@ function AgentRunsTab({
       numeric: true,
       cell: (r) => (
         <QuantityValue
-          value={r.latencyMs > 0 ? r.latencyMs : UNKNOWN}
+          value={r.latencyMs !== undefined && r.latencyMs > 0 ? r.latencyMs : UNKNOWN}
           format={formatLatency}
         />
       ),
@@ -2581,8 +2590,11 @@ function AgentRunsTab({
       cell: (r) => (
         <NextStepLink
           label="Read the run"
-          onClick={() => onInspect(r.traceId)}
-          ariaLabel={`Read run ${r.traceId}`}
+          // A run-store row (no trace backend, ADR 0150) opens the run itself; a trace row the inspector.
+          onClick={() =>
+            r.runId ? navigate(`/runs/${encodeURIComponent(r.runId)}`) : onInspect(r.traceId)
+          }
+          ariaLabel={`Read run ${r.runId ?? r.traceId}`}
         />
       ),
     },
@@ -2616,7 +2628,7 @@ function AgentRunsTab({
       <DataTable<AgentRunSummary>
         columns={cols}
         rows={state.kind === "ready" ? state.runs : []}
-        rowKey={(r) => r.traceId}
+        rowKey={(r) => r.runId ?? r.traceId}
         loading={state.kind === "loading"}
         error={
           state.kind === "error"

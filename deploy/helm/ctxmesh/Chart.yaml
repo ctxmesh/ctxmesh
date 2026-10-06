@@ -5,8 +5,8 @@ name: ctxmesh
 # live here (ADR/PRD citations, the BFF ServiceAccount's grants) is in the docs.
 description: >-
   Kubernetes-native control plane for deploying, governing, and observing AI agents
-  — CRDs, controller, model gateway, and web console. Requires Knative Serving +
-  Eventing and KEDA on the cluster.
+  — CRDs, controller, model gateway, and web console. Requires Knative Serving on
+  the cluster.
 # The control-plane + CRD templates are GENERATED from `kustomize build
 # config/default` by hack/gen-helm-chart.sh — see templates/ banners and the
 # `make helm-verify` no-drift check. Do not hand-edit generated templates.

@@ -829,8 +829,8 @@ func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	if scores == nil {
 		scores = []FeedbackScore{}
 	}
-	// Attribute each score to the source declared by the agent's FeedbackStore, if bound (M139, ADR 0112).
-	// Best-effort: an unbound/unreadable ref leaves scores unattributed (the raw data still returns).
+	// Attribute each score to the source the agent's spec.feedback declares, if any (ADR 0152).
+	// Best-effort: no declaration, or an unreadable agent, leaves scores unattributed (the raw data still returns).
 	s.attributeFeedback(r, caller, rn, scores)
 	writeJSON(w, http.StatusOK, FeedbackResponse{Scores: scores})
 }

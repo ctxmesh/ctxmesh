@@ -32,7 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
-	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // recordedScore captures one CreateScore relay so the write-path tests can assert what (if anything) was
@@ -54,8 +53,8 @@ func (f recordingLangfuse) CreateScore(_ context.Context, traceID, name string, 
 }
 
 // feedbackTestServer builds a BFF server with a permissive caller client seeded with the given objects and
-// the given Langfuse adapter (ADR 0112 tests). Mirrors serverWithAdapters but lets a test seed the agent
-// (with a feedbackStoreRef) + a FeedbackStore.
+// the given Langfuse adapter. Mirrors serverWithAdapters but lets a test seed the agent (with or without
+// spec.feedback).
 func feedbackTestServer(t *testing.T, adapter LangfuseAdapter, objs ...client.Object) *Server {
 	t.Helper()
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
@@ -69,25 +68,21 @@ func feedbackTestServer(t *testing.T, adapter LangfuseAdapter, objs ...client.Ob
 	})
 }
 
-// agentWithFeedbackRef is the inspector test agent bound to the named FeedbackStore ("" = unbound).
-func agentWithFeedbackRef(ref string) *agentsv1alpha1.AgentDeployment {
+// agentWithFeedback is the inspector test agent declaring the given spec.feedback (nil = no declaration).
+func agentWithFeedback(spec *agentsv1alpha1.FeedbackSpec) *agentsv1alpha1.AgentDeployment {
 	return &agentsv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: inspectorTestAgentName, Namespace: inspectorTestAgentNs},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{FeedbackStoreRef: ref},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{Feedback: spec},
 	}
 }
 
-// feedbackStoreFixture declares a human "thumbs" score + an external "csat-webhook" channel writing "csat".
-// Named "fs-1" to match agentWithFeedbackRef("fs-1").
-func feedbackStoreFixture(mode agentsv1beta1.FeedbackMode) *agentsv1beta1.FeedbackStore {
-	return &agentsv1beta1.FeedbackStore{
-		ObjectMeta: metav1.ObjectMeta{Name: "fs-1", Namespace: inspectorTestAgentNs},
-		Spec: agentsv1beta1.FeedbackStoreSpec{
-			Mode:  mode,
-			Human: &agentsv1beta1.HumanSource{Scores: []agentsv1beta1.ScoreDecl{{Name: "thumbs", DataType: agentsv1beta1.ScoreBoolean}}},
-			External: []agentsv1beta1.ExternalSource{
-				{Name: "csat-webhook", Score: agentsv1beta1.ScoreDecl{Name: "csat", DataType: agentsv1beta1.ScoreNumeric}},
-			},
+// feedbackFixture declares a human "thumbs" score + an external "csat-webhook" channel writing "csat".
+func feedbackFixture(mode agentsv1alpha1.FeedbackMode) *agentsv1alpha1.FeedbackSpec {
+	return &agentsv1alpha1.FeedbackSpec{
+		Mode:  mode,
+		Human: &agentsv1alpha1.HumanSource{Scores: []agentsv1alpha1.ScoreDecl{{Name: "thumbs", DataType: agentsv1alpha1.ScoreBoolean}}},
+		External: []agentsv1alpha1.ExternalSource{
+			{Name: "csat-webhook", Score: agentsv1alpha1.ScoreDecl{Name: "csat", DataType: agentsv1alpha1.ScoreNumeric}},
 		},
 	}
 }
@@ -101,11 +96,11 @@ func postFeedback(t *testing.T, s *Server, body SubmitFeedbackRequest) *httptest
 	return rec
 }
 
-// TestSubmitFeedback_DeclaredName_Relayed: a bound store + a declared score name → 202 + relayed to Langfuse.
+// TestSubmitFeedback_DeclaredName_Relayed: a declaration + a declared score name → 202 + relayed to Langfuse.
 func TestSubmitFeedback_DeclaredName_Relayed(t *testing.T) {
 	created := &[]recordedScore{}
 	s := feedbackTestServer(t, recordingLangfuse{created: created},
-		agentWithFeedbackRef("fs-1"), feedbackStoreFixture(agentsv1beta1.FeedbackEnforce))
+		agentWithFeedback(feedbackFixture(agentsv1alpha1.FeedbackEnforce)))
 	seedRunForTrace(t, s, "t1")
 
 	rec := postFeedback(t, s, SubmitFeedbackRequest{TraceID: "t1", Name: "thumbs", Value: 1, Comment: "great"})
@@ -120,7 +115,7 @@ func TestSubmitFeedback_DeclaredName_Relayed(t *testing.T) {
 func TestSubmitFeedback_UndeclaredName_EnforceRejected(t *testing.T) {
 	created := &[]recordedScore{}
 	s := feedbackTestServer(t, recordingLangfuse{created: created},
-		agentWithFeedbackRef("fs-1"), feedbackStoreFixture(agentsv1beta1.FeedbackEnforce))
+		agentWithFeedback(feedbackFixture(agentsv1alpha1.FeedbackEnforce)))
 	seedRunForTrace(t, s, "t1")
 
 	rec := postFeedback(t, s, SubmitFeedbackRequest{TraceID: "t1", Name: "undeclared", Value: 1})
@@ -132,7 +127,7 @@ func TestSubmitFeedback_UndeclaredName_EnforceRejected(t *testing.T) {
 func TestSubmitFeedback_UndeclaredName_MonitorAccepted(t *testing.T) {
 	created := &[]recordedScore{}
 	s := feedbackTestServer(t, recordingLangfuse{created: created},
-		agentWithFeedbackRef("fs-1"), feedbackStoreFixture(agentsv1beta1.FeedbackMonitor))
+		agentWithFeedback(feedbackFixture(agentsv1alpha1.FeedbackMonitor)))
 	seedRunForTrace(t, s, "t1")
 
 	rec := postFeedback(t, s, SubmitFeedbackRequest{TraceID: "t1", Name: "undeclared", Value: 0.5})
@@ -140,21 +135,21 @@ func TestSubmitFeedback_UndeclaredName_MonitorAccepted(t *testing.T) {
 	assert.Len(t, *created, 1, "Monitor still relays (accept + count)")
 }
 
-// TestSubmitFeedback_NoStore_OpenRelay: an unbound agent accepts any name → 202 (today's open relay).
-func TestSubmitFeedback_NoStore_OpenRelay(t *testing.T) {
+// TestSubmitFeedback_NoDeclaration_OpenRelay: an agent without spec.feedback accepts any name → 202 (the open relay).
+func TestSubmitFeedback_NoDeclaration_OpenRelay(t *testing.T) {
 	created := &[]recordedScore{}
-	s := feedbackTestServer(t, recordingLangfuse{created: created}, agentWithFeedbackRef(""))
+	s := feedbackTestServer(t, recordingLangfuse{created: created}, agentWithFeedback(nil))
 	seedRunForTrace(t, s, "t1")
 
 	rec := postFeedback(t, s, SubmitFeedbackRequest{TraceID: "t1", Name: "anything", Value: 1})
-	require.Equal(t, http.StatusAccepted, rec.Code, "no bound store ⇒ open relay, any name")
+	require.Equal(t, http.StatusAccepted, rec.Code, "no spec.feedback ⇒ open relay, any name")
 	assert.Len(t, *created, 1)
 }
 
 // TestSubmitFeedback_MissingFields400: absent traceId or name → 400, never relayed.
 func TestSubmitFeedback_MissingFields400(t *testing.T) {
 	created := &[]recordedScore{}
-	s := feedbackTestServer(t, recordingLangfuse{created: created}, agentWithFeedbackRef(""))
+	s := feedbackTestServer(t, recordingLangfuse{created: created}, agentWithFeedback(nil))
 	seedRunForTrace(t, s, "t1")
 
 	assert.Equal(t, http.StatusBadRequest, postFeedback(t, s, SubmitFeedbackRequest{Name: "thumbs"}).Code)
@@ -174,7 +169,7 @@ func TestFeedbackRead_AttributesSources(t *testing.T) {
 		}},
 	}
 	s := feedbackTestServer(t, adapter,
-		agentWithFeedbackRef("fs-1"), feedbackStoreFixture(agentsv1beta1.FeedbackEnforce))
+		agentWithFeedback(feedbackFixture(agentsv1alpha1.FeedbackEnforce)))
 	seedRunForTrace(t, s, "t1")
 
 	rec := httptest.NewRecorder()
@@ -193,15 +188,15 @@ func TestFeedbackRead_AttributesSources(t *testing.T) {
 	assert.Equal(t, feedbackUnattributed, byName["mystery"], "an undeclared name is surfaced as unattributed, not hidden")
 }
 
-// TestFeedbackRead_NoStore_NoAttribution: an unbound agent leaves attribution empty (today's behavior).
-func TestFeedbackRead_NoStore_NoAttribution(t *testing.T) {
+// TestFeedbackRead_NoDeclaration_NoAttribution: an agent without spec.feedback leaves attribution empty.
+func TestFeedbackRead_NoDeclaration_NoAttribution(t *testing.T) {
 	adapter := recordingLangfuse{
 		created: &[]recordedScore{},
 		fakeLangfuseAdapter: fakeLangfuseAdapter{scores: []FeedbackScore{
 			{ID: "s1", TraceID: "t1", Name: "thumbs", DataType: "BOOLEAN", Value: 1, Source: "API"},
 		}},
 	}
-	s := feedbackTestServer(t, adapter, agentWithFeedbackRef(""))
+	s := feedbackTestServer(t, adapter, agentWithFeedback(nil))
 	seedRunForTrace(t, s, "t1")
 
 	rec := httptest.NewRecorder()
@@ -211,5 +206,5 @@ func TestFeedbackRead_NoStore_NoAttribution(t *testing.T) {
 	var body FeedbackResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	require.Len(t, body.Scores, 1)
-	assert.Empty(t, body.Scores[0].AttributedSource, "no bound store ⇒ no attribution (unchanged)")
+	assert.Empty(t, body.Scores[0].AttributedSource, "no spec.feedback ⇒ no attribution")
 }

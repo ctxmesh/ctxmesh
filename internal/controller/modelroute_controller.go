@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -28,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -115,10 +117,10 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 	// ── 2. Resolve SecretBindings and Secrets ─────────────────────────────────
 	bindings := make(map[string]agentsv1alpha1.SecretBinding)
 	secretRVs := make(map[string]string)
-	// mirrors: provider Secrets (keyed by their bare name) to sync into the gateway
-	// namespace so the Deployment's SB_* secretKeyRefs can mount a provider connected
-	// in another namespace (ADR 0018).
-	mirrors := make(map[string]corev1.Secret)
+	// mirrors: provider Secrets to sync into the gateway namespace so the Deployment's SB_*
+	// secretKeyRefs can mount a provider connected in another namespace (ADR 0018), keyed by
+	// their gateway-namespace name (gateway.MirrorSecretName).
+	mirrors := make(map[string]gatewayMirror)
 
 	for i := range mrList.Items {
 		mr := &mrList.Items[i]
@@ -167,20 +169,32 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 			// Mirror the resolved Secret into the gateway namespace unless it already
 			// lives there — otherwise the gateway pod's secretKeyRef can't mount it.
 			if mr.Namespace != gateway.GatewayNamespace {
-				mirrors[sb.Spec.SecretRef.Name] = secret
+				mirrors[gateway.MirrorSecretName(mr.Namespace, sb.Spec.SecretRef.Name)] = gatewayMirror{
+					source: secretKey, secret: secret,
+				}
 			}
 		}
 	}
 
 	// ── 2b. Mirror provider Secrets into the gateway namespace ────────────────
-	if err := r.syncGatewaySecrets(ctx, mirrors); err != nil {
+	unwritten, err := r.syncGatewaySecrets(ctx, mirrors)
+	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("syncing gateway secrets: %w", err)
+	}
+	// A route whose mirror could not be written must not render: its reference would resolve to
+	// whatever Secret holds that name in the gateway namespace. Marking the source "not found"
+	// excludes it.
+	for _, source := range unwritten {
+		secretRVs[source] = ""
 	}
 
 	// ── 3. Render config ──────────────────────────────────────────────────────
 	// Enable gateway trace spans when Langfuse is configured (secret present in
 	// the gateway namespace); otherwise render clean (CI has no Langfuse).
-	otel := r.resolveOTelConfig(ctx)
+	otel, staleOTelHeaders, err := r.resolveOTelConfig(ctx)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	renderResult := gateway.Render(mrList.Items, bindings, secretRVs, otel)
 
 	// ── 4. CreateOrUpdate gateway ConfigMap ───────────────────────────────────
@@ -201,8 +215,14 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 	}
 
 	// ── 5. Patch gateway Deployment env + pod-template annotation ─────────────
-	if err := r.syncGatewayDeployment(ctx, renderResult); err != nil {
+	serving, err := r.syncGatewayDeployment(ctx, renderResult)
+	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("syncing gateway Deployment: %w", err)
+	}
+	if staleOTelHeaders {
+		if err := r.deleteStaleOTelHeaders(ctx); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// ── 6. Update Ready conditions on all ModelRoutes ─────────────────────────
@@ -215,28 +235,15 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 		mr := &mrList.Items[i]
 		routeKey := mr.Namespace + "/" + mr.Name
 
-		var condStatus metav1.ConditionStatus
-		var reason, message string
-
-		if excludedSet[routeKey] {
-			condStatus = metav1.ConditionFalse
-			reason = "SecretUnresolved"
-			message = "one or more referenced SecretBindings or Secrets could not be resolved; " +
-				"route is excluded from the gateway config"
-		} else {
-			condStatus = metav1.ConditionTrue
-			reason = "Rendered"
-			message = "route rendered into the gateway config"
-		}
-
+		ready := routeReadyCondition(mr, excludedSet[routeKey], serving)
+		changed := mr.Status.ObservedGeneration != mr.Generation
 		mr.Status.ObservedGeneration = mr.Generation
-		apimeta.SetStatusCondition(&mr.Status.Conditions, metav1.Condition{
-			Type:               conditionReady,
-			Status:             condStatus,
-			Reason:             reason,
-			Message:            message,
-			ObservedGeneration: mr.Generation,
-		})
+		if apimeta.SetStatusCondition(&mr.Status.Conditions, ready) {
+			changed = true
+		}
+		if !changed {
+			continue // a requeue while the gateway rolls must not rewrite every route's status
+		}
 
 		if err := r.Status().Update(ctx, mr); err != nil {
 			// Return the error so the reconcile REQUEUES (audit FUNC-6): a conflict or a
@@ -246,64 +253,226 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 		}
 	}
 
+	// Nothing watches the gateway Deployment (that would cache every Deployment in the cluster), so
+	// look again until it serves the config.
+	switch serving {
+	case gatewayRolling:
+		return ctrl.Result{RequeueAfter: gatewayRolloutPoll}, nil
+	case gatewayAbsent:
+		return ctrl.Result{RequeueAfter: gatewayAbsentPoll}, nil
+	}
 	return ctrl.Result{}, nil
 }
 
-// resolveOTelConfig returns the gateway's trace-export settings from the
-// langfuse-otlp Secret in the gateway namespace. Absent secret → zero value,
-// which disables the otel callback (CI / no-Langfuse).
-func (r *ModelRouteReconciler) resolveOTelConfig(ctx context.Context) gateway.OTelConfig {
+// routeReadyCondition is a route's Ready condition. Ready means a call by this alias works now, so it
+// waits for the gateway to serve the config that holds the route: "rendered" alone let a first call
+// made right after `kubectl wait` fail with LiteLLM's "Invalid model name". A route already served at
+// this generation stays served while another route's change rolls the gateway, because the old pods'
+// config holds it too.
+func routeReadyCondition(mr *agentsv1alpha1.ModelRoute, excluded bool, serving gatewayState) metav1.Condition {
+	c := metav1.Condition{Type: conditionReady, Status: metav1.ConditionFalse, ObservedGeneration: mr.Generation}
+	prev := apimeta.FindStatusCondition(mr.Status.Conditions, conditionReady)
+	alreadyServed := prev != nil && prev.Status == metav1.ConditionTrue && prev.Reason == reasonServed &&
+		prev.ObservedGeneration == mr.Generation
+	switch {
+	case excluded:
+		c.Reason = "SecretUnresolved"
+		c.Message = "one or more referenced SecretBindings or Secrets could not be resolved; " +
+			"route is excluded from the gateway config"
+	case serving == gatewayServing, serving == gatewayRolling && alreadyServed:
+		c.Status, c.Reason, c.Message = metav1.ConditionTrue, reasonServed, "the gateway serves this route"
+	case serving == gatewayAbsent:
+		c.Reason, c.Message = "GatewayAbsent", "route rendered; the gateway Deployment does not exist"
+	case prev != nil && (prev.Reason == reasonServed || prev.Reason == reasonGatewayRolling):
+		// Served before: the pods still running serve the previous version of this route, so a call
+		// by the alias works while the new version rolls out.
+		c.Reason = reasonGatewayRolling
+		c.Message = "the gateway is rolling out this route's new version; the previous one is still served"
+	default:
+		// Never served: a call by this alias fails ("Invalid model name") until the roll completes.
+		c.Reason = reasonNotYetServed
+		c.Message = "route rendered; the gateway has not started serving it yet"
+	}
+	return c
+}
+
+// Ready reasons a route's consumers act on: Served (calls work), GatewayRolling (a new version is
+// rolling out and the previous one still answers), NotYetServed (a new route; calls fail until served).
+const (
+	reasonServed         = "Served"
+	reasonGatewayRolling = "GatewayRolling"
+	reasonNotYetServed   = "NotYetServed"
+)
+
+// gatewayState is how far the gateway is from serving the config just rendered.
+type gatewayState int
+
+const (
+	gatewayServing gatewayState = iota
+	gatewayRolling
+	gatewayAbsent
+)
+
+const (
+	gatewayRolloutPoll = 5 * time.Second
+	gatewayAbsentPoll  = 30 * time.Second
+)
+
+// gatewayServes reports whether the Deployment has fully rolled out the config with this hash: the
+// rollout `kubectl rollout status` would call complete, with no pod of an older template left.
+func gatewayServes(d *appsv1.Deployment, hash string) bool {
+	want := int32(1)
+	if d.Spec.Replicas != nil {
+		want = *d.Spec.Replicas
+	}
+	st := d.Status
+	return want > 0 &&
+		d.Spec.Template.Annotations[configHashAnnotation] == hash &&
+		st.ObservedGeneration >= d.Generation &&
+		st.UpdatedReplicas == want && st.Replicas == want && st.AvailableReplicas == want
+}
+
+// gatewayOTelHeadersSecret holds the gateway's pre-built OTEL_HEADERS value. LiteLLM wants the
+// whole "Authorization=Basic ..." string, so it is derived here from the langfuse-otlp Secret
+// and kept in a Secret rather than rendered into the Deployment's env as a literal.
+const gatewayOTelHeadersSecret = "ctxmesh-gateway-otel"
+
+// gatewayOTelRoleLabel marks the derived Secret as the controller's. The controller writes or
+// deletes a Secret of that name only when it carries this label.
+const (
+	gatewayOTelRoleLabel = "agents.ctxmesh.ai/role"
+	gatewayOTelRoleValue = "gateway-otel-headers"
+)
+
+// resolveOTelConfig returns the gateway's trace-export settings from the langfuse-otlp Secret in
+// the gateway namespace. An absent or incomplete Secret gives the zero value, which disables the
+// otel callback (CI / no-Langfuse). staleDerived reports a derived header Secret left from when
+// export was on; the caller deletes it once the Deployment no longer references it, so a
+// credential does not outlive the Secret it came from.
+func (r *ModelRouteReconciler) resolveOTelConfig(ctx context.Context) (gateway.OTelConfig, bool, error) {
+	derivedKey := client.ObjectKey{Namespace: gateway.GatewayNamespace, Name: gatewayOTelHeadersSecret}
+	var existing corev1.Secret
+	derivedExists := false
+	switch err := r.Get(ctx, derivedKey, &existing); {
+	case err == nil:
+		if existing.Labels[gatewayOTelRoleLabel] != gatewayOTelRoleValue {
+			return gateway.OTelConfig{}, false, fmt.Errorf(
+				"gateway namespace holds a Secret named %s that the controller does not manage; refusing to overwrite it",
+				gatewayOTelHeadersSecret)
+		}
+		derivedExists = true
+	case !apierrors.IsNotFound(err):
+		return gateway.OTelConfig{}, false, fmt.Errorf("reading gateway OTel header Secret: %w", err)
+	}
+
 	var sec corev1.Secret
 	if err := r.Get(ctx, client.ObjectKey{
 		Namespace: gateway.GatewayNamespace, Name: telemetry.LangfuseSecretName,
 	}, &sec); err != nil {
-		return gateway.OTelConfig{} // not found (or transient) → tracing off
+		if apierrors.IsNotFound(err) {
+			return gateway.OTelConfig{}, derivedExists, nil
+		}
+		// Not "tracing off": treating a transient read error as absence would roll the gateway
+		// off and back on.
+		return gateway.OTelConfig{}, false, fmt.Errorf("reading %s Secret: %w", telemetry.LangfuseSecretName, err)
+	}
+	if missing := telemetry.MissingLangfuseKeys(sec.Data); len(missing) > 0 {
+		logf.FromContext(ctx).Info("langfuse-otlp Secret is incomplete; gateway tracing stays off",
+			"namespace", gateway.GatewayNamespace, "missing", missing)
+		return gateway.OTelConfig{}, derivedExists, nil
+	}
+
+	derived := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: derivedKey.Name, Namespace: derivedKey.Namespace}}
+	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, derived, func() error {
+		if derived.Labels == nil {
+			derived.Labels = map[string]string{}
+		}
+		// Deliberately NOT gatewaySyncLabel: syncGatewaySecrets garbage-collects by that label,
+		// and this Secret is not a provider mirror.
+		derived.Labels["app.kubernetes.io/managed-by"] = "ctxmesh-controller"
+		derived.Labels[gatewayOTelRoleLabel] = gatewayOTelRoleValue
+		derived.Type = corev1.SecretTypeOpaque
+		derived.Data = map[string][]byte{gateway.OTelHeadersKey: []byte("Authorization=" + telemetry.BasicAuthHeader(
+			string(sec.Data[telemetry.LangfuseKeyPublic]), string(sec.Data[telemetry.LangfuseKeySecret])))}
+		return nil
+	}); err != nil {
+		return gateway.OTelConfig{}, false, fmt.Errorf("writing gateway OTel header Secret: %w", err)
 	}
 	return gateway.OTelConfig{
-		Endpoint: string(sec.Data["otlp-endpoint"]),
-		AuthHeader: telemetry.BasicAuthHeader(
-			string(sec.Data["public-key"]), string(sec.Data["secret-key"])),
-	}
+		Endpoint:        string(sec.Data[telemetry.LangfuseKeyEndpoint]),
+		HeadersSecret:   gatewayOTelHeadersSecret,
+		HeadersSecretRV: derived.ResourceVersion,
+	}, false, nil
 }
 
-// syncGatewaySecrets mirrors each resolved provider Secret (mirrors, keyed by bare
-// name) into the gateway namespace so the gateway Deployment's SB_* secretKeyRefs —
-// which resolve in the gateway namespace — can mount a provider connected in ANY
-// namespace (ADR 0018). Each mirror is labelled for GC: a previously-synced Secret
-// no longer referenced by any route is removed. A pre-existing NON-synced Secret of
-// the same name is never clobbered (the mirror is skipped and logged).
+// deleteStaleOTelHeaders removes the derived header Secret after the gateway has stopped
+// referencing it. It re-checks the label rather than trusting the earlier read.
+func (r *ModelRouteReconciler) deleteStaleOTelHeaders(ctx context.Context) error {
+	var sec corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{Namespace: gateway.GatewayNamespace, Name: gatewayOTelHeadersSecret}, &sec); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if sec.Labels[gatewayOTelRoleLabel] != gatewayOTelRoleValue {
+		return nil
+	}
+	if err := r.Delete(ctx, &sec); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("removing stale gateway OTel header Secret: %w", err)
+	}
+	return nil
+}
+
+// gatewayMirror is a provider Secret to mirror into the gateway namespace, with the
+// "<namespace>/<name>" it came from.
+type gatewayMirror struct {
+	source string
+	secret corev1.Secret
+}
+
+// mirrorSourceAnnotation records which Secret a mirror copies, for whoever reads the gateway
+// namespace: the mirror's own name is a hash.
+const mirrorSourceAnnotation = "agents.ctxmesh.ai/mirrored-from"
+
+// syncGatewaySecrets mirrors each resolved provider Secret into the gateway namespace, so the
+// gateway Deployment's SB_* secretKeyRefs — which resolve in the gateway namespace — can mount a
+// provider connected in ANY namespace (ADR 0018). Each mirror is labelled for GC: a
+// previously-synced Secret no longer referenced by any route is removed.
 //
-// NOTE: mirror names are the bare SecretRef name (matching the render's
-// secretKeyRef), so two routes in different namespaces that share a secret name
-// collide in the shared gateway (last-writer-wins) — the same global-uniqueness
-// assumption the gateway render already makes.
-func (r *ModelRouteReconciler) syncGatewaySecrets(ctx context.Context, mirrors map[string]corev1.Secret) error {
+// A Secret of a mirror's name that the controller did not write is never overwritten. Its source
+// is returned in unwritten, and the caller excludes the routes that need it.
+func (r *ModelRouteReconciler) syncGatewaySecrets(ctx context.Context, mirrors map[string]gatewayMirror) ([]string, error) {
 	log := logf.FromContext(ctx)
 	referenced := make(map[string]bool, len(mirrors))
-	for name, src := range mirrors {
+	var unwritten []string
+	for name, m := range mirrors {
 		referenced[name] = true
-		// Never clobber a pre-existing Secret in the gateway namespace we don't own.
 		var cur corev1.Secret
 		err := r.Get(ctx, client.ObjectKey{Namespace: gateway.GatewayNamespace, Name: name}, &cur)
 		switch {
 		case err == nil && cur.Labels[gatewaySyncLabel] != gatewaySyncValue:
-			log.Info("gateway namespace already has an un-synced Secret of this name; skipping mirror", "name", name)
+			log.Info("gateway namespace already has an un-synced Secret of this name; its routes are excluded",
+				"name", name, "source", m.source)
+			unwritten = append(unwritten, m.source)
 			continue
 		case err != nil && !apierrors.IsNotFound(err):
-			return fmt.Errorf("checking gateway Secret %s: %w", name, err)
+			return nil, fmt.Errorf("checking gateway Secret %s: %w", name, err)
 		}
-		data := src.Data
-		m := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gateway.GatewayNamespace}}
-		if _, err := ctrl.CreateOrUpdate(ctx, r.Client, m, func() error {
-			if m.Labels == nil {
-				m.Labels = map[string]string{}
+		data := m.secret.Data
+		source := m.source
+		mirror := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gateway.GatewayNamespace}}
+		if _, err := ctrl.CreateOrUpdate(ctx, r.Client, mirror, func() error {
+			if mirror.Labels == nil {
+				mirror.Labels = map[string]string{}
 			}
-			m.Labels[gatewaySyncLabel] = gatewaySyncValue
-			m.Type = corev1.SecretTypeOpaque
-			m.Data = data
+			mirror.Labels[gatewaySyncLabel] = gatewaySyncValue
+			if mirror.Annotations == nil {
+				mirror.Annotations = map[string]string{}
+			}
+			mirror.Annotations[mirrorSourceAnnotation] = source
+			mirror.Type = corev1.SecretTypeOpaque
+			mirror.Data = data
 			return nil
 		}); err != nil {
-			return fmt.Errorf("mirroring gateway Secret %s: %w", name, err)
+			return nil, fmt.Errorf("mirroring gateway Secret %s: %w", name, err)
 		}
 	}
 
@@ -312,7 +481,7 @@ func (r *ModelRouteReconciler) syncGatewaySecrets(ctx context.Context, mirrors m
 	if err := r.List(ctx, &existing,
 		client.InNamespace(gateway.GatewayNamespace),
 		client.MatchingLabels{gatewaySyncLabel: gatewaySyncValue}); err != nil {
-		return fmt.Errorf("listing synced gateway Secrets: %w", err)
+		return nil, fmt.Errorf("listing synced gateway Secrets: %w", err)
 	}
 	for i := range existing.Items {
 		s := &existing.Items[i]
@@ -320,26 +489,26 @@ func (r *ModelRouteReconciler) syncGatewaySecrets(ctx context.Context, mirrors m
 			continue
 		}
 		if err := r.Delete(ctx, s); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("gc gateway Secret %s: %w", s.Name, err)
+			return nil, fmt.Errorf("gc gateway Secret %s: %w", s.Name, err)
 		}
 	}
-	return nil
+	return unwritten, nil
 }
 
 // syncGatewayDeployment patches the gateway Deployment with the config-hash
-// pod-template annotation and SB_* env vars derived from the render result.
-// If the Deployment does not exist yet the function returns nil — it will be
-// synced on the next reconcile after the operator is deployed.
-func (r *ModelRouteReconciler) syncGatewayDeployment(ctx context.Context, result gateway.Result) error {
+// pod-template annotation and SB_* env vars derived from the render result, and
+// reports whether the gateway already serves that config. A missing Deployment is
+// gatewayAbsent, not an error: the reconcile checks again later.
+func (r *ModelRouteReconciler) syncGatewayDeployment(ctx context.Context, result gateway.Result) (gatewayState, error) {
 	var deploy appsv1.Deployment
 	if err := r.Get(ctx, client.ObjectKey{
 		Namespace: gateway.GatewayNamespace,
 		Name:      gateway.GatewayDeploymentName,
 	}, &deploy); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil
+			return gatewayAbsent, nil
 		}
-		return fmt.Errorf("getting gateway Deployment: %w", err)
+		return gatewayRolling, fmt.Errorf("getting gateway Deployment: %w", err)
 	}
 
 	// Set config-hash annotation on the pod template to trigger rollout on change.
@@ -362,9 +531,12 @@ func (r *ModelRouteReconciler) syncGatewayDeployment(ctx context.Context, result
 	}
 
 	if err := r.Update(ctx, &deploy); err != nil {
-		return fmt.Errorf("updating gateway Deployment: %w", err)
+		return gatewayRolling, fmt.Errorf("updating gateway Deployment: %w", err)
 	}
-	return nil
+	if gatewayServes(&deploy, result.Hash) {
+		return gatewayServing, nil
+	}
+	return gatewayRolling, nil
 }
 
 // SetupWithManager registers the ModelRouteReconciler and its secondary watches.
@@ -393,6 +565,9 @@ func (r *ModelRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	)
 
 	return ctrl.NewControllerManagedBy(mgr).
+		// One worker, deliberately: every route renders into the ONE gateway ConfigMap and Deployment, so
+		// concurrent reconciles of different routes would only race each other's writes.
+		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		For(&agentsv1alpha1.ModelRoute{}).
 		Watches(&agentsv1alpha1.SecretBinding{}, enqueueAll).
 		// SEC-3: metadata-only Secret watch — the informer caches PartialObjectMetadata

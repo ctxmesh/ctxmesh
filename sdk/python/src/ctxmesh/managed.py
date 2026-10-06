@@ -750,13 +750,17 @@ def _spotlight_system_instruction(token: str) -> str:
 def _is_guarded() -> bool:
     """Return True when the agent container is running under a guardrail policy.
 
-    The controller (m66.2) injects ``GUARDRAIL_POLICY`` into the agent pod env
-    when ``guardrailPolicyRef`` is set on the AgentDeployment.  A non-empty value
-    means this process is behind the guardrail proxy, which rejects ``stream:true``
-    with 422 ``guardrail_streaming_unsupported`` (m66.6, ADR 0059 §4) — output
-    blocking is incompatible with streaming because tokens cannot be un-sent.
+    When ``guardrailPolicyRef`` is set, the controller mounts the policy and names its path in
+    ``GUARDRAIL_POLICY_FILE``; controllers before the live-reloaded policy (K3) set the policy
+    inline as ``GUARDRAIL_POLICY``. Either means this process is behind the guardrail proxy,
+    which rejects ``stream:true`` with 422 ``guardrail_streaming_unsupported`` (ADR 0059 §4) —
+    output blocking is incompatible with streaming because tokens cannot be un-sent.
+
+    Reading only ``GUARDRAIL_POLICY`` after the controller stopped setting it made every guarded
+    agent stream, and fail every call. A Go test in internal/controller pins this to the name the
+    controller injects.
     """
-    return bool(os.environ.get("GUARDRAIL_POLICY"))
+    return bool(os.environ.get("GUARDRAIL_POLICY_FILE") or os.environ.get("GUARDRAIL_POLICY"))
 
 
 def _stream_turn(

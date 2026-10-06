@@ -22,6 +22,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
@@ -123,7 +124,7 @@ func TestRender_GoldenConfig(t *testing.T) {
   - model_name: a-route
     litellm_params:
       model: anthropic/claude-sonnet-4-6
-      api_key: os.environ/SB_ANTHROPIC_KEY
+      api_key: os.environ/SB_ANTHROPIC_KEY_C8A1829890FF
       rpm: 600
     model_info:
       base_model: anthropic/claude-sonnet-4-6
@@ -141,13 +142,14 @@ func TestRender_GoldenConfig(t *testing.T) {
 `
 	assert.Equal(t, wantConfig, result.ConfigYAML, "rendered LiteLLM config YAML")
 
-	// Env vars: only one SB_ANTHROPIC_KEY (deduplicated).
+	// Env vars: only one for the anthropic binding (deduplicated), reading the gateway-namespace
+	// copy of the route's own Secret.
 	require.Len(t, result.EnvVars, 1, "expected exactly one SB_* env var")
 	ev := result.EnvVars[0]
-	assert.Equal(t, "SB_ANTHROPIC_KEY", ev.Name)
+	assert.Equal(t, "SB_ANTHROPIC_KEY_C8A1829890FF", ev.Name)
 	require.NotNil(t, ev.ValueFrom)
 	require.NotNil(t, ev.ValueFrom.SecretKeyRef)
-	assert.Equal(t, "anthropic-api-key", ev.ValueFrom.SecretKeyRef.Name)
+	assert.Equal(t, gateway.MirrorSecretName(testNS, "anthropic-api-key"), ev.ValueFrom.SecretKeyRef.Name)
 	assert.Equal(t, "api-key", ev.ValueFrom.SecretKeyRef.Key)
 
 	// No routes should be excluded.
@@ -352,7 +354,7 @@ func TestRender_EnvVarsDeduplicated(t *testing.T) {
 
 	assert.Empty(t, result.Excluded)
 	require.Len(t, result.EnvVars, 1, "env var must be deduplicated for shared binding")
-	assert.Equal(t, "SB_SHARED_BINDING", result.EnvVars[0].Name)
+	assert.Equal(t, gateway.EnvVarName(testNS, "shared-binding"), result.EnvVars[0].Name)
 }
 
 // TestRender_EnvVarValueFromSecretKeyRef verifies that the env var produced for
@@ -379,7 +381,7 @@ func TestRender_EnvVarValueFromSecretKeyRef(t *testing.T) {
 	require.NotNil(t, ev.ValueFrom.SecretKeyRef, "env var must use SecretKeyRef")
 
 	skr := ev.ValueFrom.SecretKeyRef
-	assert.Equal(t, "openai-secret", skr.Name)
+	assert.Equal(t, gateway.MirrorSecretName(testNS, "openai-secret"), skr.Name)
 	assert.Equal(t, "key", skr.Key)
 }
 
@@ -411,7 +413,7 @@ func TestRender_OTelEnabledAddsCallbackAndEnv(t *testing.T) {
 			},
 		},
 	}
-	otel := gateway.OTelConfig{Endpoint: "http://langfuse/api/public/otel", AuthHeader: "Basic ZGVhZA=="}
+	otel := gateway.OTelConfig{Endpoint: "http://langfuse/api/public/otel", HeadersSecret: "gw-otel", HeadersSecretRV: "7"}
 
 	enabled := gateway.Render([]agentsv1alpha1.ModelRoute{route}, nil, nil, otel)
 	assert.Contains(t, enabled.ConfigYAML, `callbacks: ["otel"]`, "otel callback enabled")
@@ -422,11 +424,36 @@ func TestRender_OTelEnabledAddsCallbackAndEnv(t *testing.T) {
 	assert.Contains(t, enabled.ConfigYAML, "turn_off_message_logging: true",
 		"message content logging must be off when otel export is enabled (no raw PII to Langfuse)")
 	envNames := map[string]string{}
-	for _, e := range enabled.EnvVars {
+	var headers *corev1.EnvVar
+	for i, e := range enabled.EnvVars {
 		envNames[e.Name] = e.Value
+		if e.Name == "OTEL_HEADERS" {
+			headers = &enabled.EnvVars[i]
+		}
 	}
 	assert.Equal(t, "http://langfuse/api/public/otel", envNames["OTEL_ENDPOINT"], "OTEL_ENDPOINT env")
-	assert.Contains(t, envNames["OTEL_HEADERS"], "Basic ZGVhZA==", "OTEL_HEADERS carries auth")
+	// The credential must be a Secret reference, never a value: a literal here is readable by
+	// anyone who can `get deployments`. This assertion used to check that OTEL_HEADERS CONTAINED
+	// the Basic credential -- it encoded the leak as the correct behaviour.
+	require.NotNil(t, headers, "OTEL_HEADERS must be set when otel is enabled")
+	assert.Empty(t, headers.Value, "OTEL_HEADERS must not carry a literal credential")
+	require.NotNil(t, headers.ValueFrom, "OTEL_HEADERS must come from a Secret")
+	require.NotNil(t, headers.ValueFrom.SecretKeyRef, "OTEL_HEADERS must be a secretKeyRef")
+	assert.Equal(t, "gw-otel", headers.ValueFrom.SecretKeyRef.Name)
+	assert.Equal(t, gateway.OTelHeadersKey, headers.ValueFrom.SecretKeyRef.Key)
+	require.NotNil(t, headers.ValueFrom.SecretKeyRef.Optional)
+	assert.True(t, *headers.ValueFrom.SecretKeyRef.Optional, "a missing Secret must not stop the gateway starting")
+	for _, e := range enabled.EnvVars {
+		assert.NotContains(t, e.Value, "Basic ", "%s must not carry a literal credential", e.Name)
+	}
+
+	// A credential rotation changes the derived Secret's resourceVersion; the gateway reads env at
+	// start, so the rollout hash must move with it or the old credential stays live.
+	rotated := otel
+	rotated.HeadersSecretRV = "8"
+	assert.NotEqual(t, enabled.Hash,
+		gateway.Render([]agentsv1alpha1.ModelRoute{route}, nil, nil, rotated).Hash,
+		"rotating the OTel header Secret must change the rollout hash")
 
 	// Disabled (zero value) adds neither.
 	off := gateway.Render([]agentsv1alpha1.ModelRoute{route}, nil, nil, gateway.OTelConfig{})
@@ -473,4 +500,22 @@ func TestRender_ExcludesCrossNamespaceNameCollision(t *testing.T) {
 	assert.Contains(t, result.ConfigYAML, "model_name: solo", "the non-colliding route still renders")
 	assert.Contains(t, result.Excluded, "tenant-a/anthropic")
 	assert.Contains(t, result.Excluded, "tenant-b/anthropic")
+}
+
+// The gateway serves every namespace from one Deployment, so the names that carry a credential
+// there must be distinct per namespace, and a mirror must never be able to take a platform
+// Secret's name.
+func TestQualifiedNames(t *testing.T) {
+	assert.NotEqual(t, gateway.EnvVarName("team-a", "openai"), gateway.EnvVarName("team-b", "openai"),
+		"the same binding name in two namespaces must give two env vars")
+	assert.Equal(t, gateway.EnvVarName("team-a", "openai"), gateway.EnvVarName("team-a", "openai"), "deterministic")
+	assert.Regexp(t, `^SB_OPENAI_[0-9A-F]{12}$`, gateway.EnvVarName("team-a", "openai"))
+
+	assert.Equal(t, "provider-key", gateway.MirrorSecretName(gateway.GatewayNamespace, "provider-key"),
+		"a Secret already in the gateway namespace is used where it is")
+	a, b := gateway.MirrorSecretName("team-a", "provider-key"), gateway.MirrorSecretName("team-b", "provider-key")
+	assert.NotEqual(t, a, b, "the same Secret name in two namespaces must give two mirrors")
+	assert.Regexp(t, `^ctxmesh-sb-[0-9a-f]{12}$`, a, "a mirror's name must not be one a tenant can choose")
+	// The ambiguity the hash input must not have: "a-b"/"c" and "a"/"b-c" are different Secrets.
+	assert.NotEqual(t, gateway.MirrorSecretName("a-b", "c"), gateway.MirrorSecretName("a", "b-c"))
 }

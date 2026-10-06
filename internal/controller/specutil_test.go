@@ -538,3 +538,18 @@ func TestRuntimeDigest_Component(t *testing.T) {
 	}
 	assert.NotEqual(t, d, runtimeDigest(changed3), "Resilience.ModelCall.MaxRetries change must flip the runtime digest")
 }
+
+// The collector's env reaches a pod only on a new revision, so its contract must move the digest:
+// a version bump rolls every agent once, export on/off rolls the agent, and nothing else does.
+func TestTraceExportFold(t *testing.T) {
+	base := combinedBindingDigest("", "", "", "", "", "", "x", "", "", "")
+
+	off, on := traceExportFold(base, false), traceExportFold(base, true)
+	assert.Len(t, off, 8, "the fold must keep the 8-char revision suffix budget")
+	assert.NotEqual(t, base, off, "the contract version must move every agent's digest once")
+	assert.NotEqual(t, off, on, "turning export on adds env, so it must roll a revision")
+	assert.Equal(t, off, traceExportFold(base, false), "the fold must be deterministic")
+	assert.Equal(t, on, traceExportFold(base, true), "the fold must be deterministic")
+	assert.NotEqual(t, off, traceExportFold(combinedBindingDigest("", "", "", "", "", "", "y", "", "", ""), false),
+		"the fold must carry the underlying digest through")
+}

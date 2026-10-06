@@ -91,14 +91,6 @@ spec:
                 maxItems: 64
                 type: array
                 x-kubernetes-list-type: atomic
-              approvalPolicyRef:
-                description: |-
-                  approvalPolicyRef optionally names an ApprovalPolicy (same namespace) that declaratively requires
-                  human approval for named tool calls (and optionally narrows who may approve) — M139, ADR 0111. The
-                  controller merges its require-approval requirements into this agent's effective tool policy
-                  (reusing the pause/resume/voucher runtime); a dangling ref sets a NotReady condition on the agent.
-                maxLength: 253
-                type: string
               budget:
                 description: |-
                   budget optionally sets USD cost-governance caps for this agent (PRD §14).
@@ -363,14 +355,145 @@ spec:
                 - eventing
                 - job
                 type: string
-              feedbackStoreRef:
+              feedback:
                 description: |-
-                  feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
-                  multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
-                  gates ingestion by the declared score names and the read path attributes scores to their source;
-                  Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
-                maxLength: 253
-                type: string
+                  feedback declares which feedback scores this agent accepts and where each one comes from:
+                  people annotating runs in the console, or named external channels such as a CSAT webhook.
+                  When set, the feedback endpoint checks every submitted score name against it (mode Enforce
+                  rejects a name no source declares; Monitor accepts it), and the console labels each stored
+                  score with its declared source. When omitted, any score name is accepted and scores carry no
+                  source label.
+
+                  This is configuration only: the scores themselves are stored in Langfuse, and removing this
+                  field does not delete them.
+                properties:
+                  external:
+                    description: external declares the external feedback channels,
+                      one score per channel.
+                    items:
+                      description: |-
+                        ExternalSource declares one external feedback channel, such as a webhook or an API that reports
+                        a rating, a completion or a business metric.
+                      properties:
+                        name:
+                          description: |-
+                            name is the channel name (for example "csat-webhook"). A score from this channel is labelled
+                            "external:<name>".
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                        score:
+                          description: score is the score this channel writes.
+                          properties:
+                            categories:
+                              description: |-
+                                categories is the allowed label set for a CATEGORICAL score. It is informational today and
+                                ignored for other data types.
+                              items:
+                                type: string
+                              maxItems: 64
+                              type: array
+                              x-kubernetes-list-type: set
+                            dataType:
+                              default: NUMERIC
+                              description: |-
+                                dataType is the score's value type. NUMERIC and BOOLEAN carry a number; CATEGORICAL carries
+                                a string label. Defaults to NUMERIC.
+                              enum:
+                              - NUMERIC
+                              - BOOLEAN
+                              - CATEGORICAL
+                              type: string
+                            name:
+                              description: |-
+                                name is the score name, as submitted and as stored in Langfuse (for example "thumbs",
+                                "accuracy" or "csat"). It must be unique across every source in spec.feedback.
+                              maxLength: 128
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                      required:
+                      - name
+                      - score
+                      type: object
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: each external channel must declare a distinct score
+                        name
+                      rule: self.all(e, self.exists_one(f, f.score.name == e.score.name))
+                  human:
+                    description: human declares the scores people submit, such as
+                      thumbs and ratings in the console.
+                    properties:
+                      scores:
+                        description: scores are the human-submitted score dimensions.
+                          Names must be unique.
+                        items:
+                          description: ScoreDecl declares one feedback score.
+                          properties:
+                            categories:
+                              description: |-
+                                categories is the allowed label set for a CATEGORICAL score. It is informational today and
+                                ignored for other data types.
+                              items:
+                                type: string
+                              maxItems: 64
+                              type: array
+                              x-kubernetes-list-type: set
+                            dataType:
+                              default: NUMERIC
+                              description: |-
+                                dataType is the score's value type. NUMERIC and BOOLEAN carry a number; CATEGORICAL carries
+                                a string label. Defaults to NUMERIC.
+                              enum:
+                              - NUMERIC
+                              - BOOLEAN
+                              - CATEGORICAL
+                              type: string
+                            name:
+                              description: |-
+                                name is the score name, as submitted and as stored in Langfuse (for example "thumbs",
+                                "accuracy" or "csat"). It must be unique across every source in spec.feedback.
+                              maxLength: 128
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        maxItems: 64
+                        minItems: 1
+                        type: array
+                        x-kubernetes-list-type: atomic
+                        x-kubernetes-validations:
+                        - message: human score names must be unique
+                          rule: self.all(s, self.exists_one(t, t.name == s.name))
+                    required:
+                    - scores
+                    type: object
+                  mode:
+                    default: Enforce
+                    description: |-
+                      mode selects whether the declaration gates submitted scores. Enforce rejects a score whose
+                      name no source declares. Monitor accepts it, which lets an agent that already emits scores
+                      adopt a declaration without losing any. Defaults to Enforce.
+                    enum:
+                    - Enforce
+                    - Monitor
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: 'feedback must declare at least one source: human.scores
+                    or an external channel'
+                  rule: (has(self.human) && size(self.human.scores) > 0) || (has(self.external)
+                    && size(self.external) > 0)
+                - message: a score name is declared by both human and an external
+                    channel; score names must be unique across all sources
+                  rule: '!has(self.human) || !has(self.external) || self.human.scores.all(s,
+                    !self.external.exists(e, e.score.name == s.name))'
               guardrailPolicyRef:
                 description: |-
                   guardrailPolicyRef optionally names a GuardrailPolicy (same namespace) that governs this
@@ -732,6 +855,42 @@ spec:
                     description: toolPolicy optionally constrains which tools the
                       agent may use and how.
                     properties:
+                      approvers:
+                        description: |-
+                          approvers narrows who may approve a paused tool call (rule require-approval) for this
+                          agent. A caller approving a run must hold resume permission on the agent through RBAC
+                          AND match an entry here: a User entry matches the caller's username, a Group entry any
+                          group the caller belongs to. Identity comes from the caller's own verified token, never
+                          from the request. This list can only narrow RBAC; it never grants approval to someone
+                          without it. Empty means anyone with resume permission may approve.
+
+                          A ServiceAccount approves through its username or group form, for example User
+                          "system:serviceaccount:<namespace>:<name>".
+                        items:
+                          description: |-
+                            Approver identifies who may approve a paused tool call: a Kubernetes User or Group, spelled
+                            as in an RBAC subject.
+                          properties:
+                            kind:
+                              description: |-
+                                kind is "User" (matched against the caller's username) or "Group" (matched against the
+                                groups the caller belongs to).
+                              enum:
+                              - User
+                              - Group
+                              type: string
+                            name:
+                              description: name is the username or group name to match.
+                              maxLength: 316
+                              minLength: 1
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                        maxItems: 64
+                        type: array
+                        x-kubernetes-list-type: atomic
                       default:
                         default: allow
                         description: default is the rule applied to any tool without
@@ -803,6 +962,15 @@ spec:
                   scaling configures the Knative autoscaler bounds for this agent.
                   When omitted, defaults to min=0 (scale-to-zero) and max=3.
                 properties:
+                  concurrency:
+                    description: |-
+                      concurrency is the most runs one replica handles at once (Knative containerConcurrency). A run
+                      beyond it waits for a free slot or a new replica instead of joining an overloaded pod. 0 means
+                      no limit: the pod takes every run it is sent and the autoscaler scales only on its soft target.
+                    format: int32
+                    maximum: 1000
+                    minimum: 0
+                    type: integer
                   max:
                     default: 3
                     description: max is the maximum number of replicas the autoscaler
@@ -816,6 +984,27 @@ spec:
                       to enable scale-to-zero.
                     format: int32
                     minimum: 0
+                    type: integer
+                  targetBurstCapacity:
+                    description: |-
+                      targetBurstCapacity is how much spare capacity Knative keeps routed through its activator
+                      (autoscaling.knative.dev/target-burst-capacity). 0 takes the activator out of the request path
+                      once a replica is up; -1 keeps it in the path always, where it queues runs that find every slot
+                      taken. Unset, it follows concurrency: 0 when concurrency is unlimited, -1 when it is bounded,
+                      because a bounded pod with the activator out of the path drops the runs it has no slot for.
+                    format: int32
+                    minimum: -1
+                    type: integer
+                  timeoutSeconds:
+                    default: 600
+                    description: |-
+                      timeoutSeconds is the longest one run may take before its request is cut off (Knative
+                      timeoutSeconds). It defaults to 600, matching the platform's run limit; left unset, Knative would
+                      end every run at 300 seconds. A value above the cluster's Knative max-revision-timeout-seconds
+                      (600 unless raised) is rejected by Knative.
+                    format: int64
+                    maximum: 3600
+                    minimum: 1
                     type: integer
                 type: object
               sessionMemory:
@@ -1316,14 +1505,6 @@ spec:
                 maxItems: 64
                 type: array
                 x-kubernetes-list-type: atomic
-              approvalPolicyRef:
-                description: |-
-                  approvalPolicyRef optionally names an ApprovalPolicy (same namespace) that declaratively requires
-                  human approval for named tool calls (and optionally narrows who may approve) — M139, ADR 0111. The
-                  controller merges its require-approval requirements into this agent's effective tool policy
-                  (reusing the pause/resume/voucher runtime); a dangling ref sets a NotReady condition on the agent.
-                maxLength: 253
-                type: string
               budget:
                 description: |-
                   budget optionally sets USD cost-governance caps for this agent (PRD §14).
@@ -1588,14 +1769,145 @@ spec:
                 - eventing
                 - job
                 type: string
-              feedbackStoreRef:
+              feedback:
                 description: |-
-                  feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
-                  multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
-                  gates ingestion by the declared score names and the read path attributes scores to their source;
-                  Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
-                maxLength: 253
-                type: string
+                  feedback declares which feedback scores this agent accepts and where each one comes from:
+                  people annotating runs in the console, or named external channels such as a CSAT webhook.
+                  When set, the feedback endpoint checks every submitted score name against it (mode Enforce
+                  rejects a name no source declares; Monitor accepts it), and the console labels each stored
+                  score with its declared source. When omitted, any score name is accepted and scores carry no
+                  source label.
+
+                  This is configuration only: the scores themselves are stored in Langfuse, and removing this
+                  field does not delete them.
+                properties:
+                  external:
+                    description: external declares the external feedback channels,
+                      one score per channel.
+                    items:
+                      description: |-
+                        ExternalSource declares one external feedback channel, such as a webhook or an API that reports
+                        a rating, a completion or a business metric.
+                      properties:
+                        name:
+                          description: |-
+                            name is the channel name (for example "csat-webhook"). A score from this channel is labelled
+                            "external:<name>".
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                        score:
+                          description: score is the score this channel writes.
+                          properties:
+                            categories:
+                              description: |-
+                                categories is the allowed label set for a CATEGORICAL score. It is informational today and
+                                ignored for other data types.
+                              items:
+                                type: string
+                              maxItems: 64
+                              type: array
+                              x-kubernetes-list-type: set
+                            dataType:
+                              default: NUMERIC
+                              description: |-
+                                dataType is the score's value type. NUMERIC and BOOLEAN carry a number; CATEGORICAL carries
+                                a string label. Defaults to NUMERIC.
+                              enum:
+                              - NUMERIC
+                              - BOOLEAN
+                              - CATEGORICAL
+                              type: string
+                            name:
+                              description: |-
+                                name is the score name, as submitted and as stored in Langfuse (for example "thumbs",
+                                "accuracy" or "csat"). It must be unique across every source in spec.feedback.
+                              maxLength: 128
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                      required:
+                      - name
+                      - score
+                      type: object
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: each external channel must declare a distinct score
+                        name
+                      rule: self.all(e, self.exists_one(f, f.score.name == e.score.name))
+                  human:
+                    description: human declares the scores people submit, such as
+                      thumbs and ratings in the console.
+                    properties:
+                      scores:
+                        description: scores are the human-submitted score dimensions.
+                          Names must be unique.
+                        items:
+                          description: ScoreDecl declares one feedback score.
+                          properties:
+                            categories:
+                              description: |-
+                                categories is the allowed label set for a CATEGORICAL score. It is informational today and
+                                ignored for other data types.
+                              items:
+                                type: string
+                              maxItems: 64
+                              type: array
+                              x-kubernetes-list-type: set
+                            dataType:
+                              default: NUMERIC
+                              description: |-
+                                dataType is the score's value type. NUMERIC and BOOLEAN carry a number; CATEGORICAL carries
+                                a string label. Defaults to NUMERIC.
+                              enum:
+                              - NUMERIC
+                              - BOOLEAN
+                              - CATEGORICAL
+                              type: string
+                            name:
+                              description: |-
+                                name is the score name, as submitted and as stored in Langfuse (for example "thumbs",
+                                "accuracy" or "csat"). It must be unique across every source in spec.feedback.
+                              maxLength: 128
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        maxItems: 64
+                        minItems: 1
+                        type: array
+                        x-kubernetes-list-type: atomic
+                        x-kubernetes-validations:
+                        - message: human score names must be unique
+                          rule: self.all(s, self.exists_one(t, t.name == s.name))
+                    required:
+                    - scores
+                    type: object
+                  mode:
+                    default: Enforce
+                    description: |-
+                      mode selects whether the declaration gates submitted scores. Enforce rejects a score whose
+                      name no source declares. Monitor accepts it, which lets an agent that already emits scores
+                      adopt a declaration without losing any. Defaults to Enforce.
+                    enum:
+                    - Enforce
+                    - Monitor
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: 'feedback must declare at least one source: human.scores
+                    or an external channel'
+                  rule: (has(self.human) && size(self.human.scores) > 0) || (has(self.external)
+                    && size(self.external) > 0)
+                - message: a score name is declared by both human and an external
+                    channel; score names must be unique across all sources
+                  rule: '!has(self.human) || !has(self.external) || self.human.scores.all(s,
+                    !self.external.exists(e, e.score.name == s.name))'
               guardrailPolicyRef:
                 description: |-
                   guardrailPolicyRef optionally names a GuardrailPolicy (same namespace) that governs this
@@ -1957,6 +2269,42 @@ spec:
                     description: toolPolicy optionally constrains which tools the
                       agent may use and how.
                     properties:
+                      approvers:
+                        description: |-
+                          approvers narrows who may approve a paused tool call (rule require-approval) for this
+                          agent. A caller approving a run must hold resume permission on the agent through RBAC
+                          AND match an entry here: a User entry matches the caller's username, a Group entry any
+                          group the caller belongs to. Identity comes from the caller's own verified token, never
+                          from the request. This list can only narrow RBAC; it never grants approval to someone
+                          without it. Empty means anyone with resume permission may approve.
+
+                          A ServiceAccount approves through its username or group form, for example User
+                          "system:serviceaccount:<namespace>:<name>".
+                        items:
+                          description: |-
+                            Approver identifies who may approve a paused tool call: a Kubernetes User or Group, spelled
+                            as in an RBAC subject.
+                          properties:
+                            kind:
+                              description: |-
+                                kind is "User" (matched against the caller's username) or "Group" (matched against the
+                                groups the caller belongs to).
+                              enum:
+                              - User
+                              - Group
+                              type: string
+                            name:
+                              description: name is the username or group name to match.
+                              maxLength: 316
+                              minLength: 1
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                        maxItems: 64
+                        type: array
+                        x-kubernetes-list-type: atomic
                       default:
                         default: allow
                         description: default is the rule applied to any tool without
@@ -2028,6 +2376,15 @@ spec:
                   scaling configures the Knative autoscaler bounds for this agent.
                   When omitted, defaults to min=0 (scale-to-zero) and max=3.
                 properties:
+                  concurrency:
+                    description: |-
+                      concurrency is the most runs one replica handles at once (Knative containerConcurrency). A run
+                      beyond it waits for a free slot or a new replica instead of joining an overloaded pod. 0 means
+                      no limit: the pod takes every run it is sent and the autoscaler scales only on its soft target.
+                    format: int32
+                    maximum: 1000
+                    minimum: 0
+                    type: integer
                   max:
                     default: 3
                     description: max is the maximum number of replicas the autoscaler
@@ -2041,6 +2398,27 @@ spec:
                       to enable scale-to-zero.
                     format: int32
                     minimum: 0
+                    type: integer
+                  targetBurstCapacity:
+                    description: |-
+                      targetBurstCapacity is how much spare capacity Knative keeps routed through its activator
+                      (autoscaling.knative.dev/target-burst-capacity). 0 takes the activator out of the request path
+                      once a replica is up; -1 keeps it in the path always, where it queues runs that find every slot
+                      taken. Unset, it follows concurrency: 0 when concurrency is unlimited, -1 when it is bounded,
+                      because a bounded pod with the activator out of the path drops the runs it has no slot for.
+                    format: int32
+                    minimum: -1
+                    type: integer
+                  timeoutSeconds:
+                    default: 600
+                    description: |-
+                      timeoutSeconds is the longest one run may take before its request is cut off (Knative
+                      timeoutSeconds). It defaults to 600, matching the platform's run limit; left unset, Knative would
+                      end every run at 300 seconds. A value above the cluster's Knative max-revision-timeout-seconds
+                      (600 unless raised) is rejected by Knative.
+                    format: int64
+                    maximum: 3600
+                    minimum: 1
                     type: integer
                 type: object
               sessionMemory:
@@ -3514,6 +3892,7 @@ spec:
           boundary); at runtime the supervisor delegates to a roster member via the `delegate_to` tool, which
           starts the member as a durable SUB-RUN on the run-worker path — inheriting the invoking user's OBO
           (no re-consent), the conversation, and the trace, bounded by the spawn budget + tenant quota.
+          Frozen (ADR 0152): additive bug fixes only, and no new fields until the install path is green.
         properties:
           apiVersion:
             description: |-
@@ -3818,14 +4197,6 @@ spec:
                     maxItems: 64
                     type: array
                     x-kubernetes-list-type: atomic
-                  approvalPolicyRef:
-                    description: |-
-                      approvalPolicyRef optionally names an ApprovalPolicy (same namespace) that declaratively requires
-                      human approval for named tool calls (and optionally narrows who may approve) — M139, ADR 0111. The
-                      controller merges its require-approval requirements into this agent's effective tool policy
-                      (reusing the pause/resume/voucher runtime); a dangling ref sets a NotReady condition on the agent.
-                    maxLength: 253
-                    type: string
                   budget:
                     description: |-
                       budget optionally sets USD cost-governance caps for this agent (PRD §14).
@@ -4091,14 +4462,145 @@ spec:
                     - eventing
                     - job
                     type: string
-                  feedbackStoreRef:
+                  feedback:
                     description: |-
-                      feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
-                      multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
-                      gates ingestion by the declared score names and the read path attributes scores to their source;
-                      Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
-                    maxLength: 253
-                    type: string
+                      feedback declares which feedback scores this agent accepts and where each one comes from:
+                      people annotating runs in the console, or named external channels such as a CSAT webhook.
+                      When set, the feedback endpoint checks every submitted score name against it (mode Enforce
+                      rejects a name no source declares; Monitor accepts it), and the console labels each stored
+                      score with its declared source. When omitted, any score name is accepted and scores carry no
+                      source label.
+
+                      This is configuration only: the scores themselves are stored in Langfuse, and removing this
+                      field does not delete them.
+                    properties:
+                      external:
+                        description: external declares the external feedback channels,
+                          one score per channel.
+                        items:
+                          description: |-
+                            ExternalSource declares one external feedback channel, such as a webhook or an API that reports
+                            a rating, a completion or a business metric.
+                          properties:
+                            name:
+                              description: |-
+                                name is the channel name (for example "csat-webhook"). A score from this channel is labelled
+                                "external:<name>".
+                              maxLength: 128
+                              minLength: 1
+                              type: string
+                            score:
+                              description: score is the score this channel writes.
+                              properties:
+                                categories:
+                                  description: |-
+                                    categories is the allowed label set for a CATEGORICAL score. It is informational today and
+                                    ignored for other data types.
+                                  items:
+                                    type: string
+                                  maxItems: 64
+                                  type: array
+                                  x-kubernetes-list-type: set
+                                dataType:
+                                  default: NUMERIC
+                                  description: |-
+                                    dataType is the score's value type. NUMERIC and BOOLEAN carry a number; CATEGORICAL carries
+                                    a string label. Defaults to NUMERIC.
+                                  enum:
+                                  - NUMERIC
+                                  - BOOLEAN
+                                  - CATEGORICAL
+                                  type: string
+                                name:
+                                  description: |-
+                                    name is the score name, as submitted and as stored in Langfuse (for example "thumbs",
+                                    "accuracy" or "csat"). It must be unique across every source in spec.feedback.
+                                  maxLength: 128
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                          required:
+                          - name
+                          - score
+                          type: object
+                        maxItems: 32
+                        type: array
+                        x-kubernetes-list-type: atomic
+                        x-kubernetes-validations:
+                        - message: each external channel must declare a distinct score
+                            name
+                          rule: self.all(e, self.exists_one(f, f.score.name == e.score.name))
+                      human:
+                        description: human declares the scores people submit, such
+                          as thumbs and ratings in the console.
+                        properties:
+                          scores:
+                            description: scores are the human-submitted score dimensions.
+                              Names must be unique.
+                            items:
+                              description: ScoreDecl declares one feedback score.
+                              properties:
+                                categories:
+                                  description: |-
+                                    categories is the allowed label set for a CATEGORICAL score. It is informational today and
+                                    ignored for other data types.
+                                  items:
+                                    type: string
+                                  maxItems: 64
+                                  type: array
+                                  x-kubernetes-list-type: set
+                                dataType:
+                                  default: NUMERIC
+                                  description: |-
+                                    dataType is the score's value type. NUMERIC and BOOLEAN carry a number; CATEGORICAL carries
+                                    a string label. Defaults to NUMERIC.
+                                  enum:
+                                  - NUMERIC
+                                  - BOOLEAN
+                                  - CATEGORICAL
+                                  type: string
+                                name:
+                                  description: |-
+                                    name is the score name, as submitted and as stored in Langfuse (for example "thumbs",
+                                    "accuracy" or "csat"). It must be unique across every source in spec.feedback.
+                                  maxLength: 128
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            maxItems: 64
+                            minItems: 1
+                            type: array
+                            x-kubernetes-list-type: atomic
+                            x-kubernetes-validations:
+                            - message: human score names must be unique
+                              rule: self.all(s, self.exists_one(t, t.name == s.name))
+                        required:
+                        - scores
+                        type: object
+                      mode:
+                        default: Enforce
+                        description: |-
+                          mode selects whether the declaration gates submitted scores. Enforce rejects a score whose
+                          name no source declares. Monitor accepts it, which lets an agent that already emits scores
+                          adopt a declaration without losing any. Defaults to Enforce.
+                        enum:
+                        - Enforce
+                        - Monitor
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: 'feedback must declare at least one source: human.scores
+                        or an external channel'
+                      rule: (has(self.human) && size(self.human.scores) > 0) || (has(self.external)
+                        && size(self.external) > 0)
+                    - message: a score name is declared by both human and an external
+                        channel; score names must be unique across all sources
+                      rule: '!has(self.human) || !has(self.external) || self.human.scores.all(s,
+                        !self.external.exists(e, e.score.name == s.name))'
                   guardrailPolicyRef:
                     description: |-
                       guardrailPolicyRef optionally names a GuardrailPolicy (same namespace) that governs this
@@ -4460,6 +4962,43 @@ spec:
                         description: toolPolicy optionally constrains which tools
                           the agent may use and how.
                         properties:
+                          approvers:
+                            description: |-
+                              approvers narrows who may approve a paused tool call (rule require-approval) for this
+                              agent. A caller approving a run must hold resume permission on the agent through RBAC
+                              AND match an entry here: a User entry matches the caller's username, a Group entry any
+                              group the caller belongs to. Identity comes from the caller's own verified token, never
+                              from the request. This list can only narrow RBAC; it never grants approval to someone
+                              without it. Empty means anyone with resume permission may approve.
+
+                              A ServiceAccount approves through its username or group form, for example User
+                              "system:serviceaccount:<namespace>:<name>".
+                            items:
+                              description: |-
+                                Approver identifies who may approve a paused tool call: a Kubernetes User or Group, spelled
+                                as in an RBAC subject.
+                              properties:
+                                kind:
+                                  description: |-
+                                    kind is "User" (matched against the caller's username) or "Group" (matched against the
+                                    groups the caller belongs to).
+                                  enum:
+                                  - User
+                                  - Group
+                                  type: string
+                                name:
+                                  description: name is the username or group name
+                                    to match.
+                                  maxLength: 316
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - kind
+                              - name
+                              type: object
+                            maxItems: 64
+                            type: array
+                            x-kubernetes-list-type: atomic
                           default:
                             default: allow
                             description: default is the rule applied to any tool without
@@ -4531,6 +5070,15 @@ spec:
                       scaling configures the Knative autoscaler bounds for this agent.
                       When omitted, defaults to min=0 (scale-to-zero) and max=3.
                     properties:
+                      concurrency:
+                        description: |-
+                          concurrency is the most runs one replica handles at once (Knative containerConcurrency). A run
+                          beyond it waits for a free slot or a new replica instead of joining an overloaded pod. 0 means
+                          no limit: the pod takes every run it is sent and the autoscaler scales only on its soft target.
+                        format: int32
+                        maximum: 1000
+                        minimum: 0
+                        type: integer
                       max:
                         default: 3
                         description: max is the maximum number of replicas the autoscaler
@@ -4544,6 +5092,27 @@ spec:
                           0 (default) to enable scale-to-zero.
                         format: int32
                         minimum: 0
+                        type: integer
+                      targetBurstCapacity:
+                        description: |-
+                          targetBurstCapacity is how much spare capacity Knative keeps routed through its activator
+                          (autoscaling.knative.dev/target-burst-capacity). 0 takes the activator out of the request path
+                          once a replica is up; -1 keeps it in the path always, where it queues runs that find every slot
+                          taken. Unset, it follows concurrency: 0 when concurrency is unlimited, -1 when it is bounded,
+                          because a bounded pod with the activator out of the path drops the runs it has no slot for.
+                        format: int32
+                        minimum: -1
+                        type: integer
+                      timeoutSeconds:
+                        default: 600
+                        description: |-
+                          timeoutSeconds is the longest one run may take before its request is cut off (Knative
+                          timeoutSeconds). It defaults to 600, matching the platform's run limit; left unset, Knative would
+                          end every run at 300 seconds. A value above the cluster's Knative max-revision-timeout-seconds
+                          (600 unless raised) is rejected by Knative.
+                        format: int64
+                        maximum: 3600
+                        minimum: 1
                         type: integer
                     type: object
                   sessionMemory:
@@ -4773,14 +5342,6 @@ spec:
                     maxItems: 64
                     type: array
                     x-kubernetes-list-type: atomic
-                  approvalPolicyRef:
-                    description: |-
-                      approvalPolicyRef optionally names an ApprovalPolicy (same namespace) that declaratively requires
-                      human approval for named tool calls (and optionally narrows who may approve) — M139, ADR 0111. The
-                      controller merges its require-approval requirements into this agent's effective tool policy
-                      (reusing the pause/resume/voucher runtime); a dangling ref sets a NotReady condition on the agent.
-                    maxLength: 253
-                    type: string
                   budget:
                     description: |-
                       budget optionally sets USD cost-governance caps for this agent (PRD §14).
@@ -5046,14 +5607,145 @@ spec:
                     - eventing
                     - job
                     type: string
-                  feedbackStoreRef:
+                  feedback:
                     description: |-
-                      feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
-                      multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
-                      gates ingestion by the declared score names and the read path attributes scores to their source;
-                      Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
-                    maxLength: 253
-                    type: string
+                      feedback declares which feedback scores this agent accepts and where each one comes from:
+                      people annotating runs in the console, or named external channels such as a CSAT webhook.
+                      When set, the feedback endpoint checks every submitted score name against it (mode Enforce
+                      rejects a name no source declares; Monitor accepts it), and the console labels each stored
+                      score with its declared source. When omitted, any score name is accepted and scores carry no
+                      source label.
+
+                      This is configuration only: the scores themselves are stored in Langfuse, and removing this
+                      field does not delete them.
+                    properties:
+                      external:
+                        description: external declares the external feedback channels,
+                          one score per channel.
+                        items:
+                          description: |-
+                            ExternalSource declares one external feedback channel, such as a webhook or an API that reports
+                            a rating, a completion or a business metric.
+                          properties:
+                            name:
+                              description: |-
+                                name is the channel name (for example "csat-webhook"). A score from this channel is labelled
+                                "external:<name>".
+                              maxLength: 128
+                              minLength: 1
+                              type: string
+                            score:
+                              description: score is the score this channel writes.
+                              properties:
+                                categories:
+                                  description: |-
+                                    categories is the allowed label set for a CATEGORICAL score. It is informational today and
+                                    ignored for other data types.
+                                  items:
+                                    type: string
+                                  maxItems: 64
+                                  type: array
+                                  x-kubernetes-list-type: set
+                                dataType:
+                                  default: NUMERIC
+                                  description: |-
+                                    dataType is the score's value type. NUMERIC and BOOLEAN carry a number; CATEGORICAL carries
+                                    a string label. Defaults to NUMERIC.
+                                  enum:
+                                  - NUMERIC
+                                  - BOOLEAN
+                                  - CATEGORICAL
+                                  type: string
+                                name:
+                                  description: |-
+                                    name is the score name, as submitted and as stored in Langfuse (for example "thumbs",
+                                    "accuracy" or "csat"). It must be unique across every source in spec.feedback.
+                                  maxLength: 128
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                          required:
+                          - name
+                          - score
+                          type: object
+                        maxItems: 32
+                        type: array
+                        x-kubernetes-list-type: atomic
+                        x-kubernetes-validations:
+                        - message: each external channel must declare a distinct score
+                            name
+                          rule: self.all(e, self.exists_one(f, f.score.name == e.score.name))
+                      human:
+                        description: human declares the scores people submit, such
+                          as thumbs and ratings in the console.
+                        properties:
+                          scores:
+                            description: scores are the human-submitted score dimensions.
+                              Names must be unique.
+                            items:
+                              description: ScoreDecl declares one feedback score.
+                              properties:
+                                categories:
+                                  description: |-
+                                    categories is the allowed label set for a CATEGORICAL score. It is informational today and
+                                    ignored for other data types.
+                                  items:
+                                    type: string
+                                  maxItems: 64
+                                  type: array
+                                  x-kubernetes-list-type: set
+                                dataType:
+                                  default: NUMERIC
+                                  description: |-
+                                    dataType is the score's value type. NUMERIC and BOOLEAN carry a number; CATEGORICAL carries
+                                    a string label. Defaults to NUMERIC.
+                                  enum:
+                                  - NUMERIC
+                                  - BOOLEAN
+                                  - CATEGORICAL
+                                  type: string
+                                name:
+                                  description: |-
+                                    name is the score name, as submitted and as stored in Langfuse (for example "thumbs",
+                                    "accuracy" or "csat"). It must be unique across every source in spec.feedback.
+                                  maxLength: 128
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            maxItems: 64
+                            minItems: 1
+                            type: array
+                            x-kubernetes-list-type: atomic
+                            x-kubernetes-validations:
+                            - message: human score names must be unique
+                              rule: self.all(s, self.exists_one(t, t.name == s.name))
+                        required:
+                        - scores
+                        type: object
+                      mode:
+                        default: Enforce
+                        description: |-
+                          mode selects whether the declaration gates submitted scores. Enforce rejects a score whose
+                          name no source declares. Monitor accepts it, which lets an agent that already emits scores
+                          adopt a declaration without losing any. Defaults to Enforce.
+                        enum:
+                        - Enforce
+                        - Monitor
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: 'feedback must declare at least one source: human.scores
+                        or an external channel'
+                      rule: (has(self.human) && size(self.human.scores) > 0) || (has(self.external)
+                        && size(self.external) > 0)
+                    - message: a score name is declared by both human and an external
+                        channel; score names must be unique across all sources
+                      rule: '!has(self.human) || !has(self.external) || self.human.scores.all(s,
+                        !self.external.exists(e, e.score.name == s.name))'
                   guardrailPolicyRef:
                     description: |-
                       guardrailPolicyRef optionally names a GuardrailPolicy (same namespace) that governs this
@@ -5415,6 +6107,43 @@ spec:
                         description: toolPolicy optionally constrains which tools
                           the agent may use and how.
                         properties:
+                          approvers:
+                            description: |-
+                              approvers narrows who may approve a paused tool call (rule require-approval) for this
+                              agent. A caller approving a run must hold resume permission on the agent through RBAC
+                              AND match an entry here: a User entry matches the caller's username, a Group entry any
+                              group the caller belongs to. Identity comes from the caller's own verified token, never
+                              from the request. This list can only narrow RBAC; it never grants approval to someone
+                              without it. Empty means anyone with resume permission may approve.
+
+                              A ServiceAccount approves through its username or group form, for example User
+                              "system:serviceaccount:<namespace>:<name>".
+                            items:
+                              description: |-
+                                Approver identifies who may approve a paused tool call: a Kubernetes User or Group, spelled
+                                as in an RBAC subject.
+                              properties:
+                                kind:
+                                  description: |-
+                                    kind is "User" (matched against the caller's username) or "Group" (matched against the
+                                    groups the caller belongs to).
+                                  enum:
+                                  - User
+                                  - Group
+                                  type: string
+                                name:
+                                  description: name is the username or group name
+                                    to match.
+                                  maxLength: 316
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - kind
+                              - name
+                              type: object
+                            maxItems: 64
+                            type: array
+                            x-kubernetes-list-type: atomic
                           default:
                             default: allow
                             description: default is the rule applied to any tool without
@@ -5486,6 +6215,15 @@ spec:
                       scaling configures the Knative autoscaler bounds for this agent.
                       When omitted, defaults to min=0 (scale-to-zero) and max=3.
                     properties:
+                      concurrency:
+                        description: |-
+                          concurrency is the most runs one replica handles at once (Knative containerConcurrency). A run
+                          beyond it waits for a free slot or a new replica instead of joining an overloaded pod. 0 means
+                          no limit: the pod takes every run it is sent and the autoscaler scales only on its soft target.
+                        format: int32
+                        maximum: 1000
+                        minimum: 0
+                        type: integer
                       max:
                         default: 3
                         description: max is the maximum number of replicas the autoscaler
@@ -5499,6 +6237,27 @@ spec:
                           0 (default) to enable scale-to-zero.
                         format: int32
                         minimum: 0
+                        type: integer
+                      targetBurstCapacity:
+                        description: |-
+                          targetBurstCapacity is how much spare capacity Knative keeps routed through its activator
+                          (autoscaling.knative.dev/target-burst-capacity). 0 takes the activator out of the request path
+                          once a replica is up; -1 keeps it in the path always, where it queues runs that find every slot
+                          taken. Unset, it follows concurrency: 0 when concurrency is unlimited, -1 when it is bounded,
+                          because a bounded pod with the activator out of the path drops the runs it has no slot for.
+                        format: int32
+                        minimum: -1
+                        type: integer
+                      timeoutSeconds:
+                        default: 600
+                        description: |-
+                          timeoutSeconds is the longest one run may take before its request is cut off (Knative
+                          timeoutSeconds). It defaults to 600, matching the platform's run limit; left unset, Knative would
+                          end every run at 300 seconds. A value above the cluster's Knative max-revision-timeout-seconds
+                          (600 unless raised) is rejected by Knative.
+                        format: int64
+                        maximum: 3600
+                        minimum: 1
                         type: integer
                     type: object
                   sessionMemory:
@@ -6018,1553 +6777,6 @@ metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
     helm.sh/resource-policy: keep
-  name: approvalpolicies.agents.ctxmesh.ai
-spec:
-  group: agents.ctxmesh.ai
-  names:
-    categories:
-    - agents
-    kind: ApprovalPolicy
-    listKind: ApprovalPolicyList
-    plural: approvalpolicies
-    shortNames:
-    - apr
-    singular: approvalpolicy
-  scope: Namespaced
-  versions:
-  - additionalPrinterColumns:
-    - jsonPath: .status.conditions[?(@.type=='Validated')].status
-      name: Validated
-      type: string
-    name: v1beta1
-    schema:
-      openAPIV3Schema:
-        description: |-
-          ApprovalPolicy is a namespaced, reusable human-in-the-loop policy referenced by
-          AgentDeployment.spec.approvalPolicyRef (M139, ADR 0111). It declaratively requires human approval for
-          named tool calls (reusing the existing pause/resume/voucher runtime — the controller merges its
-          requirements into the agent's effective tool policy) and optionally narrows WHO may approve. A
-          SINGLE-version CRD born directly in v1beta1.
-        properties:
-          apiVersion:
-            description: |-
-              APIVersion defines the versioned schema of this representation of an object.
-              Servers should convert recognized schemas to the latest internal value, and
-              may reject unrecognized values.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
-            type: string
-          kind:
-            description: |-
-              Kind is a string value representing the REST resource this object represents.
-              Servers may infer this from the endpoint the client submits requests to.
-              Cannot be updated.
-              In CamelCase.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
-            type: string
-          metadata:
-            type: object
-          spec:
-            description: |-
-              ApprovalPolicySpec is a namespaced, reusable HITL policy referenced by AgentDeployment.spec
-              .approvalPolicyRef (M139, ADR 0111). It is STRICTLY MONOTONIC: the controller merges its requirements
-              into the agent's effective tool policy under max-strictness (allow < require-approval < deny), so it can
-              only ADD approval requirements — an inline toolPolicy can never weaken a requirement the policy demands.
-              v1 is TOOL-scoped (the only gate with an existing runtime — pause_for_approval).
-            properties:
-              approvers:
-                description: |-
-                  approvers optionally NARROWS who may approve a pause to these subjects, AND-ed with RBAC: a resume
-                  caller must hold resume RBAC AND match an entry. Empty ⇒ any caller with resume RBAC may approve
-                  (the pre-M139 behavior, unchanged — a semantic callers depend on, so it is fixed). Matched against
-                  the caller's OWN verified identity (username + groups, from a SelfSubjectReview) — never a client claim.
-                items:
-                  description: |-
-                    ApprovalSubject identifies WHO may approve — a Kubernetes User or Group (matching rbacv1.Subject
-                    capitalization), matched at the resume endpoint against the caller's OWN verified identity (username +
-                    groups from a SelfSubjectReview). It is AND-ed with RBAC: a subject listed here must ALSO hold resume
-                    RBAC on the run's agent — the policy NARROWS who may approve, it never grants approval rights to someone
-                    without RBAC (ADR 0111 §4). A ServiceAccount approver works today via its string forms (User
-                    "system:serviceaccount:<ns>:<name>" / Group "system:serviceaccounts:<ns>"); a first-class kind is a
-                    future non-breaking enum widening.
-                  properties:
-                    kind:
-                      description: 'kind is the subject kind: "User" (a K8s username)
-                        or "Group" (a K8s group the caller is a member of).'
-                      enum:
-                      - User
-                      - Group
-                      type: string
-                    name:
-                      description: name is the User username or the Group name to
-                        match against the caller's verified identity.
-                      maxLength: 316
-                      minLength: 1
-                      type: string
-                  required:
-                  - kind
-                  - name
-                  type: object
-                maxItems: 64
-                type: array
-                x-kubernetes-list-type: atomic
-              rules:
-                description: rules select which tool calls require approval (union
-                  across rules). At least one.
-                items:
-                  description: |-
-                    ApprovalRule selects tool calls that require human approval (M139, ADR 0111). A rule is the extension
-                    point — future compatible adds (per-rule approvers, a RunStart phase, workflow steps) become fields here
-                    rather than parallel flat fields. An ApprovalPolicy carries ONLY approval requirements — never allow/deny
-                    (that is ToolPolicy's job); this is what keeps the max-strictness merge coherent.
-                  properties:
-                    allTools:
-                      description: |-
-                        allTools requires approval for EVERY tool the referencing agent may call (a coarse gate). Set this
-                        OR tools, never both empty (a rule that gates nothing is rejected by the CEL rule below).
-                      type: boolean
-                    tools:
-                      description: |-
-                        tools lists the EXACT tool names whose calls require approval (matching ToolPolicyOverride.Name
-                        semantics — exact, no globs). Union across rules.
-                      items:
-                        type: string
-                      maxItems: 128
-                      type: array
-                      x-kubernetes-list-type: set
-                  type: object
-                maxItems: 64
-                minItems: 1
-                type: array
-                x-kubernetes-list-type: atomic
-                x-kubernetes-validations:
-                - message: each rule must set tools or allTools
-                  rule: self.all(r, size(r.tools) > 0 || r.allTools)
-            required:
-            - rules
-            type: object
-          status:
-            description: ApprovalPolicyStatus is the observed state, populated by
-              the ApprovalPolicyReconciler (validate-only).
-            properties:
-              conditions:
-                description: |-
-                  conditions reflect reconciliation: Validated=True when the spec is coherent; Invalid=True (Validated
-                  False) when it is not (e.g. a rule that sets neither tools nor allTools, so it gates nothing).
-                items:
-                  description: Condition contains details for one aspect of the current
-                    state of this API Resource.
-                  properties:
-                    lastTransitionTime:
-                      description: |-
-                        lastTransitionTime is the last time the condition transitioned from one status to another.
-                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
-                      format: date-time
-                      type: string
-                    message:
-                      description: |-
-                        message is a human readable message indicating details about the transition.
-                        This may be an empty string.
-                      maxLength: 32768
-                      type: string
-                    observedGeneration:
-                      description: |-
-                        observedGeneration represents the .metadata.generation that the condition was set based upon.
-                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-                        with respect to the current state of the instance.
-                      format: int64
-                      minimum: 0
-                      type: integer
-                    reason:
-                      description: |-
-                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
-                        Producers of specific condition types may define expected values and meanings for this field,
-                        and whether the values are considered a guaranteed API.
-                        The value should be a CamelCase string.
-                        This field may not be empty.
-                      maxLength: 1024
-                      minLength: 1
-                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
-                      type: string
-                    status:
-                      description: status of the condition, one of True, False, Unknown.
-                      enum:
-                      - "True"
-                      - "False"
-                      - Unknown
-                      type: string
-                    type:
-                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
-                      maxLength: 316
-                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
-                      type: string
-                  required:
-                  - lastTransitionTime
-                  - message
-                  - reason
-                  - status
-                  - type
-                  type: object
-                type: array
-                x-kubernetes-list-map-keys:
-                - type
-                x-kubernetes-list-type: map
-            type: object
-        type: object
-    served: true
-    storage: true
-    subresources:
-      status: {}
----
-apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
-    helm.sh/resource-policy: keep
-  name: clustercredentialstores.agents.ctxmesh.ai
-spec:
-  group: agents.ctxmesh.ai
-  names:
-    categories:
-    - agents
-    kind: ClusterCredentialStore
-    listKind: ClusterCredentialStoreList
-    plural: clustercredentialstores
-    shortNames:
-    - clustercredstore
-    singular: clustercredentialstore
-  scope: Cluster
-  versions:
-  - additionalPrinterColumns:
-    - jsonPath: .status.conditions[?(@.type=='Ready')].status
-      name: Ready
-      type: string
-    - jsonPath: .metadata.creationTimestamp
-      name: Age
-      type: date
-    deprecated: true
-    name: v1alpha1
-    schema:
-      openAPIV3Schema:
-        description: |-
-          ClusterCredentialStore is the cluster-wide default credential backend, used for any
-          namespace without its own CredentialStore. Modeled on ESO's ClusterSecretStore. When
-          no ClusterCredentialStore exists, the token-service defaults to the kubernetes backend
-          (existing installs are unchanged).
-        properties:
-          apiVersion:
-            description: |-
-              APIVersion defines the versioned schema of this representation of an object.
-              Servers should convert recognized schemas to the latest internal value, and
-              may reject unrecognized values.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
-            type: string
-          kind:
-            description: |-
-              Kind is a string value representing the REST resource this object represents.
-              Servers may infer this from the endpoint the client submits requests to.
-              Cannot be updated.
-              In CamelCase.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
-            type: string
-          metadata:
-            type: object
-          spec:
-            description: spec selects the default backend.
-            properties:
-              provider:
-                description: provider selects and configures the credential backend
-                  for this store.
-                properties:
-                  kubernetes:
-                    description: kubernetes selects the built-in Kubernetes-Secret
-                      backend (the zero-dep default).
-                    properties:
-                      credentialNamespace:
-                        description: |-
-                          credentialNamespace overrides the locked namespace that holds per-user grant
-                          Secrets. Empty ⇒ the token-service's configured default (TOKEN_SERVICE_CREDENTIAL_NS).
-                        type: string
-                    type: object
-                  openbao:
-                    description: openbao selects an OpenBao/Vault backend.
-                    properties:
-                      address:
-                        description: address is the OpenBao/Vault API address (e.g.
-                          https://openbao.cred.svc:8200).
-                        minLength: 1
-                        type: string
-                    required:
-                    - address
-                    type: object
-                  postgres:
-                    description: postgres selects the Postgres reference backend (the
-                      scale profile).
-                    properties:
-                      dsnSecretRef:
-                        description: dsnSecretRef locates the Postgres connection
-                          string (a Secret key). Required.
-                        properties:
-                          key:
-                            description: |-
-                              key is the key within the Secret's data map whose value is the credential
-                              to inject into the gateway, e.g. "api-key". Required.
-                            minLength: 1
-                            type: string
-                          name:
-                            description: name is the name of the Kubernetes Secret
-                              resource. Required.
-                            minLength: 1
-                            type: string
-                        required:
-                        - key
-                        - name
-                        type: object
-                      encryption:
-                        description: |-
-                          encryption configures envelope encryption of the stored tokens (Axis B). When
-                          unset the plane refuses to store plaintext — a Postgres backend MUST have a KEK.
-                        properties:
-                          kmsV2:
-                            description: |-
-                              kmsV2 points at a Kubernetes KMS v2 provider (generic; single-key per plugin — KEK
-                              custody + rotation, but NOT per-tenant crypto-shred).
-                            properties:
-                              endpoint:
-                                description: |-
-                                  endpoint is the KMS v2 gRPC endpoint (typically a unix socket, e.g.
-                                  unix:///var/run/kms/socket). Required.
-                                minLength: 1
-                                type: string
-                              keyIDPrefix:
-                                description: |-
-                                  keyIDPrefix derives the per-tenant KEK id (keyID = <prefix><tenant>) so tenant
-                                  deletion is a KEK-destroy (crypto-shredding). Empty ⇒ a single install-wide key.
-                                type: string
-                            required:
-                            - endpoint
-                            type: object
-                          localKEKSecretRef:
-                            description: |-
-                              localKEKSecretRef locates a 32-byte AES-256 master KEK (a Secret + key); per-tenant
-                              keys are HMAC-derived. Encryption-at-rest but NOT true crypto-shred (dev/default).
-                            properties:
-                              key:
-                                description: |-
-                                  key is the key within the Secret's data map whose value is the credential
-                                  to inject into the gateway, e.g. "api-key". Required.
-                                minLength: 1
-                                type: string
-                              name:
-                                description: name is the name of the Kubernetes Secret
-                                  resource. Required.
-                                minLength: 1
-                                type: string
-                            required:
-                            - key
-                            - name
-                            type: object
-                          openBaoTransit:
-                            description: |-
-                              openBaoTransit wraps DEKs with a named per-tenant OpenBao transit key — the KEK never
-                              leaves OpenBao, and crypto-shred = delete the transit key (the reference scale custodian).
-                            properties:
-                              address:
-                                description: address is the OpenBao/Vault API base
-                                  URL (e.g. https://openbao.cred.svc:8200).
-                                minLength: 1
-                                type: string
-                              caSecretRef:
-                                description: caSecretRef optionally verifies the OpenBao
-                                  server cert (a Secret + key).
-                                properties:
-                                  key:
-                                    description: |-
-                                      key is the key within the Secret's data map whose value is the credential
-                                      to inject into the gateway, e.g. "api-key". Required.
-                                    minLength: 1
-                                    type: string
-                                  name:
-                                    description: name is the name of the Kubernetes
-                                      Secret resource. Required.
-                                    minLength: 1
-                                    type: string
-                                required:
-                                - key
-                                - name
-                                type: object
-                              keyPrefix:
-                                description: keyPrefix derives the per-tenant transit
-                                  key name (<keyPrefix><tenant>).
-                                type: string
-                              mountPath:
-                                description: mountPath is the transit engine mount.
-                                  Empty ⇒ "transit".
-                                type: string
-                              tokenSecretRef:
-                                description: tokenSecretRef locates the OpenBao token
-                                  the token-service authenticates with.
-                                properties:
-                                  key:
-                                    description: |-
-                                      key is the key within the Secret's data map whose value is the credential
-                                      to inject into the gateway, e.g. "api-key". Required.
-                                    minLength: 1
-                                    type: string
-                                  name:
-                                    description: name is the name of the Kubernetes
-                                      Secret resource. Required.
-                                    minLength: 1
-                                    type: string
-                                required:
-                                - key
-                                - name
-                                type: object
-                            required:
-                            - address
-                            - tokenSecretRef
-                            type: object
-                        type: object
-                        x-kubernetes-validations:
-                        - message: exactly one KEK custodian (localKEKSecretRef, openBaoTransit,
-                            or kmsV2) must be set
-                          rule: '[has(self.localKEKSecretRef), has(self.openBaoTransit),
-                            has(self.kmsV2)].filter(x, x).size() == 1'
-                    required:
-                    - dsnSecretRef
-                    type: object
-                  remote:
-                    description: |-
-                      remote selects an out-of-tree backend over the JSON-over-mTLS provider contract
-                      (bring-your-own vault).
-                    properties:
-                      endpoint:
-                        description: endpoint is the provider's HTTPS base URL (e.g.
-                          https://cred-backend.acme.svc:8443).
-                        minLength: 1
-                        type: string
-                      mtls:
-                        description: mtls configures the client mTLS the token-service
-                          presents to the provider.
-                        properties:
-                          caSecretRef:
-                            description: |-
-                              caSecretRef locates the CA bundle (a Secret + key) that verifies the provider's
-                              server cert. Required.
-                            properties:
-                              key:
-                                description: |-
-                                  key is the key within the Secret's data map whose value is the credential
-                                  to inject into the gateway, e.g. "api-key". Required.
-                                minLength: 1
-                                type: string
-                              name:
-                                description: name is the name of the Kubernetes Secret
-                                  resource. Required.
-                                minLength: 1
-                                type: string
-                            required:
-                            - key
-                            - name
-                            type: object
-                          clientTLSSecretName:
-                            description: |-
-                              clientTLSSecretName names a kubernetes.io/tls Secret providing tls.crt + tls.key —
-                              the client cert the token-service presents to the provider. Required.
-                            minLength: 1
-                            type: string
-                        required:
-                        - caSecretRef
-                        - clientTLSSecretName
-                        type: object
-                    required:
-                    - endpoint
-                    type: object
-                type: object
-                x-kubernetes-validations:
-                - message: exactly one provider (kubernetes, postgres, openbao, remote)
-                    must be set
-                  rule: '[has(self.kubernetes), has(self.postgres), has(self.openbao),
-                    has(self.remote)].filter(x, x).size() == 1'
-            required:
-            - provider
-            type: object
-          status:
-            description: status is the observed backend state.
-            properties:
-              conditions:
-                description: |-
-                  conditions reflect backend selection/health. "Ready" is True once the token-service
-                  has constructed and health-checked the selected backend.
-                items:
-                  description: Condition contains details for one aspect of the current
-                    state of this API Resource.
-                  properties:
-                    lastTransitionTime:
-                      description: |-
-                        lastTransitionTime is the last time the condition transitioned from one status to another.
-                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
-                      format: date-time
-                      type: string
-                    message:
-                      description: |-
-                        message is a human readable message indicating details about the transition.
-                        This may be an empty string.
-                      maxLength: 32768
-                      type: string
-                    observedGeneration:
-                      description: |-
-                        observedGeneration represents the .metadata.generation that the condition was set based upon.
-                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-                        with respect to the current state of the instance.
-                      format: int64
-                      minimum: 0
-                      type: integer
-                    reason:
-                      description: |-
-                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
-                        Producers of specific condition types may define expected values and meanings for this field,
-                        and whether the values are considered a guaranteed API.
-                        The value should be a CamelCase string.
-                        This field may not be empty.
-                      maxLength: 1024
-                      minLength: 1
-                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
-                      type: string
-                    status:
-                      description: status of the condition, one of True, False, Unknown.
-                      enum:
-                      - "True"
-                      - "False"
-                      - Unknown
-                      type: string
-                    type:
-                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
-                      maxLength: 316
-                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
-                      type: string
-                  required:
-                  - lastTransitionTime
-                  - message
-                  - reason
-                  - status
-                  - type
-                  type: object
-                type: array
-                x-kubernetes-list-map-keys:
-                - type
-                x-kubernetes-list-type: map
-            type: object
-        required:
-        - spec
-        type: object
-    served: true
-    storage: false
-    subresources:
-      status: {}
-  - additionalPrinterColumns:
-    - jsonPath: .status.conditions[?(@.type=='Ready')].status
-      name: Ready
-      type: string
-    - jsonPath: .metadata.creationTimestamp
-      name: Age
-      type: date
-    name: v1beta1
-    schema:
-      openAPIV3Schema:
-        description: |-
-          ClusterCredentialStore is the v1beta1 schema — a field-identical graduation of the cluster-scoped
-          v1alpha1 ClusterCredentialStore (ADR 0037, M34); it reuses the same CredentialStore spec/status.
-        properties:
-          apiVersion:
-            description: |-
-              APIVersion defines the versioned schema of this representation of an object.
-              Servers should convert recognized schemas to the latest internal value, and
-              may reject unrecognized values.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
-            type: string
-          kind:
-            description: |-
-              Kind is a string value representing the REST resource this object represents.
-              Servers may infer this from the endpoint the client submits requests to.
-              Cannot be updated.
-              In CamelCase.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
-            type: string
-          metadata:
-            type: object
-          spec:
-            description: CredentialStoreSpec is the shared spec for CredentialStore
-              and ClusterCredentialStore.
-            properties:
-              provider:
-                description: provider selects and configures the credential backend
-                  for this store.
-                properties:
-                  kubernetes:
-                    description: kubernetes selects the built-in Kubernetes-Secret
-                      backend (the zero-dep default).
-                    properties:
-                      credentialNamespace:
-                        description: |-
-                          credentialNamespace overrides the locked namespace that holds per-user grant
-                          Secrets. Empty ⇒ the token-service's configured default (TOKEN_SERVICE_CREDENTIAL_NS).
-                        type: string
-                    type: object
-                  openbao:
-                    description: openbao selects an OpenBao/Vault backend.
-                    properties:
-                      address:
-                        description: address is the OpenBao/Vault API address (e.g.
-                          https://openbao.cred.svc:8200).
-                        minLength: 1
-                        type: string
-                    required:
-                    - address
-                    type: object
-                  postgres:
-                    description: postgres selects the Postgres reference backend (the
-                      scale profile).
-                    properties:
-                      dsnSecretRef:
-                        description: dsnSecretRef locates the Postgres connection
-                          string (a Secret key). Required.
-                        properties:
-                          key:
-                            description: |-
-                              key is the key within the Secret's data map whose value is the credential
-                              to inject into the gateway, e.g. "api-key". Required.
-                            minLength: 1
-                            type: string
-                          name:
-                            description: name is the name of the Kubernetes Secret
-                              resource. Required.
-                            minLength: 1
-                            type: string
-                        required:
-                        - key
-                        - name
-                        type: object
-                      encryption:
-                        description: |-
-                          encryption configures envelope encryption of the stored tokens (Axis B). When
-                          unset the plane refuses to store plaintext — a Postgres backend MUST have a KEK.
-                        properties:
-                          kmsV2:
-                            description: |-
-                              kmsV2 points at a Kubernetes KMS v2 provider (generic; single-key per plugin — KEK
-                              custody + rotation, but NOT per-tenant crypto-shred).
-                            properties:
-                              endpoint:
-                                description: |-
-                                  endpoint is the KMS v2 gRPC endpoint (typically a unix socket, e.g.
-                                  unix:///var/run/kms/socket). Required.
-                                minLength: 1
-                                type: string
-                              keyIDPrefix:
-                                description: |-
-                                  keyIDPrefix derives the per-tenant KEK id (keyID = <prefix><tenant>) so tenant
-                                  deletion is a KEK-destroy (crypto-shredding). Empty ⇒ a single install-wide key.
-                                type: string
-                            required:
-                            - endpoint
-                            type: object
-                          localKEKSecretRef:
-                            description: |-
-                              localKEKSecretRef locates a 32-byte AES-256 master KEK (a Secret + key); per-tenant
-                              keys are HMAC-derived. Encryption-at-rest but NOT true crypto-shred (dev/default).
-                            properties:
-                              key:
-                                description: |-
-                                  key is the key within the Secret's data map whose value is the credential
-                                  to inject into the gateway, e.g. "api-key". Required.
-                                minLength: 1
-                                type: string
-                              name:
-                                description: name is the name of the Kubernetes Secret
-                                  resource. Required.
-                                minLength: 1
-                                type: string
-                            required:
-                            - key
-                            - name
-                            type: object
-                          openBaoTransit:
-                            description: |-
-                              openBaoTransit wraps DEKs with a named per-tenant OpenBao transit key — the KEK never
-                              leaves OpenBao, and crypto-shred = delete the transit key (the reference scale custodian).
-                            properties:
-                              address:
-                                description: address is the OpenBao/Vault API base
-                                  URL (e.g. https://openbao.cred.svc:8200).
-                                minLength: 1
-                                type: string
-                              caSecretRef:
-                                description: caSecretRef optionally verifies the OpenBao
-                                  server cert (a Secret + key).
-                                properties:
-                                  key:
-                                    description: |-
-                                      key is the key within the Secret's data map whose value is the credential
-                                      to inject into the gateway, e.g. "api-key". Required.
-                                    minLength: 1
-                                    type: string
-                                  name:
-                                    description: name is the name of the Kubernetes
-                                      Secret resource. Required.
-                                    minLength: 1
-                                    type: string
-                                required:
-                                - key
-                                - name
-                                type: object
-                              keyPrefix:
-                                description: keyPrefix derives the per-tenant transit
-                                  key name (<keyPrefix><tenant>).
-                                type: string
-                              mountPath:
-                                description: mountPath is the transit engine mount.
-                                  Empty ⇒ "transit".
-                                type: string
-                              tokenSecretRef:
-                                description: tokenSecretRef locates the OpenBao token
-                                  the token-service authenticates with.
-                                properties:
-                                  key:
-                                    description: |-
-                                      key is the key within the Secret's data map whose value is the credential
-                                      to inject into the gateway, e.g. "api-key". Required.
-                                    minLength: 1
-                                    type: string
-                                  name:
-                                    description: name is the name of the Kubernetes
-                                      Secret resource. Required.
-                                    minLength: 1
-                                    type: string
-                                required:
-                                - key
-                                - name
-                                type: object
-                            required:
-                            - address
-                            - tokenSecretRef
-                            type: object
-                        type: object
-                        x-kubernetes-validations:
-                        - message: exactly one KEK custodian (localKEKSecretRef, openBaoTransit,
-                            or kmsV2) must be set
-                          rule: '[has(self.localKEKSecretRef), has(self.openBaoTransit),
-                            has(self.kmsV2)].filter(x, x).size() == 1'
-                    required:
-                    - dsnSecretRef
-                    type: object
-                  remote:
-                    description: |-
-                      remote selects an out-of-tree backend over the JSON-over-mTLS provider contract
-                      (bring-your-own vault).
-                    properties:
-                      endpoint:
-                        description: endpoint is the provider's HTTPS base URL (e.g.
-                          https://cred-backend.acme.svc:8443).
-                        minLength: 1
-                        type: string
-                      mtls:
-                        description: mtls configures the client mTLS the token-service
-                          presents to the provider.
-                        properties:
-                          caSecretRef:
-                            description: |-
-                              caSecretRef locates the CA bundle (a Secret + key) that verifies the provider's
-                              server cert. Required.
-                            properties:
-                              key:
-                                description: |-
-                                  key is the key within the Secret's data map whose value is the credential
-                                  to inject into the gateway, e.g. "api-key". Required.
-                                minLength: 1
-                                type: string
-                              name:
-                                description: name is the name of the Kubernetes Secret
-                                  resource. Required.
-                                minLength: 1
-                                type: string
-                            required:
-                            - key
-                            - name
-                            type: object
-                          clientTLSSecretName:
-                            description: |-
-                              clientTLSSecretName names a kubernetes.io/tls Secret providing tls.crt + tls.key —
-                              the client cert the token-service presents to the provider. Required.
-                            minLength: 1
-                            type: string
-                        required:
-                        - caSecretRef
-                        - clientTLSSecretName
-                        type: object
-                    required:
-                    - endpoint
-                    type: object
-                type: object
-                x-kubernetes-validations:
-                - message: exactly one provider (kubernetes, postgres, openbao, remote)
-                    must be set
-                  rule: '[has(self.kubernetes), has(self.postgres), has(self.openbao),
-                    has(self.remote)].filter(x, x).size() == 1'
-            required:
-            - provider
-            type: object
-          status:
-            description: CredentialStoreStatus is the shared observed state.
-            properties:
-              conditions:
-                description: |-
-                  conditions reflect backend selection/health. "Ready" is True once the token-service
-                  has constructed and health-checked the selected backend.
-                items:
-                  description: Condition contains details for one aspect of the current
-                    state of this API Resource.
-                  properties:
-                    lastTransitionTime:
-                      description: |-
-                        lastTransitionTime is the last time the condition transitioned from one status to another.
-                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
-                      format: date-time
-                      type: string
-                    message:
-                      description: |-
-                        message is a human readable message indicating details about the transition.
-                        This may be an empty string.
-                      maxLength: 32768
-                      type: string
-                    observedGeneration:
-                      description: |-
-                        observedGeneration represents the .metadata.generation that the condition was set based upon.
-                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-                        with respect to the current state of the instance.
-                      format: int64
-                      minimum: 0
-                      type: integer
-                    reason:
-                      description: |-
-                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
-                        Producers of specific condition types may define expected values and meanings for this field,
-                        and whether the values are considered a guaranteed API.
-                        The value should be a CamelCase string.
-                        This field may not be empty.
-                      maxLength: 1024
-                      minLength: 1
-                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
-                      type: string
-                    status:
-                      description: status of the condition, one of True, False, Unknown.
-                      enum:
-                      - "True"
-                      - "False"
-                      - Unknown
-                      type: string
-                    type:
-                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
-                      maxLength: 316
-                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
-                      type: string
-                  required:
-                  - lastTransitionTime
-                  - message
-                  - reason
-                  - status
-                  - type
-                  type: object
-                type: array
-                x-kubernetes-list-map-keys:
-                - type
-                x-kubernetes-list-type: map
-            type: object
-        required:
-        - spec
-        type: object
-    served: true
-    storage: true
-    subresources:
-      status: {}
----
-apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
-    helm.sh/resource-policy: keep
-  name: credentialstores.agents.ctxmesh.ai
-spec:
-  group: agents.ctxmesh.ai
-  names:
-    categories:
-    - agents
-    kind: CredentialStore
-    listKind: CredentialStoreList
-    plural: credentialstores
-    shortNames:
-    - credstore
-    singular: credentialstore
-  scope: Namespaced
-  versions:
-  - additionalPrinterColumns:
-    - jsonPath: .status.conditions[?(@.type=='Ready')].status
-      name: Ready
-      type: string
-    - jsonPath: .metadata.creationTimestamp
-      name: Age
-      type: date
-    deprecated: true
-    name: v1alpha1
-    schema:
-      openAPIV3Schema:
-        description: |-
-          CredentialStore selects the credential backend for OBO grants in its own namespace,
-          overriding the cluster default. Modeled on ESO's namespaced SecretStore (ADR 0032).
-        properties:
-          apiVersion:
-            description: |-
-              APIVersion defines the versioned schema of this representation of an object.
-              Servers should convert recognized schemas to the latest internal value, and
-              may reject unrecognized values.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
-            type: string
-          kind:
-            description: |-
-              Kind is a string value representing the REST resource this object represents.
-              Servers may infer this from the endpoint the client submits requests to.
-              Cannot be updated.
-              In CamelCase.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
-            type: string
-          metadata:
-            type: object
-          spec:
-            description: spec selects the backend for this namespace.
-            properties:
-              provider:
-                description: provider selects and configures the credential backend
-                  for this store.
-                properties:
-                  kubernetes:
-                    description: kubernetes selects the built-in Kubernetes-Secret
-                      backend (the zero-dep default).
-                    properties:
-                      credentialNamespace:
-                        description: |-
-                          credentialNamespace overrides the locked namespace that holds per-user grant
-                          Secrets. Empty ⇒ the token-service's configured default (TOKEN_SERVICE_CREDENTIAL_NS).
-                        type: string
-                    type: object
-                  openbao:
-                    description: openbao selects an OpenBao/Vault backend.
-                    properties:
-                      address:
-                        description: address is the OpenBao/Vault API address (e.g.
-                          https://openbao.cred.svc:8200).
-                        minLength: 1
-                        type: string
-                    required:
-                    - address
-                    type: object
-                  postgres:
-                    description: postgres selects the Postgres reference backend (the
-                      scale profile).
-                    properties:
-                      dsnSecretRef:
-                        description: dsnSecretRef locates the Postgres connection
-                          string (a Secret key). Required.
-                        properties:
-                          key:
-                            description: |-
-                              key is the key within the Secret's data map whose value is the credential
-                              to inject into the gateway, e.g. "api-key". Required.
-                            minLength: 1
-                            type: string
-                          name:
-                            description: name is the name of the Kubernetes Secret
-                              resource. Required.
-                            minLength: 1
-                            type: string
-                        required:
-                        - key
-                        - name
-                        type: object
-                      encryption:
-                        description: |-
-                          encryption configures envelope encryption of the stored tokens (Axis B). When
-                          unset the plane refuses to store plaintext — a Postgres backend MUST have a KEK.
-                        properties:
-                          kmsV2:
-                            description: |-
-                              kmsV2 points at a Kubernetes KMS v2 provider (generic; single-key per plugin — KEK
-                              custody + rotation, but NOT per-tenant crypto-shred).
-                            properties:
-                              endpoint:
-                                description: |-
-                                  endpoint is the KMS v2 gRPC endpoint (typically a unix socket, e.g.
-                                  unix:///var/run/kms/socket). Required.
-                                minLength: 1
-                                type: string
-                              keyIDPrefix:
-                                description: |-
-                                  keyIDPrefix derives the per-tenant KEK id (keyID = <prefix><tenant>) so tenant
-                                  deletion is a KEK-destroy (crypto-shredding). Empty ⇒ a single install-wide key.
-                                type: string
-                            required:
-                            - endpoint
-                            type: object
-                          localKEKSecretRef:
-                            description: |-
-                              localKEKSecretRef locates a 32-byte AES-256 master KEK (a Secret + key); per-tenant
-                              keys are HMAC-derived. Encryption-at-rest but NOT true crypto-shred (dev/default).
-                            properties:
-                              key:
-                                description: |-
-                                  key is the key within the Secret's data map whose value is the credential
-                                  to inject into the gateway, e.g. "api-key". Required.
-                                minLength: 1
-                                type: string
-                              name:
-                                description: name is the name of the Kubernetes Secret
-                                  resource. Required.
-                                minLength: 1
-                                type: string
-                            required:
-                            - key
-                            - name
-                            type: object
-                          openBaoTransit:
-                            description: |-
-                              openBaoTransit wraps DEKs with a named per-tenant OpenBao transit key — the KEK never
-                              leaves OpenBao, and crypto-shred = delete the transit key (the reference scale custodian).
-                            properties:
-                              address:
-                                description: address is the OpenBao/Vault API base
-                                  URL (e.g. https://openbao.cred.svc:8200).
-                                minLength: 1
-                                type: string
-                              caSecretRef:
-                                description: caSecretRef optionally verifies the OpenBao
-                                  server cert (a Secret + key).
-                                properties:
-                                  key:
-                                    description: |-
-                                      key is the key within the Secret's data map whose value is the credential
-                                      to inject into the gateway, e.g. "api-key". Required.
-                                    minLength: 1
-                                    type: string
-                                  name:
-                                    description: name is the name of the Kubernetes
-                                      Secret resource. Required.
-                                    minLength: 1
-                                    type: string
-                                required:
-                                - key
-                                - name
-                                type: object
-                              keyPrefix:
-                                description: keyPrefix derives the per-tenant transit
-                                  key name (<keyPrefix><tenant>).
-                                type: string
-                              mountPath:
-                                description: mountPath is the transit engine mount.
-                                  Empty ⇒ "transit".
-                                type: string
-                              tokenSecretRef:
-                                description: tokenSecretRef locates the OpenBao token
-                                  the token-service authenticates with.
-                                properties:
-                                  key:
-                                    description: |-
-                                      key is the key within the Secret's data map whose value is the credential
-                                      to inject into the gateway, e.g. "api-key". Required.
-                                    minLength: 1
-                                    type: string
-                                  name:
-                                    description: name is the name of the Kubernetes
-                                      Secret resource. Required.
-                                    minLength: 1
-                                    type: string
-                                required:
-                                - key
-                                - name
-                                type: object
-                            required:
-                            - address
-                            - tokenSecretRef
-                            type: object
-                        type: object
-                        x-kubernetes-validations:
-                        - message: exactly one KEK custodian (localKEKSecretRef, openBaoTransit,
-                            or kmsV2) must be set
-                          rule: '[has(self.localKEKSecretRef), has(self.openBaoTransit),
-                            has(self.kmsV2)].filter(x, x).size() == 1'
-                    required:
-                    - dsnSecretRef
-                    type: object
-                  remote:
-                    description: |-
-                      remote selects an out-of-tree backend over the JSON-over-mTLS provider contract
-                      (bring-your-own vault).
-                    properties:
-                      endpoint:
-                        description: endpoint is the provider's HTTPS base URL (e.g.
-                          https://cred-backend.acme.svc:8443).
-                        minLength: 1
-                        type: string
-                      mtls:
-                        description: mtls configures the client mTLS the token-service
-                          presents to the provider.
-                        properties:
-                          caSecretRef:
-                            description: |-
-                              caSecretRef locates the CA bundle (a Secret + key) that verifies the provider's
-                              server cert. Required.
-                            properties:
-                              key:
-                                description: |-
-                                  key is the key within the Secret's data map whose value is the credential
-                                  to inject into the gateway, e.g. "api-key". Required.
-                                minLength: 1
-                                type: string
-                              name:
-                                description: name is the name of the Kubernetes Secret
-                                  resource. Required.
-                                minLength: 1
-                                type: string
-                            required:
-                            - key
-                            - name
-                            type: object
-                          clientTLSSecretName:
-                            description: |-
-                              clientTLSSecretName names a kubernetes.io/tls Secret providing tls.crt + tls.key —
-                              the client cert the token-service presents to the provider. Required.
-                            minLength: 1
-                            type: string
-                        required:
-                        - caSecretRef
-                        - clientTLSSecretName
-                        type: object
-                    required:
-                    - endpoint
-                    type: object
-                type: object
-                x-kubernetes-validations:
-                - message: exactly one provider (kubernetes, postgres, openbao, remote)
-                    must be set
-                  rule: '[has(self.kubernetes), has(self.postgres), has(self.openbao),
-                    has(self.remote)].filter(x, x).size() == 1'
-            required:
-            - provider
-            type: object
-          status:
-            description: status is the observed backend state.
-            properties:
-              conditions:
-                description: |-
-                  conditions reflect backend selection/health. "Ready" is True once the token-service
-                  has constructed and health-checked the selected backend.
-                items:
-                  description: Condition contains details for one aspect of the current
-                    state of this API Resource.
-                  properties:
-                    lastTransitionTime:
-                      description: |-
-                        lastTransitionTime is the last time the condition transitioned from one status to another.
-                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
-                      format: date-time
-                      type: string
-                    message:
-                      description: |-
-                        message is a human readable message indicating details about the transition.
-                        This may be an empty string.
-                      maxLength: 32768
-                      type: string
-                    observedGeneration:
-                      description: |-
-                        observedGeneration represents the .metadata.generation that the condition was set based upon.
-                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-                        with respect to the current state of the instance.
-                      format: int64
-                      minimum: 0
-                      type: integer
-                    reason:
-                      description: |-
-                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
-                        Producers of specific condition types may define expected values and meanings for this field,
-                        and whether the values are considered a guaranteed API.
-                        The value should be a CamelCase string.
-                        This field may not be empty.
-                      maxLength: 1024
-                      minLength: 1
-                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
-                      type: string
-                    status:
-                      description: status of the condition, one of True, False, Unknown.
-                      enum:
-                      - "True"
-                      - "False"
-                      - Unknown
-                      type: string
-                    type:
-                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
-                      maxLength: 316
-                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
-                      type: string
-                  required:
-                  - lastTransitionTime
-                  - message
-                  - reason
-                  - status
-                  - type
-                  type: object
-                type: array
-                x-kubernetes-list-map-keys:
-                - type
-                x-kubernetes-list-type: map
-            type: object
-        required:
-        - spec
-        type: object
-    served: true
-    storage: false
-    subresources:
-      status: {}
-  - additionalPrinterColumns:
-    - jsonPath: .status.conditions[?(@.type=='Ready')].status
-      name: Ready
-      type: string
-    - jsonPath: .metadata.creationTimestamp
-      name: Age
-      type: date
-    name: v1beta1
-    schema:
-      openAPIV3Schema:
-        description: |-
-          CredentialStore is the v1beta1 schema — a field-identical graduation of the v1alpha1 namespaced
-          CredentialStore (ADR 0037, M34), reusing its spec/status.
-        properties:
-          apiVersion:
-            description: |-
-              APIVersion defines the versioned schema of this representation of an object.
-              Servers should convert recognized schemas to the latest internal value, and
-              may reject unrecognized values.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
-            type: string
-          kind:
-            description: |-
-              Kind is a string value representing the REST resource this object represents.
-              Servers may infer this from the endpoint the client submits requests to.
-              Cannot be updated.
-              In CamelCase.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
-            type: string
-          metadata:
-            type: object
-          spec:
-            description: CredentialStoreSpec is the shared spec for CredentialStore
-              and ClusterCredentialStore.
-            properties:
-              provider:
-                description: provider selects and configures the credential backend
-                  for this store.
-                properties:
-                  kubernetes:
-                    description: kubernetes selects the built-in Kubernetes-Secret
-                      backend (the zero-dep default).
-                    properties:
-                      credentialNamespace:
-                        description: |-
-                          credentialNamespace overrides the locked namespace that holds per-user grant
-                          Secrets. Empty ⇒ the token-service's configured default (TOKEN_SERVICE_CREDENTIAL_NS).
-                        type: string
-                    type: object
-                  openbao:
-                    description: openbao selects an OpenBao/Vault backend.
-                    properties:
-                      address:
-                        description: address is the OpenBao/Vault API address (e.g.
-                          https://openbao.cred.svc:8200).
-                        minLength: 1
-                        type: string
-                    required:
-                    - address
-                    type: object
-                  postgres:
-                    description: postgres selects the Postgres reference backend (the
-                      scale profile).
-                    properties:
-                      dsnSecretRef:
-                        description: dsnSecretRef locates the Postgres connection
-                          string (a Secret key). Required.
-                        properties:
-                          key:
-                            description: |-
-                              key is the key within the Secret's data map whose value is the credential
-                              to inject into the gateway, e.g. "api-key". Required.
-                            minLength: 1
-                            type: string
-                          name:
-                            description: name is the name of the Kubernetes Secret
-                              resource. Required.
-                            minLength: 1
-                            type: string
-                        required:
-                        - key
-                        - name
-                        type: object
-                      encryption:
-                        description: |-
-                          encryption configures envelope encryption of the stored tokens (Axis B). When
-                          unset the plane refuses to store plaintext — a Postgres backend MUST have a KEK.
-                        properties:
-                          kmsV2:
-                            description: |-
-                              kmsV2 points at a Kubernetes KMS v2 provider (generic; single-key per plugin — KEK
-                              custody + rotation, but NOT per-tenant crypto-shred).
-                            properties:
-                              endpoint:
-                                description: |-
-                                  endpoint is the KMS v2 gRPC endpoint (typically a unix socket, e.g.
-                                  unix:///var/run/kms/socket). Required.
-                                minLength: 1
-                                type: string
-                              keyIDPrefix:
-                                description: |-
-                                  keyIDPrefix derives the per-tenant KEK id (keyID = <prefix><tenant>) so tenant
-                                  deletion is a KEK-destroy (crypto-shredding). Empty ⇒ a single install-wide key.
-                                type: string
-                            required:
-                            - endpoint
-                            type: object
-                          localKEKSecretRef:
-                            description: |-
-                              localKEKSecretRef locates a 32-byte AES-256 master KEK (a Secret + key); per-tenant
-                              keys are HMAC-derived. Encryption-at-rest but NOT true crypto-shred (dev/default).
-                            properties:
-                              key:
-                                description: |-
-                                  key is the key within the Secret's data map whose value is the credential
-                                  to inject into the gateway, e.g. "api-key". Required.
-                                minLength: 1
-                                type: string
-                              name:
-                                description: name is the name of the Kubernetes Secret
-                                  resource. Required.
-                                minLength: 1
-                                type: string
-                            required:
-                            - key
-                            - name
-                            type: object
-                          openBaoTransit:
-                            description: |-
-                              openBaoTransit wraps DEKs with a named per-tenant OpenBao transit key — the KEK never
-                              leaves OpenBao, and crypto-shred = delete the transit key (the reference scale custodian).
-                            properties:
-                              address:
-                                description: address is the OpenBao/Vault API base
-                                  URL (e.g. https://openbao.cred.svc:8200).
-                                minLength: 1
-                                type: string
-                              caSecretRef:
-                                description: caSecretRef optionally verifies the OpenBao
-                                  server cert (a Secret + key).
-                                properties:
-                                  key:
-                                    description: |-
-                                      key is the key within the Secret's data map whose value is the credential
-                                      to inject into the gateway, e.g. "api-key". Required.
-                                    minLength: 1
-                                    type: string
-                                  name:
-                                    description: name is the name of the Kubernetes
-                                      Secret resource. Required.
-                                    minLength: 1
-                                    type: string
-                                required:
-                                - key
-                                - name
-                                type: object
-                              keyPrefix:
-                                description: keyPrefix derives the per-tenant transit
-                                  key name (<keyPrefix><tenant>).
-                                type: string
-                              mountPath:
-                                description: mountPath is the transit engine mount.
-                                  Empty ⇒ "transit".
-                                type: string
-                              tokenSecretRef:
-                                description: tokenSecretRef locates the OpenBao token
-                                  the token-service authenticates with.
-                                properties:
-                                  key:
-                                    description: |-
-                                      key is the key within the Secret's data map whose value is the credential
-                                      to inject into the gateway, e.g. "api-key". Required.
-                                    minLength: 1
-                                    type: string
-                                  name:
-                                    description: name is the name of the Kubernetes
-                                      Secret resource. Required.
-                                    minLength: 1
-                                    type: string
-                                required:
-                                - key
-                                - name
-                                type: object
-                            required:
-                            - address
-                            - tokenSecretRef
-                            type: object
-                        type: object
-                        x-kubernetes-validations:
-                        - message: exactly one KEK custodian (localKEKSecretRef, openBaoTransit,
-                            or kmsV2) must be set
-                          rule: '[has(self.localKEKSecretRef), has(self.openBaoTransit),
-                            has(self.kmsV2)].filter(x, x).size() == 1'
-                    required:
-                    - dsnSecretRef
-                    type: object
-                  remote:
-                    description: |-
-                      remote selects an out-of-tree backend over the JSON-over-mTLS provider contract
-                      (bring-your-own vault).
-                    properties:
-                      endpoint:
-                        description: endpoint is the provider's HTTPS base URL (e.g.
-                          https://cred-backend.acme.svc:8443).
-                        minLength: 1
-                        type: string
-                      mtls:
-                        description: mtls configures the client mTLS the token-service
-                          presents to the provider.
-                        properties:
-                          caSecretRef:
-                            description: |-
-                              caSecretRef locates the CA bundle (a Secret + key) that verifies the provider's
-                              server cert. Required.
-                            properties:
-                              key:
-                                description: |-
-                                  key is the key within the Secret's data map whose value is the credential
-                                  to inject into the gateway, e.g. "api-key". Required.
-                                minLength: 1
-                                type: string
-                              name:
-                                description: name is the name of the Kubernetes Secret
-                                  resource. Required.
-                                minLength: 1
-                                type: string
-                            required:
-                            - key
-                            - name
-                            type: object
-                          clientTLSSecretName:
-                            description: |-
-                              clientTLSSecretName names a kubernetes.io/tls Secret providing tls.crt + tls.key —
-                              the client cert the token-service presents to the provider. Required.
-                            minLength: 1
-                            type: string
-                        required:
-                        - caSecretRef
-                        - clientTLSSecretName
-                        type: object
-                    required:
-                    - endpoint
-                    type: object
-                type: object
-                x-kubernetes-validations:
-                - message: exactly one provider (kubernetes, postgres, openbao, remote)
-                    must be set
-                  rule: '[has(self.kubernetes), has(self.postgres), has(self.openbao),
-                    has(self.remote)].filter(x, x).size() == 1'
-            required:
-            - provider
-            type: object
-          status:
-            description: CredentialStoreStatus is the shared observed state.
-            properties:
-              conditions:
-                description: |-
-                  conditions reflect backend selection/health. "Ready" is True once the token-service
-                  has constructed and health-checked the selected backend.
-                items:
-                  description: Condition contains details for one aspect of the current
-                    state of this API Resource.
-                  properties:
-                    lastTransitionTime:
-                      description: |-
-                        lastTransitionTime is the last time the condition transitioned from one status to another.
-                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
-                      format: date-time
-                      type: string
-                    message:
-                      description: |-
-                        message is a human readable message indicating details about the transition.
-                        This may be an empty string.
-                      maxLength: 32768
-                      type: string
-                    observedGeneration:
-                      description: |-
-                        observedGeneration represents the .metadata.generation that the condition was set based upon.
-                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-                        with respect to the current state of the instance.
-                      format: int64
-                      minimum: 0
-                      type: integer
-                    reason:
-                      description: |-
-                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
-                        Producers of specific condition types may define expected values and meanings for this field,
-                        and whether the values are considered a guaranteed API.
-                        The value should be a CamelCase string.
-                        This field may not be empty.
-                      maxLength: 1024
-                      minLength: 1
-                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
-                      type: string
-                    status:
-                      description: status of the condition, one of True, False, Unknown.
-                      enum:
-                      - "True"
-                      - "False"
-                      - Unknown
-                      type: string
-                    type:
-                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
-                      maxLength: 316
-                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
-                      type: string
-                  required:
-                  - lastTransitionTime
-                  - message
-                  - reason
-                  - status
-                  - type
-                  type: object
-                type: array
-                x-kubernetes-list-map-keys:
-                - type
-                x-kubernetes-list-type: map
-            type: object
-        required:
-        - spec
-        type: object
-    served: true
-    storage: true
-    subresources:
-      status: {}
----
-apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
-    helm.sh/resource-policy: keep
   name: evalsuites.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai
@@ -8017,251 +7229,6 @@ spec:
             type: object
         required:
         - spec
-        type: object
-    served: true
-    storage: true
-    subresources:
-      status: {}
----
-apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
-    helm.sh/resource-policy: keep
-  name: feedbackstores.agents.ctxmesh.ai
-spec:
-  group: agents.ctxmesh.ai
-  names:
-    categories:
-    - agents
-    kind: FeedbackStore
-    listKind: FeedbackStoreList
-    plural: feedbackstores
-    shortNames:
-    - fs
-    singular: feedbackstore
-  scope: Namespaced
-  versions:
-  - additionalPrinterColumns:
-    - jsonPath: .spec.mode
-      name: Mode
-      type: string
-    - jsonPath: .status.conditions[?(@.type=='Validated')].status
-      name: Validated
-      type: string
-    name: v1beta1
-    schema:
-      openAPIV3Schema:
-        description: |-
-          FeedbackStore is a namespaced, reusable, DECLARATIVE multi-source feedback model referenced by
-          AgentDeployment.spec.feedbackStoreRef (M139, ADR 0112, PRD §17.3). It declares which score names belong
-          to which source (human / external) so the BFF write path can GATE ingestion and the read path can
-          ATTRIBUTE scores to sources — Langfuse remains the store of record (ADR 0008). CONFIG only: deleting a
-          FeedbackStore stops gating/attribution; the raw feedback in Langfuse is retained. A SINGLE-version CRD
-          born directly in v1beta1.
-        properties:
-          apiVersion:
-            description: |-
-              APIVersion defines the versioned schema of this representation of an object.
-              Servers should convert recognized schemas to the latest internal value, and
-              may reject unrecognized values.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
-            type: string
-          kind:
-            description: |-
-              Kind is a string value representing the REST resource this object represents.
-              Servers may infer this from the endpoint the client submits requests to.
-              Cannot be updated.
-              In CamelCase.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
-            type: string
-          metadata:
-            type: object
-          spec:
-            description: |-
-              FeedbackStoreSpec is a namespaced, reusable, DECLARATIVE feedback model referenced by
-              AgentDeployment.spec.feedbackStoreRef (M139, ADR 0112). It stores NO feedback data — raw scores live in
-              Langfuse (ADR 0008), the derived rollup in the control-plane fold; this CRD is CONFIG. Deleting it stops
-              gating/attribution; the raw feedback in Langfuse is retained. At least one source (human or external)
-              must be declared. The LLM-as-judge source is deferred (ADR 0112 §Consequences) — it ships with its runner.
-            properties:
-              external:
-                description: external declares the external-signal channels.
-                items:
-                  description: |-
-                    ExternalSource declares one external-signal channel — a webhook/API rating, completion, or business
-                    metric (PRD §17.3). One declared score per named channel.
-                  properties:
-                    name:
-                      description: name is the external channel name (the allowlisted
-                        signal source, e.g. "csat-webhook").
-                      maxLength: 128
-                      minLength: 1
-                      type: string
-                    score:
-                      description: score is the dimension this channel writes.
-                      properties:
-                        categories:
-                          description: categories is the allowed label set for a CATEGORICAL
-                            score (informational in v1). Ignored otherwise.
-                          items:
-                            type: string
-                          maxItems: 64
-                          type: array
-                          x-kubernetes-list-type: set
-                        dataType:
-                          default: NUMERIC
-                          description: |-
-                            dataType is the score's Langfuse dataType. NUMERIC/BOOLEAN carry a numeric value; CATEGORICAL carries
-                            a string label. Defaults to NUMERIC (the dominant feedback path, ADR 0008).
-                          enum:
-                          - NUMERIC
-                          - BOOLEAN
-                          - CATEGORICAL
-                          type: string
-                        name:
-                          description: |-
-                            name is the Langfuse score name this dimension binds to (e.g. "thumbs", "accuracy", "nps"). Unique
-                            across the whole FeedbackStore.
-                          maxLength: 128
-                          minLength: 1
-                          type: string
-                      required:
-                      - name
-                      type: object
-                  required:
-                  - name
-                  - score
-                  type: object
-                maxItems: 32
-                type: array
-                x-kubernetes-list-type: atomic
-              human:
-                description: human declares the human-annotation scores (optional
-                  singleton).
-                properties:
-                  scores:
-                    description: scores are the human-annotation dimensions.
-                    items:
-                      description: |-
-                        ScoreDecl declares ONE feedback score dimension (M139, ADR 0112). The `name` is the correlation +
-                        attribution key: it is UNIQUE across the whole store (all sources) so a Langfuse score's name maps to
-                        exactly one declared source (Langfuse stamps every API-written score `Source=API`, so it cannot itself
-                        tell human from external — the CRD's name→source map IS the attribution).
-                      properties:
-                        categories:
-                          description: categories is the allowed label set for a CATEGORICAL
-                            score (informational in v1). Ignored otherwise.
-                          items:
-                            type: string
-                          maxItems: 64
-                          type: array
-                          x-kubernetes-list-type: set
-                        dataType:
-                          default: NUMERIC
-                          description: |-
-                            dataType is the score's Langfuse dataType. NUMERIC/BOOLEAN carry a numeric value; CATEGORICAL carries
-                            a string label. Defaults to NUMERIC (the dominant feedback path, ADR 0008).
-                          enum:
-                          - NUMERIC
-                          - BOOLEAN
-                          - CATEGORICAL
-                          type: string
-                        name:
-                          description: |-
-                            name is the Langfuse score name this dimension binds to (e.g. "thumbs", "accuracy", "nps"). Unique
-                            across the whole FeedbackStore.
-                          maxLength: 128
-                          minLength: 1
-                          type: string
-                      required:
-                      - name
-                      type: object
-                    maxItems: 64
-                    minItems: 1
-                    type: array
-                    x-kubernetes-list-type: atomic
-                required:
-                - scores
-                type: object
-              mode:
-                default: Enforce
-                description: |-
-                  mode selects whether a bound store GATES ingestion: Enforce rejects an undeclared score name, Monitor
-                  accepts + counts it (migration). Defaults to Enforce.
-                enum:
-                - Enforce
-                - Monitor
-                type: string
-            type: object
-          status:
-            description: FeedbackStoreStatus is the observed state, populated by the
-              FeedbackStoreReconciler (validate-only).
-            properties:
-              conditions:
-                description: |-
-                  conditions reflect reconciliation: Validated=True when the spec is coherent; Validated=False (reason
-                  InvalidSpec) when it is not (no source, or a duplicate score name across sources).
-                items:
-                  description: Condition contains details for one aspect of the current
-                    state of this API Resource.
-                  properties:
-                    lastTransitionTime:
-                      description: |-
-                        lastTransitionTime is the last time the condition transitioned from one status to another.
-                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
-                      format: date-time
-                      type: string
-                    message:
-                      description: |-
-                        message is a human readable message indicating details about the transition.
-                        This may be an empty string.
-                      maxLength: 32768
-                      type: string
-                    observedGeneration:
-                      description: |-
-                        observedGeneration represents the .metadata.generation that the condition was set based upon.
-                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-                        with respect to the current state of the instance.
-                      format: int64
-                      minimum: 0
-                      type: integer
-                    reason:
-                      description: |-
-                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
-                        Producers of specific condition types may define expected values and meanings for this field,
-                        and whether the values are considered a guaranteed API.
-                        The value should be a CamelCase string.
-                        This field may not be empty.
-                      maxLength: 1024
-                      minLength: 1
-                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
-                      type: string
-                    status:
-                      description: status of the condition, one of True, False, Unknown.
-                      enum:
-                      - "True"
-                      - "False"
-                      - Unknown
-                      type: string
-                    type:
-                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
-                      maxLength: 316
-                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
-                      type: string
-                  required:
-                  - lastTransitionTime
-                  - message
-                  - reason
-                  - status
-                  - type
-                  type: object
-                type: array
-                x-kubernetes-list-map-keys:
-                - type
-                x-kubernetes-list-type: map
-            type: object
         type: object
     served: true
     storage: true
@@ -10853,6 +9820,7 @@ spec:
           controller VALIDATES it (structure + CEL + the referenced-output⇒outputSchema rule + registry membership)
           and reports Validated/Invalid on status; it does NO execution. A workflow INSTANCE is a durable Run with a
           workflowRef (instances-of-record live in Postgres, not etcd), run by the executor-in-the-worker (later tasks).
+          Frozen (ADR 0152): additive bug fixes only, and no new fields until the install path is green.
         properties:
           apiVersion:
             description: |-

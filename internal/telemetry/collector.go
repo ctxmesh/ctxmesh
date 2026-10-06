@@ -80,12 +80,22 @@ func ConfigMapName(agentName string) string { return agentName + "-otel-config" 
 func RenderConfig(langfuse bool, detectors []Detector) string {
 	exporters := "  debug:\n    verbosity: detailed\n"
 	pipelineExporters := "[debug]"
+	extensions, serviceExtensions := "", ""
 	if langfuse {
+		// The collector builds the Basic auth header itself from two Secret-referenced env vars.
+		// No pre-encoded credential is ever rendered into the pod spec or this ConfigMap.
+		extensions = "" +
+			"extensions:\n" +
+			"  basicauth/langfuse:\n" +
+			"    client_auth:\n" +
+			"      username: ${env:LANGFUSE_PUBLIC_KEY}\n" +
+			"      password: ${env:LANGFUSE_SECRET_KEY}\n"
+		serviceExtensions = "  extensions: [basicauth/langfuse]\n"
 		exporters += "" +
 			"  otlphttp/langfuse:\n" +
 			"    endpoint: ${env:LANGFUSE_OTLP_ENDPOINT}\n" +
-			"    headers:\n" +
-			"      Authorization: ${env:LANGFUSE_OTLP_AUTH}\n"
+			"    auth:\n" +
+			"      authenticator: basicauth/langfuse\n"
 		pipelineExporters = "[debug, otlphttp/langfuse]"
 	}
 
@@ -108,9 +118,9 @@ func RenderConfig(langfuse bool, detectors []Detector) string {
         endpoint: 0.0.0.0:4318
 processors:
   batch: {}
-%sexporters:
+%s%sexporters:
 %sservice:
-  telemetry:
+%s  telemetry:
     logs:
       # info so the debug exporter actually prints spans — it is the e2e
       # assertion sink (ADR 0006). (M11/prod hardening drops the debug exporter.)
@@ -120,7 +130,7 @@ processors:
       receivers: [otlp]
       processors: %s
       exporters: %s
-`, redactionProcessor, exporters, pipelineProcessors, pipelineExporters)
+`, redactionProcessor, extensions, exporters, serviceExtensions, pipelineProcessors, pipelineExporters)
 }
 
 // renderRedactionProcessor emits the `transform/redaction` processor block:
@@ -184,22 +194,81 @@ func redactStatement(d Detector) string {
 // literal (e.g. `\d` → `"\\d"`), which is also YAML-safe on a single line.
 func ottlQuote(s string) string { return strconv.Quote(s) }
 
-// BasicAuthHeader returns the Langfuse OTLP Authorization header value from a
-// public/secret key pair: "Basic base64(public:secret)".
+// BasicAuthHeader returns "Basic base64(public:secret)" for a consumer that needs the header
+// pre-built (LiteLLM's OTEL_HEADERS). The result is a credential: write it into a Secret, never
+// into a pod spec or ConfigMap. Agent pods do not use this — see LangfuseEnv.
 func BasicAuthHeader(publicKey, secretKey string) string {
-	raw := publicKey + ":" + secretKey
-	return "Basic " + base64.StdEncoding.EncodeToString([]byte(raw))
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(publicKey+":"+secretKey))
 }
 
-// Container builds the collector sidecar. langfuseEnv carries
-// LANGFUSE_OTLP_ENDPOINT + LANGFUSE_OTLP_AUTH when Langfuse export is enabled;
-// pass nil for debug-only.
-func Container(configMapName string, langfuseEnv []corev1.EnvVar, image string) corev1.Container {
+// The keys of the LangfuseSecretName Secret.
+const (
+	LangfuseKeyEndpoint = "otlp-endpoint"
+	LangfuseKeyPublic   = "public-key"
+	LangfuseKeySecret   = "secret-key"
+)
+
+// LangfuseSecretKeys are the keys the LangfuseSecretName Secret must hold, all non-empty, for
+// export to be on.
+var LangfuseSecretKeys = []string{LangfuseKeyEndpoint, LangfuseKeyPublic, LangfuseKeySecret}
+
+// MissingLangfuseKeys returns the LangfuseSecretKeys that data lacks or holds empty.
+func MissingLangfuseKeys(data map[string][]byte) []string {
+	var missing []string
+	for _, k := range LangfuseSecretKeys {
+		if len(data[k]) == 0 {
+			missing = append(missing, k)
+		}
+	}
+	return missing
+}
+
+// LangfuseEnv returns the collector's Langfuse env as references to the agent namespace's own
+// LangfuseSecretName Secret. Never inline these: a literal value is readable by anyone who can
+// `get pods`, which is how a plaintext Langfuse key once reached every agent pod spec.
+//
+// Knative's ksvc webhook rejects a downward-API valueFrom (fieldRef) but accepts secretKeyRef,
+// optional included — verified by server dry-run 2026-10-05. The rejected kind is narrower than
+// the "never valueFrom" belief that produced the inline credential.
+func LangfuseEnv(secretName string) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: "LANGFUSE_OTLP_ENDPOINT", ValueFrom: secretKeyRef(secretName, LangfuseKeyEndpoint)},
+		{Name: "LANGFUSE_PUBLIC_KEY", ValueFrom: secretKeyRef(secretName, LangfuseKeyPublic)},
+		{Name: "LANGFUSE_SECRET_KEY", ValueFrom: secretKeyRef(secretName, LangfuseKeySecret)},
+	}
+}
+
+// LangfuseScoresEnv returns the feedback hook's Langfuse key pair (the launcher posts scores with
+// it), by reference to the same Secret as LangfuseEnv.
+func LangfuseScoresEnv(secretName string) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: "LANGFUSE_SCORES_PUBLIC_KEY", ValueFrom: secretKeyRef(secretName, LangfuseKeyPublic)},
+		{Name: "LANGFUSE_SCORES_SECRET_KEY", ValueFrom: secretKeyRef(secretName, LangfuseKeySecret)},
+	}
+}
+
+// secretKeyRef is always optional. A required reference to a Secret or key that is gone stops the
+// container from starting — the agent's own container included — so a deleted or incomplete
+// Secret would take an agent down on its next cold start, including a revision an eval gate is
+// holding. Optional, the env is simply unset, and the controller turns export off.
+func secretKeyRef(secretName, key string) *corev1.EnvVarSource {
+	optional := true
+	return &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+		LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+		Key:                  key,
+		Optional:             &optional,
+	}}
+}
+
+// Container builds the collector sidecar with its Langfuse env (LangfuseEnv). The references are
+// present whether or not export is on, so the pod spec does not depend on the Secret: the
+// ConfigMap decides whether the exporter runs.
+func Container(configMapName, image string) corev1.Container {
 	return corev1.Container{
 		Name:  CollectorContainerName,
 		Image: image,
 		Args:  []string{"--config", collectorConfigMountPath + "/config.yaml"},
-		Env:   langfuseEnv,
+		Env:   LangfuseEnv(LangfuseSecretName),
 		// No ContainerPorts: Knative allows exactly one port across all
 		// containers in a pod (the user container's). The collector still
 		// listens on 4317/4318 inside the shared pod netns; the user container

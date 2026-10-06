@@ -24,6 +24,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/ctxmesh/ctxmesh/internal/expand"
 )
 
 // crdBudgetUSDPattern mirrors the kubebuilder validation pattern on the CRD
@@ -158,11 +160,12 @@ func TestExpand_ModelRoute(t *testing.T) {
 // omitted → resolved to the pinned managed ref; systemPrompt → SYSTEM_PROMPT env;
 // each tool → an MCPToolBinding; the AgentDeployment comes last.
 func TestExpand_Managed(t *testing.T) {
+	stampManagedVersion(t, "v9.9.9")
 	got := expandFile(t, "managed")
 	checkGolden(t, "managed", got)
 
 	// The resolved managed image (image was omitted from the input).
-	if !strings.Contains(got, "image: ghcr.io/ctxmesh/managed-agent:latest") {
+	if !strings.Contains(got, "image: ghcr.io/ctxmesh/managed-agent:v9.9.9") {
 		t.Error("output missing the resolved managed-agent image ref")
 	}
 	// systemPrompt → SYSTEM_PROMPT env.
@@ -194,13 +197,15 @@ func TestExpand_Managed(t *testing.T) {
 // valid (resolved to the managed ref), while a custom agent WITHOUT an image
 // still errors.
 func TestExpand_Managed_ImageOptional(t *testing.T) {
-	// Managed, no image → valid (resolved).
+	// Managed, no image → valid, resolved to the release `make build-cli` stamps. It resolved to
+	// managed-agent:latest before, a tag no release publishes, so the agent could never start.
+	stampManagedVersion(t, "v9.9.9")
 	managed := "name: m\nruntime: managed\n"
 	var buf bytes.Buffer
 	if err := expandBytes([]byte(managed), &buf); err != nil {
 		t.Fatalf("managed agent without image should be valid, got: %v", err)
 	}
-	if !strings.Contains(buf.String(), "image: ghcr.io/ctxmesh/managed-agent:latest") {
+	if !strings.Contains(buf.String(), "image: ghcr.io/ctxmesh/managed-agent:v9.9.9") {
 		t.Errorf("managed agent without image should resolve the managed ref, got:\n%s", buf.String())
 	}
 
@@ -770,4 +775,12 @@ func TestExpand_EvalAndPrompt_BothPresent(t *testing.T) {
 	if !strings.Contains(got, "promptRef: my-pv") {
 		t.Errorf("output should contain promptRef, got:\n%s", got)
 	}
+}
+
+// stampManagedVersion stands in for `make build-cli`'s -ldflags stamp for one test.
+func stampManagedVersion(t *testing.T, v string) {
+	t.Helper()
+	prev := expand.ManagedImageVersion
+	expand.ManagedImageVersion = v
+	t.Cleanup(func() { expand.ManagedImageVersion = prev })
 }

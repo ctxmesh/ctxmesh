@@ -487,6 +487,12 @@ spec:
         - ~a2a:seen:*
         - ~spawn:*
         - ~agent:*
+        - ~runcap:*
+        - ~run:*
+        - ~ns:*
+        - ~fleet:*
+        - ~user:*
+        - ~conv:*
         - +@all
         - -flushall
         - -flushdb

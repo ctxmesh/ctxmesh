@@ -76,7 +76,7 @@ func (s *Server) handleAsyncPublish(w http.ResponseWriter, r *http.Request) {
 	// proof-of-possession for this request (M142.5, ADR 0124) — so a copied token is not authority.
 	capab, capErr := s.verifyRuncapWithProof(r)
 	if capErr != nil {
-		writeError(w, http.StatusUnauthorized, capErr.Error())
+		writeRuncapError(w, capErr)
 		return
 	}
 	caller, err := s.runStore.Get(capab.RunID)
@@ -143,8 +143,8 @@ func asyncPublishHeaders(in http.Header, namespace, registryID string) map[strin
 	out := make(map[string]string, len(in)+2)
 	for k := range in {
 		switch http.CanonicalHeaderKey(k) {
-		case http.CanonicalHeaderKey(runcap.HeaderName):
-			continue // never carry the run capability onto the bus
+		case http.CanonicalHeaderKey(runcap.HeaderName), http.CanonicalHeaderKey(runcap.PoPHeaderName):
+			continue // never carry the run capability, or its spent proof, onto the bus
 		case headerAsyncNamespace, headerAsyncRegistry:
 			continue // caller-supplied routing context is discarded, then re-stamped below
 		}

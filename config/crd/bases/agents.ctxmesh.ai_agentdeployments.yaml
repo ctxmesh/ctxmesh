@@ -85,14 +85,6 @@ spec:
                 maxItems: 64
                 type: array
                 x-kubernetes-list-type: atomic
-              approvalPolicyRef:
-                description: |-
-                  approvalPolicyRef optionally names an ApprovalPolicy (same namespace) that declaratively requires
-                  human approval for named tool calls (and optionally narrows who may approve) — M139, ADR 0111. The
-                  controller merges its require-approval requirements into this agent's effective tool policy
-                  (reusing the pause/resume/voucher runtime); a dangling ref sets a NotReady condition on the agent.
-                maxLength: 253
-                type: string
               budget:
                 description: |-
                   budget optionally sets USD cost-governance caps for this agent (PRD §14).
@@ -357,14 +349,145 @@ spec:
                 - eventing
                 - job
                 type: string
-              feedbackStoreRef:
+              feedback:
                 description: |-
-                  feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
-                  multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
-                  gates ingestion by the declared score names and the read path attributes scores to their source;
-                  Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
-                maxLength: 253
-                type: string
+                  feedback declares which feedback scores this agent accepts and where each one comes from:
+                  people annotating runs in the console, or named external channels such as a CSAT webhook.
+                  When set, the feedback endpoint checks every submitted score name against it (mode Enforce
+                  rejects a name no source declares; Monitor accepts it), and the console labels each stored
+                  score with its declared source. When omitted, any score name is accepted and scores carry no
+                  source label.
+
+                  This is configuration only: the scores themselves are stored in Langfuse, and removing this
+                  field does not delete them.
+                properties:
+                  external:
+                    description: external declares the external feedback channels,
+                      one score per channel.
+                    items:
+                      description: |-
+                        ExternalSource declares one external feedback channel, such as a webhook or an API that reports
+                        a rating, a completion or a business metric.
+                      properties:
+                        name:
+                          description: |-
+                            name is the channel name (for example "csat-webhook"). A score from this channel is labelled
+                            "external:<name>".
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                        score:
+                          description: score is the score this channel writes.
+                          properties:
+                            categories:
+                              description: |-
+                                categories is the allowed label set for a CATEGORICAL score. It is informational today and
+                                ignored for other data types.
+                              items:
+                                type: string
+                              maxItems: 64
+                              type: array
+                              x-kubernetes-list-type: set
+                            dataType:
+                              default: NUMERIC
+                              description: |-
+                                dataType is the score's value type. NUMERIC and BOOLEAN carry a number; CATEGORICAL carries
+                                a string label. Defaults to NUMERIC.
+                              enum:
+                              - NUMERIC
+                              - BOOLEAN
+                              - CATEGORICAL
+                              type: string
+                            name:
+                              description: |-
+                                name is the score name, as submitted and as stored in Langfuse (for example "thumbs",
+                                "accuracy" or "csat"). It must be unique across every source in spec.feedback.
+                              maxLength: 128
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                      required:
+                      - name
+                      - score
+                      type: object
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: each external channel must declare a distinct score
+                        name
+                      rule: self.all(e, self.exists_one(f, f.score.name == e.score.name))
+                  human:
+                    description: human declares the scores people submit, such as
+                      thumbs and ratings in the console.
+                    properties:
+                      scores:
+                        description: scores are the human-submitted score dimensions.
+                          Names must be unique.
+                        items:
+                          description: ScoreDecl declares one feedback score.
+                          properties:
+                            categories:
+                              description: |-
+                                categories is the allowed label set for a CATEGORICAL score. It is informational today and
+                                ignored for other data types.
+                              items:
+                                type: string
+                              maxItems: 64
+                              type: array
+                              x-kubernetes-list-type: set
+                            dataType:
+                              default: NUMERIC
+                              description: |-
+                                dataType is the score's value type. NUMERIC and BOOLEAN carry a number; CATEGORICAL carries
+                                a string label. Defaults to NUMERIC.
+                              enum:
+                              - NUMERIC
+                              - BOOLEAN
+                              - CATEGORICAL
+                              type: string
+                            name:
+                              description: |-
+                                name is the score name, as submitted and as stored in Langfuse (for example "thumbs",
+                                "accuracy" or "csat"). It must be unique across every source in spec.feedback.
+                              maxLength: 128
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        maxItems: 64
+                        minItems: 1
+                        type: array
+                        x-kubernetes-list-type: atomic
+                        x-kubernetes-validations:
+                        - message: human score names must be unique
+                          rule: self.all(s, self.exists_one(t, t.name == s.name))
+                    required:
+                    - scores
+                    type: object
+                  mode:
+                    default: Enforce
+                    description: |-
+                      mode selects whether the declaration gates submitted scores. Enforce rejects a score whose
+                      name no source declares. Monitor accepts it, which lets an agent that already emits scores
+                      adopt a declaration without losing any. Defaults to Enforce.
+                    enum:
+                    - Enforce
+                    - Monitor
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: 'feedback must declare at least one source: human.scores
+                    or an external channel'
+                  rule: (has(self.human) && size(self.human.scores) > 0) || (has(self.external)
+                    && size(self.external) > 0)
+                - message: a score name is declared by both human and an external
+                    channel; score names must be unique across all sources
+                  rule: '!has(self.human) || !has(self.external) || self.human.scores.all(s,
+                    !self.external.exists(e, e.score.name == s.name))'
               guardrailPolicyRef:
                 description: |-
                   guardrailPolicyRef optionally names a GuardrailPolicy (same namespace) that governs this
@@ -726,6 +849,42 @@ spec:
                     description: toolPolicy optionally constrains which tools the
                       agent may use and how.
                     properties:
+                      approvers:
+                        description: |-
+                          approvers narrows who may approve a paused tool call (rule require-approval) for this
+                          agent. A caller approving a run must hold resume permission on the agent through RBAC
+                          AND match an entry here: a User entry matches the caller's username, a Group entry any
+                          group the caller belongs to. Identity comes from the caller's own verified token, never
+                          from the request. This list can only narrow RBAC; it never grants approval to someone
+                          without it. Empty means anyone with resume permission may approve.
+
+                          A ServiceAccount approves through its username or group form, for example User
+                          "system:serviceaccount:<namespace>:<name>".
+                        items:
+                          description: |-
+                            Approver identifies who may approve a paused tool call: a Kubernetes User or Group, spelled
+                            as in an RBAC subject.
+                          properties:
+                            kind:
+                              description: |-
+                                kind is "User" (matched against the caller's username) or "Group" (matched against the
+                                groups the caller belongs to).
+                              enum:
+                              - User
+                              - Group
+                              type: string
+                            name:
+                              description: name is the username or group name to match.
+                              maxLength: 316
+                              minLength: 1
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                        maxItems: 64
+                        type: array
+                        x-kubernetes-list-type: atomic
                       default:
                         default: allow
                         description: default is the rule applied to any tool without
@@ -797,6 +956,15 @@ spec:
                   scaling configures the Knative autoscaler bounds for this agent.
                   When omitted, defaults to min=0 (scale-to-zero) and max=3.
                 properties:
+                  concurrency:
+                    description: |-
+                      concurrency is the most runs one replica handles at once (Knative containerConcurrency). A run
+                      beyond it waits for a free slot or a new replica instead of joining an overloaded pod. 0 means
+                      no limit: the pod takes every run it is sent and the autoscaler scales only on its soft target.
+                    format: int32
+                    maximum: 1000
+                    minimum: 0
+                    type: integer
                   max:
                     default: 3
                     description: max is the maximum number of replicas the autoscaler
@@ -810,6 +978,27 @@ spec:
                       to enable scale-to-zero.
                     format: int32
                     minimum: 0
+                    type: integer
+                  targetBurstCapacity:
+                    description: |-
+                      targetBurstCapacity is how much spare capacity Knative keeps routed through its activator
+                      (autoscaling.knative.dev/target-burst-capacity). 0 takes the activator out of the request path
+                      once a replica is up; -1 keeps it in the path always, where it queues runs that find every slot
+                      taken. Unset, it follows concurrency: 0 when concurrency is unlimited, -1 when it is bounded,
+                      because a bounded pod with the activator out of the path drops the runs it has no slot for.
+                    format: int32
+                    minimum: -1
+                    type: integer
+                  timeoutSeconds:
+                    default: 600
+                    description: |-
+                      timeoutSeconds is the longest one run may take before its request is cut off (Knative
+                      timeoutSeconds). It defaults to 600, matching the platform's run limit; left unset, Knative would
+                      end every run at 300 seconds. A value above the cluster's Knative max-revision-timeout-seconds
+                      (600 unless raised) is rejected by Knative.
+                    format: int64
+                    maximum: 3600
+                    minimum: 1
                     type: integer
                 type: object
               sessionMemory:
@@ -1310,14 +1499,6 @@ spec:
                 maxItems: 64
                 type: array
                 x-kubernetes-list-type: atomic
-              approvalPolicyRef:
-                description: |-
-                  approvalPolicyRef optionally names an ApprovalPolicy (same namespace) that declaratively requires
-                  human approval for named tool calls (and optionally narrows who may approve) — M139, ADR 0111. The
-                  controller merges its require-approval requirements into this agent's effective tool policy
-                  (reusing the pause/resume/voucher runtime); a dangling ref sets a NotReady condition on the agent.
-                maxLength: 253
-                type: string
               budget:
                 description: |-
                   budget optionally sets USD cost-governance caps for this agent (PRD §14).
@@ -1582,14 +1763,145 @@ spec:
                 - eventing
                 - job
                 type: string
-              feedbackStoreRef:
+              feedback:
                 description: |-
-                  feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
-                  multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
-                  gates ingestion by the declared score names and the read path attributes scores to their source;
-                  Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
-                maxLength: 253
-                type: string
+                  feedback declares which feedback scores this agent accepts and where each one comes from:
+                  people annotating runs in the console, or named external channels such as a CSAT webhook.
+                  When set, the feedback endpoint checks every submitted score name against it (mode Enforce
+                  rejects a name no source declares; Monitor accepts it), and the console labels each stored
+                  score with its declared source. When omitted, any score name is accepted and scores carry no
+                  source label.
+
+                  This is configuration only: the scores themselves are stored in Langfuse, and removing this
+                  field does not delete them.
+                properties:
+                  external:
+                    description: external declares the external feedback channels,
+                      one score per channel.
+                    items:
+                      description: |-
+                        ExternalSource declares one external feedback channel, such as a webhook or an API that reports
+                        a rating, a completion or a business metric.
+                      properties:
+                        name:
+                          description: |-
+                            name is the channel name (for example "csat-webhook"). A score from this channel is labelled
+                            "external:<name>".
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                        score:
+                          description: score is the score this channel writes.
+                          properties:
+                            categories:
+                              description: |-
+                                categories is the allowed label set for a CATEGORICAL score. It is informational today and
+                                ignored for other data types.
+                              items:
+                                type: string
+                              maxItems: 64
+                              type: array
+                              x-kubernetes-list-type: set
+                            dataType:
+                              default: NUMERIC
+                              description: |-
+                                dataType is the score's value type. NUMERIC and BOOLEAN carry a number; CATEGORICAL carries
+                                a string label. Defaults to NUMERIC.
+                              enum:
+                              - NUMERIC
+                              - BOOLEAN
+                              - CATEGORICAL
+                              type: string
+                            name:
+                              description: |-
+                                name is the score name, as submitted and as stored in Langfuse (for example "thumbs",
+                                "accuracy" or "csat"). It must be unique across every source in spec.feedback.
+                              maxLength: 128
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                      required:
+                      - name
+                      - score
+                      type: object
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: each external channel must declare a distinct score
+                        name
+                      rule: self.all(e, self.exists_one(f, f.score.name == e.score.name))
+                  human:
+                    description: human declares the scores people submit, such as
+                      thumbs and ratings in the console.
+                    properties:
+                      scores:
+                        description: scores are the human-submitted score dimensions.
+                          Names must be unique.
+                        items:
+                          description: ScoreDecl declares one feedback score.
+                          properties:
+                            categories:
+                              description: |-
+                                categories is the allowed label set for a CATEGORICAL score. It is informational today and
+                                ignored for other data types.
+                              items:
+                                type: string
+                              maxItems: 64
+                              type: array
+                              x-kubernetes-list-type: set
+                            dataType:
+                              default: NUMERIC
+                              description: |-
+                                dataType is the score's value type. NUMERIC and BOOLEAN carry a number; CATEGORICAL carries
+                                a string label. Defaults to NUMERIC.
+                              enum:
+                              - NUMERIC
+                              - BOOLEAN
+                              - CATEGORICAL
+                              type: string
+                            name:
+                              description: |-
+                                name is the score name, as submitted and as stored in Langfuse (for example "thumbs",
+                                "accuracy" or "csat"). It must be unique across every source in spec.feedback.
+                              maxLength: 128
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        maxItems: 64
+                        minItems: 1
+                        type: array
+                        x-kubernetes-list-type: atomic
+                        x-kubernetes-validations:
+                        - message: human score names must be unique
+                          rule: self.all(s, self.exists_one(t, t.name == s.name))
+                    required:
+                    - scores
+                    type: object
+                  mode:
+                    default: Enforce
+                    description: |-
+                      mode selects whether the declaration gates submitted scores. Enforce rejects a score whose
+                      name no source declares. Monitor accepts it, which lets an agent that already emits scores
+                      adopt a declaration without losing any. Defaults to Enforce.
+                    enum:
+                    - Enforce
+                    - Monitor
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: 'feedback must declare at least one source: human.scores
+                    or an external channel'
+                  rule: (has(self.human) && size(self.human.scores) > 0) || (has(self.external)
+                    && size(self.external) > 0)
+                - message: a score name is declared by both human and an external
+                    channel; score names must be unique across all sources
+                  rule: '!has(self.human) || !has(self.external) || self.human.scores.all(s,
+                    !self.external.exists(e, e.score.name == s.name))'
               guardrailPolicyRef:
                 description: |-
                   guardrailPolicyRef optionally names a GuardrailPolicy (same namespace) that governs this
@@ -1951,6 +2263,42 @@ spec:
                     description: toolPolicy optionally constrains which tools the
                       agent may use and how.
                     properties:
+                      approvers:
+                        description: |-
+                          approvers narrows who may approve a paused tool call (rule require-approval) for this
+                          agent. A caller approving a run must hold resume permission on the agent through RBAC
+                          AND match an entry here: a User entry matches the caller's username, a Group entry any
+                          group the caller belongs to. Identity comes from the caller's own verified token, never
+                          from the request. This list can only narrow RBAC; it never grants approval to someone
+                          without it. Empty means anyone with resume permission may approve.
+
+                          A ServiceAccount approves through its username or group form, for example User
+                          "system:serviceaccount:<namespace>:<name>".
+                        items:
+                          description: |-
+                            Approver identifies who may approve a paused tool call: a Kubernetes User or Group, spelled
+                            as in an RBAC subject.
+                          properties:
+                            kind:
+                              description: |-
+                                kind is "User" (matched against the caller's username) or "Group" (matched against the
+                                groups the caller belongs to).
+                              enum:
+                              - User
+                              - Group
+                              type: string
+                            name:
+                              description: name is the username or group name to match.
+                              maxLength: 316
+                              minLength: 1
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                        maxItems: 64
+                        type: array
+                        x-kubernetes-list-type: atomic
                       default:
                         default: allow
                         description: default is the rule applied to any tool without
@@ -2022,6 +2370,15 @@ spec:
                   scaling configures the Knative autoscaler bounds for this agent.
                   When omitted, defaults to min=0 (scale-to-zero) and max=3.
                 properties:
+                  concurrency:
+                    description: |-
+                      concurrency is the most runs one replica handles at once (Knative containerConcurrency). A run
+                      beyond it waits for a free slot or a new replica instead of joining an overloaded pod. 0 means
+                      no limit: the pod takes every run it is sent and the autoscaler scales only on its soft target.
+                    format: int32
+                    maximum: 1000
+                    minimum: 0
+                    type: integer
                   max:
                     default: 3
                     description: max is the maximum number of replicas the autoscaler
@@ -2035,6 +2392,27 @@ spec:
                       to enable scale-to-zero.
                     format: int32
                     minimum: 0
+                    type: integer
+                  targetBurstCapacity:
+                    description: |-
+                      targetBurstCapacity is how much spare capacity Knative keeps routed through its activator
+                      (autoscaling.knative.dev/target-burst-capacity). 0 takes the activator out of the request path
+                      once a replica is up; -1 keeps it in the path always, where it queues runs that find every slot
+                      taken. Unset, it follows concurrency: 0 when concurrency is unlimited, -1 when it is bounded,
+                      because a bounded pod with the activator out of the path drops the runs it has no slot for.
+                    format: int32
+                    minimum: -1
+                    type: integer
+                  timeoutSeconds:
+                    default: 600
+                    description: |-
+                      timeoutSeconds is the longest one run may take before its request is cut off (Knative
+                      timeoutSeconds). It defaults to 600, matching the platform's run limit; left unset, Knative would
+                      end every run at 300 seconds. A value above the cluster's Knative max-revision-timeout-seconds
+                      (600 unless raised) is rejected by Knative.
+                    format: int64
+                    maximum: 3600
+                    minimum: 1
                     type: integer
                 type: object
               sessionMemory:

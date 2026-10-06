@@ -34,12 +34,6 @@ func (*AgentScalingPolicy) Hub() {}
 // Hub marks AgentVersion as the conversion hub.
 func (*AgentVersion) Hub() {}
 
-// Hub marks CredentialStore as the conversion hub.
-func (*CredentialStore) Hub() {}
-
-// Hub marks ClusterCredentialStore as the conversion hub.
-func (*ClusterCredentialStore) Hub() {}
-
 // Hub marks EvalSuite as the conversion hub.
 func (*EvalSuite) Hub() {}
 

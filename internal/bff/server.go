@@ -58,6 +58,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/prompt"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/statelayer"
 )
 
 // defaultVersion is reported by /api/health when no version is injected at
@@ -214,6 +215,7 @@ type Server struct {
 	// continuously and the kill set is normally empty.
 	killFilter  killFilterCache
 	runcapBind  RuncapBindStore
+	podAuth     statelayer.PodAuthenticator
 	proofOnce   sync.Once
 	popVerifier *runcap.ProofVerifier
 	// proofSpender shares the proof-replay set across replicas (M149 m149.4). Nil ⇒ the
@@ -654,6 +656,10 @@ type Options struct {
 	// nil ⇒ POST /api/internal/runcap/bind is not registered, so no exchange is offered that could not
 	// be made single-use. Constructed in cmd/bff/main.go over the state-layer Valkey.
 	RuncapBind RuncapBindStore
+	// PodAuth authenticates an agent pod by its projected token for the BFF audience (TokenReview).
+	// The guardrail audit edge uses it for a capability relayed over AMP, which is bound to the
+	// caller's key and so cannot be proven by the agent that enforced the block. Nil ⇒ that path is off.
+	PodAuth statelayer.PodAuthenticator
 	// ProofSpender shares the proof-replay set across BFF replicas (M149 m149.4). Nil ⇒
 	// the verifier's in-process map, which is correct at one replica and silently
 	// permissive at several.
@@ -728,6 +734,7 @@ func NewServer(opts Options) *Server {
 		asyncPublisher:           opts.AsyncPublisher,
 		requireProofOfPossession: opts.RequireProofOfPossession,
 		runcapBind:               opts.RuncapBind,
+		podAuth:                  opts.PodAuth,
 		proofSpender:             opts.ProofSpender,
 		spawnBudgets:             opts.SpawnBudgets,
 		killScopes:               opts.KillScopes,
@@ -992,7 +999,8 @@ func (s *Server) Handler() http.Handler {
 		if s.adapters.Langfuse != nil {
 			authed.HandleFunc("GET /api/agents/{ns}/{name}/runs", s.handleAgentRuns)
 		} else {
-			authed.Handle("GET /api/agents/{ns}/{name}/runs", notImplemented("Langfuse per-agent runs adapter"))
+			// No trace store: the agent's runs come from the run store (ADR 0150).
+			authed.HandleFunc("GET /api/agents/{ns}/{name}/runs", s.handleStoreAgentRuns)
 		}
 		// Agent EDIT (m15.3, ADR 0017): PUT the edited simplified spec. Two modes,
 		// keyed on the source-spec annotation — a full expand+SSA round-trip for a
@@ -1407,7 +1415,7 @@ func (s *Server) Handler() http.Handler {
 		// (registered by the else branch below).
 		authed.HandleFunc("GET /api/feedback", s.handleFeedback)
 		// Feedback WRITE (M139, ADR 0112): the console/external submit path. Caller-scoped;
-		// gated by the agent's FeedbackStore (declared score names) when bound; relayed to
+		// gated by the agent's spec.feedback (declared score names) when set; relayed to
 		// Langfuse (the store of record). Langfuse absent → 501 (registered by the else branch).
 		authed.HandleFunc("POST /api/feedback", s.handleSubmitFeedback)
 		// Cost breakdown by agent (m16.5): aggregates a bounded recent window of
@@ -1417,7 +1425,8 @@ func (s *Server) Handler() http.Handler {
 		// 501 (registered by the else branch below).
 		authed.HandleFunc("GET /api/cost/breakdown", s.handleCostBreakdown)
 	} else {
-		authed.Handle("GET /api/runs", notImplemented("Langfuse runs adapter"))
+		// No trace store: list runs from the run store, which every install has (ADR 0150).
+		authed.HandleFunc("GET /api/runs", s.handleStoreRuns)
 		authed.Handle("GET /api/cost", notImplemented("Langfuse cost adapter"))
 		authed.Handle("GET /api/traces/", notImplemented("Langfuse trace adapter"))
 		authed.Handle("GET /api/feedback", notImplemented("Langfuse feedback adapter"))

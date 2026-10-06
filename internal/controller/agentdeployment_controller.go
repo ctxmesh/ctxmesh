@@ -41,6 +41,7 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -54,8 +55,8 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/skill"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/spawnbudget"
 	"github.com/ctxmesh/ctxmesh/internal/eval"
-	"github.com/ctxmesh/ctxmesh/internal/gateway"
 	"github.com/ctxmesh/ctxmesh/internal/prompt"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
@@ -64,6 +65,11 @@ import (
 // into AgentDeployment.status.conditions. Kept as a named constant to satisfy
 // the goconst linter and to make the value easy to grep.
 const conditionReady = "Ready"
+
+// conditionTraceExport reports whether this agent's spans export to Langfuse or stay in the
+// collector's debug log. It exists because the alternative was silence: an agent without a
+// Langfuse Secret in its namespace looked identical to one exporting successfully.
+const conditionTraceExport = "TraceExport"
 
 // reasonIdentitySAConflict is set on the AgentDeployment Ready condition when
 // the per-agent identity ServiceAccount (agent-<name>) already exists and is
@@ -97,8 +103,8 @@ const ceTypeAttribute = "type"
 // Blob-offload object store (m7.6b, specs/eventing-scaling.md §"Blob offload").
 // A registry member's launcher offloads a >256KiB async payload to the dedicated
 // dev MinIO (config/objectstore/) and rehydrates it on consume. The address and
-// the DEV-ONLY deterministic credentials are injected as STATIC env — never
-// valueFrom (Knative's ksvc webhook rejects it; the m5.7 landmine + tier1 guard).
+// the DEV-ONLY deterministic credentials are injected as STATIC env: they are public
+// constants (ADR 0083), so a Secret reference would hide nothing.
 const (
 	// objectStoreAddr is the cluster address of the dedicated dev MinIO Service
 	// (config/objectstore/, wired into config/default). It mirrors the S3 API
@@ -188,8 +194,14 @@ const (
 	// proxy audience; the launcher presents it so the proxy derives the tenant from the
 	// pod's namespace. The mount path + audience + expiry must match the launcher
 	// (defaultPodTokenPath) and the proxy (STATELAYER_POD_AUDIENCE) respectively.
-	envStatelayerProxyURL      = "STATELAYER_PROXY_URL"
-	envStatelayerTokenPath     = "STATELAYER_TOKEN_PATH"
+	envStatelayerProxyURL  = "STATELAYER_PROXY_URL"
+	envStatelayerTokenPath = "STATELAYER_TOKEN_PATH"
+	// A guarded agent's own identity toward the BFF (m184.37): a projected token with the BFF's audience,
+	// so the guardrail audit edge can authenticate the pod that enforced a block when the run capability
+	// it holds was relayed over AMP and is bound to another agent's key.
+	envBFFPodTokenPath         = "BFF_POD_TOKEN_PATH"
+	bffPodTokenVolume          = "bff-pod-token"
+	bffPodTokenMountPath       = "/var/run/secrets/ctxmesh-bff"
 	statelayerTokenVolume      = "statelayer-proxy-token"
 	statelayerTokenMountPath   = "/var/run/secrets/statelayer-proxy"
 	statelayerPodTokenFilePath = statelayerTokenMountPath + "/token"
@@ -198,25 +210,14 @@ const (
 )
 
 // Feedback ingest hook (M9, specs/eval-prompts-feedback.md §3). The :2995
-// listener is started by the launcher when these env vars are injected. All
-// values are known at reconcile time → STATIC env, NEVER valueFrom (Knative
-// ksvc webhook rejects valueFrom; the m5.7 landmine + tier1 no-valueFrom guard).
+// listener is started by the launcher when these env vars are injected; its
+// Langfuse keys come from the namespace's langfuse-otlp Secret
+// (telemetry.LangfuseScoresEnv), never from literals.
 const (
 	// langfuseHost is the in-cluster Langfuse base URL. The feedback hook POSTs
 	// scores to <langfuseHost>/api/public/scores. Reuses the dev Langfuse wired
 	// by `make -C harness dev-up M=3` (same host as the M3 OTel collector exporter).
 	langfuseHost = "http://langfuse-web.langfuse.svc:3000"
-
-	// langfuseDevPublicKey / langfuseDevSecretKey are the DETERMINISTIC DEV-ONLY
-	// Langfuse API credentials — fixed values committed as such (identical posture
-	// to the dev MinIO OBJECT_STORE_ACCESS_KEY / objectStoreDevAccessKey). They
-	// MUST match the public/secret key seeded by `dev-up M=3` into the
-	// langfuse-otlp Secret (and into the Langfuse Helm chart's initialApiKey
-	// block). NOT a real credential — never rotated, only ever meaningful against
-	// the in-cluster dev Langfuse. Injected as STATIC env (no valueFrom) so the
-	// launcher's feedback hook can authenticate to the dev scores API.
-	langfuseDevPublicKey = "pk-lf-dev-00000000000000000000000000000000"
-	langfuseDevSecretKey = "sk-lf-dev-00000000000000000000000000000000" //nolint:gosec // dev-only fixed value, not a real credential (see comment).
 
 	// feedbackPort is the localhost port the launcher's feedback hook binds. Must
 	// match defaultFeedbackPort in cmd/launcher/feedback.go. Reserved per
@@ -560,13 +561,6 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// re-reconciles via the watch.
 	if ie, ok := asInPodRequireApprovalError(err); ok {
 		return r.setReadyFalse(ctx, &deploy, ie.reason, ie.msg)
-	}
-	// Declarative HITL FAIL-CLOSED (M139, ADR 0111 §3): a dangling approvalPolicyRef is surfaced from
-	// buildPodTemplate as an *approvalPolicyResolveError BEFORE any workload write — the agent is held
-	// NotReady rather than served without its declared approval gate. An ApprovalPolicy create fixes it
-	// (re-reconciles via the watch).
-	if ae, ok := asApprovalPolicyResolveError(err); ok {
-		return r.setReadyFalse(ctx, &deploy, ae.reason, ae.msg)
 	}
 	// SA name-collision (m79.1, m52 C11): an agent-<name> SA already owned by a
 	// DIFFERENT controller must fail LOUD, not wedge the reconcile in a hot-loop.
@@ -1051,22 +1045,19 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// (buildPodTemplate returned a *guardrailResolveError), so we never reach here with an unenforceable
 	// policy. The env carries only the static FILE PATH (no valueFrom — the m5.7 Knative landmine).
 	//
-	// BFF_INTERNAL_URL (m66.15): the guardrail block audit POST (m66.9) targets BFF_INTERNAL_URL to write
-	// the durable guardrail.block audit row. The delegate path (delegateEnv) injects it for supervisors,
-	// but a PLAIN guarded agent (guardrailPolicyRef set, not a delegate supervisor) never enters that
-	// branch — its block audit is span-only and the durable row is silently skipped. Fix: inject
-	// BFF_INTERNAL_URL whenever a guardrailPolicyRef is present, using envVarPresent() to dedup so a
-	// guarded supervisor (both paths active) gets it exactly once. Unguarded non-delegate agents are
-	// unchanged (no BFF_INTERNAL_URL injected).
 	guardrailVol, guardrailMount, guardrailEnv, err := r.reconcileGuardrailConfigMap(ctx, deploy, gr)
 	if err != nil {
 		return podTemplate{}, err
 	}
 	if gr.referenced {
 		env = append(env, guardrailEnv...)
-		if !envVarPresent(env, "BFF_INTERNAL_URL") && !envVarPresent(deploy.Spec.Env, "BFF_INTERNAL_URL") {
-			env = append(env, corev1.EnvVar{Name: "BFF_INTERNAL_URL", Value: bffInternalURL})
-		}
+		env = append(env, corev1.EnvVar{Name: envBFFPodTokenPath, Value: bffPodTokenMountPath + "/token"})
+	}
+	// BFF_INTERNAL_URL goes to EVERY agent: its launcher binds the run capability at the BFF before the
+	// agent's code sees it (ADR 0124), and guardrail audits and delegation call the BFF too. An agent
+	// without it would hand its code a bearer capability anyone could bind first.
+	if !envVarPresent(env, "BFF_INTERNAL_URL") && !envVarPresent(deploy.Spec.Env, "BFF_INTERNAL_URL") {
+		env = append(env, corev1.EnvVar{Name: "BFF_INTERNAL_URL", Value: bffInternalURL})
 	}
 
 	// Record mode (M78, ADR 0071 §1): a record-capable agent gets RECORD_CAPABLE=true, which flips
@@ -1083,29 +1074,6 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		if !envVarPresent(env, envObjectStoreAddr) && !envVarPresent(deploy.Spec.Env, envObjectStoreAddr) {
 			env = append(env, objectStoreEnv(r.DevDataPlane)...)
 		}
-	}
-
-	// Feedback ingest hook (M9, specs/eval-prompts-feedback.md §3): the launcher
-	// starts the :2995 endpoint when LANGFUSE_HOST is present. The host, dev
-	// credentials, and port are STATIC env (values known at reconcile time — NEVER
-	// valueFrom, the m5.7 Knative ksvc landmine; tier1 no-valueFrom guard asserts
-	// this). The dev creds match those seeded by `dev-up M=3` into the
-	// langfuse-otlp Secret and the Langfuse Helm chart.
-	//
-	// OPS-2: these are DEV-ONLY Langfuse creds, so they inject ONLY when the dev data plane is
-	// enabled (devDataPlane=false ⇒ skipped) — a `profile: production` render never ships the
-	// dev.local feedback creds; with LANGFUSE_HOST absent the launcher simply does not start the
-	// feedback relay (feature-off). Prod-functional feedback against an operator-provided Langfuse
-	// (resolved from the langfuse-otlp Secret, like the collector path) is a carded follow-up
-	// (m52.G1a) — beyond this gate, whose charter is only to keep the dev creds out of production.
-	if r.DevDataPlane {
-		env = append(
-			env,
-			corev1.EnvVar{Name: "LANGFUSE_HOST", Value: langfuseHost},
-			corev1.EnvVar{Name: "LANGFUSE_SCORES_PUBLIC_KEY", Value: langfuseDevPublicKey},
-			corev1.EnvVar{Name: "LANGFUSE_SCORES_SECRET_KEY", Value: langfuseDevSecretKey},
-			corev1.EnvVar{Name: "FEEDBACK_PORT", Value: feedbackPort},
-		)
 	}
 
 	// Runtime config (M65, ADR 0058): when spec.runtime is set, marshal the entire
@@ -1158,9 +1126,21 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 
 	// Observability (M3): ensure the collector-config ConfigMap and build the
 	// sidecar to inject alongside the user container.
-	collector, collectorVol, err := r.reconcileCollector(ctx, deploy)
+	collector, collectorVol, traceExporting, err := r.reconcileCollector(ctx, deploy)
 	if err != nil {
 		return podTemplate{}, err
+	}
+
+	// Feedback ingest hook (M9, specs/eval-prompts-feedback.md §3): the launcher starts the :2995
+	// endpoint when LANGFUSE_HOST is present. Dev data plane only (ADR 0083: LANGFUSE_HOST is the
+	// bundled Langfuse), and only where the namespace holds the langfuse-otlp Secret the keys
+	// reference — a secretKeyRef to a missing Secret would stop the pod from starting. Without
+	// LANGFUSE_HOST the launcher does not start the relay. Prod-functional feedback against an
+	// operator-provided Langfuse is m52.G1a.
+	if r.DevDataPlane && traceExporting {
+		env = append(env, corev1.EnvVar{Name: "LANGFUSE_HOST", Value: langfuseHost})
+		env = append(env, telemetry.LangfuseScoresEnv(telemetry.LangfuseSecretName)...)
+		env = append(env, corev1.EnvVar{Name: "FEEDBACK_PORT", Value: feedbackPort})
 	}
 
 	// Prompt-only deploy (M9): when spec.promptRef is set, resolve the referenced
@@ -1209,14 +1189,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// prompt-injected/custom loop just hits 127.0.0.1:<port> directly, around the sidecar). So a denied
 	// in-pod tool must simply NOT be deployed. resolveToolPolicy never fails on user input (the CRD
 	// enum bounds the shape); it only errors on a marshal bug.
-	// Declarative HITL (M139, ADR 0111): resolve spec.approvalPolicyRef and MERGE its require-approval
-	// requirements into the effective tool policy (max-strictness). A dangling ref fails closed
-	// (approvalPolicyResolveError → Reconcile sets Ready=False) — never served without the declared gate.
-	approvalPolicy, aerr := resolveApprovalPolicy(ctx, r.Client, deploy)
-	if aerr != nil {
-		return podTemplate{}, aerr
-	}
-	tp, terr := resolveToolPolicy(deploy, approvalPolicy)
+	tp, terr := resolveToolPolicy(deploy)
 	if terr != nil {
 		return podTemplate{}, terr
 	}
@@ -1447,6 +1420,10 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		}
 	}
 
+	if err := r.syncModelRouteCondition(ctx, deploy); err != nil {
+		return podTemplate{}, err
+	}
+
 	// Tenancy (M47, ADR 0046): when a Tenant owns this agent's namespace, inject the tenant id + its
 	// model caps as STATIC env (known at reconcile time — NEVER valueFrom, the m5.7 Knative landmine). The
 	// launcher reads TENANT_ID for the trace attribute (m47.3) and the caps + shared-Valkey address for the
@@ -1493,8 +1470,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// feed the L7 access-control checks; A2A_MAX_DEPTH / A2A_HOP_BUDGET seed the
 	// conversation guards) and stamp the membership pod label the generated
 	// NetworkPolicy selects on. All values are known at reconcile time → plain
-	// static env, NEVER valueFrom (the Knative webhook rejects valueFrom in a
-	// ksvc — the m5.7 landmine; a tier1 guard asserts no ksvc env uses it).
+	// static env. (The Knative webhook rejects a downward-API fieldRef in a ksvc — the m5.7
+	// landmine; it accepts secretKeyRef.)
 	membership, err := resolveAgentRegistry(ctx, r.Client, deploy)
 	if err != nil {
 		return podTemplate{}, fmt.Errorf("resolving registry membership: %w", err)
@@ -1524,8 +1501,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// POD_NAMESPACE: the namespace AMP targets resolve in — the launcher's
 		// clusterHost() builds http://{target}.{POD_NAMESPACE}.svc.cluster.local.
 		// STATIC (deploy.Namespace, known here), never a downward-API fieldRef:
-		// Knative's webhook rejects valueFrom in a ksvc pod template (the m5.7
-		// landmine; a tier1 guard asserts no ksvc env uses valueFrom). Now injected
+		// Knative's webhook rejects fieldRef in a ksvc pod template (the m5.7
+		// landmine). Now injected
 		// UNCONDITIONALLY in the base env for the trace identity, so guard against a
 		// duplicate here (a duplicate container env var name is invalid); the base
 		// injection already covers a registry member without session memory.
@@ -1614,8 +1591,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// same gate the async consumer/publisher use (registry membership /
 		// AMPEnabled), independent of its own workload KIND, so a producer that
 		// publishes and a Trigger-backed consumer both get it. All three are known
-		// constants → STATIC env, NEVER valueFrom (Knative ksvc webhook rejects it;
-		// the m5.7 landmine + tier1 no-valueFrom guard). The launcher gate is
+		// constants → STATIC env. The launcher gate is
 		// OBJECT_STORE_ADDR: with it absent (a non-member), offload is disabled and
 		// async payloads pass through capped. Guard against double-injection: a
 		// record-capable agent (M78) may have already been given the same env by the
@@ -1655,6 +1631,11 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// fsnotify-watch the policy file. A core ConfigMap volume (Knative Serving admits it, same as
 		// the prompt CM). No image change — a pod-VOLUME + config change only.
 		userMounts = append(userMounts, *guardrailMount)
+	}
+	if guardrailMount != nil {
+		userMounts = append(userMounts, corev1.VolumeMount{
+			Name: bffPodTokenVolume, MountPath: bffPodTokenMountPath, ReadOnly: true,
+		})
 	}
 	if injectPodToken {
 		// Mount the projected proxy token read-only (M53). The launcher runs in this
@@ -1734,6 +1715,9 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// are excluded from the egress digest, so a remote-URL edit updates this ConfigMap in place
 		// WITHOUT rolling the revision — the mount is structurally constant for any tool-having agent.
 		volumes = append(volumes, *routesVol)
+	}
+	if guardrailVol != nil {
+		volumes = append(volumes, bffPodTokenVolumeSpec())
 	}
 	if injectPodToken {
 		// Projected serviceAccountToken bound to the proxy audience (M53, ADR 0050 Amд 3).
@@ -1966,6 +1950,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// worth paying exactly once: the alternative is a security control that appears in the spec,
 	// reports success, and protects nothing — the failure mode this whole arc exists to kill.
 	combinedDigest = hardeningFold(combinedDigest, deploy.Spec.Unconfined)
+	combinedDigest = traceExportFold(combinedDigest, traceExporting)
 
 	// Attached skills fold in AFTER the combined digest rather than as an eleventh component, the
 	// same shape the launcher image uses below. An agent with NO skills is left byte-identical,
@@ -2019,6 +2004,24 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	}, nil
 }
 
+// bffPodTokenVolumeSpec is a guarded agent's projected token for the BFF audience: a short-lived token
+// the kubelet rotates in place, read by the launcher on each audit write.
+func bffPodTokenVolumeSpec() corev1.Volume {
+	expiry := statelayerTokenExpirySecs
+	return corev1.Volume{
+		Name: bffPodTokenVolume,
+		VolumeSource: corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{
+				Sources: []corev1.VolumeProjection{{
+					ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+						Path: "token", Audience: runcap.BFFPodAudience, ExpirationSeconds: &expiry,
+					},
+				}},
+			},
+		},
+	}
+}
+
 // hardeningFold folds the hardened-securityContext decision into the revision digest.
 //
 // It MUST move the revision name, or the securityContext never reaches a running pod. This is
@@ -2038,6 +2041,46 @@ func hardeningFold(digest string, unconfined bool) string {
 		return digest
 	}
 	sum := sha256.Sum256([]byte(digest + "|hardened:v1"))
+	return fmt.Sprintf("%x", sum[:])[:8]
+}
+
+// langfuseSecretRequests maps a Secret event to every AgentDeployment in its namespace when the
+// Secret is the langfuse-otlp Secret. Its presence and completeness decide whether the collector
+// exports, so a change must reach the namespace's agents at once rather than at the next resync.
+func langfuseSecretRequests(ctx context.Context, c client.Reader, obj client.Object) []reconcile.Request {
+	if obj.GetName() != telemetry.LangfuseSecretName {
+		return nil
+	}
+	var list agentsv1alpha1.AgentDeploymentList
+	if err := c.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+		logf.FromContext(ctx).Error(err, "listing agents for a langfuse-otlp Secret change; they re-render at the next resync",
+			"namespace", obj.GetNamespace())
+		return nil
+	}
+	reqs := make([]reconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+	}
+	return reqs
+}
+
+// podContractVersion names the shape of what the platform renders into every agent's revision that a
+// change must reach every running agent with: a pod-template change that keeps the revision name is
+// dropped by the controller, and the collector's ConfigMap is rewritten in place while its env is not.
+// Bump it when that shape changes.
+//   - v2: every Langfuse credential became an optional secretKeyRef (ADR 0148).
+//   - v3: every agent gets BFF_INTERNAL_URL, so its launcher can bind the run capability (ADR 0124).
+//   - v4: every revision carries a run timeout and a target-burst-capacity (ADR 0147).
+const podContractVersion = "v4"
+
+// traceExportFold folds the pod contract into the revision digest. Whether export is on
+// is part of it so that creating, completing or deleting a namespace's langfuse-otlp Secret reaches
+// running agents: their collectors loaded the old config at start, and the feedback hook's env
+// exists only while export is on.
+//
+// Shared with the tests, like hardeningFold.
+func traceExportFold(digest string, exporting bool) string {
+	sum := sha256.Sum256([]byte(digest + "|pod-contract:" + podContractVersion + ":" + strconv.FormatBool(exporting)))
 	return fmt.Sprintf("%x", sum[:])[:8]
 }
 
@@ -2418,6 +2461,12 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 						Containers:         pod.containers,
 						Volumes:            pod.volumes,
 					},
+					ContainerConcurrency: runConcurrency(deploy),
+					TimeoutSeconds:       runTimeoutSeconds(deploy),
+					// A run that answers only when it is done sends no byte until then, so the time to the
+					// first byte must allow the whole run; left unset it falls back to Knative's 300s and cuts
+					// off every run past five minutes regardless of timeoutSeconds (measured, ADR 0147).
+					ResponseStartTimeoutSeconds: runTimeoutSeconds(deploy),
 				},
 			},
 		},
@@ -2451,6 +2500,41 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	return ksvc, pod.resolvedSkills, nil
 }
 
+// An agent run is a session, not a request (ADR 0147): it can run for minutes, so the revision's request
+// timeout must cover the platform's run limit, and how many runs one pod holds must be something an
+// operator can bound. These read spec.scaling and apply the defaults when it is absent, since the CRD's
+// defaults reach only an object that has a scaling stanza.
+const defaultRunTimeoutSeconds = int64(600) // the BFF's default run limit (RUN_EXEC_TIMEOUT) and Knative's default maximum
+
+func runConcurrency(deploy *agentsv1alpha1.AgentDeployment) *int64 {
+	if deploy.Spec.Scaling == nil || deploy.Spec.Scaling.Concurrency == nil {
+		return nil
+	}
+	cc := int64(*deploy.Spec.Scaling.Concurrency)
+	return &cc
+}
+
+func runTimeoutSeconds(deploy *agentsv1alpha1.AgentDeployment) *int64 {
+	t := defaultRunTimeoutSeconds
+	if deploy.Spec.Scaling != nil && deploy.Spec.Scaling.TimeoutSeconds != nil {
+		t = *deploy.Spec.Scaling.TimeoutSeconds
+	}
+	return &t
+}
+
+// targetBurstCapacity defaults by concurrency (measured, ADR 0147): with concurrency unlimited the
+// activator can leave the path (0); with concurrency bounded it must stay (-1) and queue the runs that
+// find every slot taken — at concurrency 1 with 0, half of a 12-run burst against 4 pods was dropped.
+func targetBurstCapacity(deploy *agentsv1alpha1.AgentDeployment) int32 {
+	if deploy.Spec.Scaling != nil && deploy.Spec.Scaling.TargetBurstCapacity != nil {
+		return *deploy.Spec.Scaling.TargetBurstCapacity
+	}
+	if cc := runConcurrency(deploy); cc != nil && *cc > 0 {
+		return -1
+	}
+	return 0
+}
+
 // autoscalingAnnotations returns the Knative autoscaling annotations for the
 // ksvc revision template. The min/max scale defaults come from spec.scaling; a
 // request-rate / custom-metric AgentScalingPolicy that targets the agent
@@ -2469,8 +2553,9 @@ func (r *AgentDeploymentReconciler) autoscalingAnnotations(
 	}
 
 	annotations := map[string]string{
-		"autoscaling.knative.dev/min-scale": strconv.Itoa(int(minScale)),
-		"autoscaling.knative.dev/max-scale": strconv.Itoa(int(maxScale)),
+		"autoscaling.knative.dev/min-scale":             strconv.Itoa(int(minScale)),
+		"autoscaling.knative.dev/max-scale":             strconv.Itoa(int(maxScale)),
+		"autoscaling.knative.dev/target-burst-capacity": strconv.Itoa(int(targetBurstCapacity(deploy))),
 	}
 
 	policy, err := r.knativeScalingPolicy(ctx, deploy)
@@ -2525,49 +2610,63 @@ func (r *AgentDeploymentReconciler) discoveryImage() string {
 
 // reconcileCollector ensures the per-agent collector-config ConfigMap and
 // returns the collector sidecar container + its config volume. Langfuse export
-// is enabled only when a `langfuse-otlp` Secret exists in the agent's namespace
-// (seeded by `dev-up M=3`); otherwise the collector runs debug-only, which is
-// the automated-assertion sink the e2e slice reads via `kubectl logs`.
+// is on only when the AGENT'S OWN namespace holds a complete `langfuse-otlp` Secret;
+// otherwise the collector runs debug-only (the sink e2e slices read via `kubectl logs`)
+// and the TraceExport condition says why, so the absence is visible rather than silent. The bool
+// reports whether export is on, for the revision digest (traceExportFold).
 func (r *AgentDeploymentReconciler) reconcileCollector(
 	ctx context.Context,
 	deploy *agentsv1alpha1.AgentDeployment,
-) (corev1.Container, corev1.Volume, error) {
-	var langfuseEnv []corev1.EnvVar
+) (corev1.Container, corev1.Volume, bool, error) {
 	langfuse := false
 
-	// Secret lookup: the agent's own namespace acts as a per-namespace
-	// override; the platform namespace (where dev-up seeds the dev keys) is
-	// the fallback default. Without the fallback, agents outside
-	// ctxmesh silently ran debug-only and nothing ever reached
-	// Langfuse (caught 2026-07-08 by querying the Langfuse API at M3 close).
+	// Secret lookup: the agent's OWN namespace only. A pod can reference only Secrets in its
+	// own namespace, and the alternative -- reading the platform namespace's Secret and copying
+	// its value into this pod -- is what put the platform's Langfuse key, as a literal, into
+	// every tenant's pod spec (any tenant admin could then read every tenant's traces).
 	var sec corev1.Secret
-	// UNCACHED read (see APIReader): a cached read is racy around informer resync and can
-	// render a collector without the LANGFUSE_OTLP env while its ConfigMap references it —
-	// crash-looping the sidecar. Fall back to the cached client when no APIReader is wired.
+	// UNCACHED read (see APIReader): a stale read could render a config that exports while the
+	// Secret it needs is gone. Fall back to the cached client when no APIReader is wired.
 	secretReader := client.Reader(r.Client)
 	if r.APIReader != nil {
 		secretReader = r.APIReader
 	}
 	err := secretReader.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: telemetry.LangfuseSecretName}, &sec)
-	if apierrors.IsNotFound(err) && deploy.Namespace != gateway.GatewayNamespace {
-		err = secretReader.Get(ctx, client.ObjectKey{Namespace: gateway.GatewayNamespace, Name: telemetry.LangfuseSecretName}, &sec)
-	}
 	switch {
 	case err == nil:
-		langfuse = true
-		// Dev keys are deterministic and non-secret; wiring the endpoint + basic
-		// auth as literal env is acceptable for the M3 dev posture (production
-		// would use a mounted secret ref). See specs/observability.md.
-		langfuseEnv = []corev1.EnvVar{
-			{Name: "LANGFUSE_OTLP_ENDPOINT", Value: string(sec.Data["otlp-endpoint"])},
-			{Name: "LANGFUSE_OTLP_AUTH", Value: telemetry.BasicAuthHeader(
-				string(sec.Data["public-key"]), string(sec.Data["secret-key"]),
-			)},
+		// A Secret missing a key would render an exporter whose endpoint or credential expands to
+		// nothing: the collector fails to start, or every export is refused. Export stays off.
+		if missing := telemetry.MissingLangfuseKeys(sec.Data); len(missing) > 0 {
+			apimeta.SetStatusCondition(&deploy.Status.Conditions, metav1.Condition{
+				Type:   conditionTraceExport,
+				Status: metav1.ConditionFalse,
+				Reason: "LangfuseSecretIncomplete",
+				Message: "the " + telemetry.LangfuseSecretName + " Secret in namespace " + deploy.Namespace +
+					" has no value for " + strings.Join(missing, ", ") + "; spans reach only the collector's debug log",
+				ObservedGeneration: deploy.Generation,
+			})
+			break
 		}
+		langfuse = true
+		apimeta.SetStatusCondition(&deploy.Status.Conditions, metav1.Condition{
+			Type:               conditionTraceExport,
+			Status:             metav1.ConditionTrue,
+			Reason:             "LangfuseSecretPresent",
+			Message:            "spans export to Langfuse using the " + telemetry.LangfuseSecretName + " Secret in this namespace",
+			ObservedGeneration: deploy.Generation,
+		})
 	case apierrors.IsNotFound(err):
-		// debug-only; not an error.
+		apimeta.SetStatusCondition(&deploy.Status.Conditions, metav1.Condition{
+			Type:   conditionTraceExport,
+			Status: metav1.ConditionFalse,
+			Reason: "NoLangfuseSecret",
+			Message: "no " + telemetry.LangfuseSecretName + " Secret in namespace " + deploy.Namespace +
+				"; spans reach only the collector's debug log. To export to Langfuse, create it in this namespace with keys " +
+				strings.Join(telemetry.LangfuseSecretKeys, ", "),
+			ObservedGeneration: deploy.Generation,
+		})
 	default:
-		return corev1.Container{}, corev1.Volume{}, fmt.Errorf("checking langfuse secret: %w", err)
+		return corev1.Container{}, corev1.Volume{}, false, fmt.Errorf("checking langfuse secret: %w", err)
 	}
 
 	// Redaction policy (§13.3): the built-in email/SSN/key detectors are always
@@ -2578,7 +2677,7 @@ func (r *AgentDeploymentReconciler) reconcileCollector(
 	// the reconciler is the backstop that refuses an un-compilable policy.
 	detectors, err := telemetry.DetectorsWithCustom(customDetectors(deploy))
 	if err != nil {
-		return corev1.Container{}, corev1.Volume{}, fmt.Errorf("building trace-redaction policy: %w", err)
+		return corev1.Container{}, corev1.Volume{}, false, fmt.Errorf("building trace-redaction policy: %w", err)
 	}
 
 	cmName := telemetry.ConfigMapName(deploy.Name)
@@ -2592,10 +2691,10 @@ func (r *AgentDeploymentReconciler) reconcileCollector(
 		cm.Data["config.yaml"] = telemetry.RenderConfig(langfuse, detectors)
 		return ctrl.SetControllerReference(deploy, cm, r.Scheme)
 	}); err != nil {
-		return corev1.Container{}, corev1.Volume{}, fmt.Errorf("upserting collector ConfigMap: %w", err)
+		return corev1.Container{}, corev1.Volume{}, false, fmt.Errorf("upserting collector ConfigMap: %w", err)
 	}
 
-	return telemetry.Container(cmName, langfuseEnv, r.collectorImage()), telemetry.Volume(cmName), nil
+	return telemetry.Container(cmName, r.collectorImage()), telemetry.Volume(cmName), langfuse, nil
 }
 
 // customDetectors adapts the AgentDeployment's optional spec.tracePolicy into
@@ -3069,6 +3168,9 @@ func envVarPresent(env []corev1.EnvVar, name string) bool {
 	return false
 }
 
+// agentDeploymentWorkers is how many agents reconcile at once.
+const agentDeploymentWorkers = 4
+
 // SetupWithManager sets up the controller with the Manager.
 // The controller owns AgentVersion and Knative Service so that changes to either
 // (e.g. a Knative controller updating ksvc status) requeue the parent deployment.
@@ -3116,6 +3218,23 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				reqs = append(reqs, reconcile.Request{
 					NamespacedName: client.ObjectKeyFromObject(&list.Items[i]),
 				})
+			}
+			return reqs
+		},
+	)
+
+	// ModelRoute → requeue the agents in its namespace that name it (ModelRouteReady mirrors its Ready).
+	mapRouteToAgents := handler.EnqueueRequestsFromMapFunc(
+		func(ctx context.Context, obj client.Object) []reconcile.Request {
+			var list agentsv1alpha1.AgentDeploymentList
+			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+				return nil
+			}
+			var reqs []reconcile.Request
+			for i := range list.Items {
+				if modelRouteName(&list.Items[i]) == obj.GetName() {
+					reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+				}
 			}
 			return reqs
 		},
@@ -3211,10 +3330,22 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	)
 
+	// langfuse-otlp Secret → requeue every AgentDeployment in its namespace (langfuseSecretRequests).
+	// Metadata-only, like the ModelRoute watch: Secret payloads are never cached.
+	mapLangfuseSecretToAgents := handler.EnqueueRequestsFromMapFunc(
+		func(ctx context.Context, obj client.Object) []reconcile.Request {
+			return langfuseSecretRequests(ctx, mgr.GetClient(), obj)
+		},
+	)
+
 	// Knative Eventing is OPTIONAL (ADR 0141). Owning a kind the cluster does not serve stops the
 	// manager from starting at all, so a user running nothing but serving agents -- the default, and
 	// the whole quickstart -- had to install a second Knative component first.
 	b := ctrl.NewControllerManagedBy(mgr).
+		// More than one worker: with one, a single reconcile that blocks (an informer that cannot sync,
+		// a slow store) stops every agent from reconciling — the M181 wedge. Reconciles of different
+		// agents share no mutable state (the reconciler holds configuration and pool-backed stores).
+		WithOptions(controller.Options{MaxConcurrentReconciles: agentDeploymentWorkers}).
 		For(&agentsv1alpha1.AgentDeployment{}).
 		Owns(&agentsv1alpha1.AgentVersion{}).
 		Owns(&servingv1.Service{})
@@ -3228,10 +3359,12 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Watches(&agentsv1alpha1.MCPToolBinding{}, mapBindingToAgent).
 		Watches(&agentsv1alpha1.AgentRegistry{}, mapRegistryToAgents).
+		Watches(&agentsv1alpha1.ModelRoute{}, mapRouteToAgents).
 		Watches(&agentsv1alpha1.AgentScalingPolicy{}, mapScalingPolicyToAgent).
 		Watches(&agentsv1alpha1.Tenant{}, mapTenantToAgents).
 		Watches(&agentsv1beta1.AgentTeam{}, mapTeamToSupervisor).
 		Watches(&agentsv1beta1.GuardrailPolicy{}, mapGuardrailPolicyToAgents).
+		WatchesMetadata(&corev1.Secret{}, mapLangfuseSecretToAgents).
 		Named("agentdeployment").
 		Complete(r)
 }

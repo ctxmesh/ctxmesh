@@ -82,6 +82,9 @@ func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runt
 	// default connection, or a route predating named connections.
 	providerType := connection
 	bindingRef := providerRouteName(connection)
+	// A custom (OpenAI-compatible) connection's endpoint. Without it the route sent the request, and
+	// the connection's key, to the provider type's default host: api.openai.com for "openai".
+	apiBase := ""
 	var connRoute agentsv1alpha1.ModelRoute
 	switch gerr := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: providerRouteName(connection)}, &connRoute); {
 	case gerr == nil:
@@ -91,6 +94,7 @@ func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runt
 				if p.SecretBindingRef != "" {
 					bindingRef = p.SecretBindingRef
 				}
+				apiBase = p.APIBase
 			}
 		}
 	case apierrors.IsNotFound(gerr):
@@ -108,6 +112,15 @@ func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runt
 	err := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &existing)
 	switch {
 	case err == nil:
+		// A picker-managed route made before routes carried the connection's endpoint points at the
+		// provider type's default host. Repair it rather than reuse it.
+		if existing.Labels[labelManagedBy] == managedByModelPicker && len(existing.Spec.Providers) > 0 &&
+			existing.Spec.Providers[0].APIBase != apiBase {
+			existing.Spec.Providers[0].APIBase = apiBase
+			if uerr := caller.Update(ctx, &existing); uerr != nil {
+				return "", classifyCreateError(uerr, modelRouteKind, name)
+			}
+		}
 		return name, nil
 	case apierrors.IsNotFound(err):
 		// fall through to create
@@ -132,6 +145,7 @@ func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runt
 				Model:            model,
 				Priority:         1,
 				SecretBindingRef: bindingRef,
+				APIBase:          apiBase,
 			}},
 			RateLimit: &agentsv1alpha1.RateLimit{TenantRPM: defaultTenantRPM},
 		},

@@ -41,6 +41,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -102,6 +103,22 @@ func (gp *gatewayProxy) fireGuardrailBlockAudit(r *http.Request, dec guardrailDe
 	}
 	url := gp.bffInternalURL + guardrailAuditIngestPath
 
+	// A capability relayed to this agent over AMP is bound to the CALLER's key (ADR 0124), and this
+	// launcher cannot prove possession of it. The audit edge then authenticates THIS pod by its own
+	// projected token (BFF audience) and takes only the user from the capability. Without that token
+	// the BFF would refuse the POST, so say so here, at error level, with what the record would hold.
+	podToken := ""
+	if capabilityIsRelayed(capToken, processRuncapBinder()) {
+		podToken = readBFFPodToken()
+		if podToken == "" {
+			gp.logf("launcher: ERROR guardrail audit: the run capability is bound to another agent's key "+
+				"(relayed over AMP) and this pod has no BFF token, so no durable block record can be written "+
+				"(detector=%s scan_point=%s content_hash=%s agent=%s; the span event is the only record)",
+				evt.Detector, evt.ScanPoint, evt.ContentHash, evt.Agent)
+			return
+		}
+	}
+
 	// Fire-and-forget: launch the HTTP POST in a goroutine. The goroutine owns its context
 	// (independent of r.Context() which closes when the request is done). The block response
 	// has already been written above, so this goroutine's lifetime is decoupled from the caller.
@@ -121,9 +138,13 @@ func (gp *gatewayProxy) fireGuardrailBlockAudit(r *http.Request, dec guardrailDe
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set(runcap.HeaderName, capToken)
+		if podToken != "" {
+			req.Header.Set("Authorization", "Bearer "+podToken)
+		}
 
 		// Reuse the gateway's HTTP client (same timeout pool), but with the goroutine's ctx.
-		hc := &http.Client{Timeout: guardrailAuditTimeout, CheckRedirect: refuseRedirect}
+		hc := withRuncapProof(&http.Client{Timeout: guardrailAuditTimeout, CheckRedirect: refuseRedirect},
+			processRuncapBinder())
 		resp, err := hc.Do(req)
 		if err != nil {
 			gp.logf("launcher: guardrail audit: POST %s: %v (block already sent; durable record skipped)", url, err)
@@ -139,4 +160,28 @@ func (gp *gatewayProxy) fireGuardrailBlockAudit(r *http.Request, dec guardrailDe
 		gp.logf("launcher: guardrail audit: durable block record persisted (detector=%s scan_point=%s content_hash=%s)",
 			evt.Detector, evt.ScanPoint, evt.ContentHash)
 	}()
+}
+
+// readBFFPodToken reads this pod's projected token for the BFF audience, re-read on each use because
+// the kubelet rotates it in place. "" when the pod has none (an unguarded agent) or it cannot be read.
+func readBFFPodToken() string {
+	path := strings.TrimSpace(os.Getenv("BFF_POD_TOKEN_PATH"))
+	if path == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(path) //nolint:gosec // a path the controller sets, not user input
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+// capabilityIsRelayed reports whether tok is bound to a key this launcher does not hold — a capability
+// relayed to it over AMP. With no binder (no BFF configured) any bound capability is someone else's.
+func capabilityIsRelayed(tok string, b *runcapBinder) bool {
+	u, err := runcap.InspectUnverified(tok)
+	if err != nil || u.KeyThumbprint == "" {
+		return false
+	}
+	return b == nil || u.KeyThumbprint != b.signer.Thumbprint()
 }

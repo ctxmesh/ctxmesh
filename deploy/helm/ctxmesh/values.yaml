@@ -241,6 +241,41 @@ tokenService:
     # kustomize, no drift). true ⇒ the token-service (credential plane) REFUSES to start
     # without mTLS — no silent HTTP downgrade. profile=production requires this true.
     required: false
+  # Where per-user MCP grants (OAuth tokens) are stored (ADR 0152). One backend per install,
+  # built by the token-service at startup. The keys mirror the spec.provider.<type> block of
+  # the retired CredentialStore kind, so an existing store's YAML moves here unchanged.
+  # Every Secret named here is read from the credential namespace (bff.mcp.credentialNamespace,
+  # else the install namespace). A missing or malformed value makes the token-service refuse to
+  # start with an error naming the setting; it never falls back to kubernetes.
+  credentialBackend:
+    # kubernetes (default): grants are Secrets in the credential namespace. Renders nothing.
+    # postgres: envelope-encrypted rows in Postgres. Needs dsnSecretRef and exactly one
+    #           encryption custodian.
+    # remote:   an out-of-tree provider over mutual TLS. Needs endpoint (https) and mtls.
+    type: kubernetes
+    postgres:
+      # The Postgres connection string: {name: <secret>, key: <key>}.
+      dsnSecretRef: {}
+      # Exactly one custodian for the key that wraps each record's data key:
+      #   localKEKSecretRef: {name, key}   a 32-byte AES-256 key in a Secret
+      #   openBaoTransit:                  a per-tenant OpenBao/Vault transit key
+      #     address: https://openbao.example:8200
+      #     tokenSecretRef: {name, key}
+      #     mountPath: transit           # optional
+      #     keyPrefix: ""                # optional; key name is <keyPrefix><tenant>
+      #     caSecretRef: {name, key}     # optional; verifies the OpenBao server
+      #   kmsV2:                           a Kubernetes KMS v2 plugin
+      #     endpoint: unix:///var/run/kms/socket
+      #     keyIDPrefix: ""              # optional
+      encryption: {}
+    remote:
+      # The provider's https base URL.
+      endpoint: ""
+      mtls:
+        # The CA that verifies the provider: {name: <secret>, key: <key>}.
+        caSecretRef: {}
+        # A kubernetes.io/tls Secret holding the client certificate the token-service presents.
+        clientTLSSecretName: ""
 # The state-layer proxy (M51, ADR 0050) — stateless, so >1 is plain HA. As of M53
 # the phase-3 cutover is the DEFAULT (agents route memory/quota/dedup through the
 # proxy and hold no direct Valkey path), so a PRODUCTION install MUST set
@@ -454,6 +489,13 @@ ui:
 # `helm install --set bff.providerConnect.enabled=false` renders "false" to
 # disable it — the ADR 0015 hardened-install path.
 bff:
+  # Run capabilities are sender-constrained (ADR 0124): the launcher binds each one to a
+  # key only it holds, and the BFF refuses an unbound (bearer) capability at spawn, handoff, discover,
+  # async publish and guardrail events. Empty follows whether binding is possible (it needs the state
+  # layer). Set false only while agents built on an older base image, whose launcher cannot bind, are
+  # still running: false lets a copied capability be spent.
+  runCapabilities:
+    requireProofOfPossession: ""
   # Container resources. An operator cannot size the control plane for their
   # cluster if these are baked into the template, and until M178 every workload
   # in this chart had them hardcoded — 31 limits/requests blocks, none of them
@@ -512,7 +554,10 @@ bff:
     annotations: {}
     tls: []
 
-  managedAgentImage: ""
+  # The image every console-created (managed) agent runs. A repository without a tag gets the
+  # chart's appVersion, like the injected images; a full ref or digest is used as given. Empty falls
+  # back to a compiled-in tag that is never published, so leave it set.
+  managedAgentImage: ghcr.io/ctxmesh/managed-agent
   ingestOcrURL: ""
   knowledgeRerankURL: ""
   # Capability discovery (M141, ADR 0120) embeds through a ModelRoute the

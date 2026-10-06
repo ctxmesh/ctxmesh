@@ -206,11 +206,6 @@ DURABILITY_KNOB_ENV = [
 MCP_HMAC_ENV = [("MCP_GRANT_HMAC_KEY", "bff.mcp.grantHmacKey")]
 
 OPTIONAL_MODEL_ENV = [
-    # MANAGED_AGENT_IMAGE (M153): the runtime image a MANAGED agent runs. The expander's
-    # compiled-in default is a public GHCR tag — right for a stock install, wrong wherever
-    # a registry is mirrored or air-gapped, and until now changeable only by patching the
-    # Deployment. Empty keeps the compiled-in default, byte-identical to before.
-    ("MANAGED_AGENT_IMAGE", "bff.managedAgentImage"),
     ("INGEST_OCR_URL", "bff.ingestOcrURL"),
     ("KNOWLEDGE_RERANK_URL", "bff.knowledgeRerankURL"),
     ("DISCOVERY_EMBEDDING_ROUTE", "bff.discoveryEmbeddingRoute"),
@@ -231,6 +226,18 @@ COST_ROLLUP_ENABLED_ENV_KUSTOMIZE = (
 COST_ROLLUP_ENABLED_ENV_HELM = (
     "        - name: COST_ROLLUP_ENABLED\n"
     "          value: {{ .Values.bff.costRollupEnabled | quote }}"
+)
+
+# RUNCAP_REQUIRE_POP (ADR 0124): config/bff leaves it unset, so the BFF requires proof-of-possession
+# whenever it can bind (it has the state layer). bff.runCapabilities.requireProofOfPossession sets it
+# explicitly, true or false, and an empty value renders nothing (== kustomize, no drift). It has no
+# kustomize literal to replace, so it is appended after COST_ROLLUP_ENABLED, which only the BFF has.
+RUNCAP_REQUIRE_POP_ENV_HELM = (
+    "\n        {{- $pop := (.Values.bff.runCapabilities | default dict).requireProofOfPossession }}"
+    '\n        {{- if or (kindIs "bool" $pop) (and (kindIs "string" $pop) (ne $pop "")) }}'
+    "\n        - name: RUNCAP_REQUIRE_POP"
+    "\n          value: {{ $pop | toString | quote }}"
+    "\n        {{- end }}"
 )
 
 # MCP_OBO_REQUIRED (M124/Gate A, ADR 0095 §2): config/bff hardcodes "false" (no-OBO install
@@ -255,6 +262,85 @@ TOKEN_SERVICE_TLS_REQUIRED_ENV_KUSTOMIZE = (
 TOKEN_SERVICE_TLS_REQUIRED_ENV_HELM = (
     "        - name: TOKEN_SERVICE_TLS_REQUIRED\n"
     "          value: {{ .Values.tokenService.tls.required | quote }}"
+)
+
+# The token-service's credential backend (ADR 0152 §1). config/token-service carries no
+# CREDENTIAL_BACKEND* env (unset = the kubernetes backend), so there is no kustomize literal to
+# replace: the block is appended after TOKEN_SERVICE_TLS_REQUIRED, which only the token-service has.
+# type kubernetes (the default) renders NOTHING, so the default render == kustomize (no drift).
+# Otherwise each set value renders as one env var named after its values path; the token-service
+# validates them and refuses to start on a bad one, naming the variable, so the chart only renders.
+CREDENTIAL_BACKEND_ENV_HELM = (
+    "\n        {{- $cb := .Values.tokenService.credentialBackend | default dict }}"
+    '\n        {{- $cbType := $cb.type | default "kubernetes" | toString }}'
+    '\n        {{- if ne $cbType "kubernetes" }}'
+    "\n        - name: CREDENTIAL_BACKEND"
+    "\n          value: {{ $cbType | quote }}"
+    "\n        {{- end }}"
+    '\n        {{- if eq $cbType "postgres" }}'
+    "\n        {{- $pg := $cb.postgres | default dict }}"
+    "\n        {{- with $pg.dsnSecretRef }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_DSN_SECRET_NAME"
+    "\n          value: {{ .name | quote }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_DSN_SECRET_KEY"
+    "\n          value: {{ .key | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- $enc := $pg.encryption | default dict }}"
+    "\n        {{- with $enc.localKEKSecretRef }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_LOCAL_KEK_SECRET_NAME"
+    "\n          value: {{ .name | quote }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_LOCAL_KEK_SECRET_KEY"
+    "\n          value: {{ .key | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- with $enc.openBaoTransit }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_ADDRESS"
+    "\n          value: {{ .address | quote }}"
+    "\n        {{- with .tokenSecretRef }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_TOKEN_SECRET_NAME"
+    "\n          value: {{ .name | quote }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_TOKEN_SECRET_KEY"
+    "\n          value: {{ .key | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- with .mountPath }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_MOUNT_PATH"
+    "\n          value: {{ . | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- with .keyPrefix }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_KEY_PREFIX"
+    "\n          value: {{ . | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- with .caSecretRef }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_CA_SECRET_NAME"
+    "\n          value: {{ .name | quote }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_CA_SECRET_KEY"
+    "\n          value: {{ .key | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- end }}"
+    "\n        {{- with $enc.kmsV2 }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_KMSV2_ENDPOINT"
+    "\n          value: {{ .endpoint | quote }}"
+    "\n        {{- with .keyIDPrefix }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_KMSV2_KEY_ID_PREFIX"
+    "\n          value: {{ . | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- end }}"
+    "\n        {{- end }}"
+    '\n        {{- if eq $cbType "remote" }}'
+    "\n        {{- $rm := $cb.remote | default dict }}"
+    "\n        - name: CREDENTIAL_BACKEND_REMOTE_ENDPOINT"
+    "\n          value: {{ $rm.endpoint | quote }}"
+    "\n        {{- $mtls := $rm.mtls | default dict }}"
+    "\n        {{- with $mtls.caSecretRef }}"
+    "\n        - name: CREDENTIAL_BACKEND_REMOTE_MTLS_CA_SECRET_NAME"
+    "\n          value: {{ .name | quote }}"
+    "\n        - name: CREDENTIAL_BACKEND_REMOTE_MTLS_CA_SECRET_KEY"
+    "\n          value: {{ .key | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- with $mtls.clientTLSSecretName }}"
+    "\n        - name: CREDENTIAL_BACKEND_REMOTE_MTLS_CLIENT_TLS_SECRET_NAME"
+    "\n          value: {{ . | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- end }}"
 )
 
 # The console OIDC/SSO seam (m19.6, ADR 0020). config/bff hardcodes the OFF defaults
@@ -326,6 +412,17 @@ EGRESS_SIDECAR_IMAGE_ENV_KUSTOMIZE = (
 EGRESS_SIDECAR_IMAGE_ENV_HELM = (
     "        - name: EGRESS_SIDECAR_IMAGE\n"
     '          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.oboEgress.sidecarImage "ctx" $) | quote }}'
+)
+# MANAGED_AGENT_IMAGE: the image every console-created (managed) agent runs. It was an optional
+# empty value, and empty meant the BFF's compiled-in ghcr.io/ctxmesh/managed-agent:latest, a tag the
+# release never publishes: every agent a stock install's console created waited on a missing image.
+# It is versioned like the injected images now.
+MANAGED_AGENT_IMAGE_ENV_KUSTOMIZE = (
+    '        - name: MANAGED_AGENT_IMAGE\n' '          value: ""'
+)
+MANAGED_AGENT_IMAGE_ENV_HELM = (
+    "        - name: MANAGED_AGENT_IMAGE\n"
+    '          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.bff.managedAgentImage "ctx" $) | quote }}'
 )
 # MCP_CAPABILITY_PUBLIC_KEY is NO LONGER templated (M124/Gate A): config/manager now reads it from the
 # bff-capability Secret via valueFrom.secretKeyRef (the keygen hook provisions it). The chart copies that
@@ -526,6 +623,7 @@ def substitute(doc: str) -> str:
             "        - name: %s\n          value: {{ .Values.%s | default \"\" | quote }}"
             % (env_name, val_path),
         )
+    doc = doc.replace(MANAGED_AGENT_IMAGE_ENV_KUSTOMIZE, MANAGED_AGENT_IMAGE_ENV_HELM)
     for env_name, val_path in OPTIONAL_MODEL_ENV + MCP_HMAC_ENV:
         doc = doc.replace(
             f'        - name: {env_name}\n          value: ""',
@@ -575,7 +673,7 @@ def substitute(doc: str) -> str:
     # plain HTTP, enforced under profile=production by ha-profile-guards.yaml.
     doc = doc.replace(
         TOKEN_SERVICE_TLS_REQUIRED_ENV_KUSTOMIZE,
-        TOKEN_SERVICE_TLS_REQUIRED_ENV_HELM,
+        TOKEN_SERVICE_TLS_REQUIRED_ENV_HELM + CREDENTIAL_BACKEND_ENV_HELM,
     )
     # BFF console OIDC/SSO seam -> Helm values (m19.6, ADR 0020). With auth.oidc
     # disabled (the default) all three render == the kustomize OFF literals (no drift);
@@ -594,7 +692,7 @@ def substitute(doc: str) -> str:
     # MCP_CAPABILITY_PUBLIC_KEY is now a secretKeyRef in config/manager, copied verbatim (no replace).
     doc = doc.replace(MCP_CAPABILITY_AUDIENCE_ENV_KUSTOMIZE, MCP_CAPABILITY_AUDIENCE_ENV_HELM)
     doc = doc.replace(TOKEN_SERVICE_URL_ENV_KUSTOMIZE, TOKEN_SERVICE_URL_ENV_HELM)
-    doc = doc.replace(COST_ROLLUP_ENABLED_ENV_KUSTOMIZE, COST_ROLLUP_ENABLED_ENV_HELM)
+    doc = doc.replace(COST_ROLLUP_ENABLED_ENV_KUSTOMIZE, COST_ROLLUP_ENABLED_ENV_HELM + RUNCAP_REQUIRE_POP_ENV_HELM)
     doc = doc.replace(MCP_OBO_REQUIRED_ENV_KUSTOMIZE, MCP_OBO_REQUIRED_ENV_HELM)
     # OPS-2 — the dev-data-plane gate -> Helm value. Default "true" renders == kustomize (no drift);
     # profile=production sets devDataPlane.enabled=false so the controller injects no dev creds.

@@ -55,10 +55,11 @@ func main() {
 	mux.HandleFunc("/readyz", handleHealth)
 
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		Addr:        addr,
+		Handler:     mux,
+		ReadTimeout: 30 * time.Second,
+		// Longer than the longest holdSeconds, or a held run is cut off by this server, not the platform.
+		WriteTimeout: (maxHoldSeconds + 30) * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
 
@@ -118,6 +119,9 @@ type chatResponse struct {
 	} `json:"choices"`
 }
 
+// maxHoldSeconds caps holdSeconds: long enough to outlast any revision timeout under test.
+const maxHoldSeconds = 900
+
 // gatewayClient is a package-level HTTP client for gateway calls. It is a
 // variable so tests can substitute a custom transport backed by httptest.Server.
 var gatewayClient = &http.Client{Timeout: 30 * time.Second}
@@ -140,6 +144,21 @@ func handleInvoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = r.Body.Close() }()
+
+	// holdSeconds keeps the run open before answering, so a harness can measure how runs that last
+	// minutes behave — the revision timeout, and how many share a pod. Capped, and ends early if the
+	// caller goes away.
+	var hold struct {
+		HoldSeconds int `json:"holdSeconds"`
+	}
+	if json.Unmarshal(body, &hold) == nil && hold.HoldSeconds > 0 {
+		d := time.Duration(min(hold.HoldSeconds, maxHoldSeconds)) * time.Second
+		select {
+		case <-time.After(d):
+		case <-r.Context().Done():
+			return
+		}
+	}
 
 	route := os.Getenv("MODEL_ROUTE")
 	if route == "" {

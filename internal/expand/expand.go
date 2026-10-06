@@ -65,15 +65,9 @@ const AnnotationSourceSpec = "agents.ctxmesh.ai/source-spec"
 // retargeted — without changing code. Defaults keep the CLI usable offline.
 
 const (
-	// DefaultManagedImage is the pinned managed-agent image ref used when an
-	// agent sets `runtime: managed` and omits `image`. Override at deploy time by
-	// setting the MANAGED_AGENT_IMAGE env on the BFF — currently via the optional
-	// `bff-adapters` Secret (envFrom, config/bff/deployment.yaml); the dev
-	// bring-up wires it to the loaded dev.local/managed-agent:e2e ref (note: the
-	// ghcr default is NOT resolvable in a local kind cluster — Knative resolves
-	// the tag→digest against ghcr.io before pulling — so dev MUST override it).
-	// This is the image built by `make docker-build-managed`.
-	DefaultManagedImage = "ghcr.io/ctxmesh/managed-agent:latest"
+	// ManagedImageRepository is the published managed-agent image. A managed agent with no image of
+	// its own runs it at a release tag; the release never publishes :latest, so no tag is assumed.
+	ManagedImageRepository = "ghcr.io/ctxmesh/managed-agent"
 
 	// DefaultManagedToolRegistry is the ToolRegistry the generated MCPToolBindings
 	// reference (registryRef). The BYO-MCP flow (ADR 0016) feeds this catalog;
@@ -95,13 +89,20 @@ const (
 	envManagedToolServer   = "MANAGED_TOOL_SERVER_URL"
 )
 
-// managedImageRef returns the resolved managed-agent image ref (env override →
-// default).
+// ManagedImageVersion is the release a managed agent's image defaults to. `make build-cli` stamps the
+// newest release tag here (-ldflags -X); a binary built without it has none.
+var ManagedImageVersion = ""
+
+// managedImageRef returns the managed-agent image: MANAGED_AGENT_IMAGE (the BFF's, set by the chart),
+// else the published image at the stamped release, else "" (no image anyone could pull).
 func managedImageRef() string {
 	if v := os.Getenv(envManagedImage); v != "" {
 		return v
 	}
-	return DefaultManagedImage
+	if ManagedImageVersion != "" {
+		return ManagedImageRepository + ":" + ManagedImageVersion
+	}
+	return ""
 }
 
 // managedToolRegistry returns the ToolRegistry name generated bindings reference.
@@ -513,6 +514,10 @@ func ExpandBytes(rawYAML []byte, w io.Writer) error {
 	}
 	if err := validateRuntime(&ay); err != nil {
 		return err
+	}
+	if ay.Runtime == managedRuntimeValue && ay.Image == "" && managedImageRef() == "" {
+		return validationErr("a managed agent needs a runtime image: set MANAGED_AGENT_IMAGE, set image in agent.yaml, " +
+			"or build the CLI with `make build-cli`, which pins the newest release")
 	}
 
 	// Phase 4: validate eval/prompt sub-fields when present.

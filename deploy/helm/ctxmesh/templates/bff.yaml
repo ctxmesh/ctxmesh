@@ -29,6 +29,22 @@ metadata:
 rules: []
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: bff
+  name: ctxmesh-bff-tokenreviewer
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   labels:
@@ -41,6 +57,23 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: ctxmesh-bff-role
+subjects:
+- kind: ServiceAccount
+  name: ctxmesh-bff
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: bff
+  name: ctxmesh-bff-tokenreviewer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ctxmesh-bff-tokenreviewer
 subjects:
 - kind: ServiceAccount
   name: ctxmesh-bff
@@ -114,6 +147,11 @@ spec:
           value: {{ .Values.statelayer.externalAddr | default (printf "ctxmesh-statelayer.%s.svc:6379" .Values.namespace) }}
         - name: COST_ROLLUP_ENABLED
           value: {{ .Values.bff.costRollupEnabled | quote }}
+        {{- $pop := (.Values.bff.runCapabilities | default dict).requireProofOfPossession }}
+        {{- if or (kindIs "bool" $pop) (and (kindIs "string" $pop) (ne $pop "")) }}
+        - name: RUNCAP_REQUIRE_POP
+          value: {{ $pop | toString | quote }}
+        {{- end }}
         - name: PLATFORM_GENERATION_MODELS
           value: {{ .Values.bff.generation.platformModels | quote }}
         - name: MCP_ENABLED
@@ -129,7 +167,7 @@ spec:
         - name: MODEL_GATEWAY_URL
           value: {{ .Values.bff.modelGatewayURL | default (printf "http://ctxmesh-gateway.%s.svc:4000" .Values.namespace) }}
         - name: MANAGED_AGENT_IMAGE
-          value: {{ .Values.bff.managedAgentImage | default "" | quote }}
+          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.bff.managedAgentImage "ctx" $) | quote }}
         - name: INGEST_OCR_URL
           value: {{ .Values.bff.ingestOcrURL | default "" | quote }}
         - name: KNOWLEDGE_RERANK_URL

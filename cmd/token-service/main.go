@@ -163,6 +163,12 @@ func wireMemoryAndKnowledge(tsServer *credplane.Server, cpDB *sql.DB, log logr.L
 
 func run(log logr.Logger) error {
 	credentialNS := strings.TrimSpace(os.Getenv("MCP_CREDENTIAL_NAMESPACE"))
+	// Parsed before anything waits on the network, so a bad CREDENTIAL_BACKEND* value refuses to
+	// start at once, naming the variable (ADR 0152 §1).
+	backendCfg, err := credstore.ConfigFromEnv(os.Environ())
+	if err != nil {
+		return fmt.Errorf("credential backend configuration: %w", err)
+	}
 
 	// In-cluster client: reads grant Secrets (credresolve) + ToolRegistry auth-type.
 	k8sClient, err := newInClusterClient()
@@ -213,14 +219,10 @@ func run(log logr.Logger) error {
 		return orgScopedFromLabels(tr.Labels), nil
 	}
 
-	// The credential backend is CONFIG-SELECTED per the CredentialStore / ClusterCredentialStore
-	// CRDs (ADR 0032); with no CRD present it is the built-in kubernetes backend, so existing
-	// installs are unchanged. Backends are shared per resolved config, so the cache + singleflight
-	// + optimistic writeback stay global across every delegating sidecar (ADR 0030 §1).
 	auditFn := func(e credresolve.AuditEvent) {
 		log.Info("grant use", "action", string(e.Action), "server", e.Server, "user", e.UserHash, "class", string(e.Class))
 	}
-	router := credstore.NewRouter(k8sClient, credstore.Deps{
+	resolver, migrated, err := credentialResolver(logr.NewContext(context.Background(), log), backendCfg, credstore.Deps{
 		Client:                     k8sClient,
 		DefaultCredentialNamespace: credentialNS,
 		Exchanger:                  &credresolve.HTTPTokenExchanger{},
@@ -228,35 +230,8 @@ func run(log logr.Logger) error {
 		IsOrgScoped:                isOrgScoped,
 		Audit:                      auditFn,
 	})
-
-	// A legacy k8s backend — the source for a one-time migration and the fallback for the
-	// dual-read cutover window (m28.2, ADR 0032).
-	k8sBackend := credresolve.NewK8sBackend(credresolve.K8sBackendConfig{
-		Client:              k8sClient,
-		CredentialNamespace: credentialNS,
-		Exchanger:           &credresolve.HTTPTokenExchanger{},
-		AuthTypeIsOAuth:     authTypeIsOAuth,
-		OrgCredential:       credresolve.NewOrgCredentialFunc(k8sClient, credentialNS, isOrgScoped),
-		Audit:               auditFn,
-	})
-
-	// One-time backfill: TOKEN_SERVICE_MIGRATE_GRANTS=true lifts every legacy k8s grant into
-	// the config-selected backend (per namespace via the Router), logs the count, and exits.
-	if envTrue("TOKEN_SERVICE_MIGRATE_GRANTS") {
-		n, mErr := credstore.Migrate(context.Background(), k8sBackend, router)
-		if mErr != nil {
-			return fmt.Errorf("migrate grants: %w", mErr)
-		}
-		log.Info("grant migration complete", "migrated", n)
-		return nil
-	}
-
-	// Dual-read cutover window: TOKEN_SERVICE_DUAL_READ=true resolves fall back to the legacy
-	// k8s backend on a miss, so a cutover to a non-kubernetes backend loses no connected account.
-	var resolver credresolve.CredentialResolver = router
-	if envTrue("TOKEN_SERVICE_DUAL_READ") {
-		resolver = credstore.NewDualRead(router, k8sBackend)
-		log.Info("dual-read enabled: legacy k8s grants still resolve during the migration window")
+	if err != nil || migrated {
+		return err
 	}
 
 	tsServer := credplane.NewServer(resolver, log)
@@ -409,6 +384,55 @@ func serverTLS(certFile, keyFile, caFile string, requireClient bool) (*tls.Confi
 	cfg.Certificates = nil
 	cfg.GetCertificate = watcher.GetCertificate
 	return cfg, watcher, nil
+}
+
+// credentialResolver builds the configured credential backend (ADR 0152 §1): one backend, shared by
+// every delegating sidecar, so the cache + singleflight + optimistic writeback stay global (ADR 0030
+// §1). migrated is true when TOKEN_SERVICE_MIGRATE_GRANTS ran the one-time backfill; the process then
+// exits without serving.
+func credentialResolver(
+	ctx context.Context, cfg credstore.Config, deps credstore.Deps,
+) (resolver credresolve.CredentialResolver, migrated bool, err error) {
+	log := logr.FromContextOrDiscard(ctx)
+	backend, err := credstore.BackendFor(ctx, cfg, deps)
+	if err != nil {
+		return nil, false, fmt.Errorf("build the %s credential backend: %w", cfg.Backend(), err)
+	}
+	log.Info("credential backend ready", "backend", cfg.Backend())
+
+	// A legacy k8s backend — the source for a one-time migration and the fallback for the
+	// dual-read cutover window (m28.2, ADR 0032).
+	k8sBackend := credresolve.NewK8sBackend(credresolve.K8sBackendConfig{
+		Client:              deps.Client,
+		CredentialNamespace: deps.DefaultCredentialNamespace,
+		Exchanger:           deps.Exchanger,
+		AuthTypeIsOAuth:     deps.AuthTypeIsOAuth,
+		OrgCredential:       credresolve.NewOrgCredentialFunc(deps.Client, deps.DefaultCredentialNamespace, deps.IsOrgScoped),
+		Audit:               deps.Audit,
+	})
+
+	// One-time backfill: TOKEN_SERVICE_MIGRATE_GRANTS=true lifts every legacy k8s grant into
+	// the configured backend, logs the count, and exits.
+	if envTrue("TOKEN_SERVICE_MIGRATE_GRANTS") {
+		writer, ok := backend.(credresolve.GrantWriter)
+		if !ok {
+			return nil, false, fmt.Errorf("migrate grants: the %s credential backend does not support writes", cfg.Backend())
+		}
+		n, mErr := credstore.Migrate(ctx, k8sBackend, writer)
+		if mErr != nil {
+			return nil, false, fmt.Errorf("migrate grants: %w", mErr)
+		}
+		log.Info("grant migration complete", "migrated", n)
+		return nil, true, nil
+	}
+
+	// Dual-read cutover window: TOKEN_SERVICE_DUAL_READ=true resolves fall back to the legacy
+	// k8s backend on a miss, so a cutover to a non-kubernetes backend loses no connected account.
+	if envTrue("TOKEN_SERVICE_DUAL_READ") {
+		log.Info("dual-read enabled: legacy k8s grants still resolve during the migration window")
+		return credstore.NewDualRead(backend, k8sBackend), false, nil
+	}
+	return backend, false, nil
 }
 
 func envOr(key, fallback string) string {

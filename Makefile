@@ -272,8 +272,12 @@ build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
 .PHONY: build-cli
-build-cli: fmt vet ## Build ctxmesh CLI binary (bin/ctxmesh).
-	go build -o bin/ctxmesh ./cmd/ctxmesh
+# CLI_RELEASE is the release a managed agent's image defaults to in `ctxmesh expand`: the newest
+# release tag, which is published. Unstamped, expand refuses a managed agent with no image rather than
+# name an image nobody can pull.
+CLI_RELEASE ?= $(shell git describe --tags --abbrev=0 --match 'v*' 2>/dev/null)
+build-cli: fmt vet ## Build ctxmesh CLI binary (bin/ctxmesh), its managed-agent default pinned to CLI_RELEASE.
+	go build -ldflags "-X github.com/ctxmesh/ctxmesh/internal/expand.ManagedImageVersion=$(CLI_RELEASE)" -o bin/ctxmesh ./cmd/ctxmesh
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
@@ -442,6 +446,10 @@ helm-generate: manifests kustomize ## Regenerate the Helm chart templates from c
 .PHONY: crd-version-parity
 crd-version-parity: manifests ## Guard: multi-version CRDs keep matching top-level CEL validations (conversion is None; audit FUNC-8).
 	./hack/check-crd-version-parity.sh config/crd/bases
+
+.PHONY: crd-frozen
+crd-frozen: manifests ## Guard: the frozen CRDs (AgentTeam, Workflow) match hack/crd-freeze.sum (ADR 0152).
+	./hack/check-crd-frozen.sh config/crd/bases
 
 .PHONY: rbac-least-privilege
 rbac-least-privilege: manifests ## Assert the SHIPPED roles grant no verb wildcards and no cluster-scoped Secret writes (M149).

@@ -50,12 +50,22 @@ import (
 // runcapBindTTL outlives runCapabilityTTL by a margin for clock skew, then lets the record vanish.
 const runcapBindTTL = runCapabilityTTL + time.Minute
 
-// RuncapBindStore records which key a run's capability was bound to. Set is atomic and single-use:
-// it returns ok=false when the run is already bound, which is what makes the first bind authoritative.
+// RuncapBindStore records which key a capability was bound to. Bind is atomic and single-use: it returns
+// ok=false when the capability is already bound, which is what makes the first bind authoritative.
 type RuncapBindStore interface {
-	// Bind records jkt for runID iff no binding exists. ok=false ⇒ already bound (by whom is returned,
+	// Bind records jkt for bindID iff no binding exists. ok=false ⇒ already bound (by whom is returned,
 	// so a legitimate re-bind of the SAME key is idempotent rather than an error).
-	Bind(ctx context.Context, runID, jkt string) (existing string, ok bool, err error)
+	Bind(ctx context.Context, bindID, jkt string) (existing string, ok bool, err error)
+}
+
+// runcapBindID is what a bind is single-use on: the token's own id. A run is re-minted on every claim and
+// resume, and a resumed run can land on another pod with another key, so keying on the run id refused
+// the run's own launcher. A token minted before ids existed falls back to its run id.
+func runcapBindID(c runcap.Capability) string {
+	if c.ID != "" {
+		return "jti:" + c.ID
+	}
+	return c.RunID
 }
 
 // redisRuncapBindStore is the production store over the shared state-layer Valkey.
@@ -70,18 +80,18 @@ func NewRedisRuncapBindStore(addr, username, password string) RuncapBindStore {
 	})}
 }
 
-func runcapBindKey(runID string) string { return "runcap:bind:" + runID }
+func runcapBindKey(bindID string) string { return "runcap:bind:" + bindID }
 
-func (s *redisRuncapBindStore) Bind(ctx context.Context, runID, jkt string) (string, bool, error) {
+func (s *redisRuncapBindStore) Bind(ctx context.Context, bindID, jkt string) (string, bool, error) {
 	// SETNX is the single-use primitive: exactly one caller wins, whichever replica it reached.
-	ok, err := s.rdb.SetNX(ctx, runcapBindKey(runID), jkt, runcapBindTTL).Result()
+	ok, err := s.rdb.SetNX(ctx, runcapBindKey(bindID), jkt, runcapBindTTL).Result()
 	if err != nil {
 		return "", false, err
 	}
 	if ok {
 		return jkt, true, nil
 	}
-	existing, err := s.rdb.Get(ctx, runcapBindKey(runID)).Result()
+	existing, err := s.rdb.Get(ctx, runcapBindKey(bindID)).Result()
 	if err != nil {
 		return "", false, err
 	}
@@ -140,7 +150,7 @@ func (s *Server) handleBindRuncap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	existing, ok, err := s.runcapBind.Bind(r.Context(), capab.RunID, jkt)
+	existing, ok, err := s.runcapBind.Bind(r.Context(), runcapBindID(capab), jkt)
 	if err != nil {
 		s.log.Error(err, "runcap bind: the bind store is unavailable", "run", capab.RunID)
 		writeError(w, http.StatusBadGateway, "the capability bind store is unavailable")

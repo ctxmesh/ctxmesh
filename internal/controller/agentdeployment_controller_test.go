@@ -43,10 +43,11 @@ import (
 // after C7b (ADR 0090): even a "bare" agent (no bindings/overrides) runs its own per-agent identity SA
 // (agent-<name>), a structural pod-spec element folded into the digest. Appended to the spec-hash base
 // (`{name}-{specHash}` → `{name}-{specHash}-h<digest>`).
-// Uses the production hardeningFold rather than repeating it, so the expected revision name
-// cannot drift from the one the controller produces.
-var bareIdentitySuffix = "-h" + hardeningFold(combinedBindingDigest("", "", "", "", "", "",
-	universalIdentitySADigest(false), "", "", ""), false)
+// Uses the production folds rather than repeating them, so the expected revision name
+// cannot drift from the one the controller produces. These test namespaces hold no
+// langfuse-otlp Secret, so trace export is off.
+var bareIdentitySuffix = "-h" + traceExportFold(hardeningFold(combinedBindingDigest("", "", "", "", "", "",
+	universalIdentitySADigest(false), "", "", ""), false), false)
 
 // newReconciler constructs an AgentDeploymentReconciler backed by the envtest
 // API server.
@@ -748,7 +749,7 @@ func TestSidecarImageOverride(t *testing.T) {
 	assert.Equal(t, "reg.example.com/collector:1.2", ov.collectorImage())
 	assert.Equal(t, "reg.example.com/discovery:3.4", ov.discoveryImage())
 	assert.Equal(t, "reg.example.com/collector:1.2",
-		telemetry.Container("cm", nil, ov.collectorImage()).Image, "override flows to the collector sidecar")
+		telemetry.Container("cm", ov.collectorImage()).Image, "override flows to the collector sidecar")
 	assert.Equal(t, "reg.example.com/discovery:3.4",
 		discoverySidecarContainer(ov.discoveryImage()).Image, "override flows to the discovery sidecar")
 }

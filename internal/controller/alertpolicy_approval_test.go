@@ -157,8 +157,8 @@ func approvalTestScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-// mkApprovalPolicy builds an AlertPolicy with a single approvalWaiting condition selecting agents by name.
-func mkApprovalPolicy(name, namespace string, agentNames []string, channels []agentsv1beta1.AlertChannel) *agentsv1beta1.AlertPolicy {
+// mkApprovalAlertPolicy builds an AlertPolicy with a single approvalWaiting condition selecting agents by name.
+func mkApprovalAlertPolicy(name, namespace string, agentNames []string, channels []agentsv1beta1.AlertChannel) *agentsv1beta1.AlertPolicy {
 	return &agentsv1beta1.AlertPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: agentsv1beta1.AlertPolicySpec{
@@ -188,7 +188,7 @@ func TestApprovalWaiting_PerRunDedup_SecondRunAlsoFires(t *testing.T) {
 	lister := &fakeApprovalRunLister{}
 	r := &AlertPolicyReconciler{Client: c, Alerts: alerts, Runs: lister}
 
-	ap := mkApprovalPolicy("hitl", ns, []string{"agent-a"}, []agentsv1beta1.AlertChannel{{Type: "console"}})
+	ap := mkApprovalAlertPolicy("hitl", ns, []string{"agent-a"}, []agentsv1beta1.AlertChannel{{Type: "console"}})
 	cond := ap.Spec.Conditions[0]
 	agents := []agentsv1alpha1.AgentDeployment{*mkApprovalAgent("agent-a", ns)}
 
@@ -252,7 +252,7 @@ func TestApprovalWaiting_PayloadCarriesRunDetailLink(t *testing.T) {
 		HTTPClient: srv.Client(),
 		ConsoleURL: "https://console.example.com",
 	}
-	ap := mkApprovalPolicy("hitl", ns, []string{"planner"}, []agentsv1beta1.AlertChannel{
+	ap := mkApprovalAlertPolicy("hitl", ns, []string{"planner"}, []agentsv1beta1.AlertChannel{
 		{Type: "webhook", Webhook: &agentsv1beta1.WebhookChannel{URL: srv.URL}},
 	})
 	cond := ap.Spec.Conditions[0]
@@ -301,7 +301,7 @@ func TestApprovalWaiting_OnlySelectedAgents(t *testing.T) {
 	)
 	r := &AlertPolicyReconciler{Client: c, Alerts: alerts, Runs: lister}
 
-	ap := mkApprovalPolicy("hitl-scoped", ns, []string{"watched"}, []agentsv1beta1.AlertChannel{{Type: "console"}})
+	ap := mkApprovalAlertPolicy("hitl-scoped", ns, []string{"watched"}, []agentsv1beta1.AlertChannel{{Type: "console"}})
 	cond := ap.Spec.Conditions[0]
 	agents := []agentsv1alpha1.AgentDeployment{*mkApprovalAgent("watched", ns)}
 
@@ -328,7 +328,7 @@ func TestApprovalWaiting_NilRunsSafe(t *testing.T) {
 	alerts := newFakeApprovalAlertStore()
 	r := &AlertPolicyReconciler{Client: c, Alerts: alerts /* Runs: nil */}
 
-	ap := mkApprovalPolicy("hitl", ns, []string{"agent-a"}, []agentsv1beta1.AlertChannel{{Type: "console"}})
+	ap := mkApprovalAlertPolicy("hitl", ns, []string{"agent-a"}, []agentsv1beta1.AlertChannel{{Type: "console"}})
 	cond := ap.Spec.Conditions[0]
 
 	require.NotPanics(t, func() {

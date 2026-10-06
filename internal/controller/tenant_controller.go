@@ -386,6 +386,9 @@ func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *a
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(objectStorePort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(statelayerProxyPort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(tokenServicePort)},
+						// Every agent's launcher binds its run capability at the BFF before the agent
+						// sees it (ADR 0124); the BFF's internal edges authenticate on that capability.
+						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(bffPort)},
 					},
 				},
 				{ // intra-tenant AMP (+ peerTenants east-west) + the knative data plane it egresses through

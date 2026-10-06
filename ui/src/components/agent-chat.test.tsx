@@ -128,7 +128,11 @@ function recordingFetch(run: RunMock = {}) {
   return calls;
 }
 
-function renderChat(devMode = false, audience: "operator" | "end-user" = "operator") {
+function renderChat(
+  devMode = false,
+  audience: "operator" | "end-user" = "operator",
+  modelRoute?: { status: string; reason: string; message: string },
+) {
   const onTraced = vi.fn();
   const utils = render(
     <MemoryRouter>
@@ -142,6 +146,7 @@ function renderChat(devMode = false, audience: "operator" | "end-user" = "operat
               memoryBound
               onTraced={onTraced}
               audience={audience}
+              modelRoute={modelRoute}
             />
           </DevModeContext.Provider>
         </CapabilitiesProvider>
@@ -391,5 +396,30 @@ describe("ChatPanel — governance and audience (M151 A10)", () => {
     expect(turn).toHaveTextContent(/didn't get an answer/i);
     expect(turn).toHaveTextContent(/Nothing above has changed/i);
     expect(document.body.textContent).not.toContain("the run store refused the create");
+  });
+});
+
+// A route the gateway does not serve yet fails every message, so Send waits for it; an edited route is
+// still served by its previous version, so Send stays open (ADR 0151).
+describe("ChatPanel — the agent's model route", () => {
+  it("holds Send while a new route is not yet served, and says why", async () => {
+    renderChat(false, "operator", { status: "False", reason: "NotYetServed", message: "m" });
+    const input = await screen.findByTestId("chat-input");
+    fireEvent.change(input, { target: { value: "hello" } });
+    expect(screen.getByTestId("chat-send")).toBeDisabled();
+    expect(screen.getByTestId("chat-route-note")).toHaveTextContent("loading this agent's model");
+  });
+
+  it("does not hold Send while an edited route rolls out", async () => {
+    renderChat(false, "operator", { status: "False", reason: "GatewayRolling", message: "rolling" });
+    const input = await screen.findByTestId("chat-input");
+    fireEvent.change(input, { target: { value: "hello" } });
+    expect(screen.getByTestId("chat-send")).toBeEnabled();
+  });
+
+  it("shows nothing when the route is served", async () => {
+    renderChat(false, "operator", { status: "True", reason: "Served", message: "ok" });
+    await screen.findByTestId("chat-input");
+    expect(screen.queryByTestId("chat-route-note")).toBeNull();
   });
 });

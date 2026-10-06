@@ -403,6 +403,9 @@ func newAMPServer(
 			},
 		},
 	}
+	// Peer calls pass through the proof transport untouched; only the async publish edge on the BFF
+	// gets the bound capability and a proof.
+	s.client = withRuncapProof(s.client, processRuncapBinder())
 	s.resolveHost = s.clusterHost
 	return s
 }

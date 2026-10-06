@@ -808,14 +808,27 @@ def test_managed_loop_without_on_step_is_unchanged(tool_gateway, echo_discovery)
 # ── m66.14: guarded agents downgrade to buffered chat (ADR 0059 §4) ────────────
 
 
-def test_guarded_agent_uses_buffered_even_with_on_token(monkeypatch):
-    """When GUARDRAIL_POLICY is set AND on_token is provided, the loop must call
+@pytest.mark.parametrize(
+    "env_name,env_value",
+    [
+        # What the controller injects today (the mounted, live-reloaded policy).
+        ("GUARDRAIL_POLICY_FILE", "/etc/ctxmesh/guardrail/policy.json"),
+        # What controllers before K3 injected (the policy inline).
+        ("GUARDRAIL_POLICY", "default"),
+    ],
+)
+def test_guarded_agent_uses_buffered_even_with_on_token(monkeypatch, env_name, env_value):
+    """When the agent is guarded AND on_token is provided, the loop must call
     client.model.chat (buffered) and must NOT call stream_completion.
 
     This prevents the 422 guardrail_streaming_unsupported that the proxy returns
-    for stream:true requests when guardrails are active (m66.6, ADR 0059 §4).
+    for stream:true requests when guardrails are active (m66.6, ADR 0059 §4). Only the
+    legacy GUARDRAIL_POLICY was tested, so the loop kept streaming after the controller
+    switched to GUARDRAIL_POLICY_FILE, and every guarded agent failed every call.
     """
-    monkeypatch.setenv("GUARDRAIL_POLICY", "default")
+    monkeypatch.delenv("GUARDRAIL_POLICY", raising=False)
+    monkeypatch.delenv("GUARDRAIL_POLICY_FILE", raising=False)
+    monkeypatch.setenv(env_name, env_value)
     with _EmptyDiscovery() as disc:
         plane = PlaneConfig.for_test(
             discovery_base_url=disc.base_url, model_gateway_url="http://gw"
