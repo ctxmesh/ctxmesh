@@ -143,10 +143,10 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Declarative approver enforcement (M139, ADR 0111 §4): if the run's agent has an ApprovalPolicy with
-	// a non-empty approver set, an APPROVE (we are past the deny branch) is allowed only when the caller is
-	// a designated approver — AND-ed with the RBAC that authorizeRunAccess already enforced. Fail-closed.
-	if isApproval && !s.enforceApprovalPolicyApprovers(w, r, caller, rn) {
+	// Approver enforcement (ADR 0152 §2): if the run's agent declares spec.runtime.toolPolicy.approvers,
+	// an APPROVE (we are past the deny branch) is allowed only when the caller is a designated approver —
+	// AND-ed with the RBAC that authorizeRunAccess already enforced. Fail-closed.
+	if isApproval && !s.enforceToolPolicyApprovers(w, r, caller, rn) {
 		return
 	}
 

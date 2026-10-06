@@ -406,14 +406,6 @@ type AgentDeploymentSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	GuardrailPolicyRef string `json:"guardrailPolicyRef,omitempty"`
 
-	// approvalPolicyRef optionally names an ApprovalPolicy (same namespace) that declaratively requires
-	// human approval for named tool calls (and optionally narrows who may approve) — M139, ADR 0111. The
-	// controller merges its require-approval requirements into this agent's effective tool policy
-	// (reusing the pause/resume/voucher runtime); a dangling ref sets a NotReady condition on the agent.
-	// +optional
-	// +kubebuilder:validation:MaxLength=253
-	ApprovalPolicyRef string `json:"approvalPolicyRef,omitempty"`
-
 	// feedback declares which feedback scores this agent accepts and where each one comes from:
 	// people annotating runs in the console, or named external channels such as a CSAT webhook.
 	// When set, the feedback endpoint checks every submitted score name against it (mode Enforce
@@ -654,7 +646,41 @@ type ToolPolicySpec struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	MaxToolCallsPerRun int32 `json:"maxToolCallsPerRun,omitempty"`
+
+	// approvers narrows who may approve a paused tool call (rule require-approval) for this
+	// agent. A caller approving a run must hold resume permission on the agent through RBAC
+	// AND match an entry here: a User entry matches the caller's username, a Group entry any
+	// group the caller belongs to. Identity comes from the caller's own verified token, never
+	// from the request. This list can only narrow RBAC; it never grants approval to someone
+	// without it. Empty means anyone with resume permission may approve.
+	//
+	// A ServiceAccount approves through its username or group form, for example User
+	// "system:serviceaccount:<namespace>:<name>".
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=64
+	Approvers []Approver `json:"approvers,omitempty"`
 }
+
+// Approver identifies who may approve a paused tool call: a Kubernetes User or Group, spelled
+// as in an RBAC subject.
+type Approver struct {
+	// kind is "User" (matched against the caller's username) or "Group" (matched against the
+	// groups the caller belongs to).
+	// +kubebuilder:validation:Enum=User;Group
+	Kind string `json:"kind"`
+
+	// name is the username or group name to match.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=316
+	Name string `json:"name"`
+}
+
+// The Approver kinds.
+const (
+	ApproverKindUser  = "User"
+	ApproverKindGroup = "Group"
+)
 
 // ToolPolicyOverride is one named tool-level policy override.
 type ToolPolicyOverride struct {

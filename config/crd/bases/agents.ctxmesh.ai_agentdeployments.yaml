@@ -85,14 +85,6 @@ spec:
                 maxItems: 64
                 type: array
                 x-kubernetes-list-type: atomic
-              approvalPolicyRef:
-                description: |-
-                  approvalPolicyRef optionally names an ApprovalPolicy (same namespace) that declaratively requires
-                  human approval for named tool calls (and optionally narrows who may approve) — M139, ADR 0111. The
-                  controller merges its require-approval requirements into this agent's effective tool policy
-                  (reusing the pause/resume/voucher runtime); a dangling ref sets a NotReady condition on the agent.
-                maxLength: 253
-                type: string
               budget:
                 description: |-
                   budget optionally sets USD cost-governance caps for this agent (PRD §14).
@@ -857,6 +849,42 @@ spec:
                     description: toolPolicy optionally constrains which tools the
                       agent may use and how.
                     properties:
+                      approvers:
+                        description: |-
+                          approvers narrows who may approve a paused tool call (rule require-approval) for this
+                          agent. A caller approving a run must hold resume permission on the agent through RBAC
+                          AND match an entry here: a User entry matches the caller's username, a Group entry any
+                          group the caller belongs to. Identity comes from the caller's own verified token, never
+                          from the request. This list can only narrow RBAC; it never grants approval to someone
+                          without it. Empty means anyone with resume permission may approve.
+
+                          A ServiceAccount approves through its username or group form, for example User
+                          "system:serviceaccount:<namespace>:<name>".
+                        items:
+                          description: |-
+                            Approver identifies who may approve a paused tool call: a Kubernetes User or Group, spelled
+                            as in an RBAC subject.
+                          properties:
+                            kind:
+                              description: |-
+                                kind is "User" (matched against the caller's username) or "Group" (matched against the
+                                groups the caller belongs to).
+                              enum:
+                              - User
+                              - Group
+                              type: string
+                            name:
+                              description: name is the username or group name to match.
+                              maxLength: 316
+                              minLength: 1
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                        maxItems: 64
+                        type: array
+                        x-kubernetes-list-type: atomic
                       default:
                         default: allow
                         description: default is the rule applied to any tool without
@@ -1471,14 +1499,6 @@ spec:
                 maxItems: 64
                 type: array
                 x-kubernetes-list-type: atomic
-              approvalPolicyRef:
-                description: |-
-                  approvalPolicyRef optionally names an ApprovalPolicy (same namespace) that declaratively requires
-                  human approval for named tool calls (and optionally narrows who may approve) — M139, ADR 0111. The
-                  controller merges its require-approval requirements into this agent's effective tool policy
-                  (reusing the pause/resume/voucher runtime); a dangling ref sets a NotReady condition on the agent.
-                maxLength: 253
-                type: string
               budget:
                 description: |-
                   budget optionally sets USD cost-governance caps for this agent (PRD §14).
@@ -2243,6 +2263,42 @@ spec:
                     description: toolPolicy optionally constrains which tools the
                       agent may use and how.
                     properties:
+                      approvers:
+                        description: |-
+                          approvers narrows who may approve a paused tool call (rule require-approval) for this
+                          agent. A caller approving a run must hold resume permission on the agent through RBAC
+                          AND match an entry here: a User entry matches the caller's username, a Group entry any
+                          group the caller belongs to. Identity comes from the caller's own verified token, never
+                          from the request. This list can only narrow RBAC; it never grants approval to someone
+                          without it. Empty means anyone with resume permission may approve.
+
+                          A ServiceAccount approves through its username or group form, for example User
+                          "system:serviceaccount:<namespace>:<name>".
+                        items:
+                          description: |-
+                            Approver identifies who may approve a paused tool call: a Kubernetes User or Group, spelled
+                            as in an RBAC subject.
+                          properties:
+                            kind:
+                              description: |-
+                                kind is "User" (matched against the caller's username) or "Group" (matched against the
+                                groups the caller belongs to).
+                              enum:
+                              - User
+                              - Group
+                              type: string
+                            name:
+                              description: name is the username or group name to match.
+                              maxLength: 316
+                              minLength: 1
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                        maxItems: 64
+                        type: array
+                        x-kubernetes-list-type: atomic
                       default:
                         default: allow
                         description: default is the rule applied to any tool without
