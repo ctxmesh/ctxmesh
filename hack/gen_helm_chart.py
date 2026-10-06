@@ -206,11 +206,6 @@ DURABILITY_KNOB_ENV = [
 MCP_HMAC_ENV = [("MCP_GRANT_HMAC_KEY", "bff.mcp.grantHmacKey")]
 
 OPTIONAL_MODEL_ENV = [
-    # MANAGED_AGENT_IMAGE (M153): the runtime image a MANAGED agent runs. The expander's
-    # compiled-in default is a public GHCR tag — right for a stock install, wrong wherever
-    # a registry is mirrored or air-gapped, and until now changeable only by patching the
-    # Deployment. Empty keeps the compiled-in default, byte-identical to before.
-    ("MANAGED_AGENT_IMAGE", "bff.managedAgentImage"),
     ("INGEST_OCR_URL", "bff.ingestOcrURL"),
     ("KNOWLEDGE_RERANK_URL", "bff.knowledgeRerankURL"),
     ("DISCOVERY_EMBEDDING_ROUTE", "bff.discoveryEmbeddingRoute"),
@@ -326,6 +321,17 @@ EGRESS_SIDECAR_IMAGE_ENV_KUSTOMIZE = (
 EGRESS_SIDECAR_IMAGE_ENV_HELM = (
     "        - name: EGRESS_SIDECAR_IMAGE\n"
     '          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.oboEgress.sidecarImage "ctx" $) | quote }}'
+)
+# MANAGED_AGENT_IMAGE: the image every console-created (managed) agent runs. It was an optional
+# empty value, and empty meant the BFF's compiled-in ghcr.io/ctxmesh/managed-agent:latest, a tag the
+# release never publishes: every agent a stock install's console created waited on a missing image.
+# It is versioned like the injected images now.
+MANAGED_AGENT_IMAGE_ENV_KUSTOMIZE = (
+    '        - name: MANAGED_AGENT_IMAGE\n' '          value: ""'
+)
+MANAGED_AGENT_IMAGE_ENV_HELM = (
+    "        - name: MANAGED_AGENT_IMAGE\n"
+    '          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.bff.managedAgentImage "ctx" $) | quote }}'
 )
 # MCP_CAPABILITY_PUBLIC_KEY is NO LONGER templated (M124/Gate A): config/manager now reads it from the
 # bff-capability Secret via valueFrom.secretKeyRef (the keygen hook provisions it). The chart copies that
@@ -526,6 +532,7 @@ def substitute(doc: str) -> str:
             "        - name: %s\n          value: {{ .Values.%s | default \"\" | quote }}"
             % (env_name, val_path),
         )
+    doc = doc.replace(MANAGED_AGENT_IMAGE_ENV_KUSTOMIZE, MANAGED_AGENT_IMAGE_ENV_HELM)
     for env_name, val_path in OPTIONAL_MODEL_ENV + MCP_HMAC_ENV:
         doc = doc.replace(
             f'        - name: {env_name}\n          value: ""',

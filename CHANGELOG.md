@@ -1,5 +1,51 @@
 # Changelog
 
+## v0.1.0-beta.9 — the first install stopped working, and the gate that would have said so had never run
+
+**Every new install of `v0.1.0-beta.8` fails.** The bundled dev object store is MinIO, and MinIO
+closed anonymous access to their container images. `devDataPlane.enabled` defaults to `true`, so a
+stock `helm install` renders it, the image cannot be pulled, and the install dies:
+
+```
+INSTALLATION FAILED: Deployment/ctxmesh/ctxmesh-objectstore not ready
+quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493… → unauthorized
+```
+
+Nothing we shipped caused it; the identical chart was green days earlier. Verified rather than
+assumed before concluding: quay.io by digest, by tag, three older releases and `:latest`, plus
+Docker Hub — every one denied.
+
+**This is the second occurrence.** Docker Hub closed first, which is why the image had already
+moved to quay.io. Chasing a third registry would be the same bet a third time, so the bundled
+store is now **SeaweedFS** (Apache-2.0, multi-arch, pinned by digest). S3 stays on port 9000, so
+the Service, the NetworkPolicy and every `OBJECT_STORE_ADDR` are unchanged — and **the client did
+not change at all**: `minio-go` is a Go module, immune to a container-registry lockdown. If you run
+with `devDataPlane.enabled=false` and your own S3, nothing here affects you.
+
+The object store also now runs non-root (uid 10001, capabilities dropped, seccomp `RuntimeDefault`).
+It previously had no `securityContext`, so restricted namespaces warned on every apply.
+
+**A reachable CVE is fixed.** `GO-2026-6505` — the OpenTelemetry OTLP exporter could leak endpoint
+URLs into info logs, reachable from the launcher and the BFF. Bumped to v1.45.0.
+
+**Security: a custom provider's key was sent to OpenAI.** An agent created in the console on a
+custom (OpenAI-compatible) connection got a model route without the connection's endpoint, so its
+calls went to the provider type's default host, `api.openai.com`, carrying the key you gave the
+custom connection. Routes now keep the connection's endpoint, and a route created before this fix is
+repaired the next time an agent is created on it. **If you connected a custom provider, rotate that
+key.**
+
+**Agents created in the console never started.** The console creates a managed agent from
+`bff.managedAgentImage`, which was empty, so the BFF used its compiled-in
+`ghcr.io/ctxmesh/managed-agent:latest`, a tag no release publishes. Every such agent waited on an
+image that does not exist. The chart now pins it to the release's own version, like the images it
+injects, and `release-truth` checks the value.
+
+**Why it took eight days to notice.** The nightly job that walks a stranger's path — cold cluster,
+published artifacts, public docs — had failed 30 nights running, every run dying in a preflight
+step before it ever reached the install. Its own header declared it "expected red", so nobody read
+it. Both are fixed: the job now runs, and there is no expected-red state.
+
 ## v0.1.0-beta.8 — the controller stopped reconciling, and nothing said so
 
 A one-line RBAC fix, cut as its own release because the version it replaces is known-broken.

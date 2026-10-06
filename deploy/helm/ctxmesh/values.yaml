@@ -512,7 +512,10 @@ bff:
     annotations: {}
     tls: []
 
-  managedAgentImage: ""
+  # The image every console-created (managed) agent runs. A repository without a tag gets the
+  # chart's appVersion, like the injected images; a full ref or digest is used as given. Empty falls
+  # back to a compiled-in tag that is never published, so leave it set.
+  managedAgentImage: ghcr.io/ctxmesh/managed-agent
   ingestOcrURL: ""
   knowledgeRerankURL: ""
   # Capability discovery (M141, ADR 0120) embeds through a ModelRoute the
