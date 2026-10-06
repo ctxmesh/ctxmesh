@@ -628,9 +628,12 @@ export function TeamDetailPage() {
           setRunState({ kind: "none" });
           return;
         }
-        const tree = await api.getRunTree(first.traceId, controller.signal);
+        // A run-store row (no trace backend, ADR 0150) has no traceId until the run finishes; the
+        // tree and the run page both resolve a run id.
+        const runKey = first.runId ?? first.traceId;
+        const tree = await api.getRunTree(runKey, controller.signal);
         if (cancelled || controller.signal.aborted) return;
-        setRunState({ kind: "ready", tree, index: indexRunTree(tree), traceId: first.traceId });
+        setRunState({ kind: "ready", tree, index: indexRunTree(tree), traceId: runKey });
       } catch (err: unknown) {
         if (cancelled || controller.signal.aborted) return;
         setRunState({

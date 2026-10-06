@@ -306,9 +306,10 @@ func TestTraceLinkRouteResolvesURL(t *testing.T) {
 }
 
 func TestLangfuseRoutesServe501WhenAdapterNil(t *testing.T) {
-	// The nil-adapter seam: routes exist and honestly report 501, not 404.
+	// The nil-adapter seam: routes exist and honestly report 501, not 404. /api/runs left this list
+	// when it gained a run-store answer (ADR 0150); cost and traces still need a trace backend.
 	s := serverWithAdapters(t, Adapters{}) // no Langfuse
-	for _, path := range []string{"/api/runs", "/api/cost", "/api/traces/abc"} {
+	for _, path := range []string{"/api/cost", "/api/traces/abc"} {
 		rec := httptest.NewRecorder()
 		s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		assert.Equal(t, http.StatusNotImplemented, rec.Code, "%s must serve 501 when Langfuse is nil", path)
@@ -388,11 +389,15 @@ func TestHandleRunsMalformedFromReturns400(t *testing.T) {
 
 // TestHandleRunsLangfuseAbsentReturns501: when Langfuse adapter is not wired,
 // the route is discoverable and returns 501 (not 404).
-func TestHandleRunsLangfuseAbsentReturns501(t *testing.T) {
+// This asserted 501, which on a stock install (no trace store) meant the console could list no run at
+// all. Without Langfuse the list now comes from the run store (ADR 0150); runs_store_list_test.go holds
+// its contract, including the caller scoping.
+func TestHandleRunsLangfuseAbsentServesTheRunStore(t *testing.T) {
 	s := serverWithAdapters(t, Adapters{}) // no Langfuse
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs", nil))
-	assert.Equal(t, http.StatusNotImplemented, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"runs":[],"nextCursor":""}`, rec.Body.String())
 }
 
 // TestHandleRunsUpstreamFailureReturns502: adapter returns an error → 502, not

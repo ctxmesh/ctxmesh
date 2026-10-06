@@ -999,7 +999,8 @@ func (s *Server) Handler() http.Handler {
 		if s.adapters.Langfuse != nil {
 			authed.HandleFunc("GET /api/agents/{ns}/{name}/runs", s.handleAgentRuns)
 		} else {
-			authed.Handle("GET /api/agents/{ns}/{name}/runs", notImplemented("Langfuse per-agent runs adapter"))
+			// No trace store: the agent's runs come from the run store (ADR 0150).
+			authed.HandleFunc("GET /api/agents/{ns}/{name}/runs", s.handleStoreAgentRuns)
 		}
 		// Agent EDIT (m15.3, ADR 0017): PUT the edited simplified spec. Two modes,
 		// keyed on the source-spec annotation — a full expand+SSA round-trip for a
@@ -1424,7 +1425,8 @@ func (s *Server) Handler() http.Handler {
 		// 501 (registered by the else branch below).
 		authed.HandleFunc("GET /api/cost/breakdown", s.handleCostBreakdown)
 	} else {
-		authed.Handle("GET /api/runs", notImplemented("Langfuse runs adapter"))
+		// No trace store: list runs from the run store, which every install has (ADR 0150).
+		authed.HandleFunc("GET /api/runs", s.handleStoreRuns)
 		authed.Handle("GET /api/cost", notImplemented("Langfuse cost adapter"))
 		authed.Handle("GET /api/traces/", notImplemented("Langfuse trace adapter"))
 		authed.Handle("GET /api/feedback", notImplemented("Langfuse feedback adapter"))

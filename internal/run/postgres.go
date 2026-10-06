@@ -175,6 +175,9 @@ CREATE INDEX IF NOT EXISTS runs_root ON runs (root_run_id) WHERE root_run_id <> 
 -- to '' for runs not yet traced, so a PARTIAL index on the non-empty values keeps it small (most
 -- rows early in a run's life have no trace yet) — mirroring the runs_root partial-index pattern.
 CREATE INDEX IF NOT EXISTS runs_trace_id ON runs (trace_id) WHERE trace_id <> '';
+-- The console's Runs list without a trace store (ListRoots): one agent's root runs, newest first, read
+-- in index order. A list over several agents uses it per agent and sorts the union.
+CREATE INDEX IF NOT EXISTS runs_roots_by_agent ON runs (namespace, agent, created_at DESC, id DESC) WHERE parent_run_id = '';
 -- The AUTHORITATIVE aggregate spawn-budget counter (M64, ADR 0057): one row per spawn TREE (keyed by
 -- root run id), incremented atomically as the BFF admits each sub-run. The BFF keys it on the root it
 -- derived from the VERIFIED parent, so it cannot be re-keyed by an agent for a fresh budget.
@@ -1247,6 +1250,73 @@ func (p *pgStore) ListByEndUser(ctx context.Context, callerUsername, namespace, 
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("run: list by end-user rows: %w", err)
+	}
+	return out, nil
+}
+
+// ListRoots — see the Store interface. The (namespace, agent) pairs travel as two parallel arrays and are
+// matched with unnest, so the allow-set is enforced in the query and a page is never short because rows
+// were filtered out after the LIMIT.
+func (p *pgStore) ListRoots(ctx context.Context, f RootListFilter) ([]RootRun, error) {
+	if len(f.Agents) == 0 {
+		return nil, nil
+	}
+	namespaces := make([]string, len(f.Agents))
+	agents := make([]string, len(f.Agents))
+	for i, a := range f.Agents {
+		namespaces[i], agents[i] = a.Namespace, a.Name
+	}
+	q := `SELECT id, namespace, agent, trace_id, status, created_at, updated_at FROM runs
+		WHERE parent_run_id = '' AND (namespace, agent) IN (SELECT * FROM unnest($1::text[], $2::text[]))`
+	args := []any{namespaces, agents}
+	if len(f.Agents) == 1 {
+		// One agent (its page, ?agent=, a team's supervisor): equality lets Postgres walk the index in
+		// order and stop at the LIMIT, where the unnest form sorts every run the agent has.
+		q = `SELECT id, namespace, agent, trace_id, status, created_at, updated_at FROM runs
+			WHERE parent_run_id = '' AND namespace = $1 AND agent = $2`
+		args = []any{f.Agents[0].Namespace, f.Agents[0].Name}
+	}
+	if !f.From.IsZero() {
+		args = append(args, f.From)
+		q += fmt.Sprintf(` AND created_at >= $%d`, len(args))
+	}
+	if !f.To.IsZero() {
+		args = append(args, f.To)
+		q += fmt.Sprintf(` AND created_at <= $%d`, len(args))
+	}
+	if f.Before != nil {
+		args = append(args, f.Before.CreatedAt, f.Before.ID)
+		q += fmt.Sprintf(` AND (created_at, id) < ($%d, $%d)`, len(args)-1, len(args))
+	}
+	q += ` ORDER BY created_at DESC, id DESC`
+	if f.Limit > 0 {
+		args = append(args, f.Limit)
+		q += fmt.Sprintf(` LIMIT $%d`, len(args))
+	}
+	rows, err := p.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("run: list roots: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []RootRun
+	for rows.Next() {
+		var (
+			r       RootRun
+			status  string
+			created time.Time
+			updated time.Time
+		)
+		if err := rows.Scan(&r.ID, &r.Namespace, &r.Agent, &r.TraceID, &status, &created, &updated); err != nil {
+			return nil, fmt.Errorf("run: list roots scan: %w", err)
+		}
+		r.Status = Status(status)
+		r.CreatedAt = created.UTC()
+		r.UpdatedAt = updated.UTC()
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("run: list roots rows: %w", err)
 	}
 	return out, nil
 }

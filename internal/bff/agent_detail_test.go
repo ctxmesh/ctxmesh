@@ -747,12 +747,16 @@ func TestAgentRunsUpstreamErrorIs502(t *testing.T) {
 
 // TestAgentRunsLangfuseAbsentIs501: when the Langfuse adapter is not wired the route
 // serves an honest 501 (the m14.8 degrade), never a 500 or a fabricated empty list.
-func TestAgentRunsLangfuseAbsentIs501(t *testing.T) {
+// This asserted 501. A stock install has no trace store, so that 501 meant the agent page could never
+// show a run; the runs now come from the run store (ADR 0150), and a 501 here would be the regression.
+// TestStoreAgentRuns_ListsTheAgentsRuns holds the full contract.
+func TestAgentRunsLangfuseAbsentServesTheRunStore(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agentFixture("default", "foo")).Build()
 	s := serverWithCallerAndAdapters(t, &fakeCallerClientFactory{client: c}, Adapters{}) // no Langfuse
 
 	rec := getRuns(t, s, "default", "foo", "")
-	assert.Equal(t, http.StatusNotImplemented, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"namespace":"default","name":"foo","runs":[]}`, rec.Body.String())
 }
 
 // TestAgentRunsAnonIs401: no bearer token → 401 before any K8s or Langfuse call.

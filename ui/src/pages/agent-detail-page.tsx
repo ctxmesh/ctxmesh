@@ -2484,6 +2484,7 @@ function AgentRunsTab({
   name: string;
   onInspect: (traceId: string) => void;
 }) {
+  const navigate = useNavigate();
   const [state, setState] = React.useState<
     | { kind: "loading" }
     | { kind: "ready"; runs: AgentRunSummary[] }
@@ -2524,8 +2525,8 @@ function AgentRunsTab({
       header: "Run",
       priority: 1,
       cell: (r) => (
-        <span className="font-mono text-xs" title={r.traceId}>
-          {truncateId(r.traceId)}
+        <span className="font-mono text-xs" title={r.runId ?? r.traceId}>
+          {truncateId(r.runId ?? r.traceId)}
         </span>
       ),
     },
@@ -2549,8 +2550,8 @@ function AgentRunsTab({
       // share a glyph (§7.1), so a 0 renders the dash with its reason.
       cell: (r) => (
         <QuantityValue
-          value={r.tokens > 0 ? r.tokens : UNKNOWN}
-          title="Per-trace token usage isn’t carried by the runs list — unknown, not zero."
+          value={r.tokens !== undefined && r.tokens > 0 ? r.tokens : UNKNOWN}
+          title="Token usage comes from a trace backend and isn’t carried here — unknown, not zero."
         />
       ),
     },
@@ -2568,7 +2569,7 @@ function AgentRunsTab({
       numeric: true,
       cell: (r) => (
         <QuantityValue
-          value={r.latencyMs > 0 ? r.latencyMs : UNKNOWN}
+          value={r.latencyMs !== undefined && r.latencyMs > 0 ? r.latencyMs : UNKNOWN}
           format={formatLatency}
         />
       ),
@@ -2581,8 +2582,11 @@ function AgentRunsTab({
       cell: (r) => (
         <NextStepLink
           label="Read the run"
-          onClick={() => onInspect(r.traceId)}
-          ariaLabel={`Read run ${r.traceId}`}
+          // A run-store row (no trace backend, ADR 0150) opens the run itself; a trace row the inspector.
+          onClick={() =>
+            r.runId ? navigate(`/runs/${encodeURIComponent(r.runId)}`) : onInspect(r.traceId)
+          }
+          ariaLabel={`Read run ${r.runId ?? r.traceId}`}
         />
       ),
     },
@@ -2616,7 +2620,7 @@ function AgentRunsTab({
       <DataTable<AgentRunSummary>
         columns={cols}
         rows={state.kind === "ready" ? state.runs : []}
-        rowKey={(r) => r.traceId}
+        rowKey={(r) => r.runId ?? r.traceId}
         loading={state.kind === "loading"}
         error={
           state.kind === "error"

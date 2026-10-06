@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useParams } from "react-router-dom";
+
+import { useEffect } from "react";
 
 import { RunsPage } from "@/pages/runs-page";
 import type { RunSummary } from "@/lib/api";
+import { NamespaceProvider, useNamespace } from "@/lib/namespace";
 
 // RunsPage (m16.8) — paginated + filterable global runs browser.
 //
@@ -157,6 +160,56 @@ describe("RunsPage — basic rendering (m16.8)", () => {
     await waitFor(() =>
       expect(screen.getByTestId("trace-page-stub")).toBeInTheDocument(),
     );
+  });
+
+  // A row read from the run store (no trace backend, ADR 0150) carries a runId and may have no trace yet:
+  // it opens the run itself, and its key cannot be the (possibly empty) traceId.
+  it("opens /runs/:runId for a run-store row, and keys rows by runId", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        runs: [
+          { runId: "run-1", traceId: "", name: "a", timestamp: "2026-10-06T09:00:00Z", agentNs: "team", agentName: "a", status: "ok" },
+          { runId: "run-2", traceId: "", name: "b", timestamp: "2026-10-06T09:01:00Z", agentNs: "team", agentName: "b", status: "running" },
+        ],
+        nextCursor: "",
+      },
+    }));
+    render(
+      <MemoryRouter initialEntries={["/runs"]}>
+        <Routes>
+          <Route path="/runs" element={<RunsPage />} />
+          <Route path="/runs/:id" element={<RunDetailStub />} />
+          <Route path="/traces/:id" element={<div data-testid="trace-page-stub" />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const [row] = await screen.findAllByText("b");
+    // Both rows render: keys did not collide on the empty traceId.
+    expect(screen.getAllByText("a").length).toBeGreaterThan(0);
+    fireEvent.click(row!.closest("tr")!);
+    expect(await screen.findByTestId("run-detail-stub")).toHaveTextContent("run-2");
+  });
+
+  // A run paused for an approval or a consent is the one state besides failure that needs a person;
+  // it must not read as "outcome not recorded".
+  it("badges a run waiting on a person and offers to answer it", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        runs: [
+          { runId: "run-held", traceId: "", name: "team/a", timestamp: "2026-10-06T09:00:00Z", agentNs: "team", agentName: "a", status: "requires_action" },
+          { runId: "run-live", traceId: "", name: "team/a", timestamp: "2026-10-06T09:01:00Z", agentNs: "team", agentName: "a", status: "running" },
+        ],
+        nextCursor: "",
+      },
+    }));
+    renderPage();
+    // The state tag renders in both the narrow and the wide layout.
+    expect((await screen.findAllByText("Held")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Running").length).toBeGreaterThan(0);
+    expect(screen.getByTestId("next-step-run-held")).toHaveTextContent("Answer the run");
   });
 
   it("renders the filter bar with agent, from, to inputs (NO status filter)", async () => {
@@ -610,5 +663,37 @@ describe("RunsPage — activity feed (M151, §4.4 / §7.1 / §7.2)", () => {
     // And it is not the teaching empty state either — nothing is missing, the
     // platform is simply not wired to answer.
     expect(screen.queryByText("No runs yet")).toBeNull();
+  });
+});
+
+function RunDetailStub() {
+  const params = useParams();
+  return <div data-testid="run-detail-stub">{params.id}</div>;
+}
+
+// NsSetter stands in for the shell's picker: it selects a namespace the way a person would.
+function NsSetter({ ns }: { ns: string }) {
+  const { setNamespace } = useNamespace();
+  useEffect(() => setNamespace(ns), [ns, setNamespace]);
+  return null;
+}
+
+describe("RunsPage — namespace scope", () => {
+  // A namespace-bound caller cannot list agents cluster-wide; the page must ask for its namespace.
+  it("sends the selected namespace with the list request", async () => {
+    const captured = installFetch(() => ({ ok: true, body: { runs: [], nextCursor: "" } }));
+    render(
+      <MemoryRouter initialEntries={["/runs"]}>
+        <NamespaceProvider>
+          <NsSetter ns="my-team" />
+          <Routes>
+            <Route path="/runs" element={<RunsPage />} />
+          </Routes>
+        </NamespaceProvider>
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(captured.some((u) => u.startsWith("/api/runs?") && u.includes("namespace=my-team"))).toBe(true),
+    );
   });
 });
