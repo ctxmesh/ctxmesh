@@ -243,7 +243,9 @@ tokenService:
     required: false
   # Where per-user MCP grants (OAuth tokens) are stored (ADR 0152). One backend per install,
   # built by the token-service at startup. The keys mirror the spec.provider.<type> block of
-  # the retired CredentialStore kind, so an existing store's YAML moves here unchanged.
+  # the retired CredentialStore kind, with two exceptions: kubernetes.credentialNamespace is
+  # bff.mcp.credentialNamespace (set it to the same namespace, or existing grants are
+  # orphaned), and kmsV2.keyIDPrefix is gone (KMS v2 is single-key).
   # Every Secret named here is read from the credential namespace (bff.mcp.credentialNamespace,
   # else the install namespace). A missing or malformed value makes the token-service refuse to
   # start with an error naming the setting; it never falls back to kubernetes.

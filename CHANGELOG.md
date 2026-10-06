@@ -105,8 +105,10 @@ contract already said.
   record names the user from the capability and the agent from the pod. The BFF gains one
   permission for this: `create` on `tokenreviews`.
 
-**Breaking: three resource kinds are retired, and their settings move onto what they configured.**
-The API now serves 14 kinds instead of 18 (ADR 0152). Move any objects before you upgrade:
+**Breaking: four resource kinds are retired, and their settings move onto what they configured.**
+The API now serves 14 kinds instead of 18 (ADR 0152). Move any objects before you upgrade.
+`helm upgrade` refuses while any object of the four kinds still exists, and names each kind and
+how many:
 
 - **`FeedbackStore` → the agent's `spec.feedback`.** Copy the store's `spec` (`mode`, `human`,
   `external`) into the agent that named it in `spec.feedbackStoreRef`, and delete that field. The
@@ -114,17 +116,24 @@ The API now serves 14 kinds instead of 18 (ADR 0152). Move any objects before yo
 - **`ApprovalPolicy` → the agent's `spec.runtime.toolPolicy`.** `rules[].allTools` becomes
   `default: require-approval`, `rules[].tools` becomes `overrides` entries with
   `rule: require-approval`, and `approvers` moves to `toolPolicy.approvers` (empty still means
-  anyone with resume permission). Delete `spec.approvalPolicyRef`. One meaning changes: an explicit
-  `allow` override now wins over `default: require-approval`, because there is no second policy to
-  merge with.
+  anyone who can act on the run: its creator, or a caller who can get the agent). Delete
+  `spec.approvalPolicyRef`. One meaning changes: an explicit `allow` override now wins over
+  `default: require-approval`, because there is no second policy to merge with. Editing
+  `approvers` or `spec.feedback` does not create a new agent version or roll the agent, and a
+  rollback keeps the agent's current `toolPolicy` and `feedback`.
 - **`CredentialStore` and `ClusterCredentialStore` → Helm values `tokenService.credentialBackend`.**
   Set `type` to `kubernetes`, `postgres` or `remote`, and move the store's `spec.provider.<type>`
-  block under the matching key unchanged. The never-implemented `openbao` provider is gone, and so
-  is the per-namespace override. If you created a `ClusterCredentialStore` named `default`, the
-  token-service used it, and you must set these values to keep that backend; otherwise it runs on
-  `kubernetes` and your users reconnect their accounts. The documented `cluster-default` name was
-  never read, so those installs were already on `kubernetes`. A missing or malformed value stops
-  the token-service at startup with an error naming the setting. Its ClusterRole is removed.
+  block under the matching key. Two keys do not move. `kubernetes.credentialNamespace` has no
+  `credentialBackend` key: the namespace is `bff.mcp.credentialNamespace`, the existing value the
+  token-service reads as `MCP_CREDENTIAL_NAMESPACE`, so an install that set `credentialNamespace`
+  must set that value to the same namespace, or its grants are orphaned. `kmsV2.keyIDPrefix` is
+  gone: KMS v2 is single-key, and the prefix was never used. The never-implemented `openbao`
+  provider is gone, and so is the per-namespace override. If you created a `ClusterCredentialStore`
+  named `default`, the token-service used it, and you must set these values to keep that backend;
+  otherwise it runs on `kubernetes` and your users reconnect their accounts. The documented
+  `cluster-default` name was never read, so those installs were already on `kubernetes`. A missing
+  or malformed value stops the token-service at startup with an error naming the setting. Its
+  ClusterRole is removed.
 
 Helm does not delete CRDs. After moving any objects, delete the retired ones:
 

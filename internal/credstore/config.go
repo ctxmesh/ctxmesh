@@ -26,9 +26,10 @@ import (
 )
 
 // Config is the token service's credential-backend configuration (ADR 0152 §1). Its fields mirror
-// the spec of the retired CredentialStore kind one for one, which is what lets the chart's
-// tokenService.credentialBackend values take an old store's YAML unchanged. Exactly one provider is
-// set.
+// the spec of the retired CredentialStore kind, so the chart's tokenService.credentialBackend values
+// take an old store's YAML, with two exceptions: the kubernetes provider's credentialNamespace is
+// MCP_CREDENTIAL_NAMESPACE (Deps.DefaultCredentialNamespace), and KMS v2's keyIDPrefix is gone
+// because KMS v2 is single-key. Exactly one provider is set.
 type Config struct {
 	Provider Provider
 }
