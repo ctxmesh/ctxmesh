@@ -173,6 +173,7 @@ type AgentTeamStatus struct {
 // boundary); at runtime the supervisor delegates to a roster member via the `delegate_to` tool, which
 // starts the member as a durable SUB-RUN on the run-worker path — inheriting the invoking user's OBO
 // (no re-consent), the conversation, and the trace, bounded by the spawn budget + tenant quota.
+// Frozen (ADR 0152): additive bug fixes only, and no new fields until the install path is green.
 type AgentTeam struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

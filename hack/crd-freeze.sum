@@ -1,0 +1,3 @@
+# Frozen CRDs (ADR 0152 §4): sha256 of the generated file. Editing a line here is the decision to change a frozen kind.
+7dcd86ca15e329d6b7be7d039ec00fc3b8a090b37d6da3b2bc476c877e310d2a  agents.ctxmesh.ai_agentteams.yaml
+44c6055f0d4ebb0dec89ffd77bf36a51af4d11eb3fe7bbbe03c5b8bf6a01015e  agents.ctxmesh.ai_workflows.yaml

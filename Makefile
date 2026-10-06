@@ -447,6 +447,10 @@ helm-generate: manifests kustomize ## Regenerate the Helm chart templates from c
 crd-version-parity: manifests ## Guard: multi-version CRDs keep matching top-level CEL validations (conversion is None; audit FUNC-8).
 	./hack/check-crd-version-parity.sh config/crd/bases
 
+.PHONY: crd-frozen
+crd-frozen: manifests ## Guard: the frozen CRDs (AgentTeam, Workflow) match hack/crd-freeze.sum (ADR 0152).
+	./hack/check-crd-frozen.sh config/crd/bases
+
 .PHONY: rbac-least-privilege
 rbac-least-privilege: manifests ## Assert the SHIPPED roles grant no verb wildcards and no cluster-scoped Secret writes (M149).
 	./hack/rbac-least-privilege.sh config/rbac

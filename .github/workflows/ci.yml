@@ -299,6 +299,10 @@ jobs:
       # top-level CEL validations across versions (audit FUNC-8).
       - name: CRD version-parity gate
         run: make crd-version-parity
+      # AgentTeam and Workflow are frozen until the install path is green (ADR 0152): their generated
+      # CRDs must match hack/crd-freeze.sum, and changing one is a deliberate edit of that file.
+      - name: CRD freeze gate
+        run: make crd-frozen
       # M148 ✅ line: the install proof runs in CI so it cannot rot the way G7/G11 did.
       #
       # Every assertion is about the RENDER, so it needs no cluster and costs seconds —

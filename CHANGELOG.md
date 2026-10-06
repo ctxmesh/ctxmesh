@@ -105,6 +105,38 @@ contract already said.
   record names the user from the capability and the agent from the pod. The BFF gains one
   permission for this: `create` on `tokenreviews`.
 
+**Breaking: three resource kinds are retired, and their settings move onto what they configured.**
+The API now serves 14 kinds instead of 18 (ADR 0152). Move any objects before you upgrade:
+
+- **`FeedbackStore` → the agent's `spec.feedback`.** Copy the store's `spec` (`mode`, `human`,
+  `external`) into the agent that named it in `spec.feedbackStoreRef`, and delete that field. The
+  API server now rejects a declaration with no source, or with a score name used twice.
+- **`ApprovalPolicy` → the agent's `spec.runtime.toolPolicy`.** `rules[].allTools` becomes
+  `default: require-approval`, `rules[].tools` becomes `overrides` entries with
+  `rule: require-approval`, and `approvers` moves to `toolPolicy.approvers` (empty still means
+  anyone with resume permission). Delete `spec.approvalPolicyRef`. One meaning changes: an explicit
+  `allow` override now wins over `default: require-approval`, because there is no second policy to
+  merge with.
+- **`CredentialStore` and `ClusterCredentialStore` → Helm values `tokenService.credentialBackend`.**
+  Set `type` to `kubernetes`, `postgres` or `remote`, and move the store's `spec.provider.<type>`
+  block under the matching key unchanged. The never-implemented `openbao` provider is gone, and so
+  is the per-namespace override. If you created a `ClusterCredentialStore` named `default`, the
+  token-service used it, and you must set these values to keep that backend; otherwise it runs on
+  `kubernetes` and your users reconnect their accounts. The documented `cluster-default` name was
+  never read, so those installs were already on `kubernetes`. A missing or malformed value stops
+  the token-service at startup with an error naming the setting. Its ClusterRole is removed.
+
+Helm does not delete CRDs. After moving any objects, delete the retired ones:
+
+```sh
+kubectl delete crd approvalpolicies.agents.ctxmesh.ai feedbackstores.agents.ctxmesh.ai \
+  credentialstores.agents.ctxmesh.ai clustercredentialstores.agents.ctxmesh.ai
+```
+
+**`AgentTeam` and `Workflow` are frozen.** Both stay, but neither gains a field until the install
+path is green (ADR 0152). CI fails on any change to their generated CRDs unless
+`hack/crd-freeze.sum` is updated on purpose.
+
 ## v0.1.0-beta.9 — the first install stopped working, and the gate that would have said so had never run
 
 **Every new install of `v0.1.0-beta.8` fails.** The bundled dev object store is MinIO, and MinIO

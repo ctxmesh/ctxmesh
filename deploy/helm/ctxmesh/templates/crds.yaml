@@ -3892,6 +3892,7 @@ spec:
           boundary); at runtime the supervisor delegates to a roster member via the `delegate_to` tool, which
           starts the member as a durable SUB-RUN on the run-worker path — inheriting the invoking user's OBO
           (no re-consent), the conversation, and the trace, bounded by the spawn budget + tenant quota.
+          Frozen (ADR 0152): additive bug fixes only, and no new fields until the install path is green.
         properties:
           apiVersion:
             description: |-
@@ -9819,6 +9820,7 @@ spec:
           controller VALIDATES it (structure + CEL + the referenced-output⇒outputSchema rule + registry membership)
           and reports Validated/Invalid on status; it does NO execution. A workflow INSTANCE is a durable Run with a
           workflowRef (instances-of-record live in Postgres, not etcd), run by the executor-in-the-worker (later tasks).
+          Frozen (ADR 0152): additive bug fixes only, and no new fields until the install path is green.
         properties:
           apiVersion:
             description: |-
