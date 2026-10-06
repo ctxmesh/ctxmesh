@@ -28,6 +28,12 @@ It previously had no `securityContext`, so restricted namespaces warned on every
 **A reachable CVE is fixed.** `GO-2026-6505` — the OpenTelemetry OTLP exporter could leak endpoint
 URLs into info logs, reachable from the launcher and the BFF. Bumped to v1.45.0.
 
+**Agents created in the console never started.** The console creates a managed agent from
+`bff.managedAgentImage`, which was empty, so the BFF used its compiled-in
+`ghcr.io/ctxmesh/managed-agent:latest`, a tag no release publishes. Every such agent waited on an
+image that does not exist. The chart now pins it to the release's own version, like the images it
+injects, and `release-truth` checks the value.
+
 **Why it took eight days to notice.** The nightly job that walks a stranger's path — cold cluster,
 published artifacts, public docs — had failed 30 nights running, every run dying in a preflight
 step before it ever reached the install. Its own header declared it "expected red", so nobody read
