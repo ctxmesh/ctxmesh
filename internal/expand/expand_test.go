@@ -37,6 +37,7 @@ const cliGoldenDir = "../../cmd/ctxmesh/testdata"
 // BFF (which calls Expand) ever diverged from the CLI, this fails — there is one
 // mapping, not two.
 func TestExpandEquivalentToCLIGolden(t *testing.T) {
+	stampManagedVersion(t, "v9.9.9") // the managed golden pins this release
 	fixtures := []string{"minimal", "full", "model-route", "managed"}
 	for _, name := range fixtures {
 		t.Run(name, func(t *testing.T) {
@@ -180,6 +181,7 @@ prompt:
 // systemPrompt → SYSTEM_PROMPT env, tools → MCPToolBinding docs; the custom path
 // (image required) is unchanged.
 func TestExpandManagedRuntime(t *testing.T) {
+	stampManagedVersion(t, "v9.9.9")
 	in := []byte("name: m\nruntime: managed\nsystemPrompt: be nice\ntools:\n  - echo_tool\n")
 	got, err := Expand(in)
 	if err != nil {
@@ -192,7 +194,7 @@ func TestExpandManagedRuntime(t *testing.T) {
 		"registryRef: default-tools",
 		"mode: remote",
 		"kind: AgentDeployment",
-		DefaultManagedImage,
+		ManagedImageRepository + ":v9.9.9",
 		"name: SYSTEM_PROMPT",
 		"value: be nice",
 	} {
@@ -220,6 +222,26 @@ func TestExpandManagedImageRefConfigurable(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "image: registry.example.com/mine:9") {
 		t.Errorf("MANAGED_AGENT_IMAGE override not honoured, got:\n%s", got)
+	}
+}
+
+// stampManagedVersion stands in for `make build-cli`'s -ldflags stamp for one test.
+func stampManagedVersion(t *testing.T, v string) {
+	t.Helper()
+	prev := ManagedImageVersion
+	ManagedImageVersion = v
+	t.Cleanup(func() { ManagedImageVersion = prev })
+}
+
+// The managed image used to default to managed-agent:latest, a tag no release publishes, so an agent
+// expanded without configuration could never start. With no image, no MANAGED_AGENT_IMAGE and no
+// stamped release, expand now refuses and says what to set.
+func TestExpandManagedWithNoImageSourceIsAnError(t *testing.T) {
+	t.Setenv(envManagedImage, "")
+	stampManagedVersion(t, "")
+	_, err := Expand([]byte("name: m\nruntime: managed\n"))
+	if err == nil || !strings.Contains(err.Error(), "MANAGED_AGENT_IMAGE") {
+		t.Fatalf("expected an error naming MANAGED_AGENT_IMAGE, got %v", err)
 	}
 }
 

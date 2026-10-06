@@ -272,8 +272,12 @@ build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
 .PHONY: build-cli
-build-cli: fmt vet ## Build ctxmesh CLI binary (bin/ctxmesh).
-	go build -o bin/ctxmesh ./cmd/ctxmesh
+# CLI_RELEASE is the release a managed agent's image defaults to in `ctxmesh expand`: the newest
+# release tag, which is published. Unstamped, expand refuses a managed agent with no image rather than
+# name an image nobody can pull.
+CLI_RELEASE ?= $(shell git describe --tags --abbrev=0 --match 'v*' 2>/dev/null)
+build-cli: fmt vet ## Build ctxmesh CLI binary (bin/ctxmesh), its managed-agent default pinned to CLI_RELEASE.
+	go build -ldflags "-X github.com/ctxmesh/ctxmesh/internal/expand.ManagedImageVersion=$(CLI_RELEASE)" -o bin/ctxmesh ./cmd/ctxmesh
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.

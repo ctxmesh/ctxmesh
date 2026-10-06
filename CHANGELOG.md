@@ -82,6 +82,12 @@ Send while the route is `NotYetServed`, `GatewayAbsent` or `SecretUnresolved`, a
 an agent created in the console answered its first message with "Invalid model name" if the gateway
 had not finished loading the new route.
 
+**Fixed: `ctxmesh expand` gave managed agents an image that does not exist.** A managed agent with no
+image of its own got `ghcr.io/ctxmesh/managed-agent:latest`, a tag no release publishes, so
+`ctxmesh expand agent.yaml | kubectl apply -f -` produced an agent that never started. `make
+build-cli` now pins the newest release tag; `MANAGED_AGENT_IMAGE` still overrides; and with neither,
+`expand` refuses and says what to set.
+
 **Fixed: durable runs of an agent that does not stream always failed.** The run worker asks agents
 for an event stream and read any reply as one. An agent that answered with plain JSON, as the
 quickstart's echo agent does, produced "stream ended with no result frame" on every run, from the
