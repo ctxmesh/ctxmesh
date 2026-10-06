@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -214,7 +215,8 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 	}
 
 	// ── 5. Patch gateway Deployment env + pod-template annotation ─────────────
-	if err := r.syncGatewayDeployment(ctx, renderResult); err != nil {
+	serving, err := r.syncGatewayDeployment(ctx, renderResult)
+	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("syncing gateway Deployment: %w", err)
 	}
 	if staleOTelHeaders {
@@ -233,28 +235,15 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 		mr := &mrList.Items[i]
 		routeKey := mr.Namespace + "/" + mr.Name
 
-		var condStatus metav1.ConditionStatus
-		var reason, message string
-
-		if excludedSet[routeKey] {
-			condStatus = metav1.ConditionFalse
-			reason = "SecretUnresolved"
-			message = "one or more referenced SecretBindings or Secrets could not be resolved; " +
-				"route is excluded from the gateway config"
-		} else {
-			condStatus = metav1.ConditionTrue
-			reason = "Rendered"
-			message = "route rendered into the gateway config"
-		}
-
+		ready := routeReadyCondition(mr, excludedSet[routeKey], serving)
+		changed := mr.Status.ObservedGeneration != mr.Generation
 		mr.Status.ObservedGeneration = mr.Generation
-		apimeta.SetStatusCondition(&mr.Status.Conditions, metav1.Condition{
-			Type:               conditionReady,
-			Status:             condStatus,
-			Reason:             reason,
-			Message:            message,
-			ObservedGeneration: mr.Generation,
-		})
+		if apimeta.SetStatusCondition(&mr.Status.Conditions, ready) {
+			changed = true
+		}
+		if !changed {
+			continue // a requeue while the gateway rolls must not rewrite every route's status
+		}
 
 		if err := r.Status().Update(ctx, mr); err != nil {
 			// Return the error so the reconcile REQUEUES (audit FUNC-6): a conflict or a
@@ -264,7 +253,72 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 		}
 	}
 
+	// Nothing watches the gateway Deployment (that would cache every Deployment in the cluster), so
+	// look again until it serves the config.
+	switch serving {
+	case gatewayRolling:
+		return ctrl.Result{RequeueAfter: gatewayRolloutPoll}, nil
+	case gatewayAbsent:
+		return ctrl.Result{RequeueAfter: gatewayAbsentPoll}, nil
+	}
 	return ctrl.Result{}, nil
+}
+
+// routeReadyCondition is a route's Ready condition. Ready means a call by this alias works now, so it
+// waits for the gateway to serve the config that holds the route: "rendered" alone let a first call
+// made right after `kubectl wait` fail with LiteLLM's "Invalid model name". A route already served at
+// this generation stays served while another route's change rolls the gateway, because the old pods'
+// config holds it too.
+func routeReadyCondition(mr *agentsv1alpha1.ModelRoute, excluded bool, serving gatewayState) metav1.Condition {
+	c := metav1.Condition{Type: conditionReady, Status: metav1.ConditionFalse, ObservedGeneration: mr.Generation}
+	prev := apimeta.FindStatusCondition(mr.Status.Conditions, conditionReady)
+	alreadyServed := prev != nil && prev.Status == metav1.ConditionTrue && prev.Reason == reasonServed &&
+		prev.ObservedGeneration == mr.Generation
+	switch {
+	case excluded:
+		c.Reason = "SecretUnresolved"
+		c.Message = "one or more referenced SecretBindings or Secrets could not be resolved; " +
+			"route is excluded from the gateway config"
+	case serving == gatewayServing, serving == gatewayRolling && alreadyServed:
+		c.Status, c.Reason, c.Message = metav1.ConditionTrue, reasonServed, "the gateway serves this route"
+	case serving == gatewayAbsent:
+		c.Reason, c.Message = "GatewayAbsent", "route rendered; the gateway Deployment does not exist"
+	default:
+		c.Reason = "GatewayRolling"
+		c.Message = "route rendered; the gateway has not finished rolling out the config that serves it"
+	}
+	return c
+}
+
+// reasonServed is the Ready reason of a route the gateway serves.
+const reasonServed = "Served"
+
+// gatewayState is how far the gateway is from serving the config just rendered.
+type gatewayState int
+
+const (
+	gatewayServing gatewayState = iota
+	gatewayRolling
+	gatewayAbsent
+)
+
+const (
+	gatewayRolloutPoll = 5 * time.Second
+	gatewayAbsentPoll  = 30 * time.Second
+)
+
+// gatewayServes reports whether the Deployment has fully rolled out the config with this hash: the
+// rollout `kubectl rollout status` would call complete, with no pod of an older template left.
+func gatewayServes(d *appsv1.Deployment, hash string) bool {
+	want := int32(1)
+	if d.Spec.Replicas != nil {
+		want = *d.Spec.Replicas
+	}
+	st := d.Status
+	return want > 0 &&
+		d.Spec.Template.Annotations[configHashAnnotation] == hash &&
+		st.ObservedGeneration >= d.Generation &&
+		st.UpdatedReplicas == want && st.Replicas == want && st.AvailableReplicas == want
 }
 
 // gatewayOTelHeadersSecret holds the gateway's pre-built OTEL_HEADERS value. LiteLLM wants the
@@ -431,19 +485,19 @@ func (r *ModelRouteReconciler) syncGatewaySecrets(ctx context.Context, mirrors m
 }
 
 // syncGatewayDeployment patches the gateway Deployment with the config-hash
-// pod-template annotation and SB_* env vars derived from the render result.
-// If the Deployment does not exist yet the function returns nil — it will be
-// synced on the next reconcile after the operator is deployed.
-func (r *ModelRouteReconciler) syncGatewayDeployment(ctx context.Context, result gateway.Result) error {
+// pod-template annotation and SB_* env vars derived from the render result, and
+// reports whether the gateway already serves that config. A missing Deployment is
+// gatewayAbsent, not an error: the reconcile checks again later.
+func (r *ModelRouteReconciler) syncGatewayDeployment(ctx context.Context, result gateway.Result) (gatewayState, error) {
 	var deploy appsv1.Deployment
 	if err := r.Get(ctx, client.ObjectKey{
 		Namespace: gateway.GatewayNamespace,
 		Name:      gateway.GatewayDeploymentName,
 	}, &deploy); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil
+			return gatewayAbsent, nil
 		}
-		return fmt.Errorf("getting gateway Deployment: %w", err)
+		return gatewayRolling, fmt.Errorf("getting gateway Deployment: %w", err)
 	}
 
 	// Set config-hash annotation on the pod template to trigger rollout on change.
@@ -466,9 +520,12 @@ func (r *ModelRouteReconciler) syncGatewayDeployment(ctx context.Context, result
 	}
 
 	if err := r.Update(ctx, &deploy); err != nil {
-		return fmt.Errorf("updating gateway Deployment: %w", err)
+		return gatewayRolling, fmt.Errorf("updating gateway Deployment: %w", err)
 	}
-	return nil
+	if gatewayServes(&deploy, result.Hash) {
+		return gatewayServing, nil
+	}
+	return gatewayRolling, nil
 }
 
 // SetupWithManager registers the ModelRouteReconciler and its secondary watches.

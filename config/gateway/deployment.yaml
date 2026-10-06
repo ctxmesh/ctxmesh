@@ -76,6 +76,13 @@ spec:
               port: 4000
             periodSeconds: 10
             failureThreshold: 3
+          # Every ModelRoute change rolls this pod (the config hash above). Without a pause the old pod
+          # stops listening while Services still route to it, and calls in those seconds get
+          # "connection refused": a quickstart run made a minute after its ModelRoute failed that way.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "10"]
           resources:
             requests:
               cpu: 50m       # scheduling headroom on ~2-CPU CI nodes
@@ -91,4 +98,4 @@ spec:
         - name: gateway-config
           configMap:
             name: gateway-config
-      terminationGracePeriodSeconds: 10
+      terminationGracePeriodSeconds: 30 # the preStop pause, then LiteLLM's own shutdown

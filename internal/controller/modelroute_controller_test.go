@@ -26,6 +26,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -129,7 +130,7 @@ func TestModelRoute_MockRouteRendered(t *testing.T) {
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, route) })
 
 	r := newMRReconciler()
-	reconcileMR(t, r, gwNS, routeName)
+	first := reconcileMR(t, r, gwNS, routeName)
 
 	// ── Assert ConfigMap ───────────────────────────────────────────────────────
 	var cm corev1.ConfigMap
@@ -152,6 +153,14 @@ func TestModelRoute_MockRouteRendered(t *testing.T) {
 	hash, hasAnnotation := annotations[configHashAnnotation]
 	assert.True(t, hasAnnotation, "gateway Deployment must have config-hash annotation")
 	assert.NotEmpty(t, hash, "config-hash annotation must be non-empty")
+
+	// Ready waits for the gateway to serve the config. envtest runs no Deployment controller, so
+	// assert the route is not Ready before the rollout, then complete the rollout by hand.
+	assert.Positive(t, first.RequeueAfter, "the reconcile must look again while the gateway rolls")
+	assertRouteCondition(t, gwNS, routeName, metav1.ConditionFalse, "GatewayRolling")
+	completeGatewayRollout(t)
+	assert.Equal(t, ctrl.Result{}, reconcileMR(t, r, gwNS, routeName))
+	assertRouteCondition(t, gwNS, routeName, metav1.ConditionTrue, "Served")
 
 	// ── Assert ModelRoute Ready=True ───────────────────────────────────────────
 	var updated agentsv1alpha1.ModelRoute
@@ -229,7 +238,7 @@ func TestModelRoute_RealProviderRendered(t *testing.T) {
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, route) })
 
 	r := newMRReconciler()
-	reconcileMR(t, r, gwNS, routeName)
+	first := reconcileMR(t, r, gwNS, routeName)
 
 	// ── Assert ConfigMap contains os.environ reference ─────────────────────────
 	var cm corev1.ConfigMap
@@ -259,6 +268,14 @@ func TestModelRoute_RealProviderRendered(t *testing.T) {
 	require.NotNil(t, foundEV.ValueFrom.SecretKeyRef)
 	assert.Equal(t, secretName, foundEV.ValueFrom.SecretKeyRef.Name)
 	assert.Equal(t, "api-key", foundEV.ValueFrom.SecretKeyRef.Key)
+
+	// Ready waits for the gateway to serve the config. envtest runs no Deployment controller, so
+	// assert the route is not Ready before the rollout, then complete the rollout by hand.
+	assert.Positive(t, first.RequeueAfter, "the reconcile must look again while the gateway rolls")
+	assertRouteCondition(t, gwNS, routeName, metav1.ConditionFalse, "GatewayRolling")
+	completeGatewayRollout(t)
+	assert.Equal(t, ctrl.Result{}, reconcileMR(t, r, gwNS, routeName))
+	assertRouteCondition(t, gwNS, routeName, metav1.ConditionTrue, "Served")
 
 	// ── Assert ModelRoute Ready=True ───────────────────────────────────────────
 	var updated agentsv1alpha1.ModelRoute
@@ -535,11 +552,65 @@ func TestModelRoute_GatewayAbsent(t *testing.T) {
 		NamespacedName: types.NamespacedName{Namespace: gwNS, Name: routeName},
 	})
 	require.NoError(t, err, "Reconcile must not error when gateway Deployment is absent")
-	assert.Equal(t, ctrl.Result{}, result)
+	// This asserted no requeue. The route now says it is not served (GatewayAbsent) and checks again,
+	// because nothing else would tell it when the gateway appears.
+	assert.Equal(t, ctrl.Result{RequeueAfter: gatewayAbsentPoll}, result)
+	assertRouteCondition(t, gwNS, routeName, metav1.ConditionFalse, "GatewayAbsent")
 
 	// ConfigMap must still be created.
 	var cm corev1.ConfigMap
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: gateway.GatewayConfigMapName, Namespace: gwNS}, &cm))
 	assert.Contains(t, cm.Data["config.yaml"], routeName)
+}
+
+// completeGatewayRollout stands in for the Deployment controller envtest does not run: it reports the
+// gateway's current template as fully rolled out.
+func completeGatewayRollout(t *testing.T) {
+	t.Helper()
+	var d appsv1.Deployment
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: gateway.GatewayDeploymentName, Namespace: gwNS}, &d))
+	d.Status = appsv1.DeploymentStatus{
+		ObservedGeneration: d.Generation, Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1,
+	}
+	require.NoError(t, k8sClient.Status().Update(testCtx, &d))
+}
+
+func assertRouteCondition(t *testing.T, ns, name string, status metav1.ConditionStatus, reason string) {
+	t.Helper()
+	var mr agentsv1alpha1.ModelRoute
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &mr))
+	c := apimeta.FindStatusCondition(mr.Status.Conditions, conditionReady)
+	require.NotNil(t, c, "ModelRoute %s/%s has no Ready condition", ns, name)
+	assert.Equal(t, status, c.Status, "Ready status (%s)", c.Message)
+	assert.Equal(t, reason, c.Reason)
+}
+
+// A route already served keeps Ready while another route's change rolls the gateway, since the pods
+// still running serve it; the new route is not Ready until the roll completes.
+func TestModelRoute_ServedRouteStaysReadyWhileAnotherRolls(t *testing.T) {
+	ensureNS(t, gwNS)
+	t.Cleanup(createGatewayDeployment(t))
+	mk := func(name string) {
+		route := &agentsv1alpha1.ModelRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gwNS},
+			Spec: agentsv1alpha1.ModelRouteSpec{Providers: []agentsv1alpha1.ProviderRef{
+				{Provider: "mock", Model: "mock-default", Priority: 1},
+			}},
+		}
+		require.NoError(t, k8sClient.Create(testCtx, route))
+		t.Cleanup(func() { _ = k8sClient.Delete(testCtx, route) })
+	}
+	r := newMRReconciler()
+	mk("mr-served-first")
+	reconcileMR(t, r, gwNS, "mr-served-first")
+	completeGatewayRollout(t)
+	reconcileMR(t, r, gwNS, "mr-served-first")
+	assertRouteCondition(t, gwNS, "mr-served-first", metav1.ConditionTrue, "Served")
+
+	mk("mr-served-second") // changes the config, so the gateway rolls again
+	reconcileMR(t, r, gwNS, "mr-served-second")
+	assertRouteCondition(t, gwNS, "mr-served-first", metav1.ConditionTrue, "Served")
+	assertRouteCondition(t, gwNS, "mr-served-second", metav1.ConditionFalse, "GatewayRolling")
 }

@@ -1205,6 +1205,12 @@ spec:
         - --config
         - /etc/litellm/config.yaml
         image: ghcr.io/berriai/litellm:v1.91.0
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - sleep
+              - "10"
         livenessProbe:
           failureThreshold: 3
           httpGet:
@@ -1246,7 +1252,7 @@ spec:
         runAsUser: 1000
         seccompProfile:
           type: RuntimeDefault
-      terminationGracePeriodSeconds: 10
+      terminationGracePeriodSeconds: 30
       volumes:
       - configMap:
           name: ctxmesh-gateway-config
