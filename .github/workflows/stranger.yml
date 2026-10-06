@@ -91,6 +91,11 @@ jobs:
             chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
           }
           helm version --short && kubectl version --client=true 2>/dev/null | head -1
+      - name: Install nvm for the console hop's browser toolchain (harness ui-e2e/.nvmrc)
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh \
+            | PROFILE=/dev/null bash
+          test -s "$HOME/.nvm/nvm.sh"
       - name: Published artifacts must match what the release claims
         env:
           AGENT_ENGINE: ${{ github.workspace }}
