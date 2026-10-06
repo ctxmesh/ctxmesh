@@ -100,6 +100,21 @@ runtime;^internal/(run|gateway|egress|pki|statelayer)/;tier0 tier1
 # held and proven by the launcher, verified by the egress sidecar and the state-layer proxy.
 runtime;^internal/runcap/;tier0 tier1 tier2 sdk-live
 sdk;^sdk/;sdk-contract sdk-readme-truth tier0
+# The credential plane behind the token service: where an on-behalf-of grant is stored, sealed and
+# refreshed. A change here decides whether a tool call can authenticate at all, so it needs the e2e
+# credential flows, not only unit tests.
+credentials;^internal/(credplane|credpostgres|credprovider|credresolve|credstore)/;tier0 tier1 tier2
+# The Postgres-backed control-plane stores the BFF serves to the console (registries, skills, knowledge,
+# datasets, shared runs). The two sub-packages mapped above keep their stricter rows.
+console;^internal/controlplane/;ux-review tier0 tier1
+# agent.yaml -> manifests. The console create flow and the CLI both produce agents through it.
+console;^internal/expand/;ux-review tier0 tier1
+console;^internal/replay/;ux-review tier0 tier1
+console-authz;^internal/enduseroidc/;flow-completability tier0 tier1
+install;^internal/(bootstrap|preflight)/;install-truth tier0 tier1
+api;^internal/webhook/;tier0 tier1 tier2
+runtime;^internal/(asyncbus|discovery|guardrail|ingest|ingestion|ocr|objectstore)/;tier0 tier1 tier2
+runtime;^internal/(audit|dbpool|eval|kedatypes|prompt|promql|runtimelimit|toolmanifest|toolpush|workflow)/;tier0 tier1
 # The DEPENDENCY surface. go.mod/go.sum were unmapped, so a dependency bump required NOTHING --
 # found 2026-10-03 by gates-owed.sh, which propagates the fail-closed exit of this script. That is
 # change class most likely to introduce a supply-chain problem, and the one that had just shipped a
