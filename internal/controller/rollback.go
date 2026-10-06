@@ -45,9 +45,10 @@ import (
 //     future auto-trigger — the guards are the mechanism, the auto-trigger is deferred):
 //     healthy-target, cooldown, two-version flap, freeze-after-auto-action. A refused
 //     rollback surfaces a clear status condition/reason and NEVER silently no-ops.
-//  3. reverts AgentDeployment.spec to the target version's spec.snapshot (the normal
-//     reconcile then rolls the workload), records the action on status.rollback, and
-//     CLEARS the annotation so the rollback fires exactly once.
+//  3. reverts AgentDeployment.spec to the target version's spec.snapshot, keeping the live
+//     tool policy and feedback declaration (rollbackSpec), so the normal reconcile then rolls
+//     the workload; records the action on status.rollback, and CLEARS the annotation so the
+//     rollback fires exactly once.
 //
 // The spec-revert is an ordinary Update to the AgentDeployment object, so it is captured by
 // the existing control-plane Auditor (internal/audit) exactly like a promote — no new audit
@@ -405,11 +406,11 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 	if err := r.Get(ctx, client.ObjectKeyFromObject(deploy), &fresh); err != nil {
 		return fmt.Errorf("re-fetching for rollback: %w", err)
 	}
-	// Revert the serving spec to the target's verbatim snapshot and clear the annotation in
-	// the SAME object Update: the spec becomes the target's, and the signal is consumed
-	// atomically so the rollback fires exactly once (the ordinary reconcile then rolls the
-	// workload against the reverted spec — the actuator changes no Knative traffic itself).
-	fresh.Spec = av.Spec.Snapshot
+	// Revert the serving spec to the target's snapshot (governance excepted, see rollbackSpec) and
+	// clear the annotation in the SAME object Update, so the rollback fires exactly once (the
+	// ordinary reconcile then rolls the workload against the reverted spec — the actuator changes
+	// no Knative traffic itself).
+	fresh.Spec = rollbackSpec(av.Spec.Snapshot, fresh.Spec)
 	if fresh.Annotations != nil {
 		delete(fresh.Annotations, rollbackAnnotation)
 	}
@@ -465,6 +466,30 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 	// The spec Update above re-enqueues the object; the next reconcile rolls the workload
 	// against the reverted spec. No requeue needed here.
 	return nil
+}
+
+// rollbackSpec returns the target snapshot with the live governance fields kept:
+// spec.runtime.toolPolicy (default, overrides, approvers) and spec.feedback. A rollback restores
+// what the agent does, never who may approve or what needs approval; a governance change is undone
+// by a person editing it.
+func rollbackSpec(snapshot, live agentsv1alpha1.AgentDeploymentSpec) agentsv1alpha1.AgentDeploymentSpec {
+	out := *snapshot.DeepCopy()
+	out.Feedback = live.Feedback.DeepCopy()
+
+	var liveToolPolicy *agentsv1alpha1.ToolPolicySpec
+	if live.Runtime != nil {
+		liveToolPolicy = live.Runtime.ToolPolicy.DeepCopy()
+	}
+	switch {
+	case out.Runtime != nil:
+		out.Runtime.ToolPolicy = liveToolPolicy
+		if *out.Runtime == (agentsv1alpha1.RuntimeSpec{}) {
+			out.Runtime = nil // the snapshot's runtime held only a tool policy
+		}
+	case liveToolPolicy != nil:
+		out.Runtime = &agentsv1alpha1.RuntimeSpec{ToolPolicy: liveToolPolicy}
+	}
+	return out
 }
 
 // refuseRollback records a REFUSED rollback on status (RolledBack=False + a clear reason) and

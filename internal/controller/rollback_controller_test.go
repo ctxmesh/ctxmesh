@@ -124,6 +124,79 @@ func TestRollback_HealthyTarget_RevertsSpec(t *testing.T) {
 	assert.Equal(t, reasonRolledBack, cond.Reason)
 }
 
+// TestRollback_KeepsLiveGovernance: rolling back to a version whose tool policy is weaker (one approval
+// gate fewer, a since-revoked approver) restores the version's image and prompt but keeps the live tool
+// policy and feedback declaration. A rollback must never reopen an approval gate.
+func TestRollback_KeepsLiveGovernance(t *testing.T) {
+	const (
+		name      = "rb-governance-agent"
+		namespace = "default"
+		targetV   = "rb-governance-agent-target0"
+	)
+	weak := &agentsv1alpha1.ToolPolicySpec{
+		Default:   "allow",
+		Overrides: []agentsv1alpha1.ToolPolicyOverride{{Name: "db.delete", Rule: "require-approval"}},
+		Approvers: []agentsv1alpha1.Approver{{Kind: "User", Name: "mallory@example.com"}},
+	}
+	strict := &agentsv1alpha1.ToolPolicySpec{
+		Default: "allow",
+		Overrides: []agentsv1alpha1.ToolPolicyOverride{
+			{Name: "db.delete", Rule: "require-approval"},
+			{Name: "send_email", Rule: "require-approval"},
+		},
+		Approvers: []agentsv1alpha1.Approver{{Kind: "Group", Name: "dba"}},
+	}
+	feedback := func(score string) *agentsv1alpha1.FeedbackSpec {
+		return &agentsv1alpha1.FeedbackSpec{Human: &agentsv1alpha1.HumanSource{
+			Scores: []agentsv1alpha1.ScoreDecl{{Name: score, DataType: agentsv1alpha1.ScoreBoolean}},
+		}}
+	}
+
+	target := &agentsv1alpha1.AgentVersion{
+		ObjectMeta: metav1.ObjectMeta{Name: targetV, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentVersionSpec{
+			DeploymentName: name,
+			Snapshot: agentsv1alpha1.AgentDeploymentSpec{
+				Image:     "ghcr.io/ctxmesh/example-agent:v1",
+				PromptRef: "support-prompt-v1",
+				Runtime:   &agentsv1alpha1.RuntimeSpec{ToolPolicy: weak},
+				Feedback:  feedback("thumbs-old"),
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, target))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, target) })
+
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image:     "ghcr.io/ctxmesh/example-agent:v2-bad",
+			PromptRef: "support-prompt-v2",
+			Runtime:   &agentsv1alpha1.RuntimeSpec{ToolPolicy: strict},
+			Feedback:  feedback("thumbs"),
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	var live agentsv1alpha1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &live))
+
+	annotateRollback(t, name, namespace, targetV)
+	reconcileNN(t, rollbackReconciler(onlinescore.NewMemStore()), name, namespace)
+
+	var got agentsv1alpha1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
+	require.NotNil(t, rolledBackCond(t, name, namespace))
+	assert.Equal(t, metav1.ConditionTrue, rolledBackCond(t, name, namespace).Status, "the rollback acted")
+
+	assert.Equal(t, "ghcr.io/ctxmesh/example-agent:v1", got.Spec.Image, "the image is restored")
+	assert.Equal(t, "support-prompt-v1", got.Spec.PromptRef, "the prompt is restored")
+	require.NotNil(t, got.Spec.Runtime)
+	assert.Equal(t, live.Spec.Runtime.ToolPolicy, got.Spec.Runtime.ToolPolicy,
+		"the live tool policy stays: send_email still needs approval and mallory is still not an approver")
+	assert.Equal(t, live.Spec.Feedback, got.Spec.Feedback, "the live feedback declaration stays")
+}
+
 // TestRollback_UnhealthyTarget_Refused: a target that itself regressed vs its own baseline is
 // refused with RollbackTargetUnhealthy, and the spec is UNCHANGED. (validate step (b))
 func TestRollback_UnhealthyTarget_Refused(t *testing.T) {
