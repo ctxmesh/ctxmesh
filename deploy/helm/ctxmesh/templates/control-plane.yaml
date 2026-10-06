@@ -1446,6 +1446,7 @@ spec:
         - mountPath: /etc/token-service/tls
           name: tls
           readOnly: true
+      enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
         seccompProfile:

@@ -44,6 +44,9 @@ spec:
         control-plane: token-service
         app.kubernetes.io/name: ctxmesh
     spec:
+      # Load-bearing: a Service named credential-backend would inject CREDENTIAL_BACKEND_* variables,
+      # which the strict config refuses (TestConfigFromEnv_RefusesServiceLinkVariables).
+      enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
         seccompProfile:

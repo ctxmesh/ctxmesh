@@ -128,6 +128,19 @@ func TestConfigFromEnv_EachBackendParses(t *testing.T) {
 	}
 }
 
+// TestConfigFromEnv_RefusesServiceLinkVariables documents why the token-service pod sets
+// enableServiceLinks: false. Kubernetes injects <SERVICE>_PORT and <SERVICE>_SERVICE_HOST for every
+// Service in the namespace, so a Service named credential-backend produces CREDENTIAL_BACKEND_*
+// variables that no backend reads, and the strict config refuses to start on them.
+func TestConfigFromEnv_RefusesServiceLinkVariables(t *testing.T) {
+	for _, name := range []string{"CREDENTIAL_BACKEND_PORT", "CREDENTIAL_BACKEND_SERVICE_HOST"} {
+		_, err := ConfigFromEnv(environ(map[string]string{name: "10.96.0.10"}))
+		if err == nil || !strings.Contains(err.Error(), name) {
+			t.Fatalf("%s: err = %v, want a refusal naming it", name, err)
+		}
+	}
+}
+
 // TestConfigFromEnv_RefusesNamingTheVariable: every unknown backend, stray, missing or malformed
 // value refuses, and the error names the variable an operator has to fix. None of them falls back to
 // kubernetes.
