@@ -49,6 +49,50 @@ jobs:
     secrets:
       BRAIN_CHECKOUT_TOKEN: ${{ secrets.BRAIN_CHECKOUT_TOKEN }}
 
+  # Upgrade from the newest published release to this tree, on a cluster carrying real data: the
+  # upgrade every user makes next (m184.16). Red until a published release installs (beta.8's
+  # bundled MinIO image can no longer be pulled), which is the truth about that upgrade path.
+  upgrade:
+    name: nightly-upgrade
+    if: ${{ !inputs.stranger_only }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the tags: the newest one is the release a user upgrades from
+      - name: Check out agent-brain (harness owns e2e — ADR 0004)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ctxmesh/agent-brain
+          token: ${{ secrets.BRAIN_CHECKOUT_TOKEN }}
+          path: agent-brain
+          persist-credentials: false
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+      - name: Install kind
+        run: |
+          curl -fsSLo ./kind "https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-$(go env GOARCH)"
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          kind version
+      - name: Install helm and kubectl explicitly
+        run: |
+          command -v helm >/dev/null || curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          command -v kubectl >/dev/null || {
+            curl -fsSLo kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/$(go env GOARCH)/kubectl"
+            chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
+          }
+      - name: Upgrade from the newest published release to this tree, with real data
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        run: agent-brain/harness/scripts/e2e-upgrade.sh
+
   full-e2e:
     name: nightly-full-e2e
     if: ${{ !inputs.stranger_only }}
