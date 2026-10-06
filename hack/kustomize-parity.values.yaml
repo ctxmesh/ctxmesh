@@ -37,6 +37,8 @@ bff:
   image:
     repository: bff
     tag: latest
+  # The dev path leaves MANAGED_AGENT_IMAGE empty; dev bring-ups set it to a loaded dev.local image.
+  managedAgentImage: ""
 tokenService:
   image:
     repository: token-service

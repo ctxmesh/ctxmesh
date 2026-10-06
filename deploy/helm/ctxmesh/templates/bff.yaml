@@ -167,7 +167,7 @@ spec:
         - name: MODEL_GATEWAY_URL
           value: {{ .Values.bff.modelGatewayURL | default (printf "http://ctxmesh-gateway.%s.svc:4000" .Values.namespace) }}
         - name: MANAGED_AGENT_IMAGE
-          value: {{ .Values.bff.managedAgentImage | default "" | quote }}
+          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.bff.managedAgentImage "ctx" $) | quote }}
         - name: INGEST_OCR_URL
           value: {{ .Values.bff.ingestOcrURL | default "" | quote }}
         - name: KNOWLEDGE_RERANK_URL
