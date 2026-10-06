@@ -25,6 +25,7 @@ package controller
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -651,13 +652,33 @@ func TestToolPolicy_InlineApproval_DeliveredToSidecar(t *testing.T) {
 	}
 }
 
-// TestToolPolicy_ApproverShapeValidatedAtAdmission: an approver kind outside User|Group, or an empty
-// name, is rejected by the API server.
+// TestToolPolicy_LongestServiceAccountApproverAccepted: the longest possible ServiceAccount username
+// (a 63-character namespace and a 253-character name) fits the approver name limit.
+func TestToolPolicy_LongestServiceAccountApproverAccepted(t *testing.T) {
+	const ns = "default"
+	username := "system:serviceaccount:" + strings.Repeat("n", 63) + ":" + strings.Repeat("s", 253)
+	require.Len(t, username, 339)
+	agent := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "tp-approver-longest-sa", Namespace: ns},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080,
+			Runtime: &agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{
+				Approvers: []agentsv1alpha1.Approver{{Kind: "User", Name: username}},
+			}},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, agent), "the longest ServiceAccount username is a valid approver")
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+}
+
+// TestToolPolicy_ApproverShapeValidatedAtAdmission: an approver kind outside User|Group, an empty
+// name, or a name longer than any Kubernetes username is rejected by the API server.
 func TestToolPolicy_ApproverShapeValidatedAtAdmission(t *testing.T) {
 	const ns = "default"
 	for name, approver := range map[string]agentsv1alpha1.Approver{
 		"tp-approver-kind": {Kind: "ServiceAccount", Name: "ci"},
 		"tp-approver-name": {Kind: "User", Name: ""},
+		"tp-approver-long": {Kind: "User", Name: strings.Repeat("a", 340)},
 	} {
 		agent := &agentsv1alpha1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},

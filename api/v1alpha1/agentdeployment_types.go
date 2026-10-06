@@ -648,11 +648,12 @@ type ToolPolicySpec struct {
 	MaxToolCallsPerRun int32 `json:"maxToolCallsPerRun,omitempty"`
 
 	// approvers narrows who may approve a paused tool call (rule require-approval) for this
-	// agent. A caller approving a run must hold resume permission on the agent through RBAC
-	// AND match an entry here: a User entry matches the caller's username, a Group entry any
-	// group the caller belongs to. Identity comes from the caller's own verified token, never
-	// from the request. This list can only narrow RBAC; it never grants approval to someone
-	// without it. Empty means anyone with resume permission may approve.
+	// agent. A caller approving a run must already be allowed to act on it, as the run's
+	// creator or as a caller who can get this AgentDeployment, AND match an entry here: a User
+	// entry matches the caller's username, a Group entry any group the caller belongs to.
+	// Identity comes from the caller's own verified token, never from the request. This list
+	// only narrows who may approve; it never lets in a caller who could not act on the run.
+	// Empty means anyone who can act on the run may approve.
 	//
 	// A ServiceAccount approves through its username or group form, for example User
 	// "system:serviceaccount:<namespace>:<name>".
@@ -670,9 +671,10 @@ type Approver struct {
 	// +kubebuilder:validation:Enum=User;Group
 	Kind string `json:"kind"`
 
-	// name is the username or group name to match.
+	// name is the username or group name to match. The limit fits the longest ServiceAccount
+	// username, system:serviceaccount:<namespace>:<name>.
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=316
+	// +kubebuilder:validation:MaxLength=339
 	Name string `json:"name"`
 }
 
