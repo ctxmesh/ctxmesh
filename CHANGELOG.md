@@ -51,6 +51,35 @@ along with per-user quotas and per-conversation spend. **If you run your own Val
 (`statelayer.externalAddr`), it must admit `~mem:* ~tenant:* ~a2a:seen:* ~spawn:* ~agent:* ~runcap:*
 ~run:* ~ns:* ~fleet:* ~user:* ~conv:*`.
 
+**Fixed: a stock install's console could not list a single run.** The console's Runs list read only
+from a trace backend (Langfuse), which the chart does not bundle, so on a stock install the list, and
+each agent's Runs tab, answered "unavailable". Every install already records runs made through
+`POST /api/runs` in its Postgres run store. Without a trace backend, both lists now read from it,
+scoped to the agents the caller can see. Cost and tokens still come from a trace backend, so they read
+"—" there, never 0. Each row opens the run itself. The Runs page now sends the selected namespace, so
+a user whose role is bound to one namespace can list it.
+
+**Fixed: model calls were refused while the gateway restarted.** Every ModelRoute change restarts the
+model gateway, and the old pod stopped listening while Kubernetes was still routing to it. Calls in
+that second failed with "connection refused"; measured, three or four per restart. A first run made a
+minute after creating a ModelRoute, as the quickstart does, failed this way. The gateway now keeps
+serving for ten seconds after it is told to stop; measured afterwards, four of five restarts dropped
+nothing.
+
+**Behaviour change: a ModelRoute is Ready only once the gateway serves it.** `Ready` used to mean the
+route had been written into the gateway's config file. The gateway then took up to a minute to restart
+with it, and a call in that window failed with LiteLLM's "Invalid model name", so waiting for `Ready`
+did not make a first call safe. `Ready` now turns True (reason `Served`) once the gateway has finished
+rolling out the config that holds the route. Until then it is False, with reason `GatewayRolling`, or
+`GatewayAbsent` when the gateway Deployment does not exist. Scripts that wait on a route's `Ready`
+with a short timeout may need a longer one.
+
+**Fixed: durable runs of an agent that does not stream always failed.** The run worker asks agents
+for an event stream and read any reply as one. An agent that answered with plain JSON, as the
+quickstart's echo agent does, produced "stream ended with no result frame" on every run, from the
+console chat and from `POST /api/runs`. A plain reply is now taken as the result, as the execution
+contract already said.
+
 **Breaking:** with a state layer present (the default), the BFF refuses unbound capabilities.
 - **Older agents:** an agent built on an older base image has a launcher that cannot bind, so those
   calls fail until it is rebuilt. To run older agents meanwhile, set
