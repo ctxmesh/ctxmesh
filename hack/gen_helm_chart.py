@@ -272,7 +272,7 @@ TOKEN_SERVICE_TLS_REQUIRED_ENV_HELM = (
 # validates them and refuses to start on a bad one, naming the variable, so the chart only renders.
 CREDENTIAL_BACKEND_ENV_HELM = (
     "\n        {{- $cb := .Values.tokenService.credentialBackend | default dict }}"
-    '\n        {{- $cbType := $cb.type | default "kubernetes" | toString }}'
+    '\n        {{- $cbType := $cb.type | default "kubernetes" | toString | lower }}'
     '\n        {{- if ne $cbType "kubernetes" }}'
     "\n        - name: CREDENTIAL_BACKEND"
     "\n          value: {{ $cbType | quote }}"

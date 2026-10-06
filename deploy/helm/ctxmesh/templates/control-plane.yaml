@@ -1340,7 +1340,7 @@ spec:
         - name: TOKEN_SERVICE_TLS_REQUIRED
           value: {{ .Values.tokenService.tls.required | quote }}
         {{- $cb := .Values.tokenService.credentialBackend | default dict }}
-        {{- $cbType := $cb.type | default "kubernetes" | toString }}
+        {{- $cbType := $cb.type | default "kubernetes" | toString | lower }}
         {{- if ne $cbType "kubernetes" }}
         - name: CREDENTIAL_BACKEND
           value: {{ $cbType | quote }}
