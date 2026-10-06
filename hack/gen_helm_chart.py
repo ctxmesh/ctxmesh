@@ -319,10 +319,6 @@ CREDENTIAL_BACKEND_ENV_HELM = (
     "\n        {{- with $enc.kmsV2 }}"
     "\n        - name: CREDENTIAL_BACKEND_POSTGRES_KMSV2_ENDPOINT"
     "\n          value: {{ .endpoint | quote }}"
-    "\n        {{- with .keyIDPrefix }}"
-    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_KMSV2_KEY_ID_PREFIX"
-    "\n          value: {{ . | quote }}"
-    "\n        {{- end }}"
     "\n        {{- end }}"
     "\n        {{- end }}"
     '\n        {{- if eq $cbType "remote" }}'

@@ -79,8 +79,7 @@ type OpenBaoTransitKMS struct {
 
 // KMSv2Provider references a Kubernetes KMS v2 gRPC provider.
 type KMSv2Provider struct {
-	Endpoint    string
-	KeyIDPrefix string
+	Endpoint string
 }
 
 // RemoteProvider selects an out-of-tree backend.
@@ -143,7 +142,6 @@ const (
 	EnvPostgresTransitCASecretName    = "CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_CA_SECRET_NAME"
 	EnvPostgresTransitCASecretKey     = "CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_CA_SECRET_KEY"
 	EnvPostgresKMSv2Endpoint          = "CREDENTIAL_BACKEND_POSTGRES_KMSV2_ENDPOINT"
-	EnvPostgresKMSv2KeyIDPrefix       = "CREDENTIAL_BACKEND_POSTGRES_KMSV2_KEY_ID_PREFIX"
 	EnvRemoteEndpoint                 = "CREDENTIAL_BACKEND_REMOTE_ENDPOINT"
 	EnvRemoteMTLSCASecretName         = "CREDENTIAL_BACKEND_REMOTE_MTLS_CA_SECRET_NAME"
 	EnvRemoteMTLSCASecretKey          = "CREDENTIAL_BACKEND_REMOTE_MTLS_CA_SECRET_KEY"
@@ -174,7 +172,7 @@ var backendVars = map[string][]string{
 		EnvPostgresTransitAddress, EnvPostgresTransitTokenSecretName, EnvPostgresTransitTokenSecretKey,
 		EnvPostgresTransitMountPath, EnvPostgresTransitKeyPrefix,
 		EnvPostgresTransitCASecretName, EnvPostgresTransitCASecretKey,
-		EnvPostgresKMSv2Endpoint, EnvPostgresKMSv2KeyIDPrefix,
+		EnvPostgresKMSv2Endpoint,
 	},
 	BackendRemote: {
 		EnvRemoteEndpoint, EnvRemoteMTLSCASecretName, EnvRemoteMTLSCASecretKey, EnvRemoteMTLSClientTLSSecretName,
@@ -262,7 +260,7 @@ func postgresFromEnv(env map[string]string) (*PostgresProvider, error) {
 		if endpoint == "" {
 			return nil, fmt.Errorf(errMissingVariable, EnvPostgresKMSv2Endpoint, BackendPostgres)
 		}
-		enc.KMSv2 = &KMSv2Provider{Endpoint: endpoint, KeyIDPrefix: env[EnvPostgresKMSv2KeyIDPrefix]}
+		enc.KMSv2 = &KMSv2Provider{Endpoint: endpoint}
 		custodians = append(custodians, EnvPostgresKMSv2Endpoint)
 	}
 	switch len(custodians) {

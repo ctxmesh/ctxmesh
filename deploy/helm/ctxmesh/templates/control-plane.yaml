@@ -1387,10 +1387,6 @@ spec:
         {{- with $enc.kmsV2 }}
         - name: CREDENTIAL_BACKEND_POSTGRES_KMSV2_ENDPOINT
           value: {{ .endpoint | quote }}
-        {{- with .keyIDPrefix }}
-        - name: CREDENTIAL_BACKEND_POSTGRES_KMSV2_KEY_ID_PREFIX
-          value: {{ . | quote }}
-        {{- end }}
         {{- end }}
         {{- end }}
         {{- if eq $cbType "remote" }}

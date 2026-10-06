@@ -265,8 +265,7 @@ tokenService:
       #     keyPrefix: ""                # optional; key name is <keyPrefix><tenant>
       #     caSecretRef: {name, key}     # optional; verifies the OpenBao server
       #   kmsV2:                           a Kubernetes KMS v2 plugin
-      #     endpoint: unix:///var/run/kms/socket
-      #     keyIDPrefix: ""              # optional
+      #     endpoint: unix:///var/run/kms/socket   # single-key: the plugin manages one KEK
       encryption: {}
     remote:
       # The provider's https base URL.

@@ -96,10 +96,10 @@ func TestConfigFromEnv_EachBackendParses(t *testing.T) {
 			}},
 		}}}},
 		{"postgres + kms v2", with(pgBase, map[string]string{
-			EnvPostgresKMSv2Endpoint: "unix:///var/run/kms/socket", EnvPostgresKMSv2KeyIDPrefix: "kek-",
+			EnvPostgresKMSv2Endpoint: "unix:///var/run/kms/socket",
 		}), Config{Provider: Provider{Postgres: &PostgresProvider{
 			DSNSecretRef: SecretKeyRef{Name: "credstore-dsn", Key: "dsn"},
-			Encryption:   &EnvelopeEncryption{KMSv2: &KMSv2Provider{Endpoint: "unix:///var/run/kms/socket", KeyIDPrefix: "kek-"}},
+			Encryption:   &EnvelopeEncryption{KMSv2: &KMSv2Provider{Endpoint: "unix:///var/run/kms/socket"}},
 		}}}},
 		{"remote", map[string]string{
 			EnvBackend:                       "remote",
@@ -197,8 +197,8 @@ func TestConfigFromEnv_RefusesNamingTheVariable(t *testing.T) {
 			EnvPostgresTransitCASecretName: "ca",
 		}), []string{EnvPostgresTransitCASecretKey}},
 		{
-			"kms v2 prefix without an endpoint", with(pgBase, map[string]string{EnvPostgresKMSv2KeyIDPrefix: "k-"}),
-			[]string{EnvPostgresKMSv2Endpoint},
+			"kms v2 key id prefix (KMS v2 is single-key)", with(pgBase, map[string]string{EnvPostgresKMSv2Endpoint: "unix:///var/run/kms/socket", "CREDENTIAL_BACKEND_POSTGRES_KMSV2_KEY_ID_PREFIX": "k-"}),
+			[]string{"CREDENTIAL_BACKEND_POSTGRES_KMSV2_KEY_ID_PREFIX"},
 		},
 		{"remote without an endpoint", with(remote, map[string]string{EnvRemoteEndpoint: ""}), []string{EnvRemoteEndpoint}},
 		{
