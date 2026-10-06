@@ -1415,7 +1415,7 @@ func (s *Server) Handler() http.Handler {
 		// (registered by the else branch below).
 		authed.HandleFunc("GET /api/feedback", s.handleFeedback)
 		// Feedback WRITE (M139, ADR 0112): the console/external submit path. Caller-scoped;
-		// gated by the agent's FeedbackStore (declared score names) when bound; relayed to
+		// gated by the agent's spec.feedback (declared score names) when set; relayed to
 		// Langfuse (the store of record). Langfuse absent → 501 (registered by the else branch).
 		authed.HandleFunc("POST /api/feedback", s.handleSubmitFeedback)
 		// Cost breakdown by agent (m16.5): aggregates a bounded recent window of

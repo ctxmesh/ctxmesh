@@ -510,10 +510,10 @@ export interface FeedbackScore {
   stringValue?: string;
   comment?: string;
   source?: string;
-  // attributedSource is the feedback source declared by the agent's FeedbackStore
-  // (M139, ADR 0112): "human", "external:<channel>", or "unattributed". Absent when
-  // the agent binds no FeedbackStore. Distinct from `source` (the raw Langfuse origin,
-  // always "API" for platform-written scores) — this is the CRD-driven attribution.
+  // attributedSource is the feedback source the agent's spec.feedback declares
+  // (ADR 0152): "human", "external:<channel>", or "unattributed". Absent when the
+  // agent declares no spec.feedback. Distinct from `source` (the raw Langfuse origin,
+  // always "API" for platform-written scores) — this is the declaration-driven attribution.
   attributedSource?: string;
 }
 

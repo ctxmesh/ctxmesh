@@ -414,13 +414,17 @@ type AgentDeploymentSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	ApprovalPolicyRef string `json:"approvalPolicyRef,omitempty"`
 
-	// feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
-	// multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
-	// gates ingestion by the declared score names and the read path attributes scores to their source;
-	// Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
+	// feedback declares which feedback scores this agent accepts and where each one comes from:
+	// people annotating runs in the console, or named external channels such as a CSAT webhook.
+	// When set, the feedback endpoint checks every submitted score name against it (mode Enforce
+	// rejects a name no source declares; Monitor accepts it), and the console labels each stored
+	// score with its declared source. When omitted, any score name is accepted and scores carry no
+	// source label.
+	//
+	// This is configuration only: the scores themselves are stored in Langfuse, and removing this
+	// field does not delete them.
 	// +optional
-	// +kubebuilder:validation:MaxLength=253
-	FeedbackStoreRef string `json:"feedbackStoreRef,omitempty"`
+	Feedback *FeedbackSpec `json:"feedback,omitempty"`
 
 	// rollout optionally selects a progressive-delivery strategy for a GATED serving
 	// agent (ADR 0062 Fork 3, M69). Absent (or strategy "") ⇒ today's promote-all/hold
@@ -666,6 +670,98 @@ type ToolPolicyOverride struct {
 	// tool retries are off unless the tool is explicitly declared idempotent/safe.
 	// +optional
 	Retryable bool `json:"retryable,omitempty"`
+}
+
+// FeedbackSpec declares an agent's feedback sources. At least one source is required, and a score
+// name may appear only once across all sources, because the name is what attributes a stored score
+// to its source.
+// +kubebuilder:validation:XValidation:rule="(has(self.human) && size(self.human.scores) > 0) || (has(self.external) && size(self.external) > 0)",message="feedback must declare at least one source: human.scores or an external channel"
+// +kubebuilder:validation:XValidation:rule="!has(self.human) || !has(self.external) || self.human.scores.all(s, !self.external.exists(e, e.score.name == s.name))",message="a score name is declared by both human and an external channel; score names must be unique across all sources"
+type FeedbackSpec struct {
+	// mode selects whether the declaration gates submitted scores. Enforce rejects a score whose
+	// name no source declares. Monitor accepts it, which lets an agent that already emits scores
+	// adopt a declaration without losing any. Defaults to Enforce.
+	// +optional
+	// +kubebuilder:default=Enforce
+	Mode FeedbackMode `json:"mode,omitempty"`
+
+	// human declares the scores people submit, such as thumbs and ratings in the console.
+	// +optional
+	Human *HumanSource `json:"human,omitempty"`
+
+	// external declares the external feedback channels, one score per channel.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:XValidation:rule="self.all(e, self.exists_one(f, f.score.name == e.score.name))",message="each external channel must declare a distinct score name"
+	External []ExternalSource `json:"external,omitempty"`
+}
+
+// FeedbackMode selects whether spec.feedback gates submitted scores.
+// +kubebuilder:validation:Enum=Enforce;Monitor
+type FeedbackMode string
+
+const (
+	// FeedbackEnforce rejects a submitted score whose name no source declares.
+	FeedbackEnforce FeedbackMode = "Enforce"
+	// FeedbackMonitor accepts a submitted score whose name no source declares.
+	FeedbackMonitor FeedbackMode = "Monitor"
+)
+
+// ScoreDataType is a feedback score's value type. The values are Langfuse's score data types,
+// because Langfuse stores the scores.
+// +kubebuilder:validation:Enum=NUMERIC;BOOLEAN;CATEGORICAL
+type ScoreDataType string
+
+const (
+	ScoreNumeric     ScoreDataType = "NUMERIC"
+	ScoreBoolean     ScoreDataType = "BOOLEAN"
+	ScoreCategorical ScoreDataType = "CATEGORICAL"
+)
+
+// ScoreDecl declares one feedback score.
+type ScoreDecl struct {
+	// name is the score name, as submitted and as stored in Langfuse (for example "thumbs",
+	// "accuracy" or "csat"). It must be unique across every source in spec.feedback.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	Name string `json:"name"`
+
+	// dataType is the score's value type. NUMERIC and BOOLEAN carry a number; CATEGORICAL carries
+	// a string label. Defaults to NUMERIC.
+	// +optional
+	// +kubebuilder:default=NUMERIC
+	DataType ScoreDataType `json:"dataType,omitempty"`
+
+	// categories is the allowed label set for a CATEGORICAL score. It is informational today and
+	// ignored for other data types.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=64
+	Categories []string `json:"categories,omitempty"`
+}
+
+// HumanSource declares the scores people submit.
+type HumanSource struct {
+	// scores are the human-submitted score dimensions. Names must be unique.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +listType=atomic
+	// +kubebuilder:validation:XValidation:rule="self.all(s, self.exists_one(t, t.name == s.name))",message="human score names must be unique"
+	Scores []ScoreDecl `json:"scores"`
+}
+
+// ExternalSource declares one external feedback channel, such as a webhook or an API that reports
+// a rating, a completion or a business metric.
+type ExternalSource struct {
+	// name is the channel name (for example "csat-webhook"). A score from this channel is labelled
+	// "external:<name>".
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	Name string `json:"name"`
+
+	// score is the score this channel writes.
+	Score ScoreDecl `json:"score"`
 }
 
 // ResilienceSpec configures per-turn retry and timeout behaviour for model and

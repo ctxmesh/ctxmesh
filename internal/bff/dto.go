@@ -1290,10 +1290,10 @@ type FeedbackScore struct {
 	Source string `json:"source"`
 	// CreatedAt is the Langfuse score creation timestamp (RFC3339).
 	CreatedAt string `json:"createdAt"`
-	// AttributedSource is the feedback source declared by the agent's FeedbackStore for this score's name
-	// (M139, ADR 0112): "human", "external:<channel>", or "unattributed". Empty (omitted) when the agent
-	// binds no FeedbackStore — Langfuse's own Source field can't distinguish sources, so this is the CRD-
-	// driven attribution.
+	// AttributedSource is the feedback source the agent's spec.feedback declares for this score's name
+	// (ADR 0152): "human", "external:<channel>", or "unattributed". Empty (omitted) when the agent declares
+	// no spec.feedback. Langfuse's own Source field cannot distinguish sources, so this is the
+	// declaration-driven attribution.
 	AttributedSource string `json:"attributedSource,omitempty"`
 }
 
@@ -1304,12 +1304,12 @@ type FeedbackResponse struct {
 }
 
 // SubmitFeedbackRequest is the body of POST /api/feedback (M139, ADR 0112) — the console/external WRITE
-// path. The score is relayed to Langfuse (the store of record) after caller-scoped authz + the bound
-// FeedbackStore's ingestion gate. Value is numeric (NUMERIC/BOOLEAN, matching the v1 relay, ADR 0008).
+// path. The score is relayed to Langfuse (the store of record) after caller-scoped authz + the
+// gate the agent's spec.feedback declares. Value is numeric (NUMERIC/BOOLEAN, matching the v1 relay, ADR 0008).
 type SubmitFeedbackRequest struct {
 	// TraceID is the run's trace the score attaches to (required).
 	TraceID string `json:"traceId"`
-	// Name is the score dimension (required) — gated against the FeedbackStore's declared names in Enforce.
+	// Name is the score dimension (required) — gated against spec.feedback's declared names in Enforce.
 	Name string `json:"name"`
 	// Value is the numeric score value (e.g. 0..1 for a thumb; a bounded rating).
 	Value float64 `json:"value"`

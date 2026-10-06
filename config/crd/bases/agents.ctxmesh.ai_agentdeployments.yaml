@@ -357,14 +357,145 @@ spec:
                 - eventing
                 - job
                 type: string
-              feedbackStoreRef:
+              feedback:
                 description: |-
-                  feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
-                  multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
-                  gates ingestion by the declared score names and the read path attributes scores to their source;
-                  Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
-                maxLength: 253
-                type: string
+                  feedback declares which feedback scores this agent accepts and where each one comes from:
+                  people annotating runs in the console, or named external channels such as a CSAT webhook.
+                  When set, the feedback endpoint checks every submitted score name against it (mode Enforce
+                  rejects a name no source declares; Monitor accepts it), and the console labels each stored
+                  score with its declared source. When omitted, any score name is accepted and scores carry no
+                  source label.
+
+                  This is configuration only: the scores themselves are stored in Langfuse, and removing this
+                  field does not delete them.
+                properties:
+                  external:
+                    description: external declares the external feedback channels,
+                      one score per channel.
+                    items:
+                      description: |-
+                        ExternalSource declares one external feedback channel, such as a webhook or an API that reports
+                        a rating, a completion or a business metric.
+                      properties:
+                        name:
+                          description: |-
+                            name is the channel name (for example "csat-webhook"). A score from this channel is labelled
+                            "external:<name>".
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                        score:
+                          description: score is the score this channel writes.
+                          properties:
+                            categories:
+                              description: |-
+                                categories is the allowed label set for a CATEGORICAL score. It is informational today and
+                                ignored for other data types.
+                              items:
+                                type: string
+                              maxItems: 64
+                              type: array
+                              x-kubernetes-list-type: set
+                            dataType:
+                              default: NUMERIC
+                              description: |-
+                                dataType is the score's value type. NUMERIC and BOOLEAN carry a number; CATEGORICAL carries
+                                a string label. Defaults to NUMERIC.
+                              enum:
+                              - NUMERIC
+                              - BOOLEAN
+                              - CATEGORICAL
+                              type: string
+                            name:
+                              description: |-
+                                name is the score name, as submitted and as stored in Langfuse (for example "thumbs",
+                                "accuracy" or "csat"). It must be unique across every source in spec.feedback.
+                              maxLength: 128
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                      required:
+                      - name
+                      - score
+                      type: object
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: each external channel must declare a distinct score
+                        name
+                      rule: self.all(e, self.exists_one(f, f.score.name == e.score.name))
+                  human:
+                    description: human declares the scores people submit, such as
+                      thumbs and ratings in the console.
+                    properties:
+                      scores:
+                        description: scores are the human-submitted score dimensions.
+                          Names must be unique.
+                        items:
+                          description: ScoreDecl declares one feedback score.
+                          properties:
+                            categories:
+                              description: |-
+                                categories is the allowed label set for a CATEGORICAL score. It is informational today and
+                                ignored for other data types.
+                              items:
+                                type: string
+                              maxItems: 64
+                              type: array
+                              x-kubernetes-list-type: set
+                            dataType:
+                              default: NUMERIC
+                              description: |-
+                                dataType is the score's value type. NUMERIC and BOOLEAN carry a number; CATEGORICAL carries
+                                a string label. Defaults to NUMERIC.
+                              enum:
+                              - NUMERIC
+                              - BOOLEAN
+                              - CATEGORICAL
+                              type: string
+                            name:
+                              description: |-
+                                name is the score name, as submitted and as stored in Langfuse (for example "thumbs",
+                                "accuracy" or "csat"). It must be unique across every source in spec.feedback.
+                              maxLength: 128
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        maxItems: 64
+                        minItems: 1
+                        type: array
+                        x-kubernetes-list-type: atomic
+                        x-kubernetes-validations:
+                        - message: human score names must be unique
+                          rule: self.all(s, self.exists_one(t, t.name == s.name))
+                    required:
+                    - scores
+                    type: object
+                  mode:
+                    default: Enforce
+                    description: |-
+                      mode selects whether the declaration gates submitted scores. Enforce rejects a score whose
+                      name no source declares. Monitor accepts it, which lets an agent that already emits scores
+                      adopt a declaration without losing any. Defaults to Enforce.
+                    enum:
+                    - Enforce
+                    - Monitor
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: 'feedback must declare at least one source: human.scores
+                    or an external channel'
+                  rule: (has(self.human) && size(self.human.scores) > 0) || (has(self.external)
+                    && size(self.external) > 0)
+                - message: a score name is declared by both human and an external
+                    channel; score names must be unique across all sources
+                  rule: '!has(self.human) || !has(self.external) || self.human.scores.all(s,
+                    !self.external.exists(e, e.score.name == s.name))'
               guardrailPolicyRef:
                 description: |-
                   guardrailPolicyRef optionally names a GuardrailPolicy (same namespace) that governs this
@@ -1612,14 +1743,145 @@ spec:
                 - eventing
                 - job
                 type: string
-              feedbackStoreRef:
+              feedback:
                 description: |-
-                  feedbackStoreRef optionally names a FeedbackStore (same namespace) that declares this agent's
-                  multi-source feedback model (M139, ADR 0112, PRD §17.3). It is DECLARATIVE config: the BFF write path
-                  gates ingestion by the declared score names and the read path attributes scores to their source;
-                  Langfuse remains the store of record (ADR 0008). Absent ⇒ today's open :2995→Langfuse relay, unchanged.
-                maxLength: 253
-                type: string
+                  feedback declares which feedback scores this agent accepts and where each one comes from:
+                  people annotating runs in the console, or named external channels such as a CSAT webhook.
+                  When set, the feedback endpoint checks every submitted score name against it (mode Enforce
+                  rejects a name no source declares; Monitor accepts it), and the console labels each stored
+                  score with its declared source. When omitted, any score name is accepted and scores carry no
+                  source label.
+
+                  This is configuration only: the scores themselves are stored in Langfuse, and removing this
+                  field does not delete them.
+                properties:
+                  external:
+                    description: external declares the external feedback channels,
+                      one score per channel.
+                    items:
+                      description: |-
+                        ExternalSource declares one external feedback channel, such as a webhook or an API that reports
+                        a rating, a completion or a business metric.
+                      properties:
+                        name:
+                          description: |-
+                            name is the channel name (for example "csat-webhook"). A score from this channel is labelled
+                            "external:<name>".
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                        score:
+                          description: score is the score this channel writes.
+                          properties:
+                            categories:
+                              description: |-
+                                categories is the allowed label set for a CATEGORICAL score. It is informational today and
+                                ignored for other data types.
+                              items:
+                                type: string
+                              maxItems: 64
+                              type: array
+                              x-kubernetes-list-type: set
+                            dataType:
+                              default: NUMERIC
+                              description: |-
+                                dataType is the score's value type. NUMERIC and BOOLEAN carry a number; CATEGORICAL carries
+                                a string label. Defaults to NUMERIC.
+                              enum:
+                              - NUMERIC
+                              - BOOLEAN
+                              - CATEGORICAL
+                              type: string
+                            name:
+                              description: |-
+                                name is the score name, as submitted and as stored in Langfuse (for example "thumbs",
+                                "accuracy" or "csat"). It must be unique across every source in spec.feedback.
+                              maxLength: 128
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                      required:
+                      - name
+                      - score
+                      type: object
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: each external channel must declare a distinct score
+                        name
+                      rule: self.all(e, self.exists_one(f, f.score.name == e.score.name))
+                  human:
+                    description: human declares the scores people submit, such as
+                      thumbs and ratings in the console.
+                    properties:
+                      scores:
+                        description: scores are the human-submitted score dimensions.
+                          Names must be unique.
+                        items:
+                          description: ScoreDecl declares one feedback score.
+                          properties:
+                            categories:
+                              description: |-
+                                categories is the allowed label set for a CATEGORICAL score. It is informational today and
+                                ignored for other data types.
+                              items:
+                                type: string
+                              maxItems: 64
+                              type: array
+                              x-kubernetes-list-type: set
+                            dataType:
+                              default: NUMERIC
+                              description: |-
+                                dataType is the score's value type. NUMERIC and BOOLEAN carry a number; CATEGORICAL carries
+                                a string label. Defaults to NUMERIC.
+                              enum:
+                              - NUMERIC
+                              - BOOLEAN
+                              - CATEGORICAL
+                              type: string
+                            name:
+                              description: |-
+                                name is the score name, as submitted and as stored in Langfuse (for example "thumbs",
+                                "accuracy" or "csat"). It must be unique across every source in spec.feedback.
+                              maxLength: 128
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        maxItems: 64
+                        minItems: 1
+                        type: array
+                        x-kubernetes-list-type: atomic
+                        x-kubernetes-validations:
+                        - message: human score names must be unique
+                          rule: self.all(s, self.exists_one(t, t.name == s.name))
+                    required:
+                    - scores
+                    type: object
+                  mode:
+                    default: Enforce
+                    description: |-
+                      mode selects whether the declaration gates submitted scores. Enforce rejects a score whose
+                      name no source declares. Monitor accepts it, which lets an agent that already emits scores
+                      adopt a declaration without losing any. Defaults to Enforce.
+                    enum:
+                    - Enforce
+                    - Monitor
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: 'feedback must declare at least one source: human.scores
+                    or an external channel'
+                  rule: (has(self.human) && size(self.human.scores) > 0) || (has(self.external)
+                    && size(self.external) > 0)
+                - message: a score name is declared by both human and an external
+                    channel; score names must be unique across all sources
+                  rule: '!has(self.human) || !has(self.external) || self.human.scores.all(s,
+                    !self.external.exists(e, e.score.name == s.name))'
               guardrailPolicyRef:
                 description: |-
                   guardrailPolicyRef optionally names a GuardrailPolicy (same namespace) that governs this

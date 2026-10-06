@@ -58,7 +58,6 @@ rules:
   - agentversions
   - alertpolicies
   - approvalpolicies
-  - feedbackstores
   - guardrailpolicies
   - knowledgebases
   - mcptoolbindings
@@ -81,7 +80,6 @@ rules:
   - agentteams/finalizers
   - alertpolicies/finalizers
   - approvalpolicies/finalizers
-  - feedbackstores/finalizers
   - guardrailpolicies/finalizers
   - knowledgebases/finalizers
   - mcptoolbindings/finalizers
@@ -99,7 +97,6 @@ rules:
   - agentteams/status
   - alertpolicies/status
   - approvalpolicies/status
-  - feedbackstores/status
   - guardrailpolicies/status
   - knowledgebases/status
   - mcptoolbindings/status

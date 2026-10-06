@@ -27,8 +27,8 @@ limitations under the License.
 //
 // Langfuse is the store (ADR 0008): the hook maps {traceId,name,value,comment}
 // to a Langfuse score create (POST <langfuse-host>/api/public/scores, HTTP
-// basic auth public_key:secret_key). No platform-owned feedback datastore in v1;
-// the full FeedbackStore CRD is phase 2.
+// basic auth public_key:secret_key). No platform-owned feedback datastore; the
+// agent's spec.feedback is enforced by the console endpoint, not this relay.
 //
 // The ScoresClient interface is the mock⇄real seam: the real impl POSTs to
 // Langfuse; unit tests inject a mock. Same swap-at-interface pattern as the m9.3
