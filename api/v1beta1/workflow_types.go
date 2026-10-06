@@ -283,7 +283,7 @@ type WorkflowStatus struct {
 // controller VALIDATES it (structure + CEL + the referenced-output⇒outputSchema rule + registry membership)
 // and reports Validated/Invalid on status; it does NO execution. A workflow INSTANCE is a durable Run with a
 // workflowRef (instances-of-record live in Postgres, not etcd), run by the executor-in-the-worker (later tasks).
-// Frozen (ADR 0152): additive bug fixes only, and no new fields until the install path is green.
+// This kind is feature-frozen: it receives fixes, not new fields (ADR 0152).
 type Workflow struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

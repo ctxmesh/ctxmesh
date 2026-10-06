@@ -6,8 +6,11 @@
 # compares the generated CRDs with the checksums committed in hack/crd-freeze.sum. Any change to a
 # frozen kind's schema, description included, fails until that file is edited on purpose.
 #
+# The hash skips the controller-gen.kubebuilder.io/version annotation, so a controller-gen upgrade
+# that leaves the schema alone does not trip the freeze.
+#
 # Unfreezing, or landing a sanctioned bug fix, is a deliberate edit of hack/crd-freeze.sum:
-#   (cd config/crd/bases && sha256sum <crd>.yaml) and replace that line.
+#   ./hack/check-crd-frozen.sh prints the new hash on failure; replace that line with it.
 # Run after `make manifests`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -15,8 +18,10 @@ cd "$(dirname "$0")/.."
 SUMS="hack/crd-freeze.sum"
 CRD_DIR="${1:-config/crd/bases}"
 
-sha256() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1
+# frozen_hash is the sha256 of a CRD without its controller-gen version annotation.
+frozen_hash() {
+  grep -v '^    controller-gen\.kubebuilder\.io/version: ' "$1" |
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -d' ' -f1
 }
 
 [ -s "$SUMS" ] || { echo "FAIL: $SUMS is missing or empty; the freeze has nothing to compare" >&2; exit 1; }
@@ -32,7 +37,7 @@ while read -r want file; do
     fail=1
     continue
   fi
-  got="$(sha256 "$path")"
+  got="$(frozen_hash "$path")"
   checked=$((checked + 1))
   if [ "$got" != "$want" ]; then
     echo "FAIL: $file changed, but this kind is frozen until close gate (d) is green (ADR 0152)." >&2
