@@ -283,15 +283,26 @@ func routeReadyCondition(mr *agentsv1alpha1.ModelRoute, excluded bool, serving g
 		c.Status, c.Reason, c.Message = metav1.ConditionTrue, reasonServed, "the gateway serves this route"
 	case serving == gatewayAbsent:
 		c.Reason, c.Message = "GatewayAbsent", "route rendered; the gateway Deployment does not exist"
+	case prev != nil && (prev.Reason == reasonServed || prev.Reason == reasonGatewayRolling):
+		// Served before: the pods still running serve the previous version of this route, so a call
+		// by the alias works while the new version rolls out.
+		c.Reason = reasonGatewayRolling
+		c.Message = "the gateway is rolling out this route's new version; the previous one is still served"
 	default:
-		c.Reason = "GatewayRolling"
-		c.Message = "route rendered; the gateway has not finished rolling out the config that serves it"
+		// Never served: a call by this alias fails ("Invalid model name") until the roll completes.
+		c.Reason = reasonNotYetServed
+		c.Message = "route rendered; the gateway has not started serving it yet"
 	}
 	return c
 }
 
-// reasonServed is the Ready reason of a route the gateway serves.
-const reasonServed = "Served"
+// Ready reasons a route's consumers act on: Served (calls work), GatewayRolling (a new version is
+// rolling out and the previous one still answers), NotYetServed (a new route; calls fail until served).
+const (
+	reasonServed         = "Served"
+	reasonGatewayRolling = "GatewayRolling"
+	reasonNotYetServed   = "NotYetServed"
+)
 
 // gatewayState is how far the gateway is from serving the config just rendered.
 type gatewayState int

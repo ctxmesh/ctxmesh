@@ -1434,6 +1434,10 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		}
 	}
 
+	if err := r.syncModelRouteCondition(ctx, deploy); err != nil {
+		return podTemplate{}, err
+	}
+
 	// Tenancy (M47, ADR 0046): when a Tenant owns this agent's namespace, inject the tenant id + its
 	// model caps as STATIC env (known at reconcile time — NEVER valueFrom, the m5.7 Knative landmine). The
 	// launcher reads TENANT_ID for the trace attribute (m47.3) and the caps + shared-Valkey address for the
@@ -3233,6 +3237,23 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	)
 
+	// ModelRoute → requeue the agents in its namespace that name it (ModelRouteReady mirrors its Ready).
+	mapRouteToAgents := handler.EnqueueRequestsFromMapFunc(
+		func(ctx context.Context, obj client.Object) []reconcile.Request {
+			var list agentsv1alpha1.AgentDeploymentList
+			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+				return nil
+			}
+			var reqs []reconcile.Request
+			for i := range list.Items {
+				if modelRouteName(&list.Items[i]) == obj.GetName() {
+					reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+				}
+			}
+			return reqs
+		},
+	)
+
 	// AgentScalingPolicy → requeue the referenced AgentDeployment (m7.5). A
 	// request-rate / custom-metric policy changes the ksvc's autoscaling
 	// annotations; a schedule policy toggles the job-model agent between a bare
@@ -3352,6 +3373,7 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Watches(&agentsv1alpha1.MCPToolBinding{}, mapBindingToAgent).
 		Watches(&agentsv1alpha1.AgentRegistry{}, mapRegistryToAgents).
+		Watches(&agentsv1alpha1.ModelRoute{}, mapRouteToAgents).
 		Watches(&agentsv1alpha1.AgentScalingPolicy{}, mapScalingPolicyToAgent).
 		Watches(&agentsv1alpha1.Tenant{}, mapTenantToAgents).
 		Watches(&agentsv1beta1.AgentTeam{}, mapTeamToSupervisor).

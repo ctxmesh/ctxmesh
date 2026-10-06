@@ -157,7 +157,7 @@ func TestModelRoute_MockRouteRendered(t *testing.T) {
 	// Ready waits for the gateway to serve the config. envtest runs no Deployment controller, so
 	// assert the route is not Ready before the rollout, then complete the rollout by hand.
 	assert.Positive(t, first.RequeueAfter, "the reconcile must look again while the gateway rolls")
-	assertRouteCondition(t, gwNS, routeName, metav1.ConditionFalse, "GatewayRolling")
+	assertRouteCondition(t, gwNS, routeName, metav1.ConditionFalse, "NotYetServed")
 	completeGatewayRollout(t)
 	assert.Equal(t, ctrl.Result{}, reconcileMR(t, r, gwNS, routeName))
 	assertRouteCondition(t, gwNS, routeName, metav1.ConditionTrue, "Served")
@@ -272,7 +272,7 @@ func TestModelRoute_RealProviderRendered(t *testing.T) {
 	// Ready waits for the gateway to serve the config. envtest runs no Deployment controller, so
 	// assert the route is not Ready before the rollout, then complete the rollout by hand.
 	assert.Positive(t, first.RequeueAfter, "the reconcile must look again while the gateway rolls")
-	assertRouteCondition(t, gwNS, routeName, metav1.ConditionFalse, "GatewayRolling")
+	assertRouteCondition(t, gwNS, routeName, metav1.ConditionFalse, "NotYetServed")
 	completeGatewayRollout(t)
 	assert.Equal(t, ctrl.Result{}, reconcileMR(t, r, gwNS, routeName))
 	assertRouteCondition(t, gwNS, routeName, metav1.ConditionTrue, "Served")
@@ -612,5 +612,32 @@ func TestModelRoute_ServedRouteStaysReadyWhileAnotherRolls(t *testing.T) {
 	mk("mr-served-second") // changes the config, so the gateway rolls again
 	reconcileMR(t, r, gwNS, "mr-served-second")
 	assertRouteCondition(t, gwNS, "mr-served-first", metav1.ConditionTrue, "Served")
-	assertRouteCondition(t, gwNS, "mr-served-second", metav1.ConditionFalse, "GatewayRolling")
+	assertRouteCondition(t, gwNS, "mr-served-second", metav1.ConditionFalse, "NotYetServed")
+}
+
+// An edited route that was served before reports GatewayRolling, not NotYetServed: the old gateway
+// pods still answer by its alias while the new version rolls out.
+func TestModelRoute_EditedServedRouteIsRollingNotNew(t *testing.T) {
+	ensureNS(t, gwNS)
+	t.Cleanup(createGatewayDeployment(t))
+	route := &agentsv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "mr-edited", Namespace: gwNS},
+		Spec: agentsv1alpha1.ModelRouteSpec{Providers: []agentsv1alpha1.ProviderRef{
+			{Provider: "mock", Model: "mock-default", Priority: 1},
+		}},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, route))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, route) })
+	r := newMRReconciler()
+	reconcileMR(t, r, gwNS, "mr-edited")
+	assertRouteCondition(t, gwNS, "mr-edited", metav1.ConditionFalse, "NotYetServed")
+	completeGatewayRollout(t)
+	reconcileMR(t, r, gwNS, "mr-edited")
+	assertRouteCondition(t, gwNS, "mr-edited", metav1.ConditionTrue, "Served")
+
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "mr-edited", Namespace: gwNS}, route))
+	route.Spec.Providers[0].Model = "mock-other" // a new generation, so a new config to roll out
+	require.NoError(t, k8sClient.Update(testCtx, route))
+	reconcileMR(t, r, gwNS, "mr-edited")
+	assertRouteCondition(t, gwNS, "mr-edited", metav1.ConditionFalse, "GatewayRolling")
 }

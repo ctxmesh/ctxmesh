@@ -280,7 +280,14 @@ export function AgentDetailPage() {
   // one surface joining them was a snapshot. So poll while the agent is UNSETTLED and
   // stop the moment it settles — no timer on a steady-state page, no websocket to keep
   // alive, and nothing to clean up but an interval.
-  const settled = state.kind === "ready" && state.detail.ready;
+  // Settled also waits for the agent's model route: a new route takes the gateway a minute to serve,
+  // and the chat panel holds Send until it does, so the page must notice when it is served.
+  const settled =
+    state.kind === "ready" &&
+    state.detail.ready &&
+    !(state.detail.conditions ?? []).some(
+      (c) => c.type === "ModelRouteReady" && c.status === "False" && c.reason === "NotYetServed",
+    );
   React.useEffect(() => {
     if (state.kind !== "ready" || settled) return;
     const id = window.setInterval(() => {
@@ -1746,6 +1753,7 @@ function OverviewTab({
         ready={detail.ready}
         memoryBound={detail.bindings.some((b) => b.kind === "memory")}
         onTraced={onTraced}
+        modelRoute={(detail.conditions ?? []).find((c) => c.type === "ModelRouteReady")}
       />
 
       <UseAgentPanel

@@ -74,6 +74,14 @@ rolling out the config that holds the route. Until then it is False, with reason
 `GatewayAbsent` when the gateway Deployment does not exist. Scripts that wait on a route's `Ready`
 with a short timeout may need a longer one.
 
+**New: an agent says whether its model route can be called.** An agent that names a route in
+`MODEL_ROUTE` carries a `ModelRouteReady` condition mirroring that route's `Ready`. A route the gateway
+has never served reports `NotYetServed`; an edited route that the gateway still serves in its previous
+version reports `GatewayRolling`. The agent's own `Ready` does not change. The console's chat holds
+Send while the route is `NotYetServed`, `GatewayAbsent` or `SecretUnresolved`, and says why. Before,
+an agent created in the console answered its first message with "Invalid model name" if the gateway
+had not finished loading the new route.
+
 **Fixed: durable runs of an agent that does not stream always failed.** The run worker asks agents
 for an event stream and read any reply as one. An agent that answered with plain JSON, as the
 quickstart's echo agent does, produced "stream ended with no result frame" on every run, from the
