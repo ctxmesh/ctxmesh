@@ -229,6 +229,9 @@ func run(log logr.Logger) error {
 		AuthTypeIsOAuth:            authTypeIsOAuth,
 		IsOrgScoped:                isOrgScoped,
 		Audit:                      auditFn,
+		StoreRetry: func(err error, in time.Duration) {
+			log.Info("credential store not ready yet; retrying", "retryIn", in, "err", err.Error())
+		},
 	})
 	if err != nil || migrated {
 		return err

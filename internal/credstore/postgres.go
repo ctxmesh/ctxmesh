@@ -24,8 +24,10 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/jackc/pgx/v5"
 	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver
 
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/credpostgres"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 	"github.com/ctxmesh/ctxmesh/internal/dbpool"
@@ -35,6 +37,11 @@ import (
 // Secret, build the envelope Sealer from the configured KEK, and wrap the sql store. The
 // org-credential path stays a k8s Secret in the credential namespace (personal grants move
 // to Postgres; the admin-set org credential does not).
+//
+// Configuration errors (a missing Secret or key, a malformed DSN) refuse at once. A database
+// that does not answer yet is waited for, bounded, as the token service waits for its
+// control-plane store, so the credential Postgres starting slower than the token service is
+// not a crash loop.
 func buildPostgresBackend(ctx context.Context, spec *PostgresProvider, deps Deps) (credresolve.CredentialResolver, error) {
 	if spec.Encryption == nil {
 		return nil, fmt.Errorf("credstore: postgres backend requires encryption (a Postgres store must not persist plaintext tokens)")
@@ -48,11 +55,21 @@ func buildPostgresBackend(ctx context.Context, spec *PostgresProvider, deps Deps
 		return nil, err
 	}
 
+	// sql.Open does not parse the DSN, so parse it here: a malformed one is configuration and must
+	// refuse now, not be retried as an unreachable server. The parse error redacts the password.
+	if _, err := pgx.ParseConfig(string(dsn)); err != nil {
+		return nil, fmt.Errorf("credstore: the postgres DSN in Secret %s/%s is not usable: %w",
+			deps.DefaultCredentialNamespace, spec.DSNSecretRef.Name, err)
+	}
 	db, err := sql.Open("pgx", string(dsn))
 	if err != nil {
 		return nil, fmt.Errorf("credstore: open postgres: %w", err)
 	}
 	dbpool.Apply(db, "CREDSTORE_MAX_OPEN_CONNS", 5) // F-8: bound the pool (ADR 0097)
+	if err := controlplane.PingWaiting(ctx, db, deps.StoreRetry); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("credstore: reach the credential postgres: %w", err)
+	}
 	store, err := credpostgres.NewStore(ctx, db)
 	if err != nil {
 		_ = db.Close()

@@ -86,15 +86,15 @@ func remoteHTTPClient(ctx context.Context, endpoint string, mtls *MTLSClientConf
 }
 
 // secretValue reads one key from a Secret in credNS. A missing Secret/key is a real error
-// (fail closed).
+// (fail closed), and it names the namespace and Secret, since the namespace is configuration too.
 func secretValue(ctx context.Context, reader client.Reader, credNS, name, key string) ([]byte, error) {
 	var sec corev1.Secret
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: credNS, Name: name}, &sec); err != nil {
-		return nil, fmt.Errorf("get secret %q: %w", name, err)
+		return nil, fmt.Errorf("get secret %s/%s: %w", credNS, name, err)
 	}
 	v, ok := sec.Data[key]
 	if !ok || len(v) == 0 {
-		return nil, fmt.Errorf("secret %q has no key %q", name, key)
+		return nil, fmt.Errorf("secret %s/%s has no key %q", credNS, name, key)
 	}
 	return v, nil
 }

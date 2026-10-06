@@ -23,6 +23,7 @@ package credstore
 import (
 	"context"
 	"errors"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -46,6 +47,9 @@ type Deps struct {
 	IsOrgScoped func(ctx context.Context, ns, server string) (bool, error)
 	// Audit records credential-plane actions (never a token). Nil ⇒ no-op.
 	Audit func(credresolve.AuditEvent)
+	// StoreRetry is told each time the postgres backend retries its database at startup, with the
+	// error and the wait before the next attempt. Nil ⇒ no-op.
+	StoreRetry func(err error, in time.Duration)
 }
 
 // BackendFor constructs the CredentialResolver a Config selects. ctx is used to load the Secrets a

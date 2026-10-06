@@ -98,7 +98,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// StartupRetryBudget is how long OpenDBWaiting / ConnectWaiting keep retrying the FIRST
+// StartupRetryBudget is how long OpenDBWaiting / ConnectWaiting / PingWaiting keep retrying the FIRST
 // connection before giving up. Overridable with CONTROLPLANE_STARTUP_TIMEOUT (any
 // time.ParseDuration value); 0 or a negative value disables retrying entirely and restores
 // the plain fail-fast behaviour.
@@ -130,6 +130,20 @@ func OpenDBWaiting(ctx context.Context, dsn string, notify func(error, time.Dura
 // ConnectWaiting is Connect with the same bounded start-up retry. See OpenDBWaiting.
 func ConnectWaiting(ctx context.Context, dsn string, notify func(error, time.Duration)) (*sql.DB, error) {
 	return waitForStore(ctx, notify, func(c context.Context) (*sql.DB, error) { return Connect(c, dsn) })
+}
+
+// PingWaiting waits, under the same bounded start-up retry, for an already-open handle to reach
+// its server. It is for a store whose handle the caller opens itself, such as the token service's
+// credential Postgres: a malformed DSN has already failed at open, so only reaching the server is
+// retried.
+func PingWaiting(ctx context.Context, db *sql.DB, notify func(error, time.Duration)) error {
+	_, err := waitForStore(ctx, notify, func(c context.Context) (*sql.DB, error) {
+		if err := db.PingContext(c); err != nil {
+			return nil, err
+		}
+		return db, nil
+	})
+	return err
 }
 
 // waitForStore retries open until it succeeds or the budget is spent, backing off
