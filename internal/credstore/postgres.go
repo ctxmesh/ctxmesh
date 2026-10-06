@@ -26,7 +26,6 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	"github.com/ctxmesh/ctxmesh/internal/credpostgres"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 	"github.com/ctxmesh/ctxmesh/internal/dbpool"
@@ -36,7 +35,7 @@ import (
 // Secret, build the envelope Sealer from the configured KEK, and wrap the sql store. The
 // org-credential path stays a k8s Secret in the credential namespace (personal grants move
 // to Postgres; the admin-set org credential does not).
-func buildPostgresBackend(ctx context.Context, spec *agentsv1alpha1.CredentialProviderPostgres, deps Deps) (credresolve.CredentialResolver, error) {
+func buildPostgresBackend(ctx context.Context, spec *PostgresProvider, deps Deps) (credresolve.CredentialResolver, error) {
 	if spec.Encryption == nil {
 		return nil, fmt.Errorf("credstore: postgres backend requires encryption (a Postgres store must not persist plaintext tokens)")
 	}
@@ -70,9 +69,8 @@ func buildPostgresBackend(ctx context.Context, spec *agentsv1alpha1.CredentialPr
 	})
 }
 
-// buildSealer builds the envelope Sealer from the CredentialStore encryption config.
-// localKEKSecretRef → LocalSealer (m27.4); kmsV2 → not yet built (m27.5).
-func buildSealer(ctx context.Context, enc *agentsv1alpha1.EnvelopeEncryption, deps Deps) (credpostgres.Sealer, error) {
+// buildSealer builds the envelope Sealer from the backend's encryption config.
+func buildSealer(ctx context.Context, enc *EnvelopeEncryption, deps Deps) (credpostgres.Sealer, error) {
 	switch {
 	case enc.LocalKEKSecretRef != nil:
 		kek, err := secretValue(ctx, deps.Client, deps.DefaultCredentialNamespace, enc.LocalKEKSecretRef.Name, enc.LocalKEKSecretRef.Key)
@@ -91,7 +89,7 @@ func buildSealer(ctx context.Context, enc *agentsv1alpha1.EnvelopeEncryption, de
 
 // buildTransitSealer builds an OpenBao transit Sealer: load the token (+ optional CA) from
 // Secrets and construct the transit client.
-func buildTransitSealer(ctx context.Context, cfg *agentsv1alpha1.OpenBaoTransitKMS, deps Deps) (credpostgres.Sealer, error) {
+func buildTransitSealer(ctx context.Context, cfg *OpenBaoTransitKMS, deps Deps) (credpostgres.Sealer, error) {
 	token, err := secretValue(ctx, deps.Client, deps.DefaultCredentialNamespace, cfg.TokenSecretRef.Name, cfg.TokenSecretRef.Key)
 	if err != nil {
 		return nil, fmt.Errorf("credstore: load openbao token: %w", err)

@@ -26,17 +26,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
-// TestIntegration_Router_PostgresPath: the FULL config-selected path — a ClusterCredentialStore
-// selecting `postgres`, the DSN + local KEK read from Secrets, a Backend built over real
-// Postgres, and a Store→Resolve round-trip. Skips unless CREDPOSTGRES_TEST_DSN is set.
-func TestIntegration_Router_PostgresPath(t *testing.T) {
+// TestIntegration_BackendFor_PostgresPath: the FULL configured path — CREDENTIAL_BACKEND=postgres
+// parsed from the environment, the DSN + local KEK read from Secrets, a Backend built over real
+// Postgres, and a Resolve against it. Skips unless CREDPOSTGRES_TEST_DSN is set.
+func TestIntegration_BackendFor_PostgresPath(t *testing.T) {
 	dsn := os.Getenv("CREDPOSTGRES_TEST_DSN")
 	if dsn == "" {
-		t.Skip("set CREDPOSTGRES_TEST_DSN to run the router→postgres integration test")
+		t.Skip("set CREDPOSTGRES_TEST_DSN to run the configured-postgres integration test")
 	}
 	ctx := context.Background()
 	const credNS = "cred-system"
@@ -49,24 +48,26 @@ func TestIntegration_Router_PostgresPath(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "pg-kek", Namespace: credNS},
 		Data:       map[string][]byte{"kek": bytes.Repeat([]byte{0x22}, 32)},
 	}
-	store := &agentsv1alpha1.ClusterCredentialStore{
-		ObjectMeta: metav1.ObjectMeta{Name: DefaultStoreName},
-		Spec: agentsv1alpha1.CredentialStoreSpec{Provider: agentsv1alpha1.CredentialStoreProvider{
-			Postgres: &agentsv1alpha1.CredentialProviderPostgres{
-				DSNSecretRef: agentsv1alpha1.SecretKeyRef{Name: "pg-dsn", Key: "dsn"},
-				Encryption: &agentsv1alpha1.EnvelopeEncryption{
-					LocalKEKSecretRef: &agentsv1alpha1.SecretKeyRef{Name: "pg-kek", Key: "kek"},
-				},
-			},
-		}},
+	cfg, err := ConfigFromEnv([]string{
+		EnvBackend + "=postgres",
+		EnvPostgresDSNSecretName + "=pg-dsn",
+		EnvPostgresDSNSecretKey + "=dsn",
+		EnvPostgresLocalKEKSecretName + "=pg-kek",
+		EnvPostgresLocalKEKSecretKey + "=kek",
+	})
+	if err != nil {
+		t.Fatalf("ConfigFromEnv: %v", err)
 	}
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(dsnSecret, kekSecret, store).Build()
-	r := NewRouter(c, Deps{Client: c, DefaultCredentialNamespace: credNS, Exchanger: &credresolve.HTTPTokenExchanger{}})
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(dsnSecret, kekSecret).Build()
+	b, err := BackendFor(ctx, cfg, Deps{Client: c, DefaultCredentialNamespace: credNS, Exchanger: &credresolve.HTTPTokenExchanger{}})
+	if err != nil {
+		t.Fatalf("BackendFor: %v", err)
+	}
 
-	// The router selects postgres, reads the DSN + KEK Secrets, opens real Postgres, and
-	// applies the schema — then a Resolve for a user with no grant on an open (non-OAuth)
-	// server returns ErrNoCredential, proving a real query ran end-to-end through the wiring.
-	if _, err := r.Resolve(ctx, "app-ns", "", "srv", "nouser"); err != credresolve.ErrNoCredential {
+	// The configured backend read the DSN + KEK Secrets, opened real Postgres and applied the
+	// schema — a Resolve for a user with no grant on an open (non-OAuth) server returns
+	// ErrNoCredential, proving a real query ran end-to-end through the wiring.
+	if _, err := b.Resolve(ctx, "app-ns", "", "srv", "nouser"); err != credresolve.ErrNoCredential {
 		t.Fatalf("Resolve(no grant) err = %v, want ErrNoCredential (config-selected postgres backend is live)", err)
 	}
 }

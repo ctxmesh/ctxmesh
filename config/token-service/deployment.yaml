@@ -2,8 +2,8 @@
 # an internal mTLS API; the per-pod injecting egress sidecars DELEGATE grant reads + OAuth
 # refresh here, so those two ceilings amortize once at the center (global cache + singleflight).
 #
-# The credential backend is CONFIG-SELECTED per the CredentialStore CRDs (ADR 0032); the
-# default is the built-in kubernetes backend, so a plain install needs no external store.
+# The credential backend is this Deployment's own configuration (CREDENTIAL_BACKEND*, ADR 0152);
+# unset means the built-in kubernetes backend, so a plain install needs no external store.
 #
 # mTLS POSTURE: the TLS env below always points at an OPTIONAL cert Secret mount
 # (token-service-tls). Provision that Secret (platform CA-signed server cert + the client CA

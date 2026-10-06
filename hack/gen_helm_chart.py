@@ -264,6 +264,85 @@ TOKEN_SERVICE_TLS_REQUIRED_ENV_HELM = (
     "          value: {{ .Values.tokenService.tls.required | quote }}"
 )
 
+# The token-service's credential backend (ADR 0152 §1). config/token-service carries no
+# CREDENTIAL_BACKEND* env (unset = the kubernetes backend), so there is no kustomize literal to
+# replace: the block is appended after TOKEN_SERVICE_TLS_REQUIRED, which only the token-service has.
+# type kubernetes (the default) renders NOTHING, so the default render == kustomize (no drift).
+# Otherwise each set value renders as one env var named after its values path; the token-service
+# validates them and refuses to start on a bad one, naming the variable, so the chart only renders.
+CREDENTIAL_BACKEND_ENV_HELM = (
+    "\n        {{- $cb := .Values.tokenService.credentialBackend | default dict }}"
+    '\n        {{- $cbType := $cb.type | default "kubernetes" | toString }}'
+    '\n        {{- if ne $cbType "kubernetes" }}'
+    "\n        - name: CREDENTIAL_BACKEND"
+    "\n          value: {{ $cbType | quote }}"
+    "\n        {{- end }}"
+    '\n        {{- if eq $cbType "postgres" }}'
+    "\n        {{- $pg := $cb.postgres | default dict }}"
+    "\n        {{- with $pg.dsnSecretRef }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_DSN_SECRET_NAME"
+    "\n          value: {{ .name | quote }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_DSN_SECRET_KEY"
+    "\n          value: {{ .key | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- $enc := $pg.encryption | default dict }}"
+    "\n        {{- with $enc.localKEKSecretRef }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_LOCAL_KEK_SECRET_NAME"
+    "\n          value: {{ .name | quote }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_LOCAL_KEK_SECRET_KEY"
+    "\n          value: {{ .key | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- with $enc.openBaoTransit }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_ADDRESS"
+    "\n          value: {{ .address | quote }}"
+    "\n        {{- with .tokenSecretRef }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_TOKEN_SECRET_NAME"
+    "\n          value: {{ .name | quote }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_TOKEN_SECRET_KEY"
+    "\n          value: {{ .key | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- with .mountPath }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_MOUNT_PATH"
+    "\n          value: {{ . | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- with .keyPrefix }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_KEY_PREFIX"
+    "\n          value: {{ . | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- with .caSecretRef }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_CA_SECRET_NAME"
+    "\n          value: {{ .name | quote }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_CA_SECRET_KEY"
+    "\n          value: {{ .key | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- end }}"
+    "\n        {{- with $enc.kmsV2 }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_KMSV2_ENDPOINT"
+    "\n          value: {{ .endpoint | quote }}"
+    "\n        {{- with .keyIDPrefix }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_KMSV2_KEY_ID_PREFIX"
+    "\n          value: {{ . | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- end }}"
+    "\n        {{- end }}"
+    '\n        {{- if eq $cbType "remote" }}'
+    "\n        {{- $rm := $cb.remote | default dict }}"
+    "\n        - name: CREDENTIAL_BACKEND_REMOTE_ENDPOINT"
+    "\n          value: {{ $rm.endpoint | quote }}"
+    "\n        {{- $mtls := $rm.mtls | default dict }}"
+    "\n        {{- with $mtls.caSecretRef }}"
+    "\n        - name: CREDENTIAL_BACKEND_REMOTE_MTLS_CA_SECRET_NAME"
+    "\n          value: {{ .name | quote }}"
+    "\n        - name: CREDENTIAL_BACKEND_REMOTE_MTLS_CA_SECRET_KEY"
+    "\n          value: {{ .key | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- with $mtls.clientTLSSecretName }}"
+    "\n        - name: CREDENTIAL_BACKEND_REMOTE_MTLS_CLIENT_TLS_SECRET_NAME"
+    "\n          value: {{ . | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- end }}"
+)
+
 # The console OIDC/SSO seam (m19.6, ADR 0020). config/bff hardcodes the OFF defaults
 # (OIDC_ENABLED "false", empty issuer/client — so `kustomize build`/`make deploy` stay
 # valid AND token login is the default); the chart templates them from the auth.oidc
@@ -594,7 +673,7 @@ def substitute(doc: str) -> str:
     # plain HTTP, enforced under profile=production by ha-profile-guards.yaml.
     doc = doc.replace(
         TOKEN_SERVICE_TLS_REQUIRED_ENV_KUSTOMIZE,
-        TOKEN_SERVICE_TLS_REQUIRED_ENV_HELM,
+        TOKEN_SERVICE_TLS_REQUIRED_ENV_HELM + CREDENTIAL_BACKEND_ENV_HELM,
     )
     # BFF console OIDC/SSO seam -> Helm values (m19.6, ADR 0020). With auth.oidc
     # disabled (the default) all three render == the kustomize OFF literals (no drift);

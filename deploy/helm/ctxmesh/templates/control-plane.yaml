@@ -710,25 +710,6 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: ctxmesh
-    control-plane: token-service
-  name: ctxmesh-token-service-clusterrole
-rules:
-- apiGroups:
-  - agents.ctxmesh.ai
-  resources:
-  - clustercredentialstores
-  - credentialstores
-  verbs:
-  - get
-  - list
-  - watch
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: ctxmesh
     rbac.ctxmesh.ai/persona: viewer
   name: ctxmesh-viewer
 rules:
@@ -889,23 +870,6 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: ctxmesh-statelayer-proxy
-  namespace: {{ .Values.namespace }}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: ctxmesh
-    control-plane: token-service
-  name: ctxmesh-token-service-clusterrolebinding
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: ctxmesh-token-service-clusterrole
-subjects:
-- kind: ServiceAccount
-  name: ctxmesh-token-service
   namespace: {{ .Values.namespace }}
 ---
 apiVersion: v1
@@ -1375,6 +1339,76 @@ spec:
           value: /etc/token-service/tls/ca.crt
         - name: TOKEN_SERVICE_TLS_REQUIRED
           value: {{ .Values.tokenService.tls.required | quote }}
+        {{- $cb := .Values.tokenService.credentialBackend | default dict }}
+        {{- $cbType := $cb.type | default "kubernetes" | toString }}
+        {{- if ne $cbType "kubernetes" }}
+        - name: CREDENTIAL_BACKEND
+          value: {{ $cbType | quote }}
+        {{- end }}
+        {{- if eq $cbType "postgres" }}
+        {{- $pg := $cb.postgres | default dict }}
+        {{- with $pg.dsnSecretRef }}
+        - name: CREDENTIAL_BACKEND_POSTGRES_DSN_SECRET_NAME
+          value: {{ .name | quote }}
+        - name: CREDENTIAL_BACKEND_POSTGRES_DSN_SECRET_KEY
+          value: {{ .key | quote }}
+        {{- end }}
+        {{- $enc := $pg.encryption | default dict }}
+        {{- with $enc.localKEKSecretRef }}
+        - name: CREDENTIAL_BACKEND_POSTGRES_LOCAL_KEK_SECRET_NAME
+          value: {{ .name | quote }}
+        - name: CREDENTIAL_BACKEND_POSTGRES_LOCAL_KEK_SECRET_KEY
+          value: {{ .key | quote }}
+        {{- end }}
+        {{- with $enc.openBaoTransit }}
+        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_ADDRESS
+          value: {{ .address | quote }}
+        {{- with .tokenSecretRef }}
+        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_TOKEN_SECRET_NAME
+          value: {{ .name | quote }}
+        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_TOKEN_SECRET_KEY
+          value: {{ .key | quote }}
+        {{- end }}
+        {{- with .mountPath }}
+        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_MOUNT_PATH
+          value: {{ . | quote }}
+        {{- end }}
+        {{- with .keyPrefix }}
+        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_KEY_PREFIX
+          value: {{ . | quote }}
+        {{- end }}
+        {{- with .caSecretRef }}
+        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_CA_SECRET_NAME
+          value: {{ .name | quote }}
+        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_CA_SECRET_KEY
+          value: {{ .key | quote }}
+        {{- end }}
+        {{- end }}
+        {{- with $enc.kmsV2 }}
+        - name: CREDENTIAL_BACKEND_POSTGRES_KMSV2_ENDPOINT
+          value: {{ .endpoint | quote }}
+        {{- with .keyIDPrefix }}
+        - name: CREDENTIAL_BACKEND_POSTGRES_KMSV2_KEY_ID_PREFIX
+          value: {{ . | quote }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- if eq $cbType "remote" }}
+        {{- $rm := $cb.remote | default dict }}
+        - name: CREDENTIAL_BACKEND_REMOTE_ENDPOINT
+          value: {{ $rm.endpoint | quote }}
+        {{- $mtls := $rm.mtls | default dict }}
+        {{- with $mtls.caSecretRef }}
+        - name: CREDENTIAL_BACKEND_REMOTE_MTLS_CA_SECRET_NAME
+          value: {{ .name | quote }}
+        - name: CREDENTIAL_BACKEND_REMOTE_MTLS_CA_SECRET_KEY
+          value: {{ .key | quote }}
+        {{- end }}
+        {{- with $mtls.clientTLSSecretName }}
+        - name: CREDENTIAL_BACKEND_REMOTE_MTLS_CLIENT_TLS_SECRET_NAME
+          value: {{ . | quote }}
+        {{- end }}
+        {{- end }}
         envFrom:
         - secretRef:
             name: ctxmesh-postgres-dsn

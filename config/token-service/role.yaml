@@ -20,8 +20,8 @@ rules:
   # first-time (user, server) grant, update to write back a rotated token / re-consent, delete on
   # revoke (RFC 7009: forget locally). create IS required — K8sBackend.StoreGrant upserts, calling
   # Client.Create on a not-found grant (internal/credresolve/backend.go). Grants live only in this
-  # one namespace (ADR 0029 §7), so this stays a namespaced Role. (ToolRegistry + CredentialStore
-  # reads are cluster-wide — the plane serves requests from ANY namespace — see the ClusterRole.)
+  # one namespace (ADR 0029 §7), so this stays a namespaced Role. The token-service needs no
+  # cluster-scoped access: its backend is its own configuration (ADR 0152).
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]

@@ -75,7 +75,7 @@ type Grant struct {
 	ServerURL string
 }
 
-// GrantWriter persists a user's grant to the backend the CredentialStore selects — so a
+// GrantWriter persists a user's grant to the configured credential backend — so a
 // grant minted by the OAuth callback lands in the config-selected store (kubernetes /
 // postgres / remote), not always a k8s Secret. The write is an UPSERT (re-consent replaces).
 type GrantWriter interface {
