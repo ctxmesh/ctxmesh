@@ -20,7 +20,8 @@
 #
 # Env (override for your install):
 #   NS=ctxmesh          control-plane namespace
-#   CRED_NS=ctxmesh     credential (locked) namespace for kubernetes-backend Secrets
+#   CRED_NS=<ns>        credential (locked) namespace: grant Secrets and the KEK; default: the
+#                       token-service Deployment's MCP_CREDENTIAL_NAMESPACE, else NS
 #   KEK_SECRET=<name>   the KEK Secret (postgres backend, LocalSealer); default: read from the
 #                       token-service Deployment's CREDENTIAL_BACKEND_POSTGRES_LOCAL_KEK_SECRET_NAME
 #   PG_POD / PG_USER / PG_DB        control-plane Postgres (default: runstore-pg / postgres / runs)
