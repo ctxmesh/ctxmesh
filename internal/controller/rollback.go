@@ -108,11 +108,12 @@ const (
 )
 
 // maybeRollback checks for the rollback annotation and, when present, actuates a guarded
-// spec-revert. It returns (handled=true, result, err) when the annotation was present and
-// consumed this reconcile — in which case the caller returns immediately (the spec-revert
-// or the refusal is terminal for this pass; the NEXT reconcile, driven by the spec Update
-// the revert makes, rolls the workload). It returns (false, _, nil) when no annotation is
-// set, and the normal reconcile proceeds unchanged (byte-compatible with pre-M69).
+// spec-revert. It returns handled=true when this reconcile must end here: the annotation was
+// consumed, or the auto path reverted the spec (the NEXT reconcile, driven by the spec Update the
+// revert makes, rolls the workload). It returns handled=false when no rollback was requested and
+// when the auto path refused one: an automatic refusal records its condition and the ordinary
+// reconcile proceeds, because that reconcile is what rolls a reverted spec and moves
+// status.latestVersion, which RegressionDetected is keyed on.
 //
 // It runs BEFORE the workload reconcile: a rollback rewrites spec, and the workload must be
 // reconciled against the REVERTED spec, not the pre-revert one. Because the revert is a spec
@@ -155,7 +156,8 @@ func (r *AgentDeploymentReconciler) maybeRollback(
 
 		// ── Actuate: revert spec → the target's snapshot, record status, clear the annotation ─
 		// A human rollback does NOT freeze auto-actions (freeze=false): the human is present.
-		return true, r.actuateRollback(ctx, deploy, &av, false)
+		_, err = r.actuateRollback(ctx, deploy, &av, false)
+		return true, err
 	}
 
 	// ── Auto path: OPT-IN auto-rollback on RegressionDetected (ADR 0062 Fork 4, PRD §17.4) ─
@@ -174,9 +176,17 @@ func (r *AgentDeploymentReconciler) maybeRollback(
 // explicitly enabled it (spec.rollout.autoRollback.enabled) AND the online-score regression
 // detector currently flags the serving version (RegressionDetected=True). The nil chain is
 // guarded so a deployment without a rollout / autoRollback block is byte-for-byte unaffected.
+//
+// A frozen deployment is not evaluated at all. The freeze is set by the auto-rollback that just
+// reverted the spec, and RegressionDetected still names the regressed version until the ordinary
+// reconcile rolls the reverted one; evaluating would overwrite that rollback's RolledBack=True
+// with a RollbackFrozen refusal on every reconcile.
 func (r *AgentDeploymentReconciler) shouldAutoRollback(deploy *agentsv1alpha1.AgentDeployment) bool {
 	ro := deploy.Spec.Rollout
 	if ro == nil || ro.AutoRollback == nil || !ro.AutoRollback.Enabled {
+		return false
+	}
+	if rb := deploy.Status.Rollback; rb != nil && rb.FrozenUntilAck {
 		return false
 	}
 	c := apimeta.FindStatusCondition(deploy.Status.Conditions, conditionRegressionDetected)
@@ -185,11 +195,11 @@ func (r *AgentDeploymentReconciler) shouldAutoRollback(deploy *agentsv1alpha1.Ag
 
 // autoRollback actuates an OPT-IN automatic rollback to the last-healthy (prior) version when
 // the serving version has regressed. It runs the SAME damping guards as the human path (so a
-// frozen / cooling-down / flapping / unhealthy-target deployment is refused identically) and,
+// cooling-down / flapping / unhealthy-target deployment is refused identically) and,
 // on success, freezes further AUTO-actions (status.rollback.frozenUntilAck) until a human acks
 // — the anti-runaway guard. It never rolls back to a version that is itself flagged (the
-// healthy-target guard refuses that). Returns (handled=true, err) so the caller returns
-// immediately, exactly like the human path.
+// healthy-target guard refuses that). It returns handled=true only when it reverted the spec; a
+// refusal is recorded and returns handled=false, so the ordinary reconcile still runs.
 func (r *AgentDeploymentReconciler) autoRollback(
 	ctx context.Context,
 	deploy *agentsv1alpha1.AgentDeployment,
@@ -204,7 +214,7 @@ func (r *AgentDeploymentReconciler) autoRollback(
 		return true, fmt.Errorf("resolving auto-rollback prior for %q: %w", deploy.Status.LatestVersion, err)
 	}
 	if !ok {
-		return true, r.refuseRollback(ctx, deploy, reasonAutoRollbackNoPrior,
+		return r.refuseAutoRollback(ctx, deploy, reasonAutoRollbackNoPrior,
 			fmt.Sprintf("auto-rollback found no prior version before serving version %q; nothing to roll back to — escalate to a human", deploy.Status.LatestVersion))
 	}
 	log.Info("Auto-rollback triggered", "target", target, "from", deploy.Status.LatestVersion)
@@ -214,23 +224,42 @@ func (r *AgentDeploymentReconciler) autoRollback(
 	var av agentsv1alpha1.AgentVersion
 	if err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: target}, &av); err != nil {
 		if apierrors.IsNotFound(err) {
-			return true, r.refuseRollback(ctx, deploy, reasonAutoRollbackNoPrior,
+			return r.refuseAutoRollback(ctx, deploy, reasonAutoRollbackNoPrior,
 				fmt.Sprintf("auto-rollback prior %q no longer exists in namespace %q; nothing to roll back to — escalate to a human", target, deploy.Namespace))
 		}
 		return true, fmt.Errorf("resolving auto-rollback target %q: %w", target, err)
 	}
 
-	// The SAME damping guards as the human path. The FROZEN guard here is what refuses a
-	// re-fire while a prior auto-action's freeze is outstanding; the healthy-target guard is
-	// what refuses rolling back to a prior that is ITSELF flagged.
+	// The SAME damping guards as the human path (a frozen deployment never gets here, see
+	// shouldAutoRollback); the healthy-target guard is what refuses rolling back to a prior that is
+	// ITSELF flagged.
 	if reason, msg, refused := r.rollbackGuards(ctx, deploy, target); refused {
-		return true, r.refuseRollback(ctx, deploy, reason, msg)
+		return r.refuseAutoRollback(ctx, deploy, reason, msg)
 	}
 
 	// Actuate with freeze=true: a successful AUTO-rollback freezes further auto-actions until
 	// a human acknowledges (clears status.rollback.frozenUntilAck), atomically with the
-	// history/condition record.
-	return true, r.actuateRollback(ctx, deploy, &av, true)
+	// history/condition record. A no-effect refusal returns acted=false and the reconcile goes on.
+	acted, err := r.actuateRollback(ctx, deploy, &av, true)
+	if err != nil {
+		return true, err
+	}
+	return acted, nil
+}
+
+// refuseAutoRollback records an auto-path refusal and returns handled=false, so the ordinary
+// reconcile runs. A refusal that ended the reconcile would also stop the reconcile that rolls the
+// serving spec and moves status.latestVersion, and RegressionDetected, keyed on that, would keep
+// firing the refusal.
+func (r *AgentDeploymentReconciler) refuseAutoRollback(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+	reason, message string,
+) (bool, error) {
+	if err := r.refuseRollback(ctx, deploy, reason, message); err != nil {
+		return true, err
+	}
+	return false, nil
 }
 
 // rollbackGuards runs the damping guards in a fixed order and returns (reason, message,
@@ -244,11 +273,10 @@ func (r *AgentDeploymentReconciler) rollbackGuards(
 ) (string, string, bool) {
 	rb := deploy.Status.Rollback
 
-	// (d) Freeze-after-auto-action: a FUTURE auto-action sets frozenUntilAck to freeze
-	// further AUTO-actions until a human acks. In v1 (human-only) it is honored but never
-	// set — no auto-path exists to set it. A human rollback is refused while frozen too: the
-	// freeze means "a human must look" and clearing the freeze IS that human step (the
-	// console clears it on ack, m69.11). Defined + honored now; the auto-trigger is deferred.
+	// (d) Freeze-after-auto-action: a successful auto-rollback sets frozenUntilAck. The auto
+	// path is not evaluated while it is set (shouldAutoRollback), so this refuses a human
+	// rollback: the freeze means "a human must look" and clearing the freeze IS that human step
+	// (the console clears it on ack, m69.11).
 	if rb != nil && rb.FrozenUntilAck {
 		return reasonRollbackFrozen,
 			"deployment is frozen pending human acknowledgement of a prior automated action; clear status.rollback.frozenUntilAck to proceed",
@@ -391,14 +419,17 @@ func (r *AgentDeploymentReconciler) priorVersionOf(
 // freeze reflects WHO drove the rollback: the human annotation path passes false (the human is
 // present, no need to freeze); the OPT-IN auto path passes true, which sets
 // status.rollback.frozenUntilAck in the SAME status write that records the rollback (atomic with
-// the history/condition) — freezing further AUTO-actions until a human acknowledges. The frozen
-// guard then refuses a subsequent auto-attempt until the freeze is cleared.
+// the history/condition) — freezing further AUTO-actions until a human acknowledges. The auto path
+// is then not evaluated until the freeze is cleared (shouldAutoRollback).
+//
+// acted is false when the rollback was refused as having no effect (RollbackNoEffect, recorded on
+// status); the auto path then lets the ordinary reconcile run.
 func (r *AgentDeploymentReconciler) actuateRollback(
 	ctx context.Context,
 	deploy *agentsv1alpha1.AgentDeployment,
 	av *agentsv1alpha1.AgentVersion,
 	freeze bool,
-) error {
+) (acted bool, err error) {
 	log := logf.FromContext(ctx)
 	fromVersion := deploy.Status.LatestVersion
 	now := metav1.Now()
@@ -406,15 +437,15 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 	// Re-fetch to layer spec + metadata (annotation-clear) writes on a fresh object.
 	var fresh agentsv1alpha1.AgentDeployment
 	if err := r.Get(ctx, client.ObjectKeyFromObject(deploy), &fresh); err != nil {
-		return fmt.Errorf("re-fetching for rollback: %w", err)
+		return false, fmt.Errorf("re-fetching for rollback: %w", err)
 	}
 	liveHash, err := specHash(fresh.Spec)
 	if err != nil {
-		return fmt.Errorf("hashing the live spec: %w", err)
+		return false, fmt.Errorf("hashing the live spec: %w", err)
 	}
 	targetHash, err := specHash(av.Spec.Snapshot)
 	if err != nil {
-		return fmt.Errorf("hashing rollback target %q: %w", av.Name, err)
+		return false, fmt.Errorf("hashing rollback target %q: %w", av.Name, err)
 	}
 	// rollbackSpec keeps the live governance fields, so a target that differs from the live spec only
 	// in those fields changes nothing. Recording that as a rollback would start the cooldown, write
@@ -422,10 +453,10 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 	next := rollbackSpec(av.Spec.Snapshot, fresh.Spec)
 	nextHash, err := specHash(next)
 	if err != nil {
-		return fmt.Errorf("hashing the rolled-back spec: %w", err)
+		return false, fmt.Errorf("hashing the rolled-back spec: %w", err)
 	}
 	if nextHash == liveHash {
-		return r.refuseRollback(ctx, deploy, reasonRollbackNoEffect,
+		return false, r.refuseRollback(ctx, deploy, reasonRollbackNoEffect,
 			rollbackNoEffectMessage(av.Name, targetHash == liveHash))
 	}
 
@@ -437,7 +468,7 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 		delete(fresh.Annotations, rollbackAnnotation)
 	}
 	if err := r.Update(ctx, &fresh); err != nil {
-		return fmt.Errorf("reverting spec to rollback target %q: %w", av.Name, err)
+		return false, fmt.Errorf("reverting spec to rollback target %q: %w", av.Name, err)
 	}
 
 	// The version that serves is named by the hash of the spec as stored (after API-server
@@ -445,12 +476,12 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 	// governance fields differ from the target's.
 	servedHash, err := specHash(fresh.Spec)
 	if err != nil {
-		return fmt.Errorf("hashing the reverted spec: %w", err)
+		return false, fmt.Errorf("hashing the reverted spec: %w", err)
 	}
 	if servedHash == liveHash {
 		// API-server defaulting made the reverted spec identical to the live one, so nothing will roll.
 		// The annotation is already cleared by the Update above; record the refusal only.
-		return r.recordRollbackRefusal(ctx, deploy, reasonRollbackNoEffect,
+		return false, r.recordRollbackRefusal(ctx, deploy, reasonRollbackNoEffect,
 			rollbackNoEffectMessage(av.Name, targetHash == liveHash))
 	}
 	served := av.Name
@@ -470,7 +501,7 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 	// regardless of cache staleness (m52.N7). base captures the pre-mutation object for the diff.
 	var withStatus agentsv1alpha1.AgentDeployment
 	if err := r.Get(ctx, client.ObjectKeyFromObject(deploy), &withStatus); err != nil {
-		return fmt.Errorf("re-fetching for rollback status: %w", err)
+		return false, fmt.Errorf("re-fetching for rollback status: %w", err)
 	}
 	base := withStatus.DeepCopy()
 	rb := withStatus.Status.Rollback
@@ -503,12 +534,12 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 		ObservedGeneration: withStatus.Generation,
 	})
 	if err := r.Status().Patch(ctx, &withStatus, client.MergeFrom(base)); err != nil {
-		return fmt.Errorf("recording rollback status: %w", err)
+		return false, fmt.Errorf("recording rollback status: %w", err)
 	}
 	log.Info("Rolled back serving spec", "to", av.Name, "serving", served, "from", fromVersion)
 	// The spec Update above re-enqueues the object; the next reconcile rolls the workload
 	// against the reverted spec. No requeue needed here.
-	return nil
+	return true, nil
 }
 
 // rollbackNoEffectMessage explains a refused rollback that would change nothing: the target is the
@@ -601,7 +632,9 @@ func (r *AgentDeploymentReconciler) refuseRollback(
 }
 
 // recordRollbackRefusal writes RolledBack=False with reason and message. It touches neither the spec
-// nor the annotation, nor the cooldown, history or freeze in status.rollback.
+// nor the annotation, nor the cooldown, history or freeze in status.rollback. On success deploy holds
+// the object as the API server returned it, so a reconcile that continues after an auto-path
+// refusal neither conflicts on a stale resourceVersion nor writes its status over the refusal.
 func (r *AgentDeploymentReconciler) recordRollbackRefusal(
 	ctx context.Context,
 	deploy *agentsv1alpha1.AgentDeployment,
@@ -632,5 +665,6 @@ func (r *AgentDeploymentReconciler) recordRollbackRefusal(
 	if err := r.Status().Patch(ctx, &withStatus, client.MergeFrom(base)); err != nil {
 		return fmt.Errorf("recording refused rollback status: %w", err)
 	}
+	withStatus.DeepCopyInto(deploy)
 	return nil
 }

@@ -94,6 +94,13 @@ quickstart's echo agent does, produced "stream ended with no result frame" on ev
 console chat and from `POST /api/runs`. A plain reply is now taken as the result, as the execution
 contract already said.
 
+**Fixed: an automatic rollback reverted the agent's spec but never rolled the agent.** With
+`spec.rollout.autoRollback` enabled, every reconcile after the revert refused the rollback again as
+`RollbackFrozen`. That overwrote the `RolledBack=True` condition and ended the reconcile before it
+created the reverted version, so the regressed version kept serving and `status.rollback.rolledBackTo`
+could name a version that did not exist. A frozen agent is no longer evaluated for auto-rollback, and
+an automatic rollback that is refused records why and lets the reconcile continue.
+
 **Fixed: the console's Rotate key action was refused for every role.** It read the provider's
 Secret, which no shipped role may do, so it answered 403 while the console offered the button. A
 rotation now rebuilds the provider from its model route, as connecting it again does, and never

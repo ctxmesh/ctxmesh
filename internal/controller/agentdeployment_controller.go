@@ -442,14 +442,16 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, fmt.Errorf("fetching AgentDeployment: %w", err)
 	}
 
-	// ── Step 1b: Human rollback actuator (m69.8, ADR 0062 Fork 4) ─────────────
-	// A `agents.ctxmesh.ai/rollback=<agentversion>` annotation reverts the serving spec to
-	// that version's snapshot, guarded by the damping mechanism. It runs BEFORE the spec-hash
-	// / workload steps because a rollback rewrites spec — the ordinary path must reconcile the
-	// REVERTED spec, not the pre-revert one. The revert is a spec Update that re-enqueues the
-	// object, so the following reconcile rolls the workload through the normal path (the
-	// actuator never touches Knative traffic; the auto-trigger is DEFERRED, PRD §17.4).
-	if handled, rerr := r.maybeRollback(ctx, &deploy); handled {
+	// ── Step 1b: Rollback actuator (m69.8, ADR 0062 Fork 4) ───────────────────
+	// A `agents.ctxmesh.ai/rollback=<agentversion>` annotation, or an opted-in auto-rollback,
+	// reverts the serving spec to that version's snapshot, guarded by the damping mechanism. It
+	// runs BEFORE the spec-hash / workload steps because a rollback rewrites spec — the ordinary
+	// path must reconcile the REVERTED spec, not the pre-revert one. The revert is a spec Update
+	// that re-enqueues the object, so the following reconcile rolls the workload through the
+	// normal path (the actuator never touches Knative traffic). An auto-path refusal is not
+	// handled: the ordinary reconcile below still runs.
+	handled, rerr := r.maybeRollback(ctx, &deploy)
+	if rerr != nil || handled {
 		return ctrl.Result{}, rerr
 	}
 

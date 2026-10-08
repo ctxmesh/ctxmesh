@@ -108,9 +108,108 @@ func TestAutoRollback_HealthyPrior_RevertsAndFreezes(t *testing.T) {
 	assert.Equal(t, reasonRolledBack, cond.Reason)
 }
 
+// TestAutoRollback_RevertedSpecRolls: every version of an agent that opted in carries the opt-in, so
+// the reverted spec still has auto-rollback enabled and RegressionDetected stays True until the
+// detector sees a new serving version. The reconciles after the revert must roll the reverted spec:
+// its AgentVersion exists, status.latestVersion and the Knative Service move to it, rolledBackTo names
+// it, RolledBack stays True and the freeze holds. In the second case the kept governance makes the
+// reverted spec a version that does not exist until the ordinary reconcile creates it.
+func TestAutoRollback_RevertedSpecRolls(t *testing.T) {
+	const (
+		namespace  = "default"
+		priorImg   = "ghcr.io/ctxmesh/example-agent:v1"
+		servingImg = "ghcr.io/ctxmesh/example-agent:v2-regressed"
+	)
+	cases := []struct {
+		name, agent   string
+		servingPolicy *agentsv1alpha1.ToolPolicySpec // kept live by the rollback
+	}{
+		{name: "the reverted spec is the prior version", agent: "ar-rolls-prior"},
+		{
+			name: "kept governance makes the reverted spec a new version", agent: "ar-rolls-newver",
+			servingPolicy: &agentsv1alpha1.ToolPolicySpec{MaxToolCallsPerRun: 5},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := rollbackReconciler(onlinescore.NewMemStore())
+
+			// The versions come from the ordinary reconcile, as they do in a cluster: the prior spec
+			// first, then the regressed one.
+			deploy := &agentsv1alpha1.AgentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: tc.agent, Namespace: namespace},
+				Spec:       autoRollbackSpec(priorImg, true),
+			}
+			require.NoError(t, k8sClient.Create(testCtx, deploy))
+			t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+			reconcileNN(t, r, tc.agent, namespace)
+			priorV := latestVersionOf(t, tc.agent, namespace)
+
+			time.Sleep(1100 * time.Millisecond) // creation-time order between the two versions
+			require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+			deploy.Spec.Image = servingImg
+			if tc.servingPolicy != nil {
+				deploy.Spec.Runtime = &agentsv1alpha1.RuntimeSpec{ToolPolicy: tc.servingPolicy.DeepCopy()}
+			}
+			require.NoError(t, k8sClient.Update(testCtx, deploy))
+			reconcileNN(t, r, tc.agent, namespace)
+			servingV := latestVersionOf(t, tc.agent, namespace)
+			require.NotEqual(t, priorV, servingV)
+
+			setRegressionDetected(t, tc.agent, namespace, servingV)
+			reconcileNN(t, r, tc.agent, namespace) // the revert
+
+			var reverted agentsv1alpha1.AgentDeployment
+			require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &reverted))
+			require.Equal(t, priorImg, reverted.Spec.Image, "the spec reverts to the prior version's image")
+			require.NotNil(t, reverted.Status.Rollback)
+			rolledBackTo := reverted.Status.Rollback.RolledBackTo
+			if tc.servingPolicy == nil {
+				assert.Equal(t, priorV, rolledBackTo)
+			} else {
+				assert.NotEqual(t, priorV, rolledBackTo, "the kept governance changes the version that serves")
+			}
+
+			for range 3 {
+				reconcileNN(t, r, tc.agent, namespace)
+			}
+
+			var got agentsv1alpha1.AgentDeployment
+			require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
+			assert.Equal(t, priorImg, got.Spec.Image, "the reverted spec stays")
+			var av agentsv1alpha1.AgentVersion
+			assert.NoError(t, k8sClient.Get(testCtx, client.ObjectKey{Namespace: namespace, Name: rolledBackTo}, &av),
+				"rolledBackTo must name an AgentVersion that exists")
+			assert.Equal(t, rolledBackTo, got.Status.LatestVersion, "the reverted version is the one serving")
+			ksvc := getKsvc(t, tc.agent, namespace)
+			require.NotEmpty(t, ksvc.Spec.Template.Spec.Containers)
+			assert.Equal(t, priorImg, ksvc.Spec.Template.Spec.Containers[0].Image, "the workload runs the reverted image")
+
+			require.NotNil(t, got.Status.Rollback)
+			assert.True(t, got.Status.Rollback.FrozenUntilAck, "only a human clears the freeze")
+			assert.Equal(t, rolledBackTo, got.Status.Rollback.RolledBackTo)
+			assert.Len(t, got.Status.Rollback.History, 1, "one rollback, not one per reconcile")
+			cond := apimeta.FindStatusCondition(got.Status.Conditions, conditionRolledBack)
+			require.NotNil(t, cond)
+			assert.Equal(t, metav1.ConditionTrue, cond.Status, "the rollback that froze the deployment stays recorded")
+			assert.Equal(t, reasonRolledBack, cond.Reason)
+		})
+	}
+}
+
+// latestVersionOf returns status.latestVersion of the named deployment.
+func latestVersionOf(t *testing.T, name, namespace string) string {
+	t.Helper()
+	var d agentsv1alpha1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKey{Name: name, Namespace: namespace}, &d))
+	require.NotEmpty(t, d.Status.LatestVersion)
+	return d.Status.LatestVersion
+}
+
 // TestAutoRollback_GovernanceOnlyPrior_NoFreeze: when the prior version differs from the serving one
 // only in approval rules a rollback keeps, the auto-path would change nothing. It is refused with
-// RollbackNoEffect and, unlike a real auto-rollback, freezes nothing and records no history.
+// RollbackNoEffect and, unlike a real auto-rollback, freezes nothing and records no history. The
+// refusal does not end the reconcile: the ordinary path still runs in the same pass.
 func TestAutoRollback_GovernanceOnlyPrior_NoFreeze(t *testing.T) {
 	const (
 		name      = "ar-govonly-agent"
@@ -151,12 +250,18 @@ func TestAutoRollback_GovernanceOnlyPrior_NoFreeze(t *testing.T) {
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, reasonRollbackNoEffect, cond.Reason)
+
+	liveHash, err := specHash(live.Spec)
+	require.NoError(t, err)
+	assert.Equal(t, name+"-"+liveHash, got.Status.LatestVersion,
+		"the ordinary reconcile ran after the refusal and recorded the serving version")
+	_ = getKsvc(t, name, namespace)
 }
 
-// TestAutoRollback_Frozen_Refused (case b): frozenUntilAck already true + another
-// RegressionDetected → the frozen guard REFUSES the auto-attempt (RolledBack=False, reason
-// frozen); the spec is unchanged.
-func TestAutoRollback_Frozen_Refused(t *testing.T) {
+// TestAutoRollback_Frozen_NotEvaluated (case b): frozenUntilAck already true + RegressionDetected
+// → the auto path is not evaluated: the spec is unchanged, the RolledBack condition of the action
+// that froze the deployment is not overwritten, and the ordinary reconcile runs.
+func TestAutoRollback_Frozen_NotEvaluated(t *testing.T) {
 	const (
 		name       = "ar-frozen-agent"
 		namespace  = "default"
@@ -176,10 +281,14 @@ func TestAutoRollback_Frozen_Refused(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
 
-	// Seed an outstanding freeze (a prior auto-action) AND the regression trigger.
+	// Seed an outstanding freeze with the rollback that set it, AND the regression trigger.
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
 	deploy.Status.LatestVersion = servingV
 	deploy.Status.Rollback = &agentsv1alpha1.RollbackStatus{FrozenUntilAck: true}
+	const frozeMsg = "reverted serving spec to AgentVersion \"an-earlier-one\""
+	apimeta.SetStatusCondition(&deploy.Status.Conditions, metav1.Condition{
+		Type: conditionRolledBack, Status: metav1.ConditionTrue, Reason: reasonRolledBack, Message: frozeMsg,
+	})
 	apimeta.SetStatusCondition(&deploy.Status.Conditions, metav1.Condition{
 		Type: conditionRegressionDetected, Status: metav1.ConditionTrue,
 		Reason: reasonRegressionDetected, Message: "serving version regressed vs prior baseline",
@@ -191,11 +300,18 @@ func TestAutoRollback_Frozen_Refused(t *testing.T) {
 	var got agentsv1alpha1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
 	assert.Equal(t, servingImg, got.Spec.Image, "a frozen deployment must not auto-roll-back")
+	require.NotNil(t, got.Status.Rollback)
+	assert.True(t, got.Status.Rollback.FrozenUntilAck, "only a human clears the freeze")
 
 	cond := rolledBackCond(t, name, namespace)
-	require.NotNil(t, cond, "RolledBack condition must be set on refusal")
-	assert.Equal(t, metav1.ConditionFalse, cond.Status)
-	assert.Equal(t, reasonRollbackFrozen, cond.Reason)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status, "the rollback that froze the deployment stays recorded")
+	assert.Equal(t, reasonRolledBack, cond.Reason)
+	assert.Equal(t, frozeMsg, cond.Message)
+
+	hash, err := specHash(got.Spec)
+	require.NoError(t, err)
+	assert.Equal(t, name+"-"+hash, got.Status.LatestVersion, "the ordinary reconcile ran")
 }
 
 // TestAutoRollback_OptOut_NoAction (case c): no autoRollback opt-in + RegressionDetected=True →

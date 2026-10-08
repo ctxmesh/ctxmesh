@@ -527,7 +527,8 @@ type RolloutSpec struct {
 	// (cooldown, two-version flap, healthy-target, freeze-after-auto-action) — it can
 	// only roll back to a HEALTHY prior version and, on success, sets
 	// status.rollback.frozenUntilAck to freeze further AUTO-actions until a human acks
-	// (the anti-runaway guard). A subsequent auto-attempt while frozen is refused.
+	// (the anti-runaway guard). While frozen, auto-rollback is not evaluated, so the
+	// RolledBack condition of the rollback that set the freeze stays.
 	// +optional
 	AutoRollback *AutoRollbackConfig `json:"autoRollback,omitempty"`
 
