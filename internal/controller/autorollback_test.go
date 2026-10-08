@@ -108,6 +108,51 @@ func TestAutoRollback_HealthyPrior_RevertsAndFreezes(t *testing.T) {
 	assert.Equal(t, reasonRolledBack, cond.Reason)
 }
 
+// TestAutoRollback_GovernanceOnlyPrior_NoFreeze: when the prior version differs from the serving one
+// only in approval rules a rollback keeps, the auto-path would change nothing. It is refused with
+// RollbackNoEffect and, unlike a real auto-rollback, freezes nothing and records no history.
+func TestAutoRollback_GovernanceOnlyPrior_NoFreeze(t *testing.T) {
+	const (
+		name      = "ar-govonly-agent"
+		namespace = "default"
+		priorV    = "ar-govonly-prior0000"
+		servingV  = "ar-govonly-serving00"
+		image     = "ghcr.io/ctxmesh/example-agent:v1"
+	)
+	withRule := func(rule string) agentsv1alpha1.AgentDeploymentSpec {
+		s := autoRollbackSpec(image, true)
+		s.Runtime = &agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{
+			Overrides: []agentsv1alpha1.ToolPolicyOverride{{Name: "db.delete", Rule: rule}},
+		}}
+		return s
+	}
+	mkVersionSpec(t, name, priorV, namespace, withRule("allow"))
+	time.Sleep(1100 * time.Millisecond)
+	mkVersionSpec(t, name, servingV, namespace, withRule("require-approval"))
+
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec:       withRule("require-approval"),
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	var live agentsv1alpha1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &live))
+
+	setRegressionDetected(t, name, namespace, servingV)
+	reconcileNN(t, rollbackReconciler(onlinescore.NewMemStore()), name, namespace)
+
+	var got agentsv1alpha1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
+	assert.Equal(t, live.Spec, got.Spec, "the approval gate stays and nothing else changes")
+	assert.Nil(t, got.Status.Rollback, "no freeze, cooldown or history for a rollback that did not happen")
+
+	cond := rolledBackCond(t, name, namespace)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, reasonRollbackNoEffect, cond.Reason)
+}
+
 // TestAutoRollback_Frozen_Refused (case b): frozenUntilAck already true + another
 // RegressionDetected → the frozen guard REFUSES the auto-attempt (RolledBack=False, reason
 // frozen); the spec is unchanged.

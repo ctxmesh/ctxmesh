@@ -118,3 +118,41 @@ func TestApproversNeverReachThePod(t *testing.T) {
 	assert.Equal(t, approverSentinel, spec.Runtime.ToolPolicy.Approvers[0].Name, "stripping copies; the spec keeps its approvers")
 	assert.Nil(t, runtimeForPod(nil))
 }
+
+// TestVersionedSpec_SnapshotOmitsGovernance: an AgentVersion snapshot leaves out approvers and
+// feedback, which are not hashed and which a rollback never restores. Stripping them from the
+// snapshot changes no hash: the snapshot hashes to its own version name, and every spec hashes as it
+// did before the strip (pinned against the hash the release before it computed).
+func TestVersionedSpec_SnapshotOmitsGovernance(t *testing.T) {
+	spec := governedSpec()
+	snap := versionedSpec(spec)
+
+	assert.Nil(t, snap.Feedback, "the snapshot carries no feedback declaration")
+	require.NotNil(t, snap.Runtime)
+	require.NotNil(t, snap.Runtime.ToolPolicy)
+	assert.Empty(t, snap.Runtime.ToolPolicy.Approvers, "the snapshot carries no approvers")
+	assert.Equal(t, spec.Runtime.ToolPolicy.Overrides, snap.Runtime.ToolPolicy.Overrides,
+		"approval rules are part of what runs, so the snapshot keeps them")
+	assert.Equal(t, approverSentinel, spec.Runtime.ToolPolicy.Approvers[0].Name, "the spec keeps its approvers")
+	assert.NotNil(t, spec.Feedback, "the spec keeps its feedback")
+
+	h, err := specHash(spec)
+	require.NoError(t, err)
+	hSnap, err := specHash(snap)
+	require.NoError(t, err)
+	assert.Equal(t, h, hSnap, "a snapshot hashes to the version it is named after")
+	assert.Equal(t, "7ae51a3e", h, "the hash of a governed spec is unchanged from the previous release")
+
+	for _, s := range []agentsv1alpha1.AgentDeploymentSpec{
+		{Image: "ghcr.io/ctxmesh/example-agent:v1"},
+		{Image: "ghcr.io/ctxmesh/example-agent:v1", Feedback: governedSpec().Feedback},
+		{Image: "ghcr.io/ctxmesh/example-agent:v1", Runtime: &agentsv1alpha1.RuntimeSpec{}},
+		governedSpec(),
+	} {
+		hs, err := specHash(s)
+		require.NoError(t, err)
+		hv, err := specHash(versionedSpec(s))
+		require.NoError(t, err)
+		assert.Equal(t, hs, hv, "stripping is idempotent under the hash")
+	}
+}

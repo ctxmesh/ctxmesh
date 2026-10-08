@@ -134,8 +134,9 @@ func ConnectWaiting(ctx context.Context, dsn string, notify func(error, time.Dur
 
 // PingWaiting waits, under the same bounded start-up retry, for an already-open handle to reach
 // its server. It is for a store whose handle the caller opens itself, such as the token service's
-// credential Postgres: a malformed DSN has already failed at open, so only reaching the server is
-// retried.
+// credential Postgres. Every failure is retried as an unreachable server, so the caller must parse
+// the DSN first (pgx.ParseConfig): sql.Open with the pgx driver does not parse it, and a malformed
+// DSN would otherwise be retried for the whole budget instead of refused.
 func PingWaiting(ctx context.Context, db *sql.DB, notify func(error, time.Duration)) error {
 	_, err := waitForStore(ctx, notify, func(c context.Context) (*sql.DB, error) {
 		if err := db.PingContext(c); err != nil {

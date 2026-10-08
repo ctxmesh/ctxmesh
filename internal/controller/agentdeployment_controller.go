@@ -874,23 +874,29 @@ func (r *AgentDeploymentReconciler) reconcileJob(
 }
 
 // specHash returns the first 8 hex characters of the SHA-256 of the canonical
-// JSON encoding of spec. The JSON encoder is deterministic for Go structs
-// (fields in declaration order) and all leaf types used in AgentDeploymentSpec
-// (strings, int32, resource.Quantity) serialise deterministically.
-//
-// spec.feedback and spec.runtime.toolPolicy.approvers are left out: only the BFF
-// enforces them, so editing them changes nothing that runs and must not mint a new
-// version. An agent without them hashes exactly as before.
+// JSON encoding of versionedSpec(spec). The JSON encoder is deterministic for Go
+// structs (fields in declaration order) and all leaf types used in
+// AgentDeploymentSpec (strings, int32, resource.Quantity) serialise
+// deterministically.
 func specHash(spec agentsv1alpha1.AgentDeploymentSpec) (string, error) {
-	spec = *spec.DeepCopy()
-	spec.Feedback = nil
-	spec.Runtime = runtimeForPod(spec.Runtime)
-	data, err := json.Marshal(spec)
+	data, err := json.Marshal(versionedSpec(spec))
 	if err != nil {
 		return "", fmt.Errorf("marshalling spec to JSON: %w", err)
 	}
 	sum := sha256.Sum256(data)
 	return fmt.Sprintf("%x", sum[:])[:8], nil
+}
+
+// versionedSpec is the part of the spec an AgentVersion identifies and snapshots. spec.feedback
+// and spec.runtime.toolPolicy.approvers are left out: only the BFF enforces them, so editing them
+// changes nothing that runs and must not mint a version, and a rollback never restores them, so a
+// snapshot carrying them would show stale governance in the version diff. An agent without them
+// hashes exactly as before.
+func versionedSpec(spec agentsv1alpha1.AgentDeploymentSpec) agentsv1alpha1.AgentDeploymentSpec {
+	out := *spec.DeepCopy()
+	out.Feedback = nil
+	out.Runtime = runtimeForPod(out.Runtime)
+	return out
 }
 
 // ensureAgentVersion creates an AgentVersion named versionName if it does not
@@ -916,7 +922,7 @@ func (r *AgentDeploymentReconciler) ensureAgentVersion(
 		},
 		Spec: agentsv1alpha1.AgentVersionSpec{
 			DeploymentName: deploy.Name,
-			Snapshot:       deploy.Spec,
+			Snapshot:       versionedSpec(deploy.Spec),
 		},
 	}
 	if err = ctrl.SetControllerReference(deploy, &av, r.Scheme); err != nil {

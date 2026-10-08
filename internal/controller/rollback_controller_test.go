@@ -195,6 +195,99 @@ func TestRollback_KeepsLiveGovernance(t *testing.T) {
 	assert.Equal(t, live.Spec.Runtime.ToolPolicy, got.Spec.Runtime.ToolPolicy,
 		"the live tool policy stays: send_email still needs approval and mallory is still not an approver")
 	assert.Equal(t, live.Spec.Feedback, got.Spec.Feedback, "the live feedback declaration stays")
+
+	// The kept approval rules differ from the target's, so the reverted spec is not the target
+	// version: status names the version that actually serves, the one the next reconcile creates.
+	servedHash, err := specHash(got.Spec)
+	require.NoError(t, err)
+	served := name + "-" + servedHash
+	require.NotEqual(t, targetV, served)
+	require.NotNil(t, got.Status.Rollback)
+	assert.Equal(t, served, got.Status.Rollback.RolledBackTo, "rolledBackTo names the serving version")
+	require.Len(t, got.Status.Rollback.History, 1)
+	assert.Equal(t, served, got.Status.Rollback.History[0].ToVersion, "history names the serving version")
+	cond := rolledBackCond(t, name, namespace)
+	assert.Contains(t, cond.Message, targetV, "the message names the requested target")
+	assert.Contains(t, cond.Message, served, "the message names the version that serves")
+}
+
+// mkVersionSpec creates an AgentVersion of deployment with the given snapshot.
+func mkVersionSpec(t *testing.T, deployment, name, namespace string, snapshot agentsv1alpha1.AgentDeploymentSpec) {
+	t.Helper()
+	av := &agentsv1alpha1.AgentVersion{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec:       agentsv1alpha1.AgentVersionSpec{DeploymentName: deployment, Snapshot: snapshot},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, av))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, av) })
+}
+
+// TestRollback_NoEffect_Refused: a target that differs from the serving spec only in fields a rollback
+// keeps (approval rules, approvers, feedback) would change nothing, so it is refused with
+// RollbackNoEffect: the spec is unchanged and no cooldown, history or freeze is recorded. A target that
+// is the version already serving is refused the same way.
+func TestRollback_NoEffect_Refused(t *testing.T) {
+	const (
+		name      = "rb-noeffect-agent"
+		namespace = "default"
+		govOnlyV  = "rb-noeffect-agent-govonly"
+		sameV     = "rb-noeffect-agent-same"
+		image     = "ghcr.io/ctxmesh/example-agent:v1"
+	)
+	policy := func(rule, approver string) *agentsv1alpha1.ToolPolicySpec {
+		return &agentsv1alpha1.ToolPolicySpec{
+			Default:   "allow",
+			Overrides: []agentsv1alpha1.ToolPolicyOverride{{Name: "db.delete", Rule: rule}},
+			Approvers: []agentsv1alpha1.Approver{{Kind: "User", Name: approver}},
+		}
+	}
+	feedback := func(score string) *agentsv1alpha1.FeedbackSpec {
+		return &agentsv1alpha1.FeedbackSpec{Human: &agentsv1alpha1.HumanSource{
+			Scores: []agentsv1alpha1.ScoreDecl{{Name: score, DataType: agentsv1alpha1.ScoreBoolean}},
+		}}
+	}
+	liveSpec := agentsv1alpha1.AgentDeploymentSpec{
+		Image:    image,
+		Runtime:  &agentsv1alpha1.RuntimeSpec{ToolPolicy: policy("require-approval", "dba@example.com")},
+		Feedback: feedback("thumbs"),
+	}
+	mkVersionSpec(t, name, govOnlyV, namespace, agentsv1alpha1.AgentDeploymentSpec{
+		Image:    image,
+		Runtime:  &agentsv1alpha1.RuntimeSpec{ToolPolicy: policy("allow", "mallory@example.com")},
+		Feedback: feedback("thumbs-old"),
+	})
+	mkVersionSpec(t, name, sameV, namespace, versionedSpec(liveSpec))
+
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec:       liveSpec,
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	var live agentsv1alpha1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &live))
+
+	for _, tc := range []struct{ target, says string }{
+		{govOnlyV, "edit those fields directly"},
+		// The first refusal started no cooldown, so this one reaches the no-effect check too.
+		{sameV, "already serving"},
+	} {
+		annotateRollback(t, name, namespace, tc.target)
+		reconcileNN(t, rollbackReconciler(onlinescore.NewMemStore()), name, namespace)
+
+		var got agentsv1alpha1.AgentDeployment
+		require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
+		assert.Equal(t, live.Spec, got.Spec, "%s: the spec is unchanged", tc.target)
+		assert.NotContains(t, got.Annotations, rollbackAnnotation, "%s: the annotation is cleared", tc.target)
+		assert.Nil(t, got.Status.Rollback, "%s: no cooldown, history or freeze is recorded", tc.target)
+
+		cond := rolledBackCond(t, name, namespace)
+		require.NotNil(t, cond, "%s: the refusal is on status", tc.target)
+		assert.Equal(t, metav1.ConditionFalse, cond.Status)
+		assert.Equal(t, reasonRollbackNoEffect, cond.Reason)
+		assert.Contains(t, cond.Message, tc.target)
+		assert.Contains(t, cond.Message, tc.says)
+	}
 }
 
 // TestRollback_UnhealthyTarget_Refused: a target that itself regressed vs its own baseline is

@@ -648,12 +648,17 @@ type ToolPolicySpec struct {
 	MaxToolCallsPerRun int32 `json:"maxToolCallsPerRun,omitempty"`
 
 	// approvers narrows who may approve a paused tool call (rule require-approval) for this
-	// agent. A caller approving a run must already be allowed to act on it, as the run's
-	// creator or as a caller who can get this AgentDeployment, AND match an entry here: a User
-	// entry matches the caller's username, a Group entry any group the caller belongs to.
-	// Identity comes from the caller's own verified token, never from the request. This list
-	// only narrows who may approve; it never lets in a caller who could not act on the run.
-	// Empty means anyone who can act on the run may approve.
+	// agent. A caller approving a run must be allowed to act on it, must be able to get this
+	// AgentDeployment (the approval reads it with the caller's own credentials), AND must match
+	// an entry here: a User entry matches the caller's username, a Group entry any group the
+	// caller belongs to. Identity comes from the caller's own verified token, never from the
+	// request. This list only narrows who may approve; it never lets in a caller who could not
+	// act on the run. Empty means any caller who can act on the run and get this
+	// AgentDeployment may approve.
+	//
+	// Setting approvers on an agent that has no toolPolicy also stores default: allow (the
+	// field's default). That is a one-time spec change that mints one new version; later
+	// edits to approvers do not.
 	//
 	// A ServiceAccount approves through its username or group form, for example User
 	// "system:serviceaccount:<namespace>:<name>".
@@ -950,8 +955,9 @@ type GateStatus struct {
 // two-version flap detector reads recent events to refuse rolling back TO a version
 // that was recently rolled back FROM.
 type RollbackEvent struct {
-	// toVersion is the AgentVersion the serving spec was reverted to (the rollback
-	// target — an explicit AgentVersion name).
+	// toVersion is the AgentVersion the serving spec was reverted to: the rollback
+	// target, or, when the governance fields a rollback keeps differ from the target's,
+	// the version the reverted spec hashes to (<deployment>-<hash>).
 	// +kubebuilder:validation:MaxLength=253
 	ToVersion string `json:"toVersion"`
 
@@ -974,8 +980,9 @@ type RollbackEvent struct {
 // read this to decide whether to honour a `agents.ctxmesh.ai/rollback=<version>`
 // annotation.
 type RollbackStatus struct {
-	// rolledBackTo is the AgentVersion the serving spec was last reverted to by a
-	// human rollback. Empty until the first successful rollback.
+	// rolledBackTo is the AgentVersion the serving spec was last reverted to (see
+	// history[].toVersion for which name that is). Empty until the first successful
+	// rollback.
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
 	RolledBackTo string `json:"rolledBackTo,omitempty"`

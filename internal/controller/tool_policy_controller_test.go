@@ -650,6 +650,20 @@ func TestToolPolicy_InlineApproval_DeliveredToSidecar(t *testing.T) {
 		assert.NotEqual(t, metav1.ConditionFalse, cond.Status,
 			"a remote require-approval tool must not hold the agent NotReady: %s", cond.Message)
 	}
+
+	// The version snapshot keeps the approval rules (they run) and leaves out the approvers (they do
+	// not, and a rollback never restores them).
+	hash, err := specHash(updated.Spec)
+	require.NoError(t, err)
+	var av agentsv1alpha1.AgentVersion
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: agent.Name + "-" + hash, Namespace: ns}, &av))
+	require.NotNil(t, av.Spec.Snapshot.Runtime)
+	require.NotNil(t, av.Spec.Snapshot.Runtime.ToolPolicy)
+	assert.Equal(t, "require-approval", av.Spec.Snapshot.Runtime.ToolPolicy.Default, "the snapshot keeps the rules")
+	assert.Empty(t, av.Spec.Snapshot.Runtime.ToolPolicy.Approvers, "the snapshot carries no approvers")
+	snapHash, err := specHash(av.Spec.Snapshot)
+	require.NoError(t, err)
+	assert.Equal(t, hash, snapHash, "the snapshot hashes to its version's name")
 }
 
 // TestToolPolicy_LongestServiceAccountApproverAccepted: the longest possible ServiceAccount username

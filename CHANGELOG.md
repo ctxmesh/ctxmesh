@@ -108,19 +108,24 @@ contract already said.
 **Breaking: four resource kinds are retired, and their settings move onto what they configured.**
 The API now serves 14 kinds instead of 18 (ADR 0152). Move any objects before you upgrade.
 `helm upgrade` refuses while any object of the four kinds still exists, and names each kind and
-how many:
+how many. The guard relies on Helm `lookup`, which `helm template`-based tools such as Argo CD do
+not run, so their users must check `kubectl get approvalpolicies,feedbackstores,credentialstores,clustercredentialstores -A`
+themselves before upgrading:
 
 - **`FeedbackStore` → the agent's `spec.feedback`.** Copy the store's `spec` (`mode`, `human`,
   `external`) into the agent that named it in `spec.feedbackStoreRef`, and delete that field. The
   API server now rejects a declaration with no source, or with a score name used twice.
 - **`ApprovalPolicy` → the agent's `spec.runtime.toolPolicy`.** `rules[].allTools` becomes
   `default: require-approval`, `rules[].tools` becomes `overrides` entries with
-  `rule: require-approval`, and `approvers` moves to `toolPolicy.approvers` (empty still means
-  anyone who can act on the run: its creator, or a caller who can get the agent). Delete
+  `rule: require-approval`, and `approvers` moves to `toolPolicy.approvers` (an approver must be
+  able to get the agent; empty means anyone who can act on the run and get the agent). Delete
   `spec.approvalPolicyRef`. One meaning changes: an explicit `allow` override now wins over
   `default: require-approval`, because there is no second policy to merge with. Editing
-  `approvers` or `spec.feedback` does not create a new agent version or roll the agent, and a
-  rollback keeps the agent's current `toolPolicy` and `feedback`.
+  `approvers` or `spec.feedback` does not create a new agent version or roll the agent, and
+  version snapshots no longer record either. A rollback keeps the agent's current approval rules
+  (`default`, `overrides`), `approvers`, `maxToolCallsPerRun` and `feedback`, and restores
+  `forcedChoice` and `parallelLimit` with the rest of the version; a rollback that would change
+  nothing else is refused as `RollbackNoEffect`.
 - **`CredentialStore` and `ClusterCredentialStore` → Helm values `tokenService.credentialBackend`.**
   Set `type` to `kubernetes`, `postgres` or `remote`, and move the store's `spec.provider.<type>`
   block under the matching key. Two keys do not move. `kubernetes.credentialNamespace` has no

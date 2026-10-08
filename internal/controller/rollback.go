@@ -46,9 +46,10 @@ import (
 //     healthy-target, cooldown, two-version flap, freeze-after-auto-action. A refused
 //     rollback surfaces a clear status condition/reason and NEVER silently no-ops.
 //  3. reverts AgentDeployment.spec to the target version's spec.snapshot, keeping the live
-//     tool policy and feedback declaration (rollbackSpec), so the normal reconcile then rolls
-//     the workload; records the action on status.rollback, and CLEARS the annotation so the
-//     rollback fires exactly once.
+//     governance fields (rollbackSpec), so the normal reconcile then rolls the workload; records
+//     the action on status.rollback, and CLEARS the annotation so the rollback fires exactly
+//     once. A target that differs from the live spec only in kept fields is refused
+//     (RollbackNoEffect): nothing would change.
 //
 // The spec-revert is an ordinary Update to the AgentDeployment object, so it is captured by
 // the existing control-plane Auditor (internal/audit) exactly like a promote — no new audit
@@ -80,6 +81,7 @@ const (
 	reasonRollbackFlap           = "RollbackFlap"            // False: target rolled-back-FROM within the flap window
 	reasonRollbackFrozen         = "RollbackFrozen"          // False: frozen pending human ack (auto-action guard)
 	reasonAutoRollbackNoPrior    = "AutoRollbackNoPrior"     // False: auto-path found no prior version to roll back to
+	reasonRollbackNoEffect       = "RollbackNoEffect"        // False: target differs only in fields a rollback keeps
 )
 
 // Damping tunables (ADR 0062 Fork 4). Documented defaults; per-agent overrides from
@@ -406,16 +408,57 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 	if err := r.Get(ctx, client.ObjectKeyFromObject(deploy), &fresh); err != nil {
 		return fmt.Errorf("re-fetching for rollback: %w", err)
 	}
-	// Revert the serving spec to the target's snapshot (governance excepted, see rollbackSpec) and
-	// clear the annotation in the SAME object Update, so the rollback fires exactly once (the
-	// ordinary reconcile then rolls the workload against the reverted spec — the actuator changes
-	// no Knative traffic itself).
-	fresh.Spec = rollbackSpec(av.Spec.Snapshot, fresh.Spec)
+	liveHash, err := specHash(fresh.Spec)
+	if err != nil {
+		return fmt.Errorf("hashing the live spec: %w", err)
+	}
+	targetHash, err := specHash(av.Spec.Snapshot)
+	if err != nil {
+		return fmt.Errorf("hashing rollback target %q: %w", av.Name, err)
+	}
+	// rollbackSpec keeps the live governance fields, so a target that differs from the live spec only
+	// in those fields changes nothing. Recording that as a rollback would start the cooldown, write
+	// flap history and, on the auto path, freeze the deployment for an action that did not happen.
+	next := rollbackSpec(av.Spec.Snapshot, fresh.Spec)
+	nextHash, err := specHash(next)
+	if err != nil {
+		return fmt.Errorf("hashing the rolled-back spec: %w", err)
+	}
+	if nextHash == liveHash {
+		return r.refuseRollback(ctx, deploy, reasonRollbackNoEffect,
+			rollbackNoEffectMessage(av.Name, targetHash == liveHash))
+	}
+
+	// Revert the serving spec and clear the annotation in the SAME object Update, so the rollback
+	// fires exactly once (the ordinary reconcile then rolls the workload against the reverted spec —
+	// the actuator changes no Knative traffic itself).
+	fresh.Spec = next
 	if fresh.Annotations != nil {
 		delete(fresh.Annotations, rollbackAnnotation)
 	}
 	if err := r.Update(ctx, &fresh); err != nil {
 		return fmt.Errorf("reverting spec to rollback target %q: %w", av.Name, err)
+	}
+
+	// The version that serves is named by the hash of the spec as stored (after API-server
+	// defaulting), which is what the next reconcile computes. It is the target unless the kept
+	// governance fields differ from the target's.
+	servedHash, err := specHash(fresh.Spec)
+	if err != nil {
+		return fmt.Errorf("hashing the reverted spec: %w", err)
+	}
+	if servedHash == liveHash {
+		// API-server defaulting made the reverted spec identical to the live one, so nothing will roll.
+		// The annotation is already cleared by the Update above; record the refusal only.
+		return r.recordRollbackRefusal(ctx, deploy, reasonRollbackNoEffect,
+			rollbackNoEffectMessage(av.Name, targetHash == liveHash))
+	}
+	served := av.Name
+	message := fmt.Sprintf("reverted serving spec to AgentVersion %q (from %q)", av.Name, fromVersion)
+	if servedHash != targetHash {
+		served = deploy.Name + "-" + servedHash
+		message = fmt.Sprintf("reverted serving spec to AgentVersion %q (from %q); it serves as %q, because the "+
+			"serving tool-policy governance was kept and differs from the target's", av.Name, fromVersion, served)
 	}
 
 	// Record the rollback on status (a separate status subresource write). Re-fetch to avoid
@@ -434,7 +477,7 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 	if rb == nil {
 		rb = &agentsv1alpha1.RollbackStatus{}
 	}
-	rb.RolledBackTo = av.Name
+	rb.RolledBackTo = served
 	rb.LastRollbackAt = &now
 	if freeze {
 		// Auto-rollback freezes further AUTO-actions until a human acks (clears this). Set it
@@ -444,7 +487,7 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 	}
 	// Prepend the event (most-recent-first) and bound the history.
 	rb.History = append([]agentsv1alpha1.RollbackEvent{{
-		ToVersion:   av.Name,
+		ToVersion:   served,
 		FromVersion: fromVersion,
 		At:          now,
 	}}, rb.History...)
@@ -456,40 +499,80 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 		Type:               conditionRolledBack,
 		Status:             metav1.ConditionTrue,
 		Reason:             reasonRolledBack,
-		Message:            fmt.Sprintf("reverted serving spec to AgentVersion %q (from %q)", av.Name, fromVersion),
+		Message:            message,
 		ObservedGeneration: withStatus.Generation,
 	})
 	if err := r.Status().Patch(ctx, &withStatus, client.MergeFrom(base)); err != nil {
 		return fmt.Errorf("recording rollback status: %w", err)
 	}
-	log.Info("Rolled back serving spec", "to", av.Name, "from", fromVersion)
+	log.Info("Rolled back serving spec", "to", av.Name, "serving", served, "from", fromVersion)
 	// The spec Update above re-enqueues the object; the next reconcile rolls the workload
 	// against the reverted spec. No requeue needed here.
 	return nil
 }
 
-// rollbackSpec returns the target snapshot with the live governance fields kept:
-// spec.runtime.toolPolicy (default, overrides, approvers) and spec.feedback. A rollback restores
-// what the agent does, never who may approve or what needs approval; a governance change is undone
-// by a person editing it.
+// rollbackNoEffectMessage explains a refused rollback that would change nothing: the target is the
+// version already serving, or differs from the serving spec only in fields a rollback keeps.
+func rollbackNoEffectMessage(target string, alreadyServing bool) string {
+	if alreadyServing {
+		return fmt.Sprintf("rollback target %q is the version already serving; no action taken", target)
+	}
+	return fmt.Sprintf("rollback target %q differs from the serving spec only in fields a rollback keeps "+
+		"(spec.runtime.toolPolicy default, overrides, approvers and maxToolCallsPerRun, and spec.feedback); "+
+		"no action taken — edit those fields directly", target)
+}
+
+// rollbackSpec returns the target snapshot with the live governance kept: spec.feedback and, of
+// spec.runtime.toolPolicy, the approval rules (default, overrides), the approvers and the
+// maxToolCallsPerRun safety cap. The tool policy's behaviour settings (forcedChoice, parallelLimit)
+// come from the snapshot like the rest of the spec. A rollback restores what the agent does, never
+// what needs approval, who may approve or how many tool calls a run may make; a person undoes a
+// governance change by editing it.
 func rollbackSpec(snapshot, live agentsv1alpha1.AgentDeploymentSpec) agentsv1alpha1.AgentDeploymentSpec {
 	out := *snapshot.DeepCopy()
 	out.Feedback = live.Feedback.DeepCopy()
 
-	var liveToolPolicy *agentsv1alpha1.ToolPolicySpec
-	if live.Runtime != nil {
-		liveToolPolicy = live.Runtime.ToolPolicy.DeepCopy()
+	var snapshotToolPolicy, liveToolPolicy *agentsv1alpha1.ToolPolicySpec
+	if out.Runtime != nil {
+		snapshotToolPolicy = out.Runtime.ToolPolicy
 	}
+	if live.Runtime != nil {
+		liveToolPolicy = live.Runtime.ToolPolicy
+	}
+	toolPolicy := rollbackToolPolicy(snapshotToolPolicy, liveToolPolicy)
 	switch {
 	case out.Runtime != nil:
-		out.Runtime.ToolPolicy = liveToolPolicy
+		out.Runtime.ToolPolicy = toolPolicy
 		if *out.Runtime == (agentsv1alpha1.RuntimeSpec{}) {
 			out.Runtime = nil // the snapshot's runtime held only a tool policy
 		}
-	case liveToolPolicy != nil:
-		out.Runtime = &agentsv1alpha1.RuntimeSpec{ToolPolicy: liveToolPolicy}
+	case toolPolicy != nil:
+		out.Runtime = &agentsv1alpha1.RuntimeSpec{ToolPolicy: toolPolicy}
 	}
 	return out
+}
+
+// rollbackToolPolicy merges a tool policy field by field: governance and safety caps from live,
+// behaviour from the snapshot. Every ToolPolicySpec field must be classified here
+// (TestRollbackToolPolicy_ClassifiesEveryField fails on a new one). Nil when nothing is set.
+func rollbackToolPolicy(snapshot, live *agentsv1alpha1.ToolPolicySpec) *agentsv1alpha1.ToolPolicySpec {
+	var out agentsv1alpha1.ToolPolicySpec
+	if live != nil {
+		live = live.DeepCopy()
+		out.Default = live.Default
+		out.Overrides = live.Overrides
+		out.Approvers = live.Approvers
+		out.MaxToolCallsPerRun = live.MaxToolCallsPerRun
+	}
+	if snapshot != nil {
+		out.ForcedChoice = snapshot.ForcedChoice
+		out.ParallelLimit = snapshot.ParallelLimit
+	}
+	if out.Default == "" && len(out.Overrides) == 0 && len(out.Approvers) == 0 && out.MaxToolCallsPerRun == 0 &&
+		out.ForcedChoice == "" && out.ParallelLimit == 0 {
+		return nil
+	}
+	return &out
 }
 
 // refuseRollback records a REFUSED rollback on status (RolledBack=False + a clear reason) and
@@ -501,9 +584,6 @@ func (r *AgentDeploymentReconciler) refuseRollback(
 	deploy *agentsv1alpha1.AgentDeployment,
 	reason, message string,
 ) error {
-	log := logf.FromContext(ctx)
-	log.Info("Rollback refused", "reason", reason, "detail", message)
-
 	// Clear the annotation (metadata Update) so the refusal does not re-fire every reconcile.
 	var fresh agentsv1alpha1.AgentDeployment
 	if err := r.Get(ctx, client.ObjectKeyFromObject(deploy), &fresh); err != nil {
@@ -517,9 +597,20 @@ func (r *AgentDeploymentReconciler) refuseRollback(
 			}
 		}
 	}
+	return r.recordRollbackRefusal(ctx, deploy, reason, message)
+}
+
+// recordRollbackRefusal writes RolledBack=False with reason and message. It touches neither the spec
+// nor the annotation, nor the cooldown, history or freeze in status.rollback.
+func (r *AgentDeploymentReconciler) recordRollbackRefusal(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+	reason, message string,
+) error {
+	logf.FromContext(ctx).Info("Rollback refused", "reason", reason, "detail", message)
 
 	// Record the refusal condition (status subresource) as a MERGE PATCH off a freshly-fetched
-	// base. The annotation-clear Update above wrote to the apiserver and bumped the
+	// base. The caller's annotation-clear Update wrote to the apiserver and bumped the
 	// resourceVersion, but this re-fetch goes through r.Get, which — in production — reads the
 	// informer CACHE and can return the STALE (pre-Update) resourceVersion. A
 	// resourceVersion-carrying Status().Update would then 409 against the apiserver, and because
