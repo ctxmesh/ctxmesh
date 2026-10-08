@@ -281,6 +281,7 @@ jobs:
       - name: M12 deployed-UI e2e (topology / config-builder / Playground + caller-scoped 403)
         if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
+          UI_E2E_OUTPUT_DIR: test-results/m12-ui
           AGENT_ENGINE: ${{ github.workspace }}
         # Drives the helm-installed UI headless (Playwright/chromium) over the BFF
         # port-forward: the 3 🧪 (topology renders live agents, the config-builder
@@ -298,6 +299,7 @@ jobs:
       - name: M13 console-foundation e2e (token login / RBAC chrome / forced-403)
         if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
+          UI_E2E_OUTPUT_DIR: test-results/m13-ui
           AGENT_ENGINE: ${{ github.workspace }}
         # The v2 console foundation (ADR 0012): 50-login drives the REAL login
         # form (paste a persona token → whoami → console + who-am-I; wrong token
@@ -310,6 +312,7 @@ jobs:
       - name: M14 first-agent aha e2e (connect → describe → create → run → tool span)
         if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
+          UI_E2E_OUTPUT_DIR: test-results/m14-ui
           AGENT_ENGINE: ${{ github.workspace }}
         # The aha (§28-30): connect a provider → add a keyed BYO-MCP (auth both
         # directions) → describe an agent → generate/review/create → land on the
@@ -325,6 +328,7 @@ jobs:
       - name: M15 fleet-management e2e (grouped topology at 200 agents + CRUD round-trips)
         if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
+          UI_E2E_OUTPUT_DIR: test-results/m15-ui
           AGENT_ENGINE: ${{ github.workspace }}
         # The fleet-management 🧪 (§31): seeds a 200-agent scale fixture across 3
         # namespaces × 3 registries (min-scale=0, no pods spin), then drives the
@@ -342,6 +346,7 @@ jobs:
       - name: M16 observability-depth e2e (native trace explorer + feedback + cost)
         if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
+          UI_E2E_OUTPUT_DIR: test-results/m16-ui
           AGENT_ENGINE: ${{ github.workspace }}
         # The observability-depth 🧪 (§31, spec observability-depth-ui): reuses the
         # M14 bring-up (helm + persona RBAC + fixture MCP + tool-mock + Langfuse),
@@ -360,6 +365,7 @@ jobs:
       - name: M17 authoring-depth e2e (OAuth MCP + tool hot-swap + approval queue)
         if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
+          UI_E2E_OUTPUT_DIR: test-results/m17-ui
           AGENT_ENGINE: ${{ github.workspace }}
         # The authoring-depth 🧪 (§28.2/§31, spec authoring-depth-ui): reuses the
         # M16 bring-up + deploys the OAuth-fixture MCP (harness/fixtures/m17,
@@ -376,6 +382,7 @@ jobs:
       - name: M18 console-cohesion e2e (personas — providers/compose/fleet/redaction)
         if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
+          UI_E2E_OUTPUT_DIR: test-results/m18-ui
           AGENT_ENGINE: ${{ github.workspace }}
         # The console-cohesion 🧪 (§28–31, spec console-cohesion): reuses the M16/M17
         # bring-up shape (M18 adds NO new fixture server) + seeds a connected-provider
@@ -393,6 +400,7 @@ jobs:
       - name: M19 dev-ui smoke (ctxmesh dev --ui — NO cluster, Docker Compose)
         if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
+          UI_E2E_OUTPUT_DIR: test-results/m19-ui
           AGENT_ENGINE: ${{ github.workspace }}
         # The dev-ui 🧪 (ADR 0021, spec dev-ui-and-sso): the ONLY slice with NO
         # cluster. It brings up `ctxmesh dev --ui` (the local Compose inner loop
@@ -404,3 +412,13 @@ jobs:
         # ADR 0006: locally provable — tier0 + tsc --noEmit + playwright --list +
         # shellcheck; the full Compose run is deferred like the other slices.
         run: make -C agent-brain/harness tier2 SLICE=m19-ui
+      # A red UI slice left nothing to look at. Each slice writes its screenshots and traces to its own
+      # directory (UI_E2E_OUTPUT_DIR), and they go up whenever the job did not pass.
+      - name: Keep the Playwright results of the UI slices
+        if: ${{ !cancelled() && failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-results
+          path: agent-brain/harness/ui-e2e/test-results
+          if-no-files-found: ignore
+          retention-days: 14

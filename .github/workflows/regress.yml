@@ -55,6 +55,18 @@ jobs:
             curl -fsSLo kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/$(go env GOARCH)/kubectl"
             chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
           }
+      # The acceptances call these tools, and their verdicts must not depend on what the runner happens
+      # to ship: the image's shellcheck 0.9.0 raised 102 notes 0.11.0 does not, and without gitleaks or
+      # govulncheck two acceptances refused to run. Same versions engine CI pins.
+      - name: Install shellcheck, gitleaks and govulncheck (pinned)
+        run: |
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.$(uname -m).tar.xz" \
+            | tar -xJ --strip-components=1 -C /tmp shellcheck-v0.11.0/shellcheck
+          sudo mv /tmp/shellcheck /usr/local/bin/shellcheck
+          shellcheck --version | grep -q 'version: 0.11.0'
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Install nvm for the UI acceptances (harness ui-e2e/.nvmrc)
         run: |
           curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh \
@@ -72,4 +84,8 @@ jobs:
         env:
           AGENT_ENGINE: ${{ github.workspace }}
           DOCS_SITE: ${{ github.workspace }}/ctxmesh.github.io
+          # Per-script budget on this runner. accept-m0 runs tier0, the whole envtest suite and a deploy
+          # back to back, about 21 minutes here (the same work takes 4+4+3+1 minutes as parallel CI jobs,
+          # plus envtest and the deploy); 900s, set on a workstation, reported it as hung.
+          REGRESS_TIMEOUT: "1800"
         run: make -C agent-brain/harness regress-all
