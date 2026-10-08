@@ -94,6 +94,11 @@ quickstart's echo agent does, produced "stream ended with no result frame" on ev
 console chat and from `POST /api/runs`. A plain reply is now taken as the result, as the execution
 contract already said.
 
+**Fixed: the console's Rotate key action was refused for every role.** It read the provider's
+Secret, which no shipped role may do, so it answered 403 while the console offered the button. A
+rotation now rebuilds the provider from its model route, as connecting it again does, and never
+reads the key it replaces.
+
 **Breaking:** with a state layer present (the default), the BFF refuses unbound capabilities.
 - **Older agents:** an agent built on an older base image has a launcher that cannot bind, so those
   calls fail until it is rebuilt. To run older agents meanwhile, set

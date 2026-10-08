@@ -52,12 +52,12 @@ var consoleFlows = []flowSpec{
 		},
 	},
 	{
-		// Re-connect / rotate the key. upsertObject creates, then UPDATES when the object
-		// already exists, so the rotate path needs update on the same three objects — not
-		// `secretbindings.update` alone, which is what the console checked while the write
-		// that actually matters is the core Secret. A custom resource cannot be updated without
-		// its resourceVersion, so the update of the SecretBinding and ModelRoute first reads their
-		// metadata (get). The Secret is updated without a read.
+		// Rotate the key (handleRotateProviderKey). It reads the ModelRoute and SecretBinding to
+		// recover what connect wrote, then UPDATES all three objects through connect's write path
+		// and never creates one. A custom resource cannot be updated without its resourceVersion,
+		// which the update reads first (get). The Secret is updated without a read: get on a
+		// Secret returns its data, and no shipped persona may hold it (ADR 0136).
+		// TestRotateProviderKey_IssuesExactlyTheFlowVerbs holds the handler to this list.
 		name: "rotateProviderKey",
 		needs: []flowNeed{
 			{group: "", resource: resSecrets, verbs: []string{verbUpdate}},
