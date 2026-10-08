@@ -64,10 +64,25 @@ func TestRotateFlowAsksAboutTheSecretNotTheBinding(t *testing.T) {
 
 	all := caps(map[string][]string{
 		resSecrets:        {verbUpdate},
+		resSecretBindings: {verbGet, verbUpdate},
+		resModelRoutes:    {verbGet, verbUpdate},
+	})
+	assert.True(t, evaluateFlows(all)["rotateProviderKey"])
+
+	// A custom resource is updated with its live resourceVersion, which takes a metadata read.
+	noRead := caps(map[string][]string{
+		resSecrets:        {verbUpdate},
 		resSecretBindings: {verbUpdate},
 		resModelRoutes:    {verbUpdate},
 	})
-	assert.True(t, evaluateFlows(all)["rotateProviderKey"])
+	assert.False(t, evaluateFlows(noRead)["rotateProviderKey"],
+		"updating the SecretBinding and ModelRoute reads their resourceVersion first")
+	secretRead := caps(map[string][]string{
+		resSecrets:        {verbUpdate},
+		resSecretBindings: {verbGet, verbUpdate},
+		resModelRoutes:    {verbGet, verbUpdate},
+	})
+	assert.True(t, evaluateFlows(secretRead)["rotateProviderKey"], "the Secret itself is never read (ADR 0136)")
 }
 
 // TestUnprobedCellIsNotAllowed inverts the UI's optimistic default on purpose. `can()` returns

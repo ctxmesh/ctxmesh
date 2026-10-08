@@ -31,6 +31,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
@@ -381,8 +382,8 @@ func createProviderObjects(ctx context.Context, w client.Client, spec providerCr
 	// covers admission webhooks, ResourceQuota on Secret counts, and policy engines. The
 	// capability probe gates the button; this gates the write.
 	for _, obj := range writes {
-		if err := dryRunUpsert(ctx, w, obj.o); err != nil {
-			return nil, classifyWriteError(err, verbCreate, obj.kind, obj.o.GetName())
+		if verb, err := dryRunUpsert(ctx, w, obj.o); err != nil {
+			return nil, classifyWriteError(err, verb, obj.kind, obj.o.GetName())
 		}
 	}
 
@@ -400,22 +401,18 @@ func createProviderObjects(ctx context.Context, w client.Client, spec providerCr
 	return created, nil
 }
 
-// dryRunUpsert asks the API server whether the upsert would succeed, persisting nothing.
+// dryRunUpsert asks the API server whether the upsert would succeed, persisting nothing, and
+// returns the verb of the call that answered.
 //
 // Create-then-Update mirrors upsertObject: a dry-run Create of an object that already exists
 // returns AlreadyExists, which is not a denial — it is the signal that the real call would take
-// the Update path, so the dry-run follows it there.
-//
-// A dry-run mutates the object's ResourceVersion/UID on some paths, so the caller must not
-// depend on those afterwards; the real upsert clears ResourceVersion itself before Update.
-func dryRunUpsert(ctx context.Context, w client.Client, obj client.Object) error {
-	err := w.Create(ctx, obj.DeepCopyObject().(client.Object), client.DryRunAll)
+// the Update path, so the dry-run follows it there, with the same resourceVersion handling.
+func dryRunUpsert(ctx context.Context, w client.Client, obj client.Object) (verb string, err error) {
+	err = w.Create(ctx, obj.DeepCopyObject().(client.Object), client.DryRunAll)
 	if err == nil || !apierrors.IsAlreadyExists(err) {
-		return err
+		return verbCreate, err
 	}
-	updated := obj.DeepCopyObject().(client.Object)
-	updated.SetResourceVersion("")
-	return w.Update(ctx, updated, client.DryRunAll)
+	return updateExisting(ctx, w, obj.DeepCopyObject().(client.Object), client.DryRunAll)
 }
 
 // upsertObject creates obj, or — if it already exists — updates it in place (the
@@ -423,25 +420,49 @@ func dryRunUpsert(ctx context.Context, w client.Client, obj client.Object) error
 // key), the SecretBinding/ModelRoute Spec refreshed, status subresources untouched. Every
 // call is CALLER-SCOPED, so the API server makes the authorization decision.
 //
-// The update is UNCONDITIONAL — no resourceVersion, and deliberately no prior Get.
-//
-// It used to Get the live object first, to carry its resourceVersion and UID. That made
-// `get secrets` a hidden requirement of connecting a provider, and `get` on a Secret
-// returns its DATA — so the credential-writing role would have had to be a
-// credential-READING role, which is the thing it exists not to be (ADR 0136). A rotate is
-// an unconditional overwrite by intent: the caller is stating the new key, not merging
-// with the old one, so optimistic concurrency buys nothing here and costs read access to
-// every credential in the namespace.
-//
-// The write verb is threaded back to the caller so a denial names the verb that was
-// actually refused — a Forbidden on update reported as "not allowed to create" sends a
-// user to ask an admin for a grant they already hold (found in M155).
+// The verb is threaded back to the caller so a denial names the verb that was actually
+// refused — a Forbidden on update reported as "not allowed to create" sends a user to ask an
+// admin for a grant they already hold.
 func upsertObject(ctx context.Context, w client.Client, obj client.Object) (verb string, err error) {
 	if err := w.Create(ctx, obj); err == nil || !apierrors.IsAlreadyExists(err) {
 		return verbCreate, err
 	}
-	obj.SetResourceVersion("")
-	return verbUpdate, w.Update(ctx, obj)
+	return updateExisting(ctx, w, obj)
+}
+
+// updateExisting overwrites an existing object with obj. A rotate is an overwrite by intent:
+// the caller states the new value, it does not merge with the old one.
+//
+// A Secret is updated unconditionally, with no resourceVersion and no prior read. Kubernetes
+// allows that for core Secrets, and reading one would return its data, which would make the
+// credential-writing role a credential-reading one (ADR 0136).
+//
+// A custom resource cannot be updated that way: the API server refuses a custom-resource update
+// without metadata.resourceVersion. So its resourceVersion is read with a metadata-only Get,
+// which needs only `get` on that kind and returns no spec, and the update is retried if the
+// object changed in between (its controller writes status, which bumps the resourceVersion).
+func updateExisting(ctx context.Context, w client.Client, obj client.Object, opts ...client.UpdateOption) (string, error) {
+	if _, isSecret := obj.(*corev1.Secret); isSecret {
+		obj.SetResourceVersion("")
+		return verbUpdate, w.Update(ctx, obj, opts...)
+	}
+	gvk, err := w.GroupVersionKindFor(obj)
+	if err != nil {
+		return verbUpdate, fmt.Errorf("resolving the kind of %q: %w", obj.GetName(), err)
+	}
+	verb := verbUpdate
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		live := &metav1.PartialObjectMetadata{}
+		live.SetGroupVersionKind(gvk)
+		if err := w.Get(ctx, client.ObjectKeyFromObject(obj), live); err != nil {
+			verb = verbGet
+			return err
+		}
+		verb = verbUpdate
+		obj.SetResourceVersion(live.GetResourceVersion())
+		return w.Update(ctx, obj, opts...)
+	})
+	return verb, err
 }
 
 // defaultPrimaryModel is the fallback model name returned by primaryModel when the
