@@ -880,9 +880,10 @@ func (s *Server) handleRotateProviderKey(w http.ResponseWriter, r *http.Request)
 }
 
 // rotateSpecFromRoute recovers what connect wrote for a provider from its ModelRoute: the name the
-// three objects share, the namespace, the console's provider id (label), the display name and base
-// URL (annotations), and the route's model and rate limit, which a rotate keeps — it changes the
-// key, not the routing.
+// three objects share, the namespace, the console's provider id (label), the display name
+// (annotation), and the route's endpoint, model and rate limit, which a rotate keeps — it changes
+// the key, not the routing. The endpoint is spec.providers[0].apiBase, the one the gateway calls;
+// the base-url annotation is only a fallback for a route without one, and the rewrite refreshes it.
 //
 // A route connect did not write, or one edited out of the shape connect writes, is refused rather
 // than rebuilt: the rewrite would overwrite whatever made it different.
@@ -906,9 +907,9 @@ func rotateSpecFromRoute(mr *agentsv1alpha1.ModelRoute) (providerCreateSpec, *cr
 			"through the SecretBinding %q", mr.Name))
 	}
 	ref := mr.Spec.Providers[0]
-	baseURL := mr.Annotations[annBaseURL]
+	baseURL := ref.APIBase
 	if baseURL == "" {
-		baseURL = ref.APIBase
+		baseURL = mr.Annotations[annBaseURL]
 	}
 	displayName := mr.Annotations[annDisplayName]
 	if displayName == "" {

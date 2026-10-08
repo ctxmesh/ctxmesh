@@ -78,6 +78,17 @@ func TestRotateSpecFromRoute_FallsBackToTheRoutesAPIBase(t *testing.T) {
 	assert.Nil(t, spec.rateLimit, "no rate limit on the route stamps connect's default")
 }
 
+func TestRotateSpecFromRoute_UsesTheEndpointTheGatewayCalls(t *testing.T) {
+	t.Parallel()
+
+	mr := connectShapedCustomRoute("https://llm.example.internal/v1")
+	mr.Spec.Providers[0].APIBase = "https://llm-eu.example.internal/v1"
+	spec, cErr := rotateSpecFromRoute(mr)
+	require.Nil(t, cErr)
+	assert.Equal(t, "https://llm-eu.example.internal/v1", spec.baseURL,
+		"an apiBase edited after connect wins over the annotation connect wrote")
+}
+
 func TestRotateSpecFromRoute_RefusesARouteConnectDidNotWrite(t *testing.T) {
 	t.Parallel()
 
@@ -414,4 +425,35 @@ func TestRotateProviderKey_WritesAnAuditRow(t *testing.T) {
 			assert.NotContains(t, fmt.Sprint(got.Detail), theTestKey)
 		})
 	}
+}
+
+// TestRotateProviderKey_KeepsAnEditedEndpoint: an operator re-pointed the route's apiBase after
+// connect. The rotate validates the new key against that endpoint, keeps it on the route, and
+// refreshes the base-url annotation to it.
+func TestRotateProviderKey_KeepsAnEditedEndpoint(t *testing.T) {
+	t.Parallel()
+
+	var oldProbes atomic.Int32
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		oldProbes.Add(1)
+		_, _ = w.Write([]byte(`{"data":[{"id":"mock-large"}]}`))
+	}))
+	t.Cleanup(old.Close)
+	edited := fakeProvider(t, "mock-large", "mock-eu")
+
+	seed := seedConnectedCustomProvider(old.URL)
+	seed[0].(*agentsv1alpha1.ModelRoute).Spec.Providers[0].APIBase = edited.URL
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(seed...).Build()
+	s, _, _ := newConnectServer(t, c)
+
+	rec := rotateGateway(t, s)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Zero(t, oldProbes.Load(), "the key is validated against the endpoint the gateway calls")
+
+	var route agentsv1alpha1.ModelRoute
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "gateway", Namespace: "prod"}, &route))
+	require.Len(t, route.Spec.Providers, 1)
+	assert.Equal(t, edited.URL, route.Spec.Providers[0].APIBase, "the edited endpoint is kept")
+	assert.Equal(t, edited.URL, route.Annotations[annBaseURL], "the annotation follows the endpoint in use")
+	assert.Equal(t, "mock-eu,mock-large", route.Annotations[annProviderModels], "the models come from the edited endpoint")
 }
