@@ -20,6 +20,7 @@ interface Captured {
 function recordingFetch(opts: {
   expand?: (body: string) => { ok: boolean; status?: number; text: string };
   create?: (body: string) => { ok: boolean; status?: number; json: unknown };
+  namespaces?: string[];
 }) {
   const calls: Captured[] = [];
   vi.stubGlobal(
@@ -52,6 +53,10 @@ function recordingFetch(opts: {
           text: async () => JSON.stringify(r.json),
         } as Response);
       }
+      if (url.startsWith("/api/namespaces") && opts.namespaces) {
+        const namespaces = opts.namespaces.map((name) => ({ name }));
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ namespaces }) } as Response);
+      }
       return Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as Response);
     }),
   );
@@ -64,13 +69,28 @@ function fill(label: RegExp | string, value: string) {
 
 // The applied panel ends in a NextStepLink to the created agent (a router
 // <Link>), so the page needs a Router in scope — the same wrapper the RBAC
-// block below already uses.
+// block below already uses. The namespace provider supplies the workspace Apply
+// writes into (the test setup selects "default").
 function renderPage() {
   return render(
     <MemoryRouter>
-      <ConfigBuilderPage />
+      <NamespaceProvider>
+        <ConfigBuilderPage />
+      </NamespaceProvider>
     </MemoryRouter>,
   );
+}
+
+function createdNamespace(calls: Captured[]): string | undefined {
+  const createCall = calls.find((c) => c.url === "/api/agents");
+  return createCall ? (JSON.parse(createCall.body) as { namespace: string }).namespace : undefined;
+}
+
+async function fillAndPreview() {
+  fill("Name", "echo-agent");
+  fill("Image", "ghcr.io/ctxmesh/echo:v1");
+  fireEvent.click(screen.getByRole("button", { name: /Preview CRD/ }));
+  await screen.findByLabelText("Expanded CRD preview");
 }
 
 afterEach(() => {
@@ -138,6 +158,54 @@ describe("ConfigBuilderPage", () => {
     const payload = JSON.parse(createCall!.body) as { agentYAML: string };
     expect(payload.agentYAML).toContain("name: echo-agent");
     expect(payload.agentYAML).toContain("image: ghcr.io/ctxmesh/echo:v1");
+  });
+
+  // Apply used to send an empty namespace, and the BFF filled in "default" — whatever workspace
+  // the user was looking at.
+  it("applies into the selected workspace", async () => {
+    localStorage.setItem("ctxmesh.namespace", "team-a");
+    const calls = recordingFetch({
+      create: () => ({
+        ok: true,
+        status: 201,
+        json: { created: [{ kind: "AgentDeployment", name: "echo-agent", namespace: "team-a" }] },
+      }),
+    });
+
+    renderPage();
+    await fillAndPreview();
+    expect(screen.queryByTestId("config-namespace-select")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Apply to cluster/ }));
+
+    expect(await screen.findByText("Applied to the cluster")).toBeInTheDocument();
+    expect(createdNamespace(calls)).toBe("team-a");
+  });
+
+  it("under 'All workspaces', Apply waits until a workspace is picked, then writes into it", async () => {
+    localStorage.setItem("ctxmesh.namespace", "");
+    const calls = recordingFetch({
+      namespaces: ["team-a", "team-b"],
+      create: () => ({
+        ok: true,
+        status: 201,
+        json: { created: [{ kind: "AgentDeployment", name: "echo-agent", namespace: "team-b" }] },
+      }),
+    });
+
+    renderPage();
+    await fillAndPreview();
+    const apply = screen.getByRole("button", { name: /Apply to cluster/ });
+    expect(apply).toBeDisabled();
+    fireEvent.click(apply);
+    expect(createdNamespace(calls)).toBeUndefined();
+
+    const picker = await screen.findByTestId("config-namespace-select");
+    fireEvent.change(picker, { target: { value: "team-b" } });
+    expect(apply).toBeEnabled();
+    fireEvent.click(apply);
+
+    expect(await screen.findByText("Applied to the cluster")).toBeInTheDocument();
+    expect(createdNamespace(calls)).toBe("team-b");
   });
 
   it("renders the manifest in a scrolling code well — YAML indentation is never re-wrapped", async () => {

@@ -425,6 +425,87 @@ func TestNamespacesLists(t *testing.T) {
 	assert.Equal(t, []NamespaceSummary{{Name: "dev"}, {Name: "prod"}, {Name: "staging"}}, body.Namespaces)
 }
 
+// TestNamespacesFlagsPlatformNamespaces: a cluster-wide caller's list includes the control plane's
+// and Kubernetes' own namespaces, sorted among their workspaces. The BFF flags those so the
+// console's first visit skips them: the install namespace, the MCP credential namespace, kube-*,
+// knative-* and *-system. Workspaces stay unflagged, and the flag does not reorder the list.
+func TestNamespacesFlagsPlatformNamespaces(t *testing.T) {
+	names := []string{
+		"calico-system", "ctxmesh", "ctxmesh-credentials", "default", "knative-serving",
+		"kube-node-lease", "kube-system", "team-a", "zz-system-tools",
+	}
+	objs := make([]client.Object, 0, len(names))
+	for _, n := range names {
+		objs = append(objs, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: n}})
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	s := NewServer(Options{
+		CallerClients:          &fakeCallerClientFactory{client: c},
+		Scheme:                 testScheme(t),
+		Auth:                   AllowAll{},
+		InstallNamespace:       "ctxmesh",
+		MCPCredentialNamespace: "ctxmesh-credentials",
+		Log:                    logr.Discard(),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/namespaces", nil)
+	req.Header.Set("Authorization", "Bearer cluster-admin-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body NamespaceListResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, []NamespaceSummary{
+		{Name: "calico-system", Platform: true},
+		{Name: "ctxmesh", Platform: true},
+		{Name: "ctxmesh-credentials", Platform: true},
+		{Name: "default"},
+		{Name: "knative-serving", Platform: true},
+		{Name: "kube-node-lease", Platform: true},
+		{Name: "kube-system", Platform: true},
+		{Name: "team-a"},
+		{Name: "zz-system-tools"},
+	}, body.Namespaces)
+	assert.NotContains(t, rec.Body.String(), `"platform":false`, "the flag is omitted when false")
+}
+
+// TestNamespacesFallbackFlagsNothing: a caller who cannot list namespaces gets only the namespaces
+// they work in, and their first visit is unchanged, so no namespace is flagged there even when it
+// is the install namespace.
+func TestNamespacesFallbackFlagsNothing(t *testing.T) {
+	ctx := context.Background()
+	store := namespacetenant.NewMemStore()
+	require.NoError(t, store.SetMembers(ctx, "tenant-a", []string{"ctxmesh", "team-a"}))
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+				return apierrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, "", assert.AnError)
+			},
+			Create: ssarInterceptor(func(_, _, _ string) bool { return true }).Create,
+		}).
+		Build()
+	s := NewServer(Options{
+		CallerClients:        &fakeCallerClientFactory{client: c},
+		Scheme:               testScheme(t),
+		Auth:                 AllowAll{},
+		InstallNamespace:     "ctxmesh",
+		NamespaceTenantStore: store,
+		Log:                  logr.Discard(),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/namespaces", nil)
+	req.Header.Set("Authorization", "Bearer team-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var body NamespaceListResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, []NamespaceSummary{{Name: "ctxmesh"}, {Name: "team-a"}}, body.Namespaces)
+}
+
 // TestNamespacesEmptyNotNull proves an empty result is {"namespaces":[]} (not
 // null) — an honest "no namespaces" state distinct from a denial.
 func TestNamespacesEmptyNotNull(t *testing.T) {

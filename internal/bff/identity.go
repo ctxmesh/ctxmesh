@@ -363,19 +363,39 @@ func (s *Server) handleNamespaces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only this branch flags platform namespaces. A caller who can list namespaces cluster-wide
+	// sees the control plane's and Kubernetes' own, sorted among their workspaces; the console
+	// skips flagged ones when it picks a first workspace. The fallback above returns only
+	// namespaces the caller works in, and keeps its first-visit behaviour unchanged.
 	summaries := make([]NamespaceSummary, 0, len(list.Items))
 	for i := range list.Items {
 		ns := &list.Items[i]
-		s := NamespaceSummary{Name: ns.Name}
+		sum := NamespaceSummary{Name: ns.Name, Platform: s.isPlatformNamespace(ns.Name)}
 		if dn := ns.Annotations[annNamespaceDisplayName]; dn != "" {
-			s.DisplayName = dn
+			sum.DisplayName = dn
 		}
-		summaries = append(summaries, s)
+		summaries = append(summaries, sum)
 	}
 	// Stable order so the SPA's namespace picker is deterministic.
 	slices.SortFunc(summaries, func(a, b NamespaceSummary) int { return strings.Compare(a.Name, b.Name) })
 
 	writeJSON(w, http.StatusOK, NamespaceListResponse{Namespaces: summaries})
+}
+
+// isPlatformNamespace reports whether the platform or Kubernetes itself occupies the namespace:
+// the BFF's own (control-plane) namespace, the MCP credential namespace, kube-* and knative-*,
+// and the *-system convention platform components install into (kourier-system, calico-system).
+// A user may still select one; it is never the console's default.
+func (s *Server) isPlatformNamespace(name string) bool {
+	switch {
+	case name == "":
+		return false
+	case name == s.installNamespace, name == s.credentialNamespace:
+		return true
+	case strings.HasPrefix(name, "kube-"), strings.HasPrefix(name, "knative-"), strings.HasSuffix(name, "-system"):
+		return true
+	}
+	return false
 }
 
 // callerVisibleNamespaces is the fallback for a caller who cannot `list namespaces`: the

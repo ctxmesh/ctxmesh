@@ -549,6 +549,10 @@ export interface NamespaceSummary {
   /** Human-readable label from the agents.ctxmesh.ai/display-name annotation.
    *  Absent (undefined) when the annotation is not set — fall back to `name`. */
   displayName?: string;
+  /** True for a namespace the platform or Kubernetes occupies (the control-plane namespace,
+   *  kube-*, knative-*, *-system). Set only on a cluster-wide list. Selectable, but never the
+   *  console's default workspace. */
+  platform?: boolean;
 }
 
 export interface NamespaceListResponse {

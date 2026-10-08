@@ -10,6 +10,8 @@ import { NamespaceProvider, useNamespace } from "@/lib/namespace";
 // list endpoints returned 403 and the console told a user with full rights in their own namespace
 // that they had none. Three independent UX reviewers found it the same way: by opening the page.
 
+// A name ending in "!" is returned flagged platform-owned, as the BFF flags the control-plane
+// namespace, kube-*, knative-* and *-system on a cluster-wide list.
 function stubNamespaces(names: string[]) {
   vi.stubGlobal(
     "fetch",
@@ -19,7 +21,11 @@ function stubNamespaces(names: string[]) {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ namespaces: names.map((name) => ({ name })) }),
+          json: async () => ({
+            namespaces: names.map((n) =>
+              n.endsWith("!") ? { name: n.slice(0, -1), platform: true } : { name: n },
+            ),
+          }),
         } as Response);
       }
       return Promise.resolve({ ok: true, status: 200, json: async () => ({}) } as Response);
@@ -80,6 +86,51 @@ describe("NamespaceProvider — the first-visit scope", () => {
       </NamespaceProvider>,
     );
     await waitFor(() => expect(scope()).toBe("selected=team-b working=team-b"));
+  });
+
+  // A cluster-wide caller's list is every namespace, sorted, so the control plane's own namespace
+  // and kube-* often come first. Landing there showed "No agents in ctxmesh" and pointed Connect a
+  // provider at the control-plane namespace.
+  it("skips platform namespaces on a first visit and lands in the first workspace", async () => {
+    stubNamespaces(["ctxmesh!", "default", "knative-serving!", "kube-system!", "team-a"]);
+    render(
+      <NamespaceProvider>
+        <Probe />
+      </NamespaceProvider>,
+    );
+    await waitFor(() => expect(scope()).toBe("selected=default working=default"));
+  });
+
+  it("opens 'All workspaces' when every namespace is platform-owned", async () => {
+    stubNamespaces(["ctxmesh!", "kube-system!"]);
+    render(
+      <NamespaceProvider>
+        <Probe />
+      </NamespaceProvider>,
+    );
+    await waitFor(() => expect(scope()).toBe("selected=<all> working=ctxmesh"));
+  });
+
+  it("keeps a stored choice, even a platform namespace", async () => {
+    localStorage.setItem("ctxmesh.namespace", "ctxmesh");
+    stubNamespaces(["ctxmesh!", "default"]);
+    render(
+      <NamespaceProvider>
+        <Probe />
+      </NamespaceProvider>,
+    );
+    await waitFor(() => expect(scope()).toBe("selected=ctxmesh working=ctxmesh"));
+  });
+
+  it("writes into a workspace, not a platform namespace, under a stored 'All workspaces'", async () => {
+    localStorage.setItem("ctxmesh.namespace", "");
+    stubNamespaces(["ctxmesh!", "kube-system!", "team-a"]);
+    render(
+      <NamespaceProvider>
+        <Probe />
+      </NamespaceProvider>,
+    );
+    await waitFor(() => expect(scope()).toBe("selected=<all> working=team-a"));
   });
 
   it("leaves the scope empty when the caller genuinely has no namespace", async () => {

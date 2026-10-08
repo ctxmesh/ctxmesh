@@ -344,6 +344,10 @@ type CapabilitiesResponse struct {
 type NamespaceSummary struct {
 	Name        string `json:"name"`
 	DisplayName string `json:"displayName,omitempty"`
+	// Platform marks a namespace the platform or Kubernetes itself occupies (the control-plane
+	// namespace, kube-*, knative-*, *-system). It is set only on the cluster-wide list, so the
+	// console's first visit opens a workspace a user works in, never one of these.
+	Platform bool `json:"platform,omitempty"`
 }
 
 // SetNamespaceDisplayNameRequest is the body for

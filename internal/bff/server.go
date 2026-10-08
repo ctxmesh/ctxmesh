@@ -374,6 +374,10 @@ type Server struct {
 	credentialNamespace string
 	credentialClient    client.Client
 
+	// installNamespace is the namespace the BFF runs in, the control-plane namespace. GET
+	// /api/namespaces flags it as platform-owned (isPlatformNamespace).
+	installNamespace string
+
 	// capabilitySigner mints the short-lived RUN CAPABILITY (runcap, ADR 0030 §2) at an
 	// authenticated /invoke: an EdDSA-signed JWT carrying the invoking user's hashed
 	// identity that the credential plane verifies to resolve THAT user's OBO credential.
@@ -503,6 +507,11 @@ type Options struct {
 	// grant Secret when set (m25.1b, ADR 0029 §7). Empty ⇒ legacy per-request-namespace
 	// grants. Wired from MCP_CREDENTIAL_NAMESPACE in cmd/bff/main.go.
 	MCPCredentialNamespace string
+	// InstallNamespace is the namespace the BFF runs in (the control-plane namespace). GET
+	// /api/namespaces flags it as platform-owned so the console never opens a first visit
+	// there. Wired from POD_NAMESPACE or the ServiceAccount namespace file in cmd/bff/main.go;
+	// empty outside a cluster.
+	InstallNamespace string
 	// CredentialClient is the privileged, namespace-scoped client used to write/read/
 	// delete grant Secrets in MCPCredentialNamespace (the BFF's own SA — tenants have
 	// no RBAC there). Built in cmd/bff/main.go only when MCPCredentialNamespace is set;
@@ -695,6 +704,7 @@ func NewServer(opts Options) *Server {
 		mcpRequireApproval:       opts.MCPRequireApproval,
 		credentialNamespace:      opts.MCPCredentialNamespace,
 		credentialClient:         opts.CredentialClient,
+		installNamespace:         strings.TrimSpace(opts.InstallNamespace),
 		tokenServiceURL:          strings.TrimRight(strings.TrimSpace(opts.TokenServiceURL), "/"),
 		tokenServiceClient:       opts.TokenServiceHTTPClient,
 		grantStore:               opts.GrantStore,

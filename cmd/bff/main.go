@@ -627,6 +627,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		MCPRequireApproval:          flags.mcpRequireApproval,
 		MCPGrantHMACKey:             mcpGrantHMACKey,
 		MCPCredentialNamespace:      mcpCredentialNamespace,
+		InstallNamespace:            installNamespace(),
 		CredentialClient:            credentialClient,
 		MCPCapabilityPrivateSeedB64: mcpCapabilitySeed,
 		MCPCapabilityAudience:       mcpCapabilityAudience,
@@ -1101,4 +1102,16 @@ func buildAdapters(log logr.Logger) bff.Adapters {
 	}
 
 	return adapters
+}
+
+// installNamespace is the namespace the BFF runs in: POD_NAMESPACE, else the ServiceAccount
+// namespace file every in-cluster pod mounts. Empty outside a cluster.
+func installNamespace() string {
+	if ns := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); ns != "" {
+		return ns
+	}
+	if b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+		return strings.TrimSpace(string(b))
+	}
+	return ""
 }

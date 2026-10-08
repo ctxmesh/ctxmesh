@@ -17,6 +17,7 @@ import {
 import { FormField } from "@/components/config/form-field";
 import { api, ApiError, type CreatedObject } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
+import { useNamespace } from "@/lib/namespace";
 import { RES_AGENTS } from "@/lib/nav";
 import {
   emptyForm,
@@ -63,6 +64,8 @@ import {
 //
 // data-testid contract:
 //   apply-readonly-note   — the viewer's read-only explanation (no Apply button)
+//   config-namespace-select / config-namespace-input — the workspace to apply into, shown
+//                           only under "All workspaces"
 //   crd-preview           — the YAML well (also aria-labelled "Expanded CRD preview")
 //   crd-applied           — the post-apply panel
 
@@ -100,6 +103,14 @@ export function ConfigBuilderPage() {
   // wrong/optimistic (probe unavailable). reprobe() corrects a stale "yes".
   const { can, reprobe } = useCapabilities();
   const canApply = can(RES_AGENTS, "create");
+  // Apply writes into the selected workspace. "All workspaces" names none, and the BFF would
+  // otherwise fall back to "default", so in that scope the user picks one here — the same
+  // Workspace control the create-agent flow shows.
+  const { namespace, list } = useNamespace();
+  const allWorkspaces = namespace === "";
+  const nsOptions = list.kind === "ready" ? list.namespaces.map((n) => n.name) : [];
+  const [pickedNs, setPickedNs] = useState("");
+  const applyNs = allWorkspaces ? pickedNs.trim() : namespace;
 
   function set<K extends keyof ConfigForm>(key: K, value: ConfigForm[K]) {
     setForm((f) => ({ ...f, [key]: value }));
@@ -146,11 +157,11 @@ export function ConfigBuilderPage() {
   }
 
   async function onApply() {
-    if (submit.kind !== "preview") return;
+    if (submit.kind !== "preview" || applyNs === "") return;
     const { yaml, manifest } = submit;
     setSubmit({ kind: "applying", yaml, manifest });
     try {
-      const res = await api.createAgent(yaml, "");
+      const res = await api.createAgent(yaml, applyNs);
       setSubmit({ kind: "applied", created: res.created });
     } catch (err) {
       // A 403 DESPITE a "yes" capability means the cached map was stale — correct
@@ -594,10 +605,44 @@ export function ConfigBuilderPage() {
                   </p>
                 ) : null}
 
+                {canApply && allWorkspaces ? (
+                  <FormField
+                    id="config-namespace"
+                    label="Workspace"
+                    hint="You are viewing all workspaces. Choose the one to apply into."
+                  >
+                    {nsOptions.length > 0 ? (
+                      <Select
+                        id="config-namespace"
+                        value={pickedNs}
+                        onChange={(e) => setPickedNs(e.target.value)}
+                        data-testid="config-namespace-select"
+                      >
+                        <option value="" disabled>
+                          Choose a workspace
+                        </option>
+                        {nsOptions.map((n) => (
+                          <option key={n} value={n}>
+                            {n}
+                          </option>
+                        ))}
+                      </Select>
+                    ) : (
+                      <Input
+                        id="config-namespace"
+                        value={pickedNs}
+                        onChange={(e) => setPickedNs(e.target.value)}
+                        placeholder="team-a"
+                        data-testid="config-namespace-input"
+                      />
+                    )}
+                  </FormField>
+                ) : null}
+
                 {canApply ? (
                   <Button
                     onClick={onApply}
-                    disabled={submit.kind !== "preview"}
+                    disabled={submit.kind !== "preview" || applyNs === ""}
                     className="w-full"
                   >
                     <Rocket className="h-4 w-4" />
