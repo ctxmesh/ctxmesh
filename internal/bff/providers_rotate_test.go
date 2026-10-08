@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
 )
 
 // connectShapedCustomRoute is the ModelRoute connect writes for a custom (OpenAI-compatible)
@@ -220,6 +221,10 @@ func TestRotateProviderKey_IssuesExactlyTheFlowVerbs(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, want, "the rotateProviderKey flow must exist")
+	// The audit row's actor lookup. A refusal there records the actor as unknown and never fails the
+	// rotate, so it is not a verb the flow needs.
+	assert.True(t, issued["selfsubjectreviews"][verbCreate], "the audit row resolves the caller")
+	delete(issued, "selfsubjectreviews")
 	assert.Equal(t, want, issued, "the rotate handler must issue exactly the verbs its flow declares")
 	assert.False(t, issued[resSecrets][verbGet], "the Secret is never read (ADR 0136)")
 
@@ -330,6 +335,72 @@ func TestRotateProviderKey_RefusesWithoutProbingOrWriting(t *testing.T) {
 			assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 			assert.Contains(t, rec.Body.String(), "gateway")
 			assert.Equal(t, before, probes.Load(), "the new key must not be sent upstream for a refused rotate")
+		})
+	}
+}
+
+// TestRotateProviderKey_WritesAnAuditRow: a rotate lands in the audit log as a connect with
+// rotate=true, when it succeeds and when the API server refuses it. The new key is never in the row.
+func TestRotateProviderKey_WritesAnAuditRow(t *testing.T) {
+	t.Parallel()
+
+	forbidden := func(obj client.Object) error {
+		return apierrors.NewForbidden(schema.GroupResource{Resource: "any"}, obj.GetName(), assert.AnError)
+	}
+	for name, tc := range map[string]struct {
+		funcs        interceptor.Funcs
+		wantCode     int
+		wantOutcome  string
+		wantProvider bool
+	}{
+		"success": {wantCode: http.StatusOK, wantOutcome: auditOutcomeSuccess, wantProvider: true},
+		"write denied": {
+			funcs: interceptor.Funcs{
+				Update: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.UpdateOption) error {
+					return forbidden(obj)
+				},
+			},
+			wantCode: http.StatusForbidden, wantOutcome: auditOutcomeDenied, wantProvider: true,
+		},
+		"route read denied": {
+			funcs: interceptor.Funcs{
+				Get: func(ctx context.Context, w client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, isRoute := obj.(*agentsv1alpha1.ModelRoute); isRoute {
+						return forbidden(obj)
+					}
+					return w.Get(ctx, key, obj, opts...)
+				},
+			},
+			wantCode: http.StatusForbidden, wantOutcome: auditOutcomeDenied,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			prov := fakeProvider(t, "mock-large")
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+				WithObjects(seedConnectedCustomProvider(prov.URL)...).WithInterceptorFuncs(tc.funcs).Build()
+			s, _, _ := newConnectServer(t, c)
+			store := auditlog.NewMemStore()
+			s.auditStore = store
+
+			rec := rotateGateway(t, s)
+			require.Equal(t, tc.wantCode, rec.Code, rec.Body.String())
+
+			page, err := store.List(context.Background(), auditlog.Query{})
+			require.NoError(t, err)
+			require.Len(t, page.Items, 1, "one audit row per rotate")
+			got := page.Items[0]
+			assert.Equal(t, "bff", got.Source)
+			assert.Equal(t, auditActionConnect, got.Action)
+			assert.Equal(t, resourceKindProvider, got.ResourceKind)
+			assert.Equal(t, "gateway", got.ResourceName)
+			assert.Equal(t, "prod", got.Namespace)
+			assert.Equal(t, tc.wantOutcome, got.Outcome)
+			assert.Equal(t, true, got.Detail["rotate"])
+			if tc.wantProvider {
+				assert.Equal(t, providerCustom, got.Detail[providerNoun])
+			}
+			assert.NotContains(t, fmt.Sprint(got.Detail), theTestKey)
 		})
 	}
 }

@@ -780,8 +780,26 @@ func (s *Server) handleRotateProviderKey(w http.ResponseWriter, r *http.Request)
 		ns = defaultCreateNamespace
 	}
 
+	// A rotate is audited as a connect with rotate=true (ADR 0056 §2): success after the write,
+	// denied on any 403. The controller's Auditor watches custom resources only, so without this row
+	// the Secret holding the new key changes unaudited.
+	audit := func(provider, outcome string) {
+		detail := map[string]any{"rotate": true}
+		if provider != "" {
+			detail[providerNoun] = strings.ToLower(provider)
+		}
+		s.appendAudit(r.Context(), auditlog.Entry{
+			Actor: s.auditActor(r.Context(), caller), Action: auditActionConnect,
+			ResourceKind: resourceKindProvider, ResourceName: name, Namespace: ns, Outcome: outcome,
+			Detail: detail,
+		})
+	}
+
 	var route agentsv1alpha1.ModelRoute
 	if err := caller.Get(r.Context(), client.ObjectKey{Name: name, Namespace: ns}, &route); err != nil {
+		if apierrors.IsForbidden(err) {
+			audit("", auditOutcomeDenied)
+		}
 		s.writeGetError(w, err, providerNoun)
 		return
 	}
@@ -792,6 +810,9 @@ func (s *Server) handleRotateProviderKey(w http.ResponseWriter, r *http.Request)
 	}
 	var binding agentsv1alpha1.SecretBinding
 	if err := caller.Get(r.Context(), client.ObjectKey{Name: spec.name, Namespace: ns}, &binding); err != nil {
+		if apierrors.IsForbidden(err) {
+			audit(spec.provider, auditOutcomeDenied)
+		}
 		if apierrors.IsNotFound(err) {
 			ce := classifyProviderWriteError(err, verbGet, secretBindingKind, spec)
 			writeError(w, ce.status, ce.msg)
@@ -820,9 +841,13 @@ func (s *Server) handleRotateProviderKey(w http.ResponseWriter, r *http.Request)
 	spec.models = models
 
 	if _, cErr := createProviderObjects(r.Context(), caller, spec); cErr != nil {
+		if cErr.status == http.StatusForbidden {
+			audit(spec.provider, auditOutcomeDenied)
+		}
 		writeError(w, cErr.status, cErr.msg)
 		return
 	}
+	audit(spec.provider, "")
 
 	// The refreshed provider summary (freshly probed models). No key.
 	summary := providerSummaryFromRoute(&route)

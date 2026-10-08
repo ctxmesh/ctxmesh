@@ -45,6 +45,8 @@ const (
 	// auditOutcomeDenied is the outcome value for an access that was refused (grant revoked, provider
 	// denied, guardrail blocked, etc.). Shared across all BFF audit rows that record a denial.
 	auditOutcomeDenied = "denied"
+	// auditOutcomeSuccess is the outcome the store records when none is given.
+	auditOutcomeSuccess = "success"
 	// auditPolicyActionBlock is the policy_action value for a guardrail block decision (m66.9).
 	// Defined here (alongside the other audit constants) so the ingest handler and its callers share
 	// the same string without triggering goconst.
@@ -103,7 +105,7 @@ func (s *Server) auditInvoke(ctx context.Context, actor, agent, namespace, runID
 		ResourceKind: auditKindAgent,
 		ResourceName: agent,
 		Namespace:    namespace,
-		Outcome:      "success",
+		Outcome:      auditOutcomeSuccess,
 		TraceID:      runID,
 	})
 }
