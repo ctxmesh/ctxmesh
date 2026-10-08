@@ -479,17 +479,21 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 		return false, fmt.Errorf("hashing the reverted spec: %w", err)
 	}
 	if servedHash == liveHash {
-		// API-server defaulting made the reverted spec identical to the live one, so nothing will roll.
-		// The annotation is already cleared by the Update above; record the refusal only.
-		return false, r.recordRollbackRefusal(ctx, deploy, reasonRollbackNoEffect,
-			rollbackNoEffectMessage(av.Name, targetHash == liveHash))
+		// Defaulting or a mutating admission webhook stored the reverted spec identical to the live one,
+		// so nothing will roll. The annotation is already cleared by the Update above; record the refusal.
+		return false, r.recordRollbackRefusal(ctx, deploy, reasonRollbackNoEffect, fmt.Sprintf(
+			"rollback target %q was stored identical to the serving spec (API-server defaulting or an admission "+
+				"webhook changed it back); no action taken", av.Name))
 	}
 	served := av.Name
 	message := fmt.Sprintf("reverted serving spec to AgentVersion %q (from %q)", av.Name, fromVersion)
 	if servedHash != targetHash {
+		// Kept governance is the usual cause, but not the only one: rollbackSpec also drops an empty
+		// runtime block the snapshot carried.
 		served = deploy.Name + "-" + servedHash
-		message = fmt.Sprintf("reverted serving spec to AgentVersion %q (from %q); it serves as %q, because the "+
-			"serving tool-policy governance was kept and differs from the target's", av.Name, fromVersion, served)
+		message = fmt.Sprintf("reverted serving spec to AgentVersion %q (from %q); the reverted spec is not identical "+
+			"to that version's snapshot (a rollback keeps the live governance fields), so it serves as %q",
+			av.Name, fromVersion, served)
 	}
 
 	// Record the rollback on status (a separate status subresource write). Re-fetch to avoid

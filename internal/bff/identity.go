@@ -384,13 +384,16 @@ func (s *Server) handleNamespaces(w http.ResponseWriter, r *http.Request) {
 
 // isPlatformNamespace reports whether the platform or Kubernetes itself occupies the namespace:
 // the BFF's own (control-plane) namespace, the MCP credential namespace, kube-* and knative-*,
-// and the *-system convention platform components install into (kourier-system, calico-system).
-// A user may still select one; it is never the console's default.
+// cert-manager, and the *-system convention platform components install into (kourier-system,
+// calico-system). A user may still select one; it is never the console's default.
+// The *-system suffix also flags a workspace a team happened to name that way, which then only
+// stops being the first-visit default.
 func (s *Server) isPlatformNamespace(name string) bool {
+	const certManagerNamespace = "cert-manager"
 	switch {
 	case name == "":
 		return false
-	case name == s.installNamespace, name == s.credentialNamespace:
+	case name == s.installNamespace, name == s.credentialNamespace, name == certManagerNamespace:
 		return true
 	case strings.HasPrefix(name, "kube-"), strings.HasPrefix(name, "knative-"), strings.HasSuffix(name, "-system"):
 		return true

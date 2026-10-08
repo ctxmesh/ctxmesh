@@ -282,7 +282,9 @@ func TestRotateProviderKey_KeepsTheRoutesEndpointModelAndRateLimit(t *testing.T)
 }
 
 // TestRotateProviderKey_IncompleteProviderIsRefusedBeforeAnyWrite: a rotate never creates, so a
-// provider whose Secret is gone is refused by the pre-flight with nothing persisted.
+// provider whose Secret is gone is refused with nothing persisted. Against an API server the
+// pre-flight's dry-run update refuses it. The fake client's dry-run checks nothing, so here the 409
+// comes from the real update of the Secret, which is written first.
 func TestRotateProviderKey_IncompleteProviderIsRefusedBeforeAnyWrite(t *testing.T) {
 	t.Parallel()
 
@@ -456,4 +458,98 @@ func TestRotateProviderKey_KeepsAnEditedEndpoint(t *testing.T) {
 	assert.Equal(t, edited.URL, route.Spec.Providers[0].APIBase, "the edited endpoint is kept")
 	assert.Equal(t, edited.URL, route.Annotations[annBaseURL], "the annotation follows the endpoint in use")
 	assert.Equal(t, "mock-eu,mock-large", route.Annotations[annProviderModels], "the models come from the edited endpoint")
+}
+
+// TestRotateProviderKey_RefusesARouteEditedDuringTheProbe: an operator re-points the route while the
+// rotate is probing the provider. The rotate refuses rather than writing back the endpoint it read,
+// and writes nothing. The API server bumps metadata.generation on a spec change; the fake client
+// does not, so the edit sets it by hand.
+func TestRotateProviderKey_RefusesARouteEditedDuringTheProbe(t *testing.T) {
+	t.Parallel()
+
+	const repointed = "https://llm-eu.example.internal/v1"
+	var c client.Client
+	prov := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var route agentsv1alpha1.ModelRoute
+		if err := c.Get(r.Context(), client.ObjectKey{Name: "gateway", Namespace: "prod"}, &route); err == nil &&
+			route.Spec.Providers[0].APIBase != repointed {
+			route.Spec.Providers[0].APIBase = repointed
+			route.Generation++
+			if err := c.Update(r.Context(), &route); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"mock-large"}]}`))
+	}))
+	t.Cleanup(prov.Close)
+
+	seed := seedConnectedCustomProvider(prov.URL)
+	for _, o := range seed[:2] {
+		o.SetGeneration(1)
+	}
+	c = fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(seed...).Build()
+	s, _, _ := newConnectServer(t, c)
+
+	rec := rotateGateway(t, s)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `its ModelRoute \"gateway\" was changed while the key was being rotated`)
+
+	var route agentsv1alpha1.ModelRoute
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "gateway", Namespace: "prod"}, &route))
+	assert.Equal(t, repointed, route.Spec.Providers[0].APIBase, "the re-point is kept")
+	var secret corev1.Secret
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "gateway", Namespace: "prod"}, &secret))
+	assert.Equal(t, "sk-old", string(secret.Data[secretKeyAPIKey]), "a refused rotate writes nothing")
+}
+
+// TestUpdateExisting_RechecksTheGenerationOnEveryRetry: a status write by the route's controller
+// conflicts the update and is retried; a spec edit is refused, also when it lands between the read
+// and the update and is only seen on the retry.
+func TestUpdateExisting_RechecksTheGenerationOnEveryRetry(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		secondGeneration int64
+		wantErr          bool
+	}{
+		"status write in between": {secondGeneration: 1},
+		"spec edit in between":    {secondGeneration: 2, wantErr: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var gets, updates int
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existingRoute()).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, w client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						gets++
+						if err := w.Get(ctx, key, obj, opts...); err != nil {
+							return err
+						}
+						obj.SetGeneration(1)
+						if gets > 1 {
+							obj.SetGeneration(tc.secondGeneration)
+						}
+						return nil
+					},
+					Update: func(ctx context.Context, w client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+						updates++
+						if updates == 1 {
+							return apierrors.NewConflict(schema.GroupResource{Resource: "modelroutes"}, obj.GetName(), assert.AnError)
+						}
+						return w.Update(ctx, obj, opts...)
+					},
+				}).Build()
+
+			_, err := updateExisting(context.Background(), c, existingRoute(), 1)
+			if !tc.wantErr {
+				require.NoError(t, err)
+				assert.Equal(t, 2, updates)
+				return
+			}
+			var sc *specChangedError
+			require.ErrorAs(t, err, &sc)
+			assert.Equal(t, 1, updates, "the edited route is not written")
+		})
+	}
 }

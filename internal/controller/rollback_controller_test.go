@@ -19,6 +19,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -287,6 +288,80 @@ func TestRollback_NoEffect_Refused(t *testing.T) {
 		assert.Equal(t, reasonRollbackNoEffect, cond.Reason)
 		assert.Contains(t, cond.Message, tc.target)
 		assert.Contains(t, cond.Message, tc.says)
+	}
+}
+
+// imagePinningClient stands in for a mutating admission webhook, such as a policy engine that pins
+// every agent to an approved image: each AgentDeployment update is stored with the pinned image.
+type imagePinningClient struct {
+	client.Client
+	pinned string
+}
+
+func (c *imagePinningClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if d, ok := obj.(*agentsv1alpha1.AgentDeployment); ok {
+		d.Spec.Image = c.pinned
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+// TestRollback_NoEffectAfterTheWrite_Refused pins the check after the spec write on its own: the
+// reverted spec differs from the live one, so the check before the write lets it through, but
+// admission stores it identical to the live spec. The rollback is refused as RollbackNoEffect with
+// no cooldown, history or freeze; on the auto path the reconcile then continues.
+func TestRollback_NoEffectAfterTheWrite_Refused(t *testing.T) {
+	const (
+		namespace = "default"
+		targetImg = "ghcr.io/ctxmesh/example-agent:v1"
+		liveImg   = "ghcr.io/ctxmesh/example-agent:v2-pinned"
+	)
+	for _, auto := range []bool{false, true} {
+		name := "rb-stored-human"
+		if auto {
+			name = "rb-stored-auto"
+		}
+		t.Run(name, func(t *testing.T) {
+			targetV := name + "-target"
+			mkVersionSpec(t, name, targetV, namespace, autoRollbackSpec(targetImg, auto))
+			time.Sleep(1100 * time.Millisecond) // creation-time order: the target is the prior version
+			servingV := name + "-serving"
+			mkVersionSpec(t, name, servingV, namespace, autoRollbackSpec(liveImg, auto))
+
+			deploy := &agentsv1alpha1.AgentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Spec:       autoRollbackSpec(liveImg, auto),
+			}
+			require.NoError(t, k8sClient.Create(testCtx, deploy))
+			t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+			var live agentsv1alpha1.AgentDeployment
+			require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &live))
+
+			if auto {
+				setRegressionDetected(t, name, namespace, servingV)
+			} else {
+				annotateRollback(t, name, namespace, targetV)
+			}
+			r := rollbackReconciler(onlinescore.NewMemStore())
+			r.Client = &imagePinningClient{Client: k8sClient, pinned: liveImg}
+			reconcileNN(t, r, name, namespace)
+
+			var got agentsv1alpha1.AgentDeployment
+			require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
+			assert.Equal(t, live.Spec, got.Spec, "admission kept the live spec")
+			assert.NotContains(t, got.Annotations, rollbackAnnotation)
+			assert.Nil(t, got.Status.Rollback, "no cooldown, history or freeze for a rollback that changed nothing")
+			cond := apimeta.FindStatusCondition(got.Status.Conditions, conditionRolledBack)
+			require.NotNil(t, cond)
+			assert.Equal(t, metav1.ConditionFalse, cond.Status)
+			assert.Equal(t, reasonRollbackNoEffect, cond.Reason)
+			assert.Contains(t, cond.Message, "stored identical to the serving spec")
+
+			if auto {
+				hash, err := specHash(live.Spec)
+				require.NoError(t, err)
+				assert.Equal(t, name+"-"+hash, got.Status.LatestVersion, "the ordinary reconcile ran after the refusal")
+			}
+		})
 	}
 }
 

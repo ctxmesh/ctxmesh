@@ -279,6 +279,10 @@ type providerCreateSpec struct {
 	// what connect wrote and never creates, so a provider missing one of its objects is refused
 	// by the pre-flight, before anything is written.
 	mustExist bool
+	// routeGeneration and bindingGeneration are the metadata.generation a rotate read. The rotate
+	// probes the provider between that read and its writes, and a spec edited meanwhile (a re-pointed
+	// endpoint) is refused rather than overwritten with what was read. Zero skips the check.
+	routeGeneration, bindingGeneration int64
 }
 
 // createProviderObjects UPSERTS the Secret, SecretBinding, and ModelRoute (in
@@ -382,12 +386,13 @@ func createProviderObjects(ctx context.Context, w client.Client, spec providerCr
 	}
 
 	writes := []struct {
-		kind string
-		o    client.Object
+		kind       string
+		o          client.Object
+		generation int64
 	}{
-		{secretKind, secret},
-		{secretBindingKind, binding},
-		{modelRouteKind, route},
+		{secretKind, secret, 0},
+		{secretBindingKind, binding, spec.bindingGeneration},
+		{modelRouteKind, route, spec.routeGeneration},
 	}
 
 	// PRE-FLIGHT the whole set before persisting any of it. The sequence is not transactional
@@ -399,24 +404,29 @@ func createProviderObjects(ctx context.Context, w client.Client, spec providerCr
 	// this asks the API server whether the write would actually SUCCEED, which additionally
 	// covers admission webhooks, ResourceQuota on Secret counts, and policy engines. The
 	// capability probe gates the button; this gates the write.
-	dryRun, write := dryRunUpsert, upsertObject
+	dryRun := func(ctx context.Context, w client.Client, obj client.Object, _ int64) (string, error) {
+		return dryRunUpsert(ctx, w, obj)
+	}
+	write := func(ctx context.Context, w client.Client, obj client.Object, _ int64) (string, error) {
+		return upsertObject(ctx, w, obj)
+	}
 	if spec.mustExist {
-		dryRun = func(ctx context.Context, w client.Client, obj client.Object) (string, error) {
-			return updateExisting(ctx, w, obj.DeepCopyObject().(client.Object), client.DryRunAll)
+		dryRun = func(ctx context.Context, w client.Client, obj client.Object, generation int64) (string, error) {
+			return updateExisting(ctx, w, obj.DeepCopyObject().(client.Object), generation, client.DryRunAll)
 		}
-		write = func(ctx context.Context, w client.Client, obj client.Object) (string, error) {
-			return updateExisting(ctx, w, obj)
+		write = func(ctx context.Context, w client.Client, obj client.Object, generation int64) (string, error) {
+			return updateExisting(ctx, w, obj, generation)
 		}
 	}
 	for _, obj := range writes {
-		if verb, err := dryRun(ctx, w, obj.o); err != nil {
+		if verb, err := dryRun(ctx, w, obj.o, obj.generation); err != nil {
 			return nil, classifyProviderWriteError(err, verb, obj.kind, spec)
 		}
 	}
 
 	created := make([]createdObject, 0, 3)
 	for _, obj := range writes {
-		if verb, err := write(ctx, w, obj.o); err != nil {
+		if verb, err := write(ctx, w, obj.o, obj.generation); err != nil {
 			return created, classifyProviderWriteError(err, verb, obj.kind, spec)
 		}
 		created = append(created, createdObject{
@@ -438,6 +448,15 @@ func (e *notConnectManagedError) Error() string {
 		e.kind, e.name, labelManagedBy, managedByConnect)
 }
 
+// specChangedError refuses to overwrite a custom resource whose spec changed after the caller read it.
+type specChangedError struct {
+	kind, name string
+}
+
+func (e *specChangedError) Error() string {
+	return fmt.Sprintf("its %s %q was changed while the key was being rotated; check it and try again", e.kind, e.name)
+}
+
 // classifyProviderWriteError maps a failed provider write to its HTTP answer. When the objects
 // must already exist, a missing one is the provider being incomplete, not an upstream fault.
 func classifyProviderWriteError(err error, verb, kind string, spec providerCreateSpec) *createError {
@@ -447,6 +466,9 @@ func classifyProviderWriteError(err error, verb, kind string, spec providerCreat
 		}
 		return &createError{status: http.StatusConflict, msg: fmt.Sprintf(
 			"%v; choose another connection name, or remove the %s first", nc, nc.kind)}
+	}
+	if sc, ok := errors.AsType[*specChangedError](err); ok {
+		return &createError{status: http.StatusConflict, msg: fmt.Sprintf("provider %q cannot be rotated: %v", spec.name, sc)}
 	}
 	if spec.mustExist && apierrors.IsNotFound(err) {
 		return &createError{status: http.StatusConflict, msg: fmt.Sprintf(
@@ -467,7 +489,7 @@ func dryRunUpsert(ctx context.Context, w client.Client, obj client.Object) (verb
 	if err == nil || !apierrors.IsAlreadyExists(err) {
 		return verbCreate, err
 	}
-	return updateExisting(ctx, w, obj.DeepCopyObject().(client.Object), client.DryRunAll)
+	return updateExisting(ctx, w, obj.DeepCopyObject().(client.Object), 0, client.DryRunAll)
 }
 
 // upsertObject creates obj, or — if it already exists — updates it in place (the
@@ -482,7 +504,7 @@ func upsertObject(ctx context.Context, w client.Client, obj client.Object) (verb
 	if err := w.Create(ctx, obj); err == nil || !apierrors.IsAlreadyExists(err) {
 		return verbCreate, err
 	}
-	return updateExisting(ctx, w, obj)
+	return updateExisting(ctx, w, obj, 0)
 }
 
 // updateExisting overwrites an existing object with obj. A rotate is an overwrite by intent:
@@ -498,8 +520,12 @@ func upsertObject(ctx context.Context, w client.Client, obj client.Object) (verb
 // object changed in between (its controller writes status, which bumps the resourceVersion).
 // The same read refuses an object connect did not write (notConnectManagedError): connection
 // names are chosen by the user, and one can name a ModelRoute or SecretBinding made by hand or
-// by GitOps.
-func updateExisting(ctx context.Context, w client.Client, obj client.Object, opts ...client.UpdateOption) (string, error) {
+// by GitOps. A non-zero wantGeneration also refuses an object whose spec changed since the caller
+// read it (specChangedError). Status writes do not change the generation, so the controller's own
+// status updates never trip it, and each conflict retry checks it again.
+func updateExisting(ctx context.Context, w client.Client, obj client.Object, wantGeneration int64,
+	opts ...client.UpdateOption,
+) (string, error) {
 	if _, isSecret := obj.(*corev1.Secret); isSecret {
 		obj.SetResourceVersion("")
 		return verbUpdate, w.Update(ctx, obj, opts...)
@@ -519,6 +545,9 @@ func updateExisting(ctx context.Context, w client.Client, obj client.Object, opt
 		verb = verbUpdate
 		if live.GetLabels()[labelManagedBy] != managedByConnect {
 			return &notConnectManagedError{kind: gvk.Kind, name: obj.GetName()}
+		}
+		if wantGeneration != 0 && live.GetGeneration() != wantGeneration {
+			return &specChangedError{kind: gvk.Kind, name: obj.GetName()}
 		}
 		obj.SetResourceVersion(live.GetResourceVersion())
 		return w.Update(ctx, obj, opts...)
@@ -849,6 +878,7 @@ func (s *Server) handleRotateProviderKey(w http.ResponseWriter, r *http.Request)
 		writeError(w, cErr.status, cErr.msg)
 		return
 	}
+	spec.bindingGeneration = binding.Generation
 
 	// Validate the NEW key with one live probe, as connect does — a bad key is refused before
 	// anything is written, never a silent rotate to a broken credential.
@@ -916,14 +946,15 @@ func rotateSpecFromRoute(mr *agentsv1alpha1.ModelRoute) (providerCreateSpec, *cr
 		displayName = mr.Name
 	}
 	return providerCreateSpec{
-		name:        mr.Name,
-		namespace:   mr.Namespace,
-		provider:    provider,
-		displayName: displayName,
-		baseURL:     baseURL,
-		model:       ref.Model,
-		rateLimit:   mr.Spec.RateLimit.DeepCopy(),
-		mustExist:   true,
+		name:            mr.Name,
+		namespace:       mr.Namespace,
+		provider:        provider,
+		displayName:     displayName,
+		baseURL:         baseURL,
+		model:           ref.Model,
+		rateLimit:       mr.Spec.RateLimit.DeepCopy(),
+		mustExist:       true,
+		routeGeneration: mr.Generation,
 	}, nil
 }
 

@@ -45,8 +45,9 @@ import (
 // TestProviderReconnect_RotatesTheKeyAgainstARealAPIServer connects a provider and then
 // connects it again with a new key, as a user holding only the shipped personas. The API server
 // refuses a custom-resource update without metadata.resourceVersion (a core Secret may be updated
-// without one), and the fake client does not model that, so only a real API server can prove the
-// second connect works. The user holds no read verb on Secrets (ADR 0136).
+// without one). The fake client models that rule too, but its dry-run checks nothing and it
+// enforces no RBAC, so the pre-flight and the personas are proven here. The user holds no read
+// verb on Secrets (ADR 0136).
 func TestProviderReconnect_RotatesTheKeyAgainstARealAPIServer(t *testing.T) {
 	ctx := context.Background()
 	admin, err := client.New(rbacCfg, client.Options{Scheme: testScheme(t)})
@@ -214,6 +215,63 @@ func TestProviderConnect_RefusesAModelRouteItDidNotCreate(t *testing.T) {
 		err := admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: "prod-llm"}, o)
 		assert.True(t, apierrors.IsNotFound(err), "%T must not be written by a refused connect; got %v", o, err)
 	}
+}
+
+// TestProviderRotate_RefusesARouteRepointedDuringTheProbe: an operator re-points the route while the
+// rotate is probing the provider with the new key. The API server bumps the route's generation, the
+// rotate's pre-flight sees it and refuses with 409, and nothing is written: the re-point stays and so
+// does the old key. Status writes do not bump the generation, so the controller's never trip this.
+func TestProviderRotate_RefusesARouteRepointedDuringTheProbe(t *testing.T) {
+	ctx := context.Background()
+	admin, err := client.New(rbacCfg, client.Options{Scheme: testScheme(t)})
+	require.NoError(t, err)
+
+	credentialAdmin := installPersona(t, admin, "ctxmesh_credential_admin_role.yaml")
+	role := installPersona(t, admin, "ctxmesh_developer_role.yaml")
+	const (
+		ns        = "rotate-repointed"
+		repointed = "https://llm-eu.example.internal/v1"
+	)
+	require.NoError(t, admin.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}))
+	alice := personaUser(t, admin, ns, "alice-"+ns, role, credentialAdmin)
+
+	prov := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer sk-rotated-key" {
+			var route agentsv1alpha1.ModelRoute
+			if err := admin.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: providerCustom}, &route); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			route.Spec.Providers[0].APIBase = repointed
+			if err := admin.Update(r.Context(), &route); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"mock-large"}]}`))
+	}))
+	t.Cleanup(prov.Close)
+
+	s, _, _ := newConnectServer(t, alice)
+	body, err := json.Marshal(ConnectProviderRequest{
+		Provider: providerCustom, APIKey: "sk-first-key", BaseURL: prov.URL, Namespace: ns,
+	})
+	require.NoError(t, err)
+	rec := postAs(s, "/api/providers", body)
+	require.Equal(t, http.StatusCreated, rec.Code, "connect: %s", rec.Body.String())
+
+	body, err = json.Marshal(RotateProviderKeyRequest{APIKey: "sk-rotated-key", Namespace: ns})
+	require.NoError(t, err)
+	rec = postAs(s, "/api/providers/"+providerCustom+"/rotate", body)
+	require.Equal(t, http.StatusConflict, rec.Code, "rotate: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "was changed while the key was being rotated")
+
+	var route agentsv1alpha1.ModelRoute
+	require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: providerCustom}, &route))
+	assert.Equal(t, repointed, route.Spec.Providers[0].APIBase, "the re-point is kept")
+	var secret corev1.Secret
+	require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: providerCustom}, &secret))
+	assert.Equal(t, "sk-first-key", string(secret.Data[secretKeyAPIKey]), "a refused rotate writes nothing")
 }
 
 // personaUser binds user to the given ClusterRoles in ns, asserts the user cannot read Secrets

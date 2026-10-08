@@ -428,11 +428,12 @@ func TestNamespacesLists(t *testing.T) {
 // TestNamespacesFlagsPlatformNamespaces: a cluster-wide caller's list includes the control plane's
 // and Kubernetes' own namespaces, sorted among their workspaces. The BFF flags those so the
 // console's first visit skips them: the install namespace, the MCP credential namespace, kube-*,
-// knative-* and *-system. Workspaces stay unflagged, and the flag does not reorder the list.
+// knative-*, cert-manager and *-system. Workspaces stay unflagged, and the flag does not reorder
+// the list.
 func TestNamespacesFlagsPlatformNamespaces(t *testing.T) {
 	names := []string{
-		"calico-system", "ctxmesh", "ctxmesh-credentials", "default", "knative-serving",
-		"kube-node-lease", "kube-system", "team-a", "zz-system-tools",
+		"calico-system", "cert-manager", "cert-manager-tests", "ctxmesh", "ctxmesh-credentials", "default",
+		"knative-serving", "kube-node-lease", "kube-system", "team-a", "zz-system-tools",
 	}
 	objs := make([]client.Object, 0, len(names))
 	for _, n := range names {
@@ -458,6 +459,8 @@ func TestNamespacesFlagsPlatformNamespaces(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, []NamespaceSummary{
 		{Name: "calico-system", Platform: true},
+		{Name: "cert-manager", Platform: true},
+		{Name: "cert-manager-tests"},
 		{Name: "ctxmesh", Platform: true},
 		{Name: "ctxmesh-credentials", Platform: true},
 		{Name: "default"},
