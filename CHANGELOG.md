@@ -101,10 +101,26 @@ created the reverted version, so the regressed version kept serving and `status.
 could name a version that did not exist. A frozen agent is no longer evaluated for auto-rollback, and
 an automatic rollback that is refused records why and lets the reconcile continue.
 
+**Fixed: connecting a provider that was already connected failed with HTTP 400.** Every release
+updated the provider's SecretBinding and ModelRoute without a `resourceVersion`, which the API
+server refuses for a custom resource, so connecting a provider again to change its key or endpoint
+always failed. It now updates them in place. Connect also refuses, with 409, a connection name that
+belongs to a ModelRoute or SecretBinding it did not create, rather than replacing that object.
+
 **Fixed: the console's Rotate key action was refused for every role.** It read the provider's
 Secret, which no shipped role may do, so it answered 403 while the console offered the button. A
-rotation now rebuilds the provider from its model route, as connecting it again does, and never
-reads the key it replaces.
+rotation now validates the new key against the endpoint the provider's model route calls, then
+rewrites the provider's Secret, SecretBinding and route, keeping the route's endpoint, model and
+rate limit. It never reads the key it replaces, and the audit log records it as a `connect` with
+`rotate: true`.
+
+**Fixed: the console could open in the control-plane namespace, and the config builder ignored the
+selected workspace.** On a first visit the console selected the first namespace it could list. For
+a cluster-wide user that was usually the control plane's own namespace or a `kube-*` one, and
+connecting a provider there wrote the key into the control plane. It now opens in the first
+namespace that is not a platform namespace, or in All workspaces; a stored choice still wins. The
+config builder's Apply created the agent in `default` whatever workspace was selected. It now
+applies into the selected workspace, and under All workspaces asks for one first.
 
 **Breaking:** with a state layer present (the default), the BFF refuses unbound capabilities.
 - **Older agents:** an agent built on an older base image has a launcher that cannot bind, so those
