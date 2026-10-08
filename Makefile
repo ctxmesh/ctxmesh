@@ -471,6 +471,10 @@ sdk-contract: ## Assert the SDKs track the product — every launcher route reac
 sdk-readme-truth: ## Assert every SDK README links the repo and pins a version that resolves (M175). Add --live to ask the registries.
 	./hack/sdk-readme-truth.sh
 
+.PHONY: shipped-truth
+shipped-truth: ## Assert the source claims shipped milestones made still hold, one table row each. Static; the docs-site rows need CTXMESH_SITE or ../ctxmesh.github.io.
+	./hack/shipped-truth.sh
+
 .PHONY: bump-version
 bump-version: ## Assert every verbatim-shipped version and README pin matches CHANGELOG (M175). Pass a version to WRITE them: ./hack/bump-version.sh 0.1.0-beta.4
 	./hack/bump-version.sh --check

@@ -136,9 +136,19 @@ jobs:
       # Go half of `make test` only (the py-test / ui-test halves are the py /
       # ui jobs). Reproduces the umbrella recipe: manifests+generate+fmt+vet,
       # then `go test ./... -coverprofile cover.out`.
+      # The run-store and credential-store suites skip without their own DSN, and CI set neither: 35
+      # internal/run tests and the fencing tests the durable worker rests on never ran here. Each gets
+      # its own database because the suites truncate their tables.
+      - name: Create the run-store and credential-store test databases
+        env:
+          PGPASSWORD: ctxmesh-ci
+        run: |
+          psql -h localhost -U postgres -c 'CREATE DATABASE ctxmesh_run' -c 'CREATE DATABASE ctxmesh_cred'
       - name: Go unit tests (manifests/generate/fmt/vet + go test)
         env:
           CONTROLPLANE_TEST_DSN: postgres://postgres:ctxmesh-ci@localhost:5432/ctxmesh?sslmode=disable
+          RUN_POSTGRES_TEST_DSN: postgres://postgres:ctxmesh-ci@localhost:5432/ctxmesh_run?sslmode=disable
+          CREDPOSTGRES_TEST_DSN: postgres://postgres:ctxmesh-ci@localhost:5432/ctxmesh_cred?sslmode=disable
         run: |
           make manifests generate fmt vet
           go test ./... -coverprofile cover.out
@@ -401,6 +411,15 @@ jobs:
         run: ./hack/docs-images-published.sh
       - name: Registry-copy gate (no internal vocabulary on registry pages)
         run: ./hack/registry-copy.sh
+
+      # Claims about the shipped source that a string or a test name can hold, one table row each: the
+      # greps fifteen milestone acceptances used to run without touching a cluster. A rename, a deleted
+      # test or a reverted fix fails here, on the PR, instead of in a nightly. The docs-site rows read the
+      # checkout above; without it the gate fails rather than skipping.
+      - name: Shipped-truth gate (source claims from shipped milestones still hold)
+        env:
+          CTXMESH_SITE: ${{ github.workspace }}/ctxmesh.github.io
+        run: ./hack/shipped-truth.sh
 
   envtest:
     name: envtest
