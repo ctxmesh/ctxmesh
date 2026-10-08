@@ -19,6 +19,7 @@ package bff
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -427,9 +428,26 @@ func createProviderObjects(ctx context.Context, w client.Client, spec providerCr
 	return created, nil
 }
 
+// notConnectManagedError refuses to overwrite a custom resource that connect did not write.
+type notConnectManagedError struct {
+	kind, name string
+}
+
+func (e *notConnectManagedError) Error() string {
+	return fmt.Sprintf("%s %q exists and was not created by connecting a provider (it has no %s=%s label)",
+		e.kind, e.name, labelManagedBy, managedByConnect)
+}
+
 // classifyProviderWriteError maps a failed provider write to its HTTP answer. When the objects
 // must already exist, a missing one is the provider being incomplete, not an upstream fault.
 func classifyProviderWriteError(err error, verb, kind string, spec providerCreateSpec) *createError {
+	if nc, ok := errors.AsType[*notConnectManagedError](err); ok {
+		if spec.mustExist {
+			return &createError{status: http.StatusConflict, msg: fmt.Sprintf("provider %q cannot be rotated: %v", spec.name, nc)}
+		}
+		return &createError{status: http.StatusConflict, msg: fmt.Sprintf(
+			"%v; choose another connection name, or remove the %s first", nc, nc.kind)}
+	}
 	if spec.mustExist && apierrors.IsNotFound(err) {
 		return &createError{status: http.StatusConflict, msg: fmt.Sprintf(
 			"provider %q is incomplete: its %s %q does not exist; disconnect it and connect it again",
@@ -478,6 +496,9 @@ func upsertObject(ctx context.Context, w client.Client, obj client.Object) (verb
 // without metadata.resourceVersion. So its resourceVersion is read with a metadata-only Get,
 // which needs only `get` on that kind and returns no spec, and the update is retried if the
 // object changed in between (its controller writes status, which bumps the resourceVersion).
+// The same read refuses an object connect did not write (notConnectManagedError): connection
+// names are chosen by the user, and one can name a ModelRoute or SecretBinding made by hand or
+// by GitOps.
 func updateExisting(ctx context.Context, w client.Client, obj client.Object, opts ...client.UpdateOption) (string, error) {
 	if _, isSecret := obj.(*corev1.Secret); isSecret {
 		obj.SetResourceVersion("")
@@ -496,6 +517,9 @@ func updateExisting(ctx context.Context, w client.Client, obj client.Object, opt
 			return err
 		}
 		verb = verbUpdate
+		if live.GetLabels()[labelManagedBy] != managedByConnect {
+			return &notConnectManagedError{kind: gvk.Kind, name: obj.GetName()}
+		}
 		obj.SetResourceVersion(live.GetResourceVersion())
 		return w.Update(ctx, obj, opts...)
 	})
@@ -902,10 +926,17 @@ func rotateSpecFromRoute(mr *agentsv1alpha1.ModelRoute) (providerCreateSpec, *cr
 	}, nil
 }
 
-// checkConnectBinding refuses a SecretBinding that no longer points where connect pointed it. A
-// rotate writes the key into the Secret connect created; if the binding names another Secret, that
-// write would not change the key the provider uses.
+// checkConnectBinding refuses a SecretBinding that connect did not write, or that no longer points
+// where connect pointed it. A rotate writes the key into the Secret connect created; if the binding
+// names another Secret, that write would not change the key the provider uses.
 func checkConnectBinding(b *agentsv1alpha1.SecretBinding, name string) *createError {
+	if b.Labels[labelManagedBy] != managedByConnect {
+		return &createError{
+			status: http.StatusConflict,
+			msg: fmt.Sprintf("provider %q cannot be rotated: %v", name,
+				&notConnectManagedError{kind: secretBindingKind, name: name}),
+		}
+	}
 	if b.Spec.Backend == secretBackendKubernetes && b.Spec.SecretRef.Name == name && b.Spec.SecretRef.Key == secretKeyAPIKey {
 		return nil
 	}

@@ -723,14 +723,14 @@ func seedConnectedProvider(baseURL, key string) []client.Object {
 		},
 	}
 	binding := &agentsv1alpha1.SecretBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "prod"},
+		ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "prod", Labels: route.Labels},
 		Spec: agentsv1alpha1.SecretBindingSpec{
 			Backend:   secretBackendKubernetes,
 			SecretRef: agentsv1alpha1.SecretKeyRef{Name: "anthropic", Key: secretKeyAPIKey},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "prod"},
+		ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "prod", Labels: route.Labels},
 		Data:       map[string][]byte{secretKeyAPIKey: []byte(key)},
 	}
 	return []client.Object{route, binding, secret}

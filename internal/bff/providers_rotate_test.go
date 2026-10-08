@@ -108,16 +108,22 @@ func TestCheckConnectBinding(t *testing.T) {
 	t.Parallel()
 
 	binding := func(secret, key string) *agentsv1alpha1.SecretBinding {
-		return &agentsv1alpha1.SecretBinding{Spec: agentsv1alpha1.SecretBindingSpec{
-			Backend:   secretBackendKubernetes,
-			SecretRef: agentsv1alpha1.SecretKeyRef{Name: secret, Key: key},
-		}}
+		return &agentsv1alpha1.SecretBinding{
+			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labelManagedBy: managedByConnect}},
+			Spec: agentsv1alpha1.SecretBindingSpec{
+				Backend:   secretBackendKubernetes,
+				SecretRef: agentsv1alpha1.SecretKeyRef{Name: secret, Key: key},
+			},
+		}
 	}
 	assert.Nil(t, checkConnectBinding(binding("gateway", secretKeyAPIKey), "gateway"))
 
+	unlabeled := binding("gateway", secretKeyAPIKey)
+	unlabeled.Labels = map[string]string{"app.kubernetes.io/instance": "argocd-prod"}
 	for name, b := range map[string]*agentsv1alpha1.SecretBinding{
-		"another Secret": binding("shared-keys", secretKeyAPIKey),
-		"another key":    binding("gateway", "token"),
+		"another Secret":   binding("shared-keys", secretKeyAPIKey),
+		"another key":      binding("gateway", "token"),
+		"not from connect": unlabeled,
 	} {
 		cErr := checkConnectBinding(b, "gateway")
 		require.NotNil(t, cErr, name)
@@ -313,6 +319,11 @@ func TestRotateProviderKey_RefusesWithoutProbingOrWriting(t *testing.T) {
 		"binding re-pointed": func() []client.Object {
 			objs := seedConnectedCustomProvider(prov.URL)
 			objs[1].(*agentsv1alpha1.SecretBinding).Spec.SecretRef.Name = "shared-keys"
+			return objs
+		},
+		"binding not from connect": func() []client.Object {
+			objs := seedConnectedCustomProvider(prov.URL)
+			objs[1].SetLabels(map[string]string{"app.kubernetes.io/instance": "argocd-prod"})
 			return objs
 		},
 		"binding missing": func() []client.Object {

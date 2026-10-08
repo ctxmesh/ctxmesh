@@ -169,6 +169,53 @@ func TestProviderRotate_RewritesTheKeyWithoutReadingIt(t *testing.T) {
 	}
 }
 
+// TestProviderConnect_RefusesAModelRouteItDidNotCreate: a connection name can name a ModelRoute
+// made by hand or by GitOps. Connecting under that name is refused with 409 by the pre-flight,
+// before the Secret is written, and the route is left as it was. The fake client's dry-run checks
+// nothing, so only a real API server shows that the refusal comes before any write.
+func TestProviderConnect_RefusesAModelRouteItDidNotCreate(t *testing.T) {
+	ctx := context.Background()
+	admin, err := client.New(rbacCfg, client.Options{Scheme: testScheme(t)})
+	require.NoError(t, err)
+
+	credentialAdmin := installPersona(t, admin, "ctxmesh_credential_admin_role.yaml")
+	role := installPersona(t, admin, "ctxmesh_developer_role.yaml")
+	const ns = "connect-handmade"
+	require.NoError(t, admin.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}))
+	alice := personaUser(t, admin, ns, "alice-"+ns, role, credentialAdmin)
+
+	route := &agentsv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "prod-llm", Namespace: ns,
+			Labels: map[string]string{"app.kubernetes.io/instance": "argocd-prod"},
+		},
+		Spec: agentsv1alpha1.ModelRouteSpec{Providers: []agentsv1alpha1.ProviderRef{
+			{Provider: "openai", Model: "gpt-5", Priority: 1, SecretBindingRef: "openai"},
+			{Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 2, SecretBindingRef: "anthropic"},
+		}},
+	}
+	require.NoError(t, admin.Create(ctx, route))
+
+	prov := anyKeyProvider(t)
+	s, _, _ := newConnectServer(t, alice)
+	body, err := json.Marshal(ConnectProviderRequest{
+		Provider: providerCustom, Connection: "prod-llm", APIKey: "sk-first-key", BaseURL: prov.URL, Namespace: ns,
+	})
+	require.NoError(t, err)
+	rec := postAs(s, "/api/providers", body)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `ModelRoute \"prod-llm\" exists and was not created by connecting a provider`)
+
+	var after agentsv1alpha1.ModelRoute
+	require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(route), &after))
+	assert.Equal(t, route.ResourceVersion, after.ResourceVersion, "the route is untouched")
+	assert.Len(t, after.Spec.Providers, 2)
+	for _, o := range []client.Object{&corev1.Secret{}, &agentsv1alpha1.SecretBinding{}} {
+		err := admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: "prod-llm"}, o)
+		assert.True(t, apierrors.IsNotFound(err), "%T must not be written by a refused connect; got %v", o, err)
+	}
+}
+
 // personaUser binds user to the given ClusterRoles in ns, asserts the user cannot read Secrets
 // there, and returns a client acting as that user.
 func personaUser(t *testing.T, admin client.Client, ns, user string, roles ...string) client.Client {

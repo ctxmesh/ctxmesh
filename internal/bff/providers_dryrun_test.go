@@ -2,6 +2,7 @@ package bff
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -156,7 +157,10 @@ func TestDryRunUpsertSurfacesAnUpdateDenial(t *testing.T) {
 
 func existingRoute() *agentsv1alpha1.ModelRoute {
 	return &agentsv1alpha1.ModelRoute{
-		ObjectMeta: metav1.ObjectMeta{Name: "custom", Namespace: "team-a"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "custom", Namespace: "team-a",
+			Labels: map[string]string{labelManagedBy: managedByConnect, labelProvider: providerCustom},
+		},
 		Spec: agentsv1alpha1.ModelRouteSpec{Providers: []agentsv1alpha1.ProviderRef{{
 			Provider: "openai", Model: "old-model", Priority: 1, SecretBindingRef: "custom",
 		}}},
@@ -279,4 +283,77 @@ func TestDryRunUpsert_CustomResourceCarriesItsLiveResourceVersion(t *testing.T) 
 	assert.NotEmpty(t, updateRVs[0], "the dry-run update carries the live resourceVersion")
 	assert.Equal(t, 1, dryRuns, "the update is a dry-run")
 	assert.Empty(t, desired.GetResourceVersion(), "the pre-flight does not touch the caller's object")
+}
+
+// TestUpsertObject_RefusesACustomResourceConnectDidNotWrite: a connection name is the user's choice
+// and can name a ModelRoute or SecretBinding made by hand or by GitOps. Connect, the pre-flight
+// included, refuses to overwrite it, and a rotate refuses the same way.
+func TestUpsertObject_RefusesACustomResourceConnectDidNotWrite(t *testing.T) {
+	t.Parallel()
+
+	handMade := map[string]client.Object{
+		modelRouteKind: &agentsv1alpha1.ModelRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "prod-llm", Namespace: "team-a",
+				Labels: map[string]string{"app.kubernetes.io/instance": "argocd-prod"},
+			},
+			Spec: agentsv1alpha1.ModelRouteSpec{Providers: []agentsv1alpha1.ProviderRef{
+				{Provider: "openai", Model: "gpt-5", Priority: 1, SecretBindingRef: "openai"},
+				{Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 2, SecretBindingRef: "anthropic"},
+			}},
+		},
+		secretBindingKind: &agentsv1alpha1.SecretBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "prod-llm", Namespace: "team-a"},
+			Spec: agentsv1alpha1.SecretBindingSpec{
+				Backend:   secretBackendKubernetes,
+				SecretRef: agentsv1alpha1.SecretKeyRef{Name: "vault-synced", Key: "token"},
+			},
+		},
+	}
+	for kind, existing := range handMade {
+		for path, write := range map[string]func(context.Context, client.Client, client.Object) (string, error){
+			"upsert":  upsertObject,
+			"dry-run": dryRunUpsert,
+		} {
+			t.Run(kind+"/"+path, func(t *testing.T) {
+				t.Parallel()
+				var updates int
+				c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+					WithObjects(existing.DeepCopyObject().(client.Object)).
+					WithInterceptorFuncs(interceptor.Funcs{
+						// The fake client's dry-run Create returns nil without checking anything; the
+						// API server answers AlreadyExists, which sends the pre-flight to the update.
+						Create: func(ctx context.Context, w client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+							if path == "dry-run" {
+								return apierrors.NewAlreadyExists(schema.GroupResource{}, obj.GetName())
+							}
+							return w.Create(ctx, obj, opts...)
+						},
+						Update: func(ctx context.Context, w client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+							updates++
+							return w.Update(ctx, obj, opts...)
+						},
+					}).Build()
+				desired := existing.DeepCopyObject().(client.Object)
+				desired.SetLabels(map[string]string{labelManagedBy: managedByConnect, labelProvider: providerCustom})
+
+				verb, err := write(context.Background(), c, desired)
+				var nc *notConnectManagedError
+				require.ErrorAs(t, err, &nc)
+				assert.Zero(t, updates, "nothing is written over an object connect did not write")
+
+				ce := classifyProviderWriteError(err, verb, kind, providerCreateSpec{name: "prod-llm"})
+				assert.Equal(t, http.StatusConflict, ce.status)
+				assert.Contains(t, ce.msg, kind+` "prod-llm" exists and was not created by connecting a provider`)
+				assert.Contains(t, ce.msg, "choose another connection name")
+				ce = classifyProviderWriteError(err, verb, kind, providerCreateSpec{name: "prod-llm", mustExist: true})
+				assert.Equal(t, http.StatusConflict, ce.status)
+				assert.Contains(t, ce.msg, `provider "prod-llm" cannot be rotated`)
+
+				live := existing.DeepCopyObject().(client.Object)
+				require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(existing), live))
+				assert.Equal(t, existing.GetLabels(), live.GetLabels(), "the object is untouched")
+			})
+		}
+	}
 }
