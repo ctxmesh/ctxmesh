@@ -489,11 +489,10 @@ func TestCreateRun_StreamsTokens(t *testing.T) {
 	assert.Contains(t, body, "event: token")
 	assert.Contains(t, body, "Hel")
 	assert.Contains(t, body, "lo")
-	// The step frames were republished as EventStep, their Data the verbatim step-metadata JSON
-	// (JSON-escaped inside the run Event's `data` field on the wire).
-	assert.Contains(t, body, "event: step")
-	assert.Contains(t, body, `\"kind\":\"model\"`)
-	assert.Contains(t, body, `\"tool\":\"echo_tool\"`)
+	// The step frames were republished as EventStep, the frame's payload the verbatim step-metadata
+	// JSON (the payload itself, not wrapped in the run Event).
+	assert.Contains(t, body, "event: step\ndata: "+stepModel+"\n\n")
+	assert.Contains(t, body, "event: step\ndata: "+stepTool+"\n\n")
 	assert.Contains(t, body, "event: message")
 	assert.Contains(t, body, "event: state")
 	assert.Contains(t, body, string(run.StatusSucceeded))

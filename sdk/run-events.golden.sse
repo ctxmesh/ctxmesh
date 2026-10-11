@@ -1,0 +1,50 @@
+id: 1
+event: state
+data: running
+
+id: 2
+event: step
+data: {"type":"step","step":1,"kind":"model","tokens":{"prompt":11,"completion":7},"ref":null}
+
+id: 3
+event: token
+data: Calling echo_tool.
+data:
+
+id: 4
+event: step
+data: {"type":"step","step":1,"kind":"tool","tool":"echo_tool","tokens":{"prompt":0,"completion":0},"ref":null}
+
+id: 5
+event: state
+data: requires_action
+
+id: 6
+event: state
+data: running
+
+id: 7
+event: step
+data: {"type":"step","step":2,"kind":"model","tokens":{"prompt":40,"completion":12},"ref":null}
+
+id: 8
+event: token
+data: MOCK_TOOL_OK echo_tool returned:
+data: FIXTURE_ECHO: ping
+data:
+
+id: 9
+event: token
+data:  Done.
+
+id: 10
+event: message
+data: Calling echo_tool.
+data: MOCK_TOOL_OK echo_tool returned:
+data: FIXTURE_ECHO: ping
+data:  Done.
+
+id: 11
+event: state
+data: succeeded
+

@@ -2630,10 +2630,12 @@ function parseSSEFrame(
 
 // --- Run-oriented execution stream (ADR 0034, m32.8) -------------------------
 // The console chat consumes a run's SSE event stream (GET /api/runs/{id}/events):
-// `id:<seq>\nevent:<kind>\ndata:<json>\n\n`. Kinds: `token` (a live content delta),
-// `message` (a completed assistant turn), `state` (a status transition — the data
-// is the new status), `step` (a loop/tool boundary). The stream closes when the run
-// is terminal, so onClose fires exactly once (clean end or abort).
+// `id: <seq>\nevent: <kind>\n` then the payload, one `data:` line per line of it.
+// Kinds: `token` (a live content delta), `message` (a completed assistant turn),
+// `state` (a status transition — the payload is the new status), `step` (a loop/tool
+// boundary — step metadata JSON or a label). The stream closes when the run is
+// terminal, so onClose fires exactly once (clean end or abort); it stays open while
+// the run waits in requires_action. sdk/run-events.golden.sse is the server's bytes.
 
 export type CreateRunRequest = InvokeRequest;
 
@@ -2723,7 +2725,22 @@ export interface RunDetail {
   nodes?: WorkflowNodeStatus[];
 }
 
-export type RunEventKind = "state" | "message" | "token" | "step";
+// RunEventKind is a run stream event's `event:` name. `descendant-requires-action` is posted on a
+// root run when a delegated sub-run pauses; its payload is that sub-run's id (ADR 0075 §4).
+export type RunEventKind =
+  | "state"
+  | "message"
+  | "token"
+  | "step"
+  | "descendant-requires-action";
+
+const RUN_EVENT_KINDS: ReadonlySet<string> = new Set<RunEventKind>([
+  "state",
+  "message",
+  "token",
+  "step",
+  "descendant-requires-action",
+]);
 
 // StepMeta is the metadata a `step` run event carries (M78, ADR 0071 §4/§C3): the loop step
 // number, the boundary kind (model/tool), the tool name (tool steps), and best-effort token
@@ -2888,8 +2905,10 @@ export function openRunStream(
   return () => controller.abort();
 }
 
-// parseRunSSEFrame parses one run SSE frame ("id:<seq>\nevent:<kind>\ndata:<json>")
-// into a typed event. Unknown/absent event names default to "message".
+// parseRunSSEFrame parses one run SSE frame into a typed event: the data lines rejoined
+// with "\n" are the payload. An absent event name is "message" (the SSE default); an
+// event name this console does not know is skipped, as EventSource skips a named event
+// nobody listens for, so a new kind can never overwrite the answer being streamed.
 function parseRunSSEFrame(
   frame: string,
 ): { seq: number; kind: RunEventKind; data: string } | null {
@@ -2904,10 +2923,8 @@ function parseRunSSEFrame(
       dataLines.push(line.slice(5).replace(/^ /, ""));
   }
   if (dataLines.length === 0 && event === "") return null; // keep-alive.
-  const kind: RunEventKind =
-    event === "state" || event === "token" || event === "step"
-      ? event
-      : "message";
+  if (event !== "" && !RUN_EVENT_KINDS.has(event)) return null;
+  const kind = (event === "" ? "message" : event) as RunEventKind;
   return { seq, kind, data: dataLines.join("\n") };
 }
 

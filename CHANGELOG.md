@@ -78,6 +78,17 @@ a base domain that can never be delegated (`localhost`, `internal`, `test`, `inv
 `local`) is where the agents live, not a public suffix. Any other single label is treated as a
 public suffix, so a console at `console.corp` has its agents under `console.corp`.
 
+**Fixed: the chat streamed raw event JSON and never showed an approval or consent prompt
+mid-run.** The run event stream (`GET /api/runs/{id}/events`) put each event in its `data:` line as
+a JSON envelope, while the console and the SDKs read that line as the payload itself. The chat
+showed tokens and step labels as JSON until the run ended, and a run that stopped for an approval
+or a consent left the chat on an open stream instead of showing the prompt. The Python and
+TypeScript SDKs' `RunsClient.stream` yielded the envelope instead of the text. Each frame now
+carries the payload itself (a token's text, a state's new status, a step's metadata), one `data:`
+line per line of it, with the sequence number in `id:`. A client that parsed the envelope reads the
+payload directly instead. After a consent or an approval, the chat resumes the run's stream after
+the event that paused it.
+
 **Security: an agent could serve a page at its own address and finish a visitor's OAuth consent
 as its author.** The console's consent page trusts a page at an agent's hostname, and with the
 edge's `extAuth.enabled: false`, `/invoke` at every agent hostname reaches the agent's own

@@ -374,23 +374,10 @@ func streamPodLogSSE(ctx context.Context, w http.ResponseWriter, flusher http.Fl
 // surfaces as an SSE error rather than buffering without limit.
 const maxLogLineBytes = 256 * 1024
 
-// writeSSEEvent writes one Server-Sent Event (an `event:` line + a `data:` line +
-// the blank separator) and flushes it. Newlines in the payload are split into
-// multiple data: lines per the SSE grammar so a multi-line message stays one
-// event. A best-effort write: an error means the client disconnected, which the
-// surrounding loop's context check already handles.
+// writeSSEEvent writes one Server-Sent Event (see sseFrame) and flushes it. A best-effort write: an
+// error means the client disconnected, which the surrounding loop's context check already handles.
 func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, event, data string) {
-	var b strings.Builder
-	b.WriteString("event: ")
-	b.WriteString(event)
-	b.WriteByte('\n')
-	for line := range strings.SplitSeq(data, "\n") {
-		b.WriteString("data: ")
-		b.WriteString(line)
-		b.WriteByte('\n')
-	}
-	b.WriteByte('\n')
-	_, _ = io.WriteString(w, b.String())
+	_, _ = io.WriteString(w, sseFrame("", event, data))
 	flusher.Flush()
 }
 

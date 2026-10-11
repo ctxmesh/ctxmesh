@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -861,7 +862,10 @@ func nodesFromCursor(cursorJSON, specSnapshot string) ([]WorkflowNodeStatus, str
 // handleRunEvents serves GET /api/runs/{id}/events — the run's live event stream as SSE (ADR
 // 0034). It resumes from a `Last-Event-ID` header (or `?fromSeq=`) so a reconnect replays only
 // missed events, then streams live until the run is terminal (the stream closes) or the client
-// disconnects. Each frame is `id:<seq>`, `event:<kind>`, `data:<json event>`.
+// disconnects. Each frame is `id: <seq>`, `event: <kind>`, then the event's Data itself as the
+// payload, one `data: ` line per line of it (sseFrame): a token's text, a state's new status, a
+// step's metadata JSON or label. Every client (the console, the SDKs) reads the payload, so the
+// frame carries nothing else; sdk/run-events.golden.sse pins the bytes.
 func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.callerClient(w, r)
 	if !ok {
@@ -905,17 +909,19 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return // client disconnected
 		case <-heartbeat.C:
-			_, _ = fmt.Fprint(w, ": heartbeat\n\n") // SSE comment — ignored by parsers, resets the read deadline
+			// SSE comment — ignored by parsers, resets the read deadline. A failed write means
+			// the client is gone.
+			if _, err := io.WriteString(w, ": heartbeat\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		case ev, open := <-events:
 			if !open {
 				return // run terminal + backlog drained
 			}
-			data, mErr := json.Marshal(ev)
-			if mErr != nil {
-				continue
+			if _, err := io.WriteString(w, sseFrame(strconv.Itoa(ev.Seq), string(ev.Kind), ev.Data)); err != nil {
+				return
 			}
-			_, _ = fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", ev.Seq, ev.Kind, data)
 			flusher.Flush()
 		}
 	}

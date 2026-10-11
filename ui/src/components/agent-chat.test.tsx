@@ -7,6 +7,12 @@ import { CapabilitiesProvider } from "@/lib/capabilities";
 import { NamespaceProvider } from "@/lib/namespace";
 import { DevModeContext } from "@/lib/dev-mode";
 import { MCP_CONSENT_READY, MCP_CONSENT_TICKET, MCP_OAUTH_MESSAGE } from "@/lib/oauth-popup";
+import {
+  chunked,
+  golden,
+  GOLDEN_REQUIRES_ACTION_SEQ,
+  GOLDEN_TEXT,
+} from "@/test/run-events-golden";
 
 // ChatPanel converges on DURABLE runs (ADR 0093): each cluster chat turn is createRun →
 // openRunStream → finalize (getRun), so it becomes a first-class, observable run — instead of
@@ -23,11 +29,15 @@ interface Captured {
   url: string;
   method: string;
   body: string;
+  lastEventId?: string | null;
+  signal?: AbortSignal;
 }
 
 // sseBody wraps SSE frame strings in a ReadableStream-like body (getReader) so the durable run
 // event stream (openRunStream) drives deterministically — mirrors the Playground test helper.
-function sseBody(frames: string[]) {
+// With `openUntil`, the body stays open after the frames, as the server's does for a run waiting
+// in requires_action, until that signal aborts.
+function sseBody(frames: string[], openUntil?: AbortSignal) {
   const enc = new TextEncoder();
   let i = 0;
   return {
@@ -36,6 +46,12 @@ function sseBody(frames: string[]) {
         read() {
           if (i < frames.length)
             return Promise.resolve({ value: enc.encode(frames[i++]), done: false });
+          if (openUntil)
+            return new Promise((_resolve, reject) => {
+              const abort = () => reject(new DOMException("aborted", "AbortError"));
+              if (openUntil.aborted) abort();
+              else openUntil.addEventListener("abort", abort, { once: true });
+            });
           return Promise.resolve({ value: undefined, done: true });
         },
         releaseLock() {},
@@ -49,6 +65,8 @@ function sseBody(frames: string[]) {
 // the create outcome (for the forbidden case).
 interface RunMock {
   frames?: string[];
+  // A stream per /events request, given the request's Last-Event-ID; `open` keeps it from closing.
+  stream?: (lastEventId: string | null) => { frames: string[]; open?: boolean };
   details?: unknown[]; // successive GET /api/runs/{id} responses (consent → success)
   createOk?: boolean;
   createStatus?: number;
@@ -67,7 +85,8 @@ function recordingFetch(run: RunMock = {}) {
       const path = url.split("?")[0];
       const method = init?.method ?? "GET";
       const body = typeof init?.body === "string" ? init.body : "";
-      calls.push({ url: path, method, body });
+      const lastEventId = new Headers(init?.headers).get("Last-Event-ID");
+      calls.push({ url: path, method, body, lastEventId, signal: init?.signal ?? undefined });
       const j = (b: unknown) =>
         Promise.resolve({ ok: true, status: 200, json: async () => b, text: async () => JSON.stringify(b) } as Response);
 
@@ -85,17 +104,21 @@ function recordingFetch(run: RunMock = {}) {
           text: async () => JSON.stringify(run.createJson ?? { error: "denied" }),
         } as Response);
       }
-      if (path.endsWith("/events"))
+      if (path.endsWith("/events")) {
+        const scripted = run.stream?.(lastEventId);
         return Promise.resolve({
           ok: true,
           status: 200,
           body: sseBody(
-            run.frames ?? [
-              'event:message\ndata:{"output":"hi there"}\n\n',
-              "event:state\ndata:succeeded\n\n",
-            ],
+            scripted?.frames ??
+              run.frames ?? [
+                'event:message\ndata:{"output":"hi there"}\n\n',
+                "event:state\ndata:succeeded\n\n",
+              ],
+            scripted?.open ? (init?.signal ?? undefined) : undefined,
           ),
         } as unknown as Response);
+      }
       // POST /api/runs/{id}/resume — the consent connect-and-continue (no decision).
       if (path.startsWith("/api/runs/") && path.endsWith("/resume"))
         return j({ id: "run-1", status: "running" });
@@ -202,27 +225,119 @@ describe("ChatPanel (durable runs, ADR 0093)", () => {
   });
 
   it("(b) streams tokens live into the agent turn (the UX upgrade over wait-for-full-response)", async () => {
+    // The server's bytes for the run's second leg up to its last token, with the stream still open:
+    // what the turn shows can only have come from the tokens, since the run has not been re-read.
+    const calls = recordingFetch({
+      stream: () => ({ frames: chunked(golden(GOLDEN_REQUIRES_ACTION_SEQ, 9), 11), open: true }),
+    });
+    renderChat(false);
+    await sendMessage("hi");
+
+    await waitFor(() =>
+      expect(screen.getByTestId("chat-turn-agent")).toHaveTextContent(
+        "MOCK_TOOL_OK echo_tool returned: FIXTURE_ECHO: ping Done.",
+      ),
+    );
+    expect(screen.getByTestId("chat-turn-agent")).not.toHaveTextContent("{");
+    expect(calls.filter((c) => c.url === "/api/runs/run-1" && c.method === "GET")).toHaveLength(0);
+  });
+
+  it("(b2) a closed stream finalizes to the run's message and trace", async () => {
     recordingFetch({
-      frames: [
-        "event:token\ndata:Hel\n\n",
-        "event:token\ndata:lo\n\n",
-        "event:state\ndata:succeeded\n\n",
-      ],
+      stream: () => ({ frames: [golden(GOLDEN_REQUIRES_ACTION_SEQ)] }),
       details: [
         {
           id: "run-1",
           status: "succeeded",
           traceId: "trace-xyz",
-          messages: [{ role: "assistant", content: "Hello" }],
+          messages: [{ role: "assistant", content: GOLDEN_TEXT }],
         },
       ],
     });
     renderChat(false);
     await sendMessage("hi");
 
-    // The streamed tokens accumulate into the turn, and it finalizes to the clean message + trace.
-    expect(await screen.findByTestId("chat-turn-agent")).toHaveTextContent("Hello");
+    expect(await screen.findByTestId("chat-turn-agent")).toHaveTextContent("FIXTURE_ECHO: ping");
     await waitFor(() => expect(screen.getByTestId("open-trace")).toBeInTheDocument());
+  });
+
+  // The server leaves the stream open while a run waits in requires_action, so the chat must act on
+  // the `state: requires_action` frame itself. Both pauses below arrive on the server's own bytes.
+  it("(f) a run that pauses for consent mid-stream shows Connect, and resuming continues after the pause", async () => {
+    const popup = { closed: false } as Window;
+    vi.stubGlobal("open", vi.fn(() => popup));
+    const calls = recordingFetch({
+      stream: (lastEventId) =>
+        lastEventId === null
+          ? { frames: chunked(golden(0, GOLDEN_REQUIRES_ACTION_SEQ), 13), open: true }
+          : { frames: [golden(Number(lastEventId))] },
+      details: [
+        {
+          id: "run-1",
+          status: "requires_action",
+          messages: [],
+          requiresAction: { kind: "consent_required", servers: ["echo-mcp"] },
+        },
+        {
+          id: "run-1",
+          status: "succeeded",
+          traceId: "trace-done",
+          messages: [{ role: "assistant", content: GOLDEN_TEXT }],
+        },
+      ],
+    });
+    renderChat(false);
+    await sendMessage("ping");
+
+    const connect = await screen.findByTestId("connect-echo-mcp");
+    expect(connect).toHaveTextContent("Connect echo-mcp");
+    // The tokens streamed before the pause stay on the turn, and the chat closed the stream itself.
+    expect(screen.getByTestId("chat-turn-agent")).toHaveTextContent("Calling echo_tool.");
+    const first = calls.filter((c) => c.url === "/api/runs/run-1/events");
+    expect(first).toHaveLength(1);
+    expect(first[0].lastEventId).toBeNull();
+    expect(first[0].signal?.aborted).toBe(true);
+
+    fireEvent.click(connect);
+    await waitFor(() => expect(calls.find((c) => c.url === "/api/mcp/oauth/grant")).toBeDefined());
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: MCP_OAUTH_MESSAGE, server: "echo-mcp", error: "" },
+        origin: window.location.origin,
+      }),
+    );
+
+    // The resumed run streams from after the pause; replaying it would end the turn on the spot.
+    await waitFor(() =>
+      expect(calls.filter((c) => c.url === "/api/runs/run-1/events")).toHaveLength(2),
+    );
+    expect(calls.filter((c) => c.url === "/api/runs/run-1/events")[1].lastEventId).toBe(
+      String(GOLDEN_REQUIRES_ACTION_SEQ),
+    );
+    await waitFor(() => expect(screen.getByTestId("open-trace")).toHaveTextContent("trace-done"));
+    expect(screen.queryByTestId("connect-echo-mcp")).not.toBeInTheDocument();
+  });
+
+  it("(g) a run that pauses for an approval mid-stream shows the hold", async () => {
+    const calls = recordingFetch({
+      stream: () => ({ frames: [golden(0, GOLDEN_REQUIRES_ACTION_SEQ)], open: true }),
+      details: [
+        {
+          id: "run-1",
+          status: "requires_action",
+          messages: [],
+          requiresAction: { kind: "approval", key: "tool:echo_tool", message: "approve the step" },
+        },
+      ],
+    });
+    renderChat(false);
+    await sendMessage("ping");
+
+    expect(await screen.findByTestId("chat-hold")).toHaveTextContent(
+      "A person has to approve this before it goes on",
+    );
+    expect(screen.getByRole("link", { name: "Review the hold on run run-1" })).toBeInTheDocument();
+    expect(calls.find((c) => c.url === "/api/runs/run-1/events")?.signal?.aborted).toBe(true);
   });
 
   it("(c) a consent_required finalize shows Connect → clicking connect RESUMES the same run (not a new createRun)", async () => {

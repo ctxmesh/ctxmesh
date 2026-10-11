@@ -104,6 +104,10 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
   const [state, setState] = React.useState<DurableRunState>(IDLE);
   // The active run's SSE stream canceller — aborts on New-run / cancel / unmount (no leak).
   const streamCancelRef = React.useRef<(() => void) | null>(null);
+  // The last event seq seen on the current run's stream. A resumed run keeps its stream, which
+  // still holds the requires_action that paused it, so the resumed stream opens after this cursor;
+  // replaying that event would finalize the resumed run on the spot.
+  const lastSeqRef = React.useRef<{ runId: string; seq: number } | null>(null);
   // Options can change per render (inline closures); keep the latest in a ref so the long-lived
   // stream callbacks always call the current handlers without re-creating the stream.
   const optsRef = React.useRef(options);
@@ -160,8 +164,9 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
   // terminal/paused state, then finalizes. Shared by start() and resume() so the two paths are
   // byte-identical (the Playground duplicated this).
   const streamRun = React.useCallback(
-    (runId: string) => {
+    (runId: string, fromSeq = 0) => {
       setState((s) => ({ ...s, status: "streaming", runId, responseText: "", step: "" }));
+      lastSeqRef.current = { runId, seq: fromSeq };
       let acc = "";
       let step = "";
       let finalized = false;
@@ -172,7 +177,8 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
         void finalizeRun(runId, acc);
       };
       const cancelStream = openRunStream(runId, {
-        onEvent: (kind, data) => {
+        onEvent: (kind, data, seq) => {
+          if (seq > 0) lastSeqRef.current = { runId, seq };
           if (kind === "token") {
             acc += data;
             setState((s) => ({ ...s, status: "streaming", runId, responseText: acc, step }));
@@ -203,7 +209,7 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
           optsRef.current.onForbidden?.(message);
           setState((s) => ({ ...s, status: "forbidden", error: message, forbidden: true }));
         },
-      });
+      }, { fromSeq });
       streamCancelRef.current = cancelStream;
     },
     [finalizeRun, stopStream],
@@ -257,7 +263,8 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
         void finalizeRun(runId, "");
         return;
       }
-      streamRun(runId);
+      const last = lastSeqRef.current;
+      streamRun(runId, last?.runId === runId ? last.seq : 0);
     },
     [state.runId, stopStream, streamRun, finalizeRun],
   );

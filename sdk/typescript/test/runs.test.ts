@@ -6,6 +6,7 @@
  * get, resume with a decision, cancel, SSE stream parsing, and the run() sugar's create+poll.
  */
 
+import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
@@ -22,10 +23,11 @@ interface Recorded {
   body: string;
 }
 
-/** A canned BFF response: a JSON body at a status, or a raw SSE stream. */
+/** A canned BFF response: a JSON body at a status, SSE lines, or an SSE body served byte for byte. */
 type Reply =
   | { json: unknown; status?: number }
-  | { sse: string[]; status?: number };
+  | { sse: string[]; status?: number }
+  | { sseBytes: string; status?: number };
 
 /**
  * A tiny BFF run-API stub. Each request pops the next queued reply (FIFO), records the request,
@@ -91,6 +93,11 @@ class BffStub {
       if (!reply) {
         res.writeHead(500);
         res.end('{"error":"no queued reply"}');
+        return;
+      }
+      if ("sseBytes" in reply) {
+        res.writeHead(reply.status ?? 200, { "Content-Type": "text/event-stream" });
+        res.end(reply.sseBytes);
         return;
       }
       if ("sse" in reply) {
@@ -218,6 +225,38 @@ describe("RunsClient.stream", () => {
     // Accept header + no Last-Event-ID when fromSeq defaults to 0.
     expect(bff.req(0).headers["accept"]).toBe("text/event-stream");
     expect(bff.req(0).headers["last-event-id"]).toBeUndefined();
+  });
+
+  it("reads the server's frames: the payload is the text, the status, the step metadata", async () => {
+    // The BFF's run event stream exactly as its handler writes it: internal/bff's
+    // TestRunEventsWire_MatchesGolden regenerates this file from the real handler and fails when
+    // the handler's bytes drift from it.
+    const golden = readFileSync(new URL("../../run-events.golden.sse", import.meta.url), "utf8");
+    bff.queue({ sseBytes: golden });
+
+    const events: RunEvent[] = [];
+    for await (const event of new RunsClient(bff.baseUrl).stream("run-golden")) {
+      events.push(event);
+    }
+
+    expect(events.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    const text = "Calling echo_tool.\nMOCK_TOOL_OK echo_tool returned:\nFIXTURE_ECHO: ping\n Done.";
+    expect(events.filter((e) => e.kind === "token").map((e) => e.data).join("")).toBe(text);
+    expect(events.filter((e) => e.kind === "state").map((e) => e.data)).toEqual([
+      "running",
+      "requires_action",
+      "running",
+      "succeeded",
+    ]);
+    const steps = events
+      .filter((e) => e.kind === "step")
+      .map((e) => JSON.parse(e.data) as { step: number; kind: string; tool?: string });
+    expect(steps.map((s) => [s.step, s.kind, s.tool])).toEqual([
+      [1, "model", undefined],
+      [1, "tool", "echo_tool"],
+      [2, "model", undefined],
+    ]);
+    expect(events.filter((e) => e.kind === "message").map((e) => e.data)).toEqual([text]);
   });
 
   it("sends the Last-Event-ID cursor when resuming from a seq", async () => {
