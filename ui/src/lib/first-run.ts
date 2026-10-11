@@ -13,7 +13,8 @@
  *
  * Keyed by workspace, because the checklist asks "have you run an agent HERE". A single global
  * flag would check the step off in a namespace the user has never run anything in, which is the
- * same wrong answer in the other direction.
+ * same wrong answer in the other direction. All workspaces is every workspace, so there a run seen
+ * in any of them counts.
  */
 
 /** Namespaced so it cannot collide with the session token or a page's own key on this origin. */
@@ -39,10 +40,20 @@ export function markRunCompleted(namespace: string): void {
   }
 }
 
-/** Whether a run has been seen to complete in this workspace on this browser. */
+/**
+ * Whether a run has been seen to complete in this workspace on this browser. The empty namespace
+ * is All workspaces, which a run in any workspace satisfies: chats record the namespace they ran
+ * in, so nothing records under the all-workspaces key itself.
+ */
 export function hasCompletedRun(namespace: string): boolean {
   try {
-    return window.localStorage.getItem(storageKey(namespace)) === "1";
+    const storage = window.localStorage;
+    if (namespace) return storage.getItem(storageKey(namespace)) === "1";
+    for (let i = 0; i < storage.length; i++) {
+      const key = storage.key(i);
+      if (key?.startsWith(`${KEY_PREFIX}:`) && storage.getItem(key) === "1") return true;
+    }
+    return false;
   } catch {
     return false;
   }

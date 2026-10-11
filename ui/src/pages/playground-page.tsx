@@ -517,9 +517,10 @@ export function PlaygroundPage() {
     onFinalized: (detail) => {
       // The Home checklist's "Run your agent" step reads a Langfuse-backed feed that is ready and
       // EMPTY on a default install, so it never checked off for a user who had just watched a run
-      // finish. Record what the browser saw. Any terminal result counts: the step asks the user to
-      // send a message and watch the trace, which a failed run also satisfies.
-      markRunCompleted(runNamespace);
+      // finish. Record what the browser saw, under the namespace the run went to (the BFF's default
+      // when none is named). Any terminal result counts: the step asks the user to send a message
+      // and watch the trace, which a failed run also satisfies.
+      markRunCompleted(chatNamespace);
       setRun(finalizedRun(detail));
     },
     onFinalizeError: (err) => setRun(errorRun(err)),

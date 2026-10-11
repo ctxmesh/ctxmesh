@@ -17,6 +17,21 @@ describe("first-run latch", () => {
   it("is scoped per workspace — a run in one namespace does not check the step off in another", () => {
     markRunCompleted("team-a");
     expect(hasCompletedRun("team-b")).toBe(false);
+  });
+
+  // All workspaces spans every workspace, and the chats record the concrete namespace they ran in,
+  // so a run anywhere is a run here. This used to read only the all-workspaces key, which nothing
+  // writes since the chat records under the agent's own namespace: the step never checked off.
+  it("counts a run in any workspace under All workspaces", () => {
+    expect(hasCompletedRun("")).toBe(false);
+    markRunCompleted("team-a");
+    expect(hasCompletedRun("")).toBe(true);
+  });
+
+  it("does not count another key on the origin as a run under All workspaces", () => {
+    window.localStorage.setItem("ctxmesh.namespace", "team-a");
+    window.localStorage.setItem("ctxmesh.firstRun.ranAgentLater", "1");
+    window.localStorage.setItem("ctxmesh.firstRun.ranAgent:team-a", "0");
     expect(hasCompletedRun("")).toBe(false);
   });
 

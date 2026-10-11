@@ -12,6 +12,7 @@ import {
 } from "@/pages/dashboard-page";
 import { UNKNOWN, isKnown } from "@/components/kit";
 import { markRunCompleted } from "@/lib/first-run";
+import { NamespaceProvider } from "@/lib/namespace";
 import type { AgentSummary } from "@/lib/api";
 
 // Home (route "/", archetype A11) — the page a person judges the product by.
@@ -765,9 +766,58 @@ describe("Home — the first-run path (the aha entry point)", () => {
     window.localStorage.clear();
   });
 
+  // Home scoped to one workspace asks about that workspace. (This test used to render under All
+  // workspaces, which spans team-b too; it now renders the workspace it is about.)
   it("does not let a run in another workspace check the step off here", async () => {
     window.localStorage.clear();
+    window.localStorage.setItem("ctxmesh.namespace", "team-a");
     markRunCompleted("team-b"); // a different workspace from the one being rendered
+    routeFetch({
+      "/api/agents": agentsResponse(FLEET),
+      "/api/providers": providersConnected,
+      "/api/runs": { runs: [] },
+    });
+    render(
+      <MemoryRouter>
+        <NamespaceProvider>
+          <DashboardPage />
+        </NamespaceProvider>
+      </MemoryRouter>,
+    );
+
+    const pill = await screen.findByTestId("home-setup-progress");
+    expect(pill).toHaveTextContent(/Setup 2 \/ 3/);
+    window.localStorage.clear();
+  });
+
+  it("checks the run step off in the workspace the run went to", async () => {
+    window.localStorage.clear();
+    window.localStorage.setItem("ctxmesh.namespace", "team-a");
+    markRunCompleted("team-a");
+    routeFetch({
+      "/api/agents": agentsResponse(FLEET),
+      "/api/providers": providersConnected,
+      "/api/runs": { runs: [] },
+    });
+    render(
+      <MemoryRouter>
+        <NamespaceProvider>
+          <DashboardPage />
+        </NamespaceProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByTestId("home-page");
+    await waitFor(() => expect(screen.queryByTestId("first-run-checklist")).toBeNull());
+    expect(screen.queryByTestId("home-setup-progress")).toBeNull();
+    window.localStorage.clear();
+  });
+
+  // A chat records the namespace it ran in, never the all-workspaces scope, so under All workspaces
+  // a run in any workspace has to count or the step never checks off there.
+  it("checks the run step off under All workspaces after a run in any workspace", async () => {
+    window.localStorage.clear();
+    markRunCompleted("team-b");
     routeFetch({
       "/api/agents": agentsResponse(FLEET),
       "/api/providers": providersConnected,
@@ -775,8 +825,9 @@ describe("Home — the first-run path (the aha entry point)", () => {
     });
     renderHome();
 
-    const pill = await screen.findByTestId("home-setup-progress");
-    expect(pill).toHaveTextContent(/Setup 2 \/ 3/);
+    await screen.findByTestId("home-page");
+    await waitFor(() => expect(screen.queryByTestId("first-run-checklist")).toBeNull());
+    expect(screen.queryByTestId("home-setup-progress")).toBeNull();
     window.localStorage.clear();
   });
 
