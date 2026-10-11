@@ -327,6 +327,9 @@ const PICK_DEBOUNCE_MS = 250;
 /** How often an agent that has not settled is re-read, as on the agent page. */
 const SETTLE_POLL_MS = 4_000;
 
+/** A failed background re-read doubles the wait before the next one, up to this. */
+const SETTLE_RETRY_MAX_MS = 30_000;
+
 /** Ready, and its model route (if any) is served — the state the chat needs to stop polling. */
 function agentSettled(d: AgentDetailResponse): boolean {
   return (
@@ -351,9 +354,15 @@ function useChatAgent(ns: string, name: string, enabled: boolean): ChatAgent {
     }
     const ctrl = new AbortController();
     let timer = 0;
+    // Consecutive background re-reads that failed. Each one doubles the wait before the next.
+    let failures = 0;
+    const reread = () => {
+      const wait = Math.min(SETTLE_POLL_MS * 2 ** failures, SETTLE_RETRY_MAX_MS);
+      timer = window.setTimeout(() => read(true), wait);
+    };
     const read = (silent: boolean) => {
       if (silent && document.visibilityState === "hidden") {
-        timer = window.setTimeout(() => read(true), SETTLE_POLL_MS);
+        reread();
         return;
       }
       if (!silent) setState({ kind: "loading" });
@@ -361,11 +370,19 @@ function useChatAgent(ns: string, name: string, enabled: boolean): ChatAgent {
         .agentDetail(ns, name, ctrl.signal)
         .then((detail) => {
           if (ctrl.signal.aborted) return;
+          failures = 0;
           setState({ kind: "ready", detail });
-          if (!agentSettled(detail)) timer = window.setTimeout(() => read(true), SETTLE_POLL_MS);
+          if (!agentSettled(detail)) reread();
         })
         .catch((err: unknown) => {
           if (ctrl.signal.aborted) return;
+          // A background re-read that fails keeps the detail already on screen, so the chat and
+          // its transcript stay, and tries again later. Only the first read decides what renders.
+          if (silent) {
+            failures += 1;
+            reread();
+            return;
+          }
           if (err instanceof ApiError && err.status === 404) {
             setState({ kind: "missing" });
             return;

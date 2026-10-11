@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { PlaygroundPage } from "@/pages/playground-page";
@@ -58,9 +58,13 @@ function recordingFetch(opts: {
   // agent with no detail here answers 404.
   agents?: { name: string; namespace: string }[];
   agentDetails?: Record<string, unknown>;
+  // Successive answers to GET /api/agents/{ns}/{name}, by "<ns>/<name>": a detail object, or an
+  // HTTP status to fail with. The last answer repeats. Takes precedence over agentDetails.
+  agentDetailReads?: Record<string, (object | number)[]>;
 }) {
   const run = opts.run ?? {};
   const calls: Captured[] = [];
+  const detailReads: Record<string, number> = {};
   vi.stubGlobal(
     "fetch",
     vi.fn((input: string | URL, init?: RequestInit) => {
@@ -145,7 +149,28 @@ function recordingFetch(opts: {
       }
       const detailMatch = /^\/api\/agents\/([^/]+)\/([^/]+)$/.exec(path);
       if (detailMatch && method === "GET") {
-        const detail = opts.agentDetails?.[`${detailMatch[1]}/${detailMatch[2]}`];
+        const key = `${detailMatch[1]}/${detailMatch[2]}`;
+        const reads = opts.agentDetailReads?.[key];
+        if (reads) {
+          const n = detailReads[key] ?? 0;
+          detailReads[key] = n + 1;
+          const answer = reads[Math.min(n, reads.length - 1)];
+          if (typeof answer === "number") {
+            return Promise.resolve({
+              ok: false,
+              status: answer,
+              json: async () => ({ error: `stubbed ${answer}` }),
+              text: async () => JSON.stringify({ error: `stubbed ${answer}` }),
+            } as Response);
+          }
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => answer,
+            text: async () => JSON.stringify(answer),
+          } as Response);
+        }
+        const detail = opts.agentDetails?.[key];
         return Promise.resolve({
           ok: detail !== undefined,
           status: detail !== undefined ? 200 : 404,
@@ -998,6 +1023,89 @@ describe("PlaygroundPage — plain-text chat by default (m184.15)", () => {
       return c!;
     });
     expect(JSON.parse(createCall.body).namespace).toBe("team-b");
+  });
+
+  // The page re-reads an agent that has not settled. One failed re-read used to replace the chat
+  // with an error card, discarding the conversation and the composer.
+  describe("a background re-read that fails", () => {
+    const loadingRoute = {
+      type: "ModelRouteReady",
+      status: "False",
+      reason: "NotYetServed",
+      message: "ModelRoute chat: not served yet",
+      lastTransitionTime: "",
+    };
+    const starting = { ...readyDetail("prod", "echo"), ready: false, phase: "Pending" };
+    const advance = (ms: number) =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+      });
+    const detailReads = (calls: Captured[]) =>
+      calls.filter((c) => c.url === "/api/agents/prod/echo" && c.method === "GET").length;
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("keeps the composer and the transcript", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const calls = recordingFetch({
+        run: { detail: finished },
+        agentDetailReads: { "prod/echo": [starting, 500, starting] },
+      });
+
+      renderPage("/playground?agent=echo&ns=prod");
+      const composer = await screen.findByTestId("chat-input");
+      fireEvent.change(composer, { target: { value: "hello there" } });
+      fireEvent.click(screen.getByTestId("chat-send"));
+      await waitFor(() => expect(screen.getByTestId("chat-turn-agent")).toHaveTextContent("MOCK_OK"));
+      expect(detailReads(calls)).toBe(1);
+
+      await advance(4_000);
+      await waitFor(() => expect(detailReads(calls)).toBe(2));
+
+      expect(screen.queryByTestId("playground-chat-error")).toBeNull();
+      expect(screen.getByTestId("chat-input")).toBeInTheDocument();
+      expect(screen.getByTestId("chat-turn-user")).toHaveTextContent("hello there");
+      expect(screen.getByTestId("chat-turn-agent")).toHaveTextContent("MOCK_OK");
+
+      // And it tries again, waiting longer than the settle poll after a failure.
+      await advance(4_000);
+      expect(detailReads(calls)).toBe(2);
+      await advance(4_000);
+      await waitFor(() => expect(detailReads(calls)).toBe(3));
+    });
+
+    it("still lifts the model-loading hold once a later read succeeds", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const calls = recordingFetch({
+        agentDetailReads: {
+          "prod/echo": [readyDetail("prod", "echo", [loadingRoute]), 500, readyDetail("prod", "echo")],
+        },
+      });
+
+      renderPage("/playground?agent=echo&ns=prod");
+      const composer = await screen.findByTestId("chat-input");
+      fireEvent.change(composer, { target: { value: "hello" } });
+      expect(screen.getByTestId("chat-send")).toBeDisabled();
+
+      await advance(4_000);
+      await waitFor(() => expect(detailReads(calls)).toBe(2));
+      expect(screen.queryByTestId("playground-chat-error")).toBeNull();
+      expect(screen.getByTestId("chat-send")).toBeDisabled();
+
+      await advance(8_000);
+      await waitFor(() => expect(screen.getByTestId("chat-send")).toBeEnabled());
+      expect(screen.queryByTestId("chat-route-note")).toBeNull();
+      expect(detailReads(calls)).toBe(3);
+    });
+
+    it("shows the error card when the first read fails", async () => {
+      recordingFetch({ agentDetailReads: { "prod/echo": [500] } });
+      renderPage("/playground?agent=echo&ns=prod");
+      expect(await screen.findByTestId("playground-chat-error")).toHaveTextContent("echo could not be read");
+      expect(screen.queryByTestId("chat-input")).toBeNull();
+    });
   });
 
   it("says what to do before an agent is picked, and when the named agent does not exist", async () => {
