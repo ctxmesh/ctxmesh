@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 )
 
 // TestProviderReconnect_RotatesTheKeyAgainstARealAPIServer connects a provider and then
@@ -63,7 +64,7 @@ func TestProviderReconnect_RotatesTheKeyAgainstARealAPIServer(t *testing.T) {
 			var secret corev1.Secret
 
 			prov := anyKeyProvider(t)
-			s, _, _ := newConnectServer(t, caller)
+			s, _, _ := newRBACConnectServer(t, caller)
 			connect := func(key string) {
 				t.Helper()
 				body, err := json.Marshal(ConnectProviderRequest{
@@ -115,7 +116,7 @@ func TestProviderRotate_RewritesTheKeyWithoutReadingIt(t *testing.T) {
 			bob := personaUser(t, admin, ns, "bob-"+ns, role)
 
 			prov := anyKeyProvider(t)
-			aliceSrv, _, _ := newConnectServer(t, alice)
+			aliceSrv, _, _ := newRBACConnectServer(t, alice)
 			body, err := json.Marshal(ConnectProviderRequest{
 				Provider: providerCustom, APIKey: "sk-first-key", BaseURL: prov.URL, Namespace: ns,
 			})
@@ -149,7 +150,7 @@ func TestProviderRotate_RewritesTheKeyWithoutReadingIt(t *testing.T) {
 
 			// Without credential-admin the rotate is refused before anything is written, and the
 			// refusal names the verb the user lacks.
-			bobSrv, _, _ := newConnectServer(t, bob)
+			bobSrv, _, _ := newRBACConnectServer(t, bob)
 			rec = rotate(bobSrv, "sk-bobs-key")
 			require.Equal(t, http.StatusForbidden, rec.Code, "rotate without credential-admin: %s", rec.Body.String())
 			assert.Contains(t, rec.Body.String(), "not allowed to update Secret")
@@ -198,7 +199,7 @@ func TestProviderConnect_RefusesAModelRouteItDidNotCreate(t *testing.T) {
 	require.NoError(t, admin.Create(ctx, route))
 
 	prov := anyKeyProvider(t)
-	s, _, _ := newConnectServer(t, alice)
+	s, _, _ := newRBACConnectServer(t, alice)
 	body, err := json.Marshal(ConnectProviderRequest{
 		Provider: providerCustom, Connection: "prod-llm", APIKey: "sk-first-key", BaseURL: prov.URL, Namespace: ns,
 	})
@@ -252,7 +253,7 @@ func TestProviderRotate_RefusesARouteRepointedDuringTheProbe(t *testing.T) {
 	}))
 	t.Cleanup(prov.Close)
 
-	s, _, _ := newConnectServer(t, alice)
+	s, _, _ := newRBACConnectServer(t, alice)
 	body, err := json.Marshal(ConnectProviderRequest{
 		Provider: providerCustom, APIKey: "sk-first-key", BaseURL: prov.URL, Namespace: ns,
 	})
@@ -272,6 +273,16 @@ func TestProviderRotate_RefusesARouteRepointedDuringTheProbe(t *testing.T) {
 	var secret corev1.Secret
 	require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: providerCustom}, &secret))
 	assert.Equal(t, "sk-first-key", string(secret.Data[secretKeyAPIKey]), "a refused rotate writes nothing")
+}
+
+// newRBACConnectServer is newConnectServer with the production authorizer, so connect's
+// pre-flight SelfSubjectAccessReviews are answered by the real API server and the shipped
+// personas are proven to pass it, not an allow-all stand-in.
+func newRBACConnectServer(t *testing.T, c client.Client) (*Server, *fakeCallerClientFactory, *logBuffer) {
+	t.Helper()
+	s, f, lb := newConnectServer(t, c)
+	s.authorizer = authz.SSARAuthorizer{}
+	return s, f, lb
 }
 
 // personaUser binds user to the given ClusterRoles in ns, asserts the user cannot read Secrets

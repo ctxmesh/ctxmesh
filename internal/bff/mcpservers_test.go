@@ -93,6 +93,11 @@ func fakeMCPServer(t *testing.T, requireKey bool) *httptest.Server {
 // newMCPServer builds a Server with the BYO-MCP flow ENABLED, the fake caller
 // factory, and a real HTTP client (the probe reaches the httptest MCP server). It
 // returns the server, the token-recording factory, and the log buffer.
+//
+// It is wired as production is: an in-memory ToolRegistry store and an authorizer that
+// allows, because registration authorizes before it probes — a server with neither would
+// refuse every register before reaching the path under test. A test that needs a denial
+// or seeded registries calls wireTRStore again, which replaces both.
 func newMCPServer(t *testing.T, c client.Client, requireApproval bool) (*Server, *fakeCallerClientFactory, *logBuffer) {
 	t.Helper()
 	factory := &fakeCallerClientFactory{client: c}
@@ -108,6 +113,7 @@ func newMCPServer(t *testing.T, c client.Client, requireApproval bool) (*Server,
 		Version:            "test",
 		Log:                log,
 	})
+	wireTRStore(t, s, nil)
 	return s, factory, lb
 }
 

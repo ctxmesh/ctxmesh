@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
@@ -83,6 +84,25 @@ func (s *Server) writeAuthzError(w http.ResponseWriter, err error, action string
 	}
 	s.log.Error(err, "control-plane authorization failed", "action", action)
 	writeError(w, http.StatusInternalServerError, "authorization check failed")
+}
+
+// authzRefusal maps a failed pre-flight authorization to the response a handler returns
+// before it does anything else — in particular before any outbound request to a URL the
+// caller supplied. A denial is 403; a token the API server rejects is 401 (a garbage bearer
+// fails the SelfSubjectAccessReview itself, it is not a denial); anything else is a 500 and
+// never an allow. nil in, nil out.
+func (s *Server) authzRefusal(err error, action string) *createError {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, authz.ErrForbidden), apierrors.IsForbidden(err):
+		return &createError{status: http.StatusForbidden, msg: "you do not have permission to " + action}
+	case apierrors.IsUnauthorized(err):
+		return &createError{status: http.StatusUnauthorized, msg: msgTokenRejected}
+	default:
+		s.log.Error(err, "pre-flight authorization failed", "action", action)
+		return &createError{status: http.StatusInternalServerError, msg: "authorization check failed"}
+	}
 }
 
 // writeValidationError maps a controlplane.ErrInvalid (the in-app replacement for

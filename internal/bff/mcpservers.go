@@ -148,7 +148,8 @@ const networkPolicyMCPSuffix = "-mcp-egress"
 const networkPolicyKind = "NetworkPolicy"
 
 // handleRegisterMCPServer serves POST /api/mcpservers (ADR 0016). It:
-//  1. reads + validates the request body;
+//  1. reads + validates the request body, then authorizes the caller (no outbound
+//     request is made for a caller who may not register);
 //  2. PROBES the MCP server (initialize + tools/list) → the tools with their
 //     inputSchema. A bad URL / non-MCP endpoint → an honest 4xx, never a 500;
 //  3. if apiKey given → creates a Secret + SecretBinding (the key server-side
@@ -182,6 +183,22 @@ func (s *Server) handleRegisterMCPServer(w http.ResponseWriter, r *http.Request)
 		ns = defaultCreateNamespace
 	}
 	name := mcpServerName(req.Name)
+
+	// Authorize BEFORE any outbound request. The probe below and the OAuth discovery in
+	// beginMCPOAuthRegistration both contact the URL in the body; doing that for a caller
+	// who may not register a server made the BFF an SSRF and a reachability oracle for any
+	// bearer string. The check is the store write's own (toolregistries create).
+	if s.toolRegistryStore == nil {
+		writeError(w, http.StatusNotImplemented, msgToolRegistryStoreRequired)
+		return
+	}
+	if cErr := s.authzRefusal(
+		s.authorizeStore(r.Context(), caller, authz.VerbCreate, resourceToolRegistries, ns, ""),
+		"register an MCP server",
+	); cErr != nil {
+		writeError(w, cErr.status, cErr.msg)
+		return
+	}
 
 	// OAuth 2.1 tier (m17.2, ADR 0016): when auth.type == "oauth", registration does
 	// NOT probe/create now — the server's tools are behind a token the user must

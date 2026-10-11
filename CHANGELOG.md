@@ -33,6 +33,13 @@ agent's code receives it. It then proves possession on every call to spawn, hand
 async publish and guardrail events. Every agent now gets `BFF_INTERNAL_URL`, and a Tenant's network
 policy allows it.
 
+**Security: registering an MCP server or connecting a provider contacted the URL before checking
+the caller.** Both flows probe the URL in the request body, and both probed first. Anyone holding
+any bearer string could make the BFF send requests to an address of their choosing and learn from
+the error whether it answered. Both now check the caller's permission first: a refused caller gets
+403 (401 for a token the API server rejects) and nothing is contacted. Registration without the
+control-plane store is refused with 501 instead of failing after the probe.
+
 **Fixed: every agent run was cut off at five minutes.** Knative's default request timeout is 300
 seconds, and the platform never set one, while a run may take 600. A run that sends nothing until
 it is done also hit Knative's separate time-to-first-byte limit at the same 300 seconds. Every

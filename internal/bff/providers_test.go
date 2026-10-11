@@ -125,6 +125,9 @@ func newConnectServer(t *testing.T, c client.Client) (*Server, *fakeCallerClient
 		Version:         "test",
 		Log:             log,
 	})
+	// Connect authorizes its write set before it probes; these tests model the API server's
+	// answer to the writes themselves, so the pre-flight allows. A denial test replaces it.
+	s.authorizer = &recordingAuthorizer{}
 	return s, factory, lb
 }
 

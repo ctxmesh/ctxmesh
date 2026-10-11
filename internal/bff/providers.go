@@ -37,6 +37,7 @@ import (
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 )
 
 // The connect-a-provider handlers (ADR 0015). All three are CALLER-SCOPED
@@ -162,6 +163,27 @@ func (s *Server) handleConnectProvider(w http.ResponseWriter, r *http.Request) {
 			"namespace", ns, "provider", req.Provider)
 	}
 
+	// Objects are named by the CONNECTION (ADR 0026), so a second key for the same
+	// provider type under a different connection name is a NEW connection, not a
+	// rotation of the first.
+	name := providerRouteName(req.connectionName())
+
+	// Authorize the whole write set BEFORE the probe: the probe contacts the base URL in
+	// the body, and a caller who could not complete the connect must not get the BFF to
+	// make that request for them.
+	if aErr := s.authorizeFlow(r.Context(), caller, flowConnectProvider, ns); aErr != nil {
+		if errors.Is(aErr, authz.ErrForbidden) {
+			s.appendAudit(r.Context(), auditlog.Entry{
+				Actor: s.auditActor(r.Context(), caller), Action: auditActionConnect,
+				ResourceKind: resourceKindProvider, ResourceName: name, Namespace: ns, Outcome: auditOutcomeDenied,
+				Detail: map[string]any{providerNoun: strings.ToLower(strings.TrimSpace(req.Provider))},
+			})
+		}
+		ce := s.authzRefusal(aErr, "connect a model provider")
+		writeError(w, ce.status, ce.msg)
+		return
+	}
+
 	// (2) Validate the key with a live probe. A bad key → 401 (honest), an
 	// unreachable provider → 502 — never a 500, never a swallowed success. The
 	// probe returns the initial model list the picker uses (no second round-trip).
@@ -178,10 +200,6 @@ func (s *Server) handleConnectProvider(w http.ResponseWriter, r *http.Request) {
 
 	// (3) Create the three objects with the CALLER'S client. The key goes ONLY
 	// into the Secret; it is dropped from the request struct immediately after.
-	// Objects are named by the CONNECTION (ADR 0026), so a second key for the same
-	// provider type under a different connection name is a NEW connection, not a
-	// rotation of the first.
-	name := providerRouteName(req.connectionName())
 	created, cErr := createProviderObjects(r.Context(), caller, providerCreateSpec{
 		name:        name,
 		namespace:   ns,

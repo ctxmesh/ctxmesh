@@ -1,5 +1,14 @@
 package bff
 
+import (
+	"context"
+	"fmt"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
+)
+
 // Console FLOWS — a flow is one console action and the COMPLETE set of writes it performs.
 //
 // This exists because the UI used to assemble the permission question itself, resource by
@@ -36,6 +45,9 @@ type flowSpec struct {
 	needs []flowNeed
 }
 
+// flowConnectProvider names the provider-connect flow; the handler authorizes it by name.
+const flowConnectProvider = "connectProvider"
+
 // consoleFlows is the registry the capability probe answers. Adding a write to a handler
 // without adding it here is the drift this file exists to prevent, and hack/flow-completability.sh
 // is the gate that catches it.
@@ -44,7 +56,7 @@ var consoleFlows = []flowSpec{
 		// Connect a model provider (internal/bff/providers.go, createProviderObjects).
 		// Three objects, in this order: Secret (the key), SecretBinding (logical name →
 		// Secret/key), ModelRoute (provider + models + the binding ref).
-		name: "connectProvider",
+		name: flowConnectProvider,
 		needs: []flowNeed{
 			{group: "", resource: resSecrets, verbs: []string{verbCreate}},
 			{group: agentsAPIGroup, resource: resSecretBindings, verbs: []string{verbCreate}},
@@ -114,4 +126,27 @@ func evaluateFlows(allowed map[string]map[string]bool) map[string]bool {
 		out[f.name] = ok
 	}
 	return out
+}
+
+// authorizeFlow asks, as the caller, for every permission the named flow needs in namespace,
+// and returns the first refusal (authz.ErrForbidden) or API error. A handler whose flow starts
+// with an outbound request to a caller-supplied URL calls this first, so a caller who could not
+// complete the writes never gets the BFF to contact anything on their behalf.
+func (s *Server) authorizeFlow(ctx context.Context, caller client.Client, name, namespace string) error {
+	for _, f := range consoleFlows {
+		if f.name != name {
+			continue
+		}
+		for _, n := range f.needs {
+			for _, v := range n.verbs {
+				if err := s.authorizer.Authorize(ctx, caller, authz.Action{
+					Verb: v, Group: n.group, Resource: n.resource, Namespace: namespace,
+				}); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return fmt.Errorf("authorize flow: no console flow named %q", name)
 }
