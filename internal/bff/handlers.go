@@ -160,7 +160,7 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 		opts = append(opts, client.InNamespace(namespace))
 	}
 
-	list, err := listAgentDeployments(r.Context(), caller, opts...)
+	list, err := listAgentDeployments(r.Context(), s.acrossWorkspaces(caller), opts...)
 	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
@@ -261,9 +261,9 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 	case "":
 		// Raw mode: preserve the exact M12 response. q is only meaningful under a
 		// grouping axis, so it is ignored here (raw mode already emits every node).
-		graph, err = buildTopology(r.Context(), caller, scope...)
+		graph, err = buildTopology(r.Context(), s.acrossWorkspaces(caller), scope...)
 	case groupKindRegistry, groupKindNamespace:
-		graph, err = buildGroupedTopology(r.Context(), caller, topologyGroupSpec{
+		graph, err = buildGroupedTopology(r.Context(), s.acrossWorkspaces(caller), topologyGroupSpec{
 			group:  group,
 			q:      q,
 			expand: parseExpandSet(r.URL.Query().Get("expand")),
@@ -465,7 +465,7 @@ func (s *Server) callerVisibleAgentKeys(ctx context.Context, caller client.Clien
 	if namespace != "" {
 		opts = append(opts, client.InNamespace(namespace))
 	}
-	list, err := listAgentDeployments(ctx, caller, opts...)
+	list, err := listAgentDeployments(ctx, s.acrossWorkspaces(caller), opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -867,7 +867,7 @@ func (s *Server) handleEvalGatedMetric(w http.ResponseWriter, r *http.Request) {
 		opts = append(opts, client.InNamespace(ns))
 	}
 
-	list, err := listAgentDeployments(r.Context(), caller, opts...)
+	list, err := listAgentDeployments(r.Context(), s.acrossWorkspaces(caller), opts...)
 	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)

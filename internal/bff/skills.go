@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/skill"
 )
@@ -47,11 +48,15 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ns := strings.TrimSpace(r.URL.Query().Get("namespace"))
-	if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceSkills, ns, ""); err != nil {
-		s.writeAuthzError(w, err, "list skills")
+	opts := controlplane.ListOptions{Namespace: ns}
+	if !s.authorizeStoreList(w, r, caller, resourceSkills, &opts, "list skills") {
 		return
 	}
-	items, err := s.skillStore.ListSkills(r.Context(), ns)
+	namespaces := opts.Namespaces // nil: the caller may list skills cluster-wide
+	if ns != "" {
+		namespaces = []string{ns}
+	}
+	items, err := s.skillStore.ListSkills(r.Context(), namespaces)
 	if err != nil {
 		s.log.Error(err, "list skills failed")
 		writeError(w, http.StatusInternalServerError, "failed to list skills")

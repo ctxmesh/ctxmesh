@@ -261,13 +261,11 @@ func (s *Server) handleListPromptVersions(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotImplemented, msgPromptStoreRequired)
 		return
 	}
-	if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourcePromptVersions, namespace, ""); err != nil {
-		s.writeAuthzError(w, err, "list prompt versions")
+	opts := controlplane.ListOptions{Namespace: namespace, Search: q, PageSize: limit, PageToken: cursor}
+	if !s.authorizeStoreList(w, r, caller, resourcePromptVersions, &opts, "list prompt versions") {
 		return
 	}
-	page, err := s.promptStore.List(r.Context(), controlplane.ListOptions{
-		Namespace: namespace, Search: q, PageSize: limit, PageToken: cursor,
-	})
+	page, err := s.promptStore.List(r.Context(), opts)
 	if err != nil {
 		s.log.Error(err, "list PromptVersions from store failed")
 		writeError(w, http.StatusInternalServerError, "failed to list prompt versions")

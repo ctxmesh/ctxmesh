@@ -54,6 +54,9 @@ type ListOptions struct {
 	PageToken string            // opaque; "" = first page (see EncodePageToken)
 	SortBy    string            // entity-defined column; "" = the entity default
 	SortDesc  bool
+	// Namespaces, when non-nil, keeps only rows in these namespaces (AND-ed with Namespace). An
+	// empty non-nil slice matches nothing, so a caller allowed nowhere can never read everything.
+	Namespaces []string
 }
 
 // Page is a page of results plus the total matching count and an opaque token for the next page.

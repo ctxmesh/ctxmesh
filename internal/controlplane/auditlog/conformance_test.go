@@ -218,3 +218,27 @@ func TestStore_DefaultsAndDetailRoundTrip(t *testing.T) {
 		assert.Equal(t, "req-1", got.Detail["requestId"])
 	})
 }
+
+// A namespace set keeps only entries in those namespaces: a cluster-scoped entry, which has no
+// namespace, is not in any set. An empty set reads nothing.
+func TestStore_NamespaceSet(t *testing.T) {
+	eachStore(t, func(t *testing.T, s Store) {
+		ctx := context.Background()
+		base := time.Date(2026, 8, 8, 9, 0, 0, 0, time.UTC)
+		for i, ns := range []string{"ns1", "ns2", "ns3", ""} {
+			require.NoError(t, s.Append(ctx, at(base.Add(time.Duration(i)*time.Second), "create", ns, "alice")))
+		}
+
+		page, err := s.List(ctx, Query{Namespaces: []string{"ns3", "ns1"}})
+		require.NoError(t, err)
+		got := make([]string, 0, len(page.Items))
+		for _, e := range page.Items {
+			got = append(got, e.Namespace)
+		}
+		assert.Equal(t, []string{"ns3", "ns1"}, got, "newest first, only the set")
+
+		none, err := s.List(ctx, Query{Namespaces: []string{}})
+		require.NoError(t, err)
+		assert.Empty(t, none.Items)
+	})
+}

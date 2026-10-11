@@ -400,7 +400,7 @@ func (s *Server) handleListEvalSuites(w http.ResponseWriter, r *http.Request) {
 		opts = append(opts, client.InNamespace(namespace))
 	}
 
-	list, err := listEvalSuitesForCRUD(r.Context(), caller, opts...)
+	list, err := listEvalSuitesForCRUD(r.Context(), s.acrossWorkspaces(caller), opts...)
 	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)

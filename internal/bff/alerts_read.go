@@ -17,11 +17,15 @@ limitations under the License.
 package bff
 
 import (
+	"cmp"
+	"context"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/alertstore"
 )
 
 // AlertSummary is one fired-alert row on the wire (GET /api/alerts). It NEVER
@@ -72,11 +76,10 @@ func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 
 	namespace := strings.TrimSpace(r.URL.Query().Get("namespace"))
 
-	// Persona gate (never per-row): one SSAR on `alertpolicies`. Scoped to
-	// ?namespace= when given (a namespaced reader sees only their namespace);
-	// empty ⇒ a cluster-wide read check.
-	if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceAlerts, namespace, ""); err != nil {
-		s.writeAuthzError(w, err, "read the alerts feed")
+	// Persona gate (never per-row): an SSAR on `alertpolicies` in ?namespace=, or for
+	// "All workspaces" the caller's namespaces where it is allowed.
+	opts := controlplane.ListOptions{Namespace: namespace}
+	if !s.authorizeStoreList(w, r, caller, resourceAlerts, &opts, "read the alerts feed") {
 		return
 	}
 
@@ -84,7 +87,7 @@ func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 	// Ask for one more than we will return: the store contract carries no
 	// has-more flag, and an over-fetch of one row is how we learn there is more
 	// without changing it.
-	alerts, err := s.alertStore.List(r.Context(), namespace, limit+1)
+	alerts, err := s.listAlerts(r.Context(), namespace, opts.Namespaces, limit+1)
 	if err != nil {
 		s.log.Error(err, "list alerts from store failed")
 		writeError(w, http.StatusInternalServerError, "failed to read the alerts feed")
@@ -119,4 +122,27 @@ func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, AlertListResponse{Items: items, Truncated: truncated})
+}
+
+// listAlerts reads the newest limit alerts in namespace, or, given namespaces, the newest limit
+// across them: each namespace's newest limit, merged.
+func (s *Server) listAlerts(ctx context.Context, namespace string, namespaces []string, limit int) ([]alertstore.Alert, error) {
+	if namespaces == nil {
+		return s.alertStore.List(ctx, namespace, limit)
+	}
+	var merged []alertstore.Alert
+	for _, ns := range namespaces {
+		got, err := s.alertStore.List(ctx, ns, limit)
+		if err != nil {
+			return nil, err
+		}
+		merged = append(merged, got...)
+	}
+	slices.SortFunc(merged, func(a, b alertstore.Alert) int {
+		if c := b.FiredAt.Compare(a.FiredAt); c != 0 {
+			return c
+		}
+		return cmp.Compare(b.ID, a.ID)
+	})
+	return merged[:min(limit, len(merged))], nil
 }

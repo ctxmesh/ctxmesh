@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
 
@@ -48,8 +49,10 @@ func TestToolCatalogForAPersonaBoundToOneNamespace(t *testing.T) {
 
 	const mine, theirs = "catalog-mine", "catalog-theirs"
 	store := toolregistry.NewMemStore()
+	mirror := namespacetenant.NewMemStore()
 	for ns, tool := range map[string]string{mine: "lookup", theirs: "their_lookup"} {
 		require.NoError(t, admin.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}))
+		require.NoError(t, mirror.RecordNamespace(ctx, ns))
 		_, err := store.Upsert(ctx, toolregistry.ToolRegistry{
 			Namespace: ns, Name: ns + "-tools",
 			Tools:  []toolregistry.ToolEntry{{Name: tool, URL: "http://" + ns + "-tools.svc/mcp"}},
@@ -60,13 +63,14 @@ func TestToolCatalogForAPersonaBoundToOneNamespace(t *testing.T) {
 	developer := personaUser(t, admin, mine, "developer-"+mine, installPersona(t, admin, "ctxmesh_developer_role.yaml"))
 
 	s := NewServer(Options{
-		CallerClients: newFakeFactory(developer),
-		Scheme:        testScheme(t),
-		Auth:          AllowAll{},
-		MCPEnabled:    true,
-		ProviderHTTP:  &http.Client{},
-		Version:       "test",
-		Log:           logr.Discard(),
+		CallerClients:        newFakeFactory(developer),
+		Scheme:               testScheme(t),
+		Auth:                 AllowAll{},
+		MCPEnabled:           true,
+		ProviderHTTP:         &http.Client{},
+		NamespaceTenantStore: mirror,
+		Version:              "test",
+		Log:                  logr.Discard(),
 	})
 	s.toolRegistryStore = store
 	send := func(method, path string, body []byte) *httptest.ResponseRecorder {

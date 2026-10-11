@@ -636,7 +636,7 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var routes agentsv1beta1.ModelRouteList
-	if err := caller.List(r.Context(), &routes, opts...); err != nil {
+	if err := s.acrossWorkspaces(caller).List(r.Context(), &routes, opts...); err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
 			return

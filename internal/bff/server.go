@@ -1648,7 +1648,7 @@ func (s *Server) Handler() http.Handler {
 		}
 	}
 
-	api.Handle("/api/", s.requireAuth(authed))
+	api.Handle("/api/", s.requireAuth(withWorkspaceMemo(authed)))
 
 	// MCP OAuth 2.1 callback (m17.2, ADR 0016). Registered on the `api` mux
 	// DIRECTLY (a more specific pattern than "/api/"), so it is NOT behind

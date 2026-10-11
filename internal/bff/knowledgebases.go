@@ -716,7 +716,7 @@ func (s *Server) handleListKBs(w http.ResponseWriter, r *http.Request) {
 	if ns != "" {
 		listOpts = append(listOpts, client.InNamespace(ns))
 	}
-	if err := caller.List(r.Context(), &kbList, listOpts...); err != nil {
+	if err := s.acrossWorkspaces(caller).List(r.Context(), &kbList, listOpts...); err != nil {
 		if apierrors.IsForbidden(err) {
 			writeError(w, http.StatusForbidden, "forbidden: not allowed to list KnowledgeBases")
 			return

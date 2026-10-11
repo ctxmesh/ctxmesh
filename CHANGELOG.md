@@ -181,10 +181,22 @@ leaving it, while a sub-agent's pause is being read no longer affects the new co
 `/api/tools` without a namespace, and the BFF then asked whether the caller may list tool registries
 in every namespace, which a RoleBinding (the chart's default way of granting a persona) never
 allows: the catalog, and the bind wizard behind it, answered 403. The catalog now reads the selected
-workspace, and the create-agent tool picker the namespace the agent is created in. With "All
-workspaces" selected, or with no namespace, `/api/tools`, `/api/mcpservers` and `/api/mcp/approvals`
-list every namespace whose registries the caller may list, checked namespace by namespace; a caller
-who may list them nowhere is still refused with 403.
+workspace, and the create-agent tool picker the namespace the agent is created in. "All
+workspaces" follows the rule in the next entry.
+
+**Fixed: "All workspaces" was refused to anyone bound to a namespace.** With "All workspaces"
+selected, every console list asked Kubernetes, or the access check for the lists kept in Postgres,
+about every namespace at once, which a RoleBinding never allows, so each page answered 403. A list
+given no namespace now reads the namespaces the caller works in, the set the workspace picker
+shows, found once per request with the caller's own token. It answers 200 with an empty list when
+the caller may read that kind somewhere and nothing is there, and 403 only when they may read it
+nowhere. A caller allowed cluster-wide still gets one cluster-wide read. Paged lists page across
+the caller's namespaces. Lists kept in Postgres are read only after the caller is authorized, and
+only in the namespaces they may read, so whether the answer is 403 no longer depends on what is
+stored: a namespace holding only someone else's private MCP server answers exactly as an empty one.
+A namespace where someone may list other kinds but not agents is not part of "All workspaces";
+selecting it still reads it. `GET /api/skills` with no namespace now lists the skills of every
+namespace the caller may read; it listed none.
 
 **Security: a tool binding could name a server its author may not use.** A
 `POST /api/mcptoolbindings` that gave `registryRef`, `mode` and `server`, and every

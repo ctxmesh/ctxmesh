@@ -72,6 +72,9 @@ func (s *pgStore) List(ctx context.Context, q Query) (Page, error) {
 	if q.Namespace != "" {
 		add("namespace = $%d", q.Namespace)
 	}
+	if q.Namespaces != nil {
+		add("namespace = ANY(COALESCE($%d::text[], '{}'::text[]))", q.Namespaces)
+	}
 	if q.Actor != "" {
 		add("actor = $%d", q.Actor)
 	}

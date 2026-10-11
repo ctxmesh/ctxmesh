@@ -187,3 +187,33 @@ func TestStore_ListFilterSortPaginate(t *testing.T) {
 		assert.Equal(t, "gamma", page.Items[0].Name)
 	})
 }
+
+// A namespace set narrows a list to those namespaces and pages within them; an empty set reads
+// nothing, so a caller authorized nowhere can never fall through to every row.
+func TestStore_ListNamespaceSet(t *testing.T) {
+	eachStore(t, func(t *testing.T, s Store) {
+		ctx := context.Background()
+		for _, ns := range []string{"a", "b", "c"} {
+			for _, name := range []string{"one", "two"} {
+				_, err := s.Upsert(ctx, PromptVersion{Namespace: ns, Name: name, Repo: "r", Ref: "1", Path: "p"})
+				require.NoError(t, err)
+			}
+		}
+
+		p1, err := s.List(ctx, controlplane.ListOptions{Namespaces: []string{"c", "a"}, PageSize: 3})
+		require.NoError(t, err)
+		assert.EqualValues(t, 4, p1.Total)
+		p2, err := s.List(ctx, controlplane.ListOptions{Namespaces: []string{"c", "a"}, PageSize: 3, PageToken: p1.NextPage})
+		require.NoError(t, err)
+		got := make([]string, 0, len(p1.Items)+len(p2.Items))
+		for _, pv := range append(p1.Items, p2.Items...) {
+			got = append(got, pv.Namespace+"/"+pv.Name)
+		}
+		assert.Equal(t, []string{"a/one", "a/two", "c/one", "c/two"}, got)
+
+		none, err := s.List(ctx, controlplane.ListOptions{Namespaces: []string{}})
+		require.NoError(t, err)
+		assert.Empty(t, none.Items)
+		assert.Zero(t, none.Total)
+	})
+}

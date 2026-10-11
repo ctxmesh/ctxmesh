@@ -73,16 +73,21 @@ func (s *memStore) GetSkill(_ context.Context, ns, name string) (Skill, bool, er
 	return sk, ok, nil
 }
 
-func (s *memStore) ListSkills(_ context.Context, ns string) ([]Skill, error) {
+func (s *memStore) ListSkills(_ context.Context, namespaces []string) ([]Skill, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := []Skill{}
 	for k, sk := range s.skills {
-		if k.ns == ns {
+		if namespaces == nil || slices.Contains(namespaces, k.ns) {
 			out = append(out, sk)
 		}
 	}
-	slices.SortFunc(out, func(a, b Skill) int { return strings.Compare(a.Name, b.Name) })
+	slices.SortFunc(out, func(a, b Skill) int {
+		if c := strings.Compare(a.Namespace, b.Namespace); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
 	return out, nil
 }
 

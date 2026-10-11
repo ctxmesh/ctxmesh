@@ -340,7 +340,7 @@ func (s *Server) handleListAgentScalingPolicies(w http.ResponseWriter, r *http.R
 		opts = append(opts, client.InNamespace(namespace))
 	}
 
-	list, err := listAgentScalingPoliciesForCRUD(r.Context(), caller, opts...)
+	list, err := listAgentScalingPoliciesForCRUD(r.Context(), s.acrossWorkspaces(caller), opts...)
 	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)

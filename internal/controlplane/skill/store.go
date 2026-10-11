@@ -104,8 +104,9 @@ type Store interface {
 	// GetSkill returns the skill and whether it exists.
 	GetSkill(ctx context.Context, namespace, name string) (Skill, bool, error)
 
-	// ListSkills returns every skill in the namespace, sorted by name.
-	ListSkills(ctx context.Context, namespace string) ([]Skill, error)
+	// ListSkills returns the skills in the given namespaces, sorted by namespace then name. nil
+	// lists every namespace; an empty non-nil slice lists none.
+	ListSkills(ctx context.Context, namespaces []string) ([]Skill, error)
 
 	// DeleteSkill removes the skill and its versions.
 	DeleteSkill(ctx context.Context, namespace, name string) error

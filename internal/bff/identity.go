@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
 	"sync"
 
@@ -316,70 +315,40 @@ func reviewCoreAccess(ctx context.Context, caller client.Client, namespace, reso
 	return ssar.Status.Allowed, nil
 }
 
-// handleNamespaces serves GET /api/namespaces — the namespaces the CALLER can
-// list, through the CALLER-SCOPED client (ADR 0011). A caller whose RBAC does
-// not permit listing namespaces gets an honest 403 (via classifyReadError), NEVER
-// a silent empty list that would masquerade as "no namespaces exist". An
-// authentically empty cluster still yields {"namespaces":[]}.
+// handleNamespaces serves GET /api/namespaces — the namespaces the CALLER works
+// in, through the CALLER-SCOPED client (ADR 0011). It is the same set a list given
+// no namespace reads (workspaces.go). When nothing can be learned about the caller
+// the answer is the honest 403, NEVER a silent empty list that would masquerade as
+// "no namespaces exist". An authentically empty cluster still yields
+// {"namespaces":[]}.
 func (s *Server) handleNamespaces(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.callerClient(w, r)
 	if !ok {
 		return
 	}
 
-	var list corev1.NamespaceList
-	if err := caller.List(r.Context(), &list); err != nil {
-		if _, _, isRBAC := classifyReadError(err); isRBAC {
-			// The caller cannot `list namespaces` cluster-wide. That is the NORMAL state for
-			// every persona bound per-namespace — which is the binding shape ADR 0136 and
-			// catalog.go's tenant-isolation precondition both require. Returning 403 here left
-			// the picker empty and the console with no namespace to work in, so it fell back to
-			// "" — a cluster-scoped capability probe that no namespaced RoleBinding can satisfy.
-			//
-			// The projects pattern instead (what the OpenShift console does): enumerate
-			// CANDIDATES with the platform's own view, then filter to what THIS caller may use.
-			// Only SSAR-approved names reach the wire, so this is not a namespace-existence
-			// oracle. The BFF gains no Kubernetes privilege — the mirror is its own Postgres
-			// projection, and every allow decision is still the API server's, made as the caller.
-			allowed, learned, ferr := s.callerVisibleNamespaces(r.Context(), caller)
-			if ferr != nil {
-				s.log.Error(ferr, "namespace discovery fallback failed")
-				writeError(w, http.StatusInternalServerError, "failed to determine your namespaces")
-				return
-			}
-			if !learned {
-				// The fallback had nothing to enumerate (no mirror, or no namespace in it), so it
-				// learned NOTHING about this caller. Returning [] here would assert "you have no
-				// namespaces" — a fact we do not have. The honest answer is still the denial.
-				status, msg, _ := classifyReadError(err)
-				writeError(w, status, msg)
-				return
-			}
-			writeJSON(w, http.StatusOK, NamespaceListResponse{Namespaces: allowed})
+	// A caller who may list namespaces gets every one, platform namespaces flagged so the
+	// console's first visit skips them. A caller bound per namespace (the chart's default)
+	// cannot, and gets the mirror's namespaces filtered to those they may use: only names the
+	// API server approved for this caller reach the wire, so this is not an existence oracle.
+	set, err := s.callerWorkspaces(r.Context(), caller)
+	if err != nil {
+		if status, msg, isRBAC := classifyReadError(err); isRBAC {
+			writeError(w, status, msg)
 			return
 		}
 		s.log.Error(err, "list namespaces failed")
-		writeError(w, http.StatusInternalServerError, "failed to list namespaces")
+		writeError(w, http.StatusInternalServerError, "failed to determine your namespaces")
 		return
 	}
-
-	// Only this branch flags platform namespaces. A caller who can list namespaces cluster-wide
-	// sees the control plane's and Kubernetes' own, sorted among their workspaces; the console
-	// skips flagged ones when it picks a first workspace. The fallback above returns only
-	// namespaces the caller works in, and keeps its first-visit behaviour unchanged.
-	summaries := make([]NamespaceSummary, 0, len(list.Items))
-	for i := range list.Items {
-		ns := &list.Items[i]
-		sum := NamespaceSummary{Name: ns.Name, Platform: s.isPlatformNamespace(ns.Name)}
-		if dn := ns.Annotations[annNamespaceDisplayName]; dn != "" {
-			sum.DisplayName = dn
-		}
-		summaries = append(summaries, sum)
+	if !set.known {
+		// Nothing to enumerate (no mirror, or an empty one), so nothing was learned about this
+		// caller: [] would assert "you have no namespaces". The denial is the honest answer.
+		status, msg, _ := classifyReadError(set.denial)
+		writeError(w, status, msg)
+		return
 	}
-	// Stable order so the SPA's namespace picker is deterministic.
-	slices.SortFunc(summaries, func(a, b NamespaceSummary) int { return strings.Compare(a.Name, b.Name) })
-
-	writeJSON(w, http.StatusOK, NamespaceListResponse{Namespaces: summaries})
+	writeJSON(w, http.StatusOK, NamespaceListResponse{Namespaces: set.namespaces})
 }
 
 // isPlatformNamespace reports whether the platform or Kubernetes itself occupies the namespace:
@@ -426,14 +395,16 @@ func (s *Server) callerVisibleNamespaces(ctx context.Context, caller client.Clie
 	if len(candidates) == 0 {
 		return nil, false, nil
 	}
+	allowed, errs := probeEach(ctx, candidates, func(ctx context.Context, ns string) (bool, error) {
+		return reviewAccess(ctx, caller, ns, resAgentDeployments, verbList)
+	})
 	out := make([]NamespaceSummary, 0, len(candidates))
-	for _, ns := range candidates {
-		ok, rerr := reviewAccess(ctx, caller, ns, resAgentDeployments, verbList)
-		if rerr != nil {
-			s.log.Error(rerr, "namespace membership probe failed (omitting)", "namespace", ns)
+	for i, ns := range candidates {
+		if errs[i] != nil {
+			s.log.Error(errs[i], "namespace membership probe failed (omitting)", "namespace", ns)
 			continue
 		}
-		if ok {
+		if allowed[i] {
 			out = append(out, NamespaceSummary{Name: ns})
 		}
 	}

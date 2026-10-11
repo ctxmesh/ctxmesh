@@ -322,7 +322,7 @@ func (s *Server) handleListMCPToolBindings(w http.ResponseWriter, r *http.Reques
 		opts = append(opts, client.InNamespace(namespace))
 	}
 
-	list, err := listMCPToolBindingsForCRUD(r.Context(), caller, opts...)
+	list, err := listMCPToolBindingsForCRUD(r.Context(), s.acrossWorkspaces(caller), opts...)
 	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)

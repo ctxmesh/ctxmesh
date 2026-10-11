@@ -112,6 +112,9 @@ func matches(e Entry, q Query) bool {
 	if q.Namespace != "" && e.Namespace != q.Namespace {
 		return false
 	}
+	if q.Namespaces != nil && !slices.Contains(q.Namespaces, e.Namespace) {
+		return false
+	}
 	if q.Actor != "" && e.Actor != q.Actor {
 		return false
 	}

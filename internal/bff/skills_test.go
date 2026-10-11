@@ -75,7 +75,7 @@ func TestSkillWritesAreCallerScoped(t *testing.T) {
 		`{"namespace":"team-a","name":"summarise","description":"d"}`)
 	require.Equal(t, http.StatusForbidden, rec.Code)
 
-	got, err := store.ListSkills(context.Background(), "team-a")
+	got, err := store.ListSkills(context.Background(), []string{"team-a"})
 	require.NoError(t, err)
 	assert.Empty(t, got, "a denied write must persist nothing")
 }

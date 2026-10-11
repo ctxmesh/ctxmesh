@@ -290,13 +290,11 @@ func (s *Server) handleListToolRegistries(w http.ResponseWriter, r *http.Request
 	// ToolRegistry is Postgres-authoritative (ADR 0044). The API server is not in
 	// the path, so authorize the list with a caller-scoped SSAR (exact RBAC parity
 	// with the retired CRD read) and push namespace/search/paging down to the store.
-	if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceToolRegistries, namespace, ""); err != nil {
-		s.writeAuthzError(w, err, "list tool registries")
+	opts := controlplane.ListOptions{Namespace: namespace, Search: q, PageSize: limit, PageToken: cursor}
+	if !s.authorizeStoreList(w, r, caller, resourceToolRegistries, &opts, "list tool registries") {
 		return
 	}
-	page, err := s.toolRegistryStore.List(r.Context(), controlplane.ListOptions{
-		Namespace: namespace, Search: q, PageSize: limit, PageToken: cursor,
-	})
+	page, err := s.toolRegistryStore.List(r.Context(), opts)
 	if err != nil {
 		s.log.Error(err, "list ToolRegistries from store failed")
 		writeError(w, http.StatusInternalServerError, "failed to list tool registries")
