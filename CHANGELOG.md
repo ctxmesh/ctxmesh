@@ -100,6 +100,12 @@ registration whose user the cluster cannot identify is refused before anything i
 Servers registered through OAuth before this release still have no owner; register them again
 under a new name.
 
+**Fixed: an MCP server registered with a key could be stored with no owner.** A keyed server is
+private to whoever registers it. When the cluster could not say who that was, the server was
+registered anyway, without an owner, so nobody could see it. That registration is now refused with
+HTTP 500 before the server is contacted. A server registered without a key is shared with the
+team and still registers.
+
 **Fixed: per-version online scores never counted a failed tool call.** The tool-failure count read
 only `SPAN` observations, and Langfuse records the platform's tool calls as `TOOL`. A failed `TOOL`
 observation now counts. A `SPAN` still counts, for traces recorded before Langfuse typed tool calls.

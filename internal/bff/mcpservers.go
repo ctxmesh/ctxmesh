@@ -211,6 +211,24 @@ func (s *Server) handleRegisterMCPServer(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// A keyed server is private to its registrant (ADR 0067 §2), so the registrant's identity
+	// is its owner, resolved before anything is contacted: a private server stored without an
+	// owner is visible to nobody, the registrant included. An open server is team-visible;
+	// its owner is stamped when the identity resolves and is not required.
+	keyed := strings.TrimSpace(req.APIKey) != ""
+	owner := ""
+	if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
+		owner = userGrantHash(username)
+	} else if keyed {
+		if status, msg, isRBAC := classifyReadError(uErr); isRBAC {
+			writeError(w, status, msg)
+			return
+		}
+		s.log.Error(uErr, "resolve caller identity for MCP registration failed")
+		writeError(w, http.StatusInternalServerError, "failed to resolve caller identity: a server with a key belongs to whoever registers it")
+		return
+	}
+
 	// (2) Probe the server. A bad URL / non-MCP endpoint → an honest 4xx with a
 	// teaching message; an unreachable host → 502. The optional key is used only
 	// for the probe here; it is neither returned nor logged.
@@ -234,34 +252,11 @@ func (s *Server) handleRegisterMCPServer(w http.ResponseWriter, r *http.Request)
 	//   no-auth server  → visibility=team, credentialSource=none, scope=public (legacy inverse)
 	//   keyed/OAuth server → visibility=private, credentialSource=byo-oauth, scope=personal (legacy inverse)
 	// Both axes are validated via validateMCPCells before the create.
-	var (
-		scope            string
-		visibility       string
-		credentialSource string
-		owner            string
-	)
-	if strings.TrimSpace(req.APIKey) == "" {
-		// No-auth / open server: team-visible, no credential.
-		scope = scopePublic
-		visibility = visibilityTeam
-		credentialSource = credSourceNone
-		// Stamp owner when the identity is resolvable (harmless; enables "my servers" UX).
-		if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
-			owner = userGrantHash(username)
-		}
-	} else {
-		// Keyed server: private to the registrant.
-		scope = scopePersonal
-		visibility = visibilityPrivate
-		credentialSource = credSourceByoOAuth
-		if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
-			owner = userGrantHash(username)
-		} else {
-			// If the identity can't be resolved (never in prod — the same caller client
-			// would then also fail the object create below), register without an owner label
-			// rather than failing the whole flow.
-			s.log.Error(uErr, "mcp register: could not resolve owner identity; server registered without an owner label")
-		}
+	// No-auth / open server: team-visible, no credential. Keyed server: private to the
+	// registrant (owner resolved above).
+	scope, visibility, credentialSource := scopePublic, visibilityTeam, credSourceNone
+	if keyed {
+		scope, visibility, credentialSource = scopePersonal, visibilityPrivate, credSourceByoOAuth
 	}
 	created, cErr := s.createMCPObjects(r.Context(), caller, mcpCreateSpec{
 		name:             name,

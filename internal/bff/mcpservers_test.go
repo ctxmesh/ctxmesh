@@ -23,12 +23,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	authnv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -36,9 +38,12 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
 
 // theMCPKey is the bearer key the BYO-MCP tests paste. DELIBERATELY recognizable
@@ -141,7 +146,7 @@ func registerBody(t *testing.T, name, url, key string) []byte {
 // any log line.
 func TestRegisterMCPDiscoversToolsAndCapturesInputSchema(t *testing.T) {
 	mcp := fakeMCPServer(t, true)
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	c := registrantClient(t, interceptor.Funcs{})
 	s, factory, lb := newMCPServer(t, c, false)
 	store := wireTRStore(t, s, nil) // register writes the ToolRegistry to the store (retired, ADR 0044)
 
@@ -198,6 +203,8 @@ func TestRegisterMCPDiscoversToolsAndCapturesInputSchema(t *testing.T) {
 		assert.Equal(t, agentsv1beta1.ApprovalApproved, e.ApprovalStatus)
 		assert.Equal(t, mcp.URL, e.URL)
 	}
+	assert.Equal(t, visibilityPrivate, tr.Labels[labelMCPVisibility], "a keyed server is private")
+	assert.Equal(t, userGrantHash(oauthRegistrant), tr.Labels[labelMCPOwner], "and belongs to its registrant")
 
 	// The per-server egress NetworkPolicy exists, is egress-only, and bounds to the
 	// server's port (never a blanket open).
@@ -282,15 +289,58 @@ func TestRegisterMCPHardenedIsPendingApprovalNoEgress(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err), "no egress NetworkPolicy exists for a pending server")
 }
 
+// TestRegisterKeyedMCPWithoutIdentityIsRefused: a keyed server is private to whoever registers
+// it. A registrant the API server cannot name would get a private server stored without an owner,
+// visible to nobody, the registrant included. The register is refused before the server is
+// contacted and nothing is stored. An open server is team-visible and still registers.
+func TestRegisterKeyedMCPWithoutIdentityIsRefused(t *testing.T) {
+	register := func(t *testing.T, key string) (*httptest.ResponseRecorder, *atomic.Int32, toolregistry.Store, *bool) {
+		inner := fakeMCPServer(t, key != "")
+		srv, hits := countingServer(t, inner.Config.Handler)
+		createCalled := false
+		// A plain fake client answers a SelfSubjectReview with no username.
+		c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, ok := obj.(*authnv1.SelfSubjectReview); !ok {
+					createCalled = true
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		}).Build()
+		s, _, _ := newMCPServer(t, c, false)
+		store := wireTRStore(t, s, nil)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/mcpservers", bytes.NewReader(registerBody(t, "anon-mcp", srv.URL, key)))
+		req.Header.Set("Authorization", "Bearer developer-persona-token")
+		s.Handler().ServeHTTP(rec, req)
+		return rec, hits, store, &createCalled
+	}
+
+	t.Run("keyed", func(t *testing.T) {
+		rec, hits, store, created := register(t, theMCPKey)
+		require.Equal(t, http.StatusInternalServerError, rec.Code, "body: %s", rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "failed to resolve caller identity")
+		assert.Zero(t, hits.Load(), "the server is never contacted")
+		assert.False(t, *created, "no object is created")
+		_, err := store.Get(context.Background(), "prod", "anon-mcp")
+		assert.ErrorIs(t, err, controlplane.ErrNotFound, "no server is stored")
+	})
+
+	t.Run("open", func(t *testing.T) {
+		rec, _, store, _ := register(t, "")
+		require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+		tr, err := store.Get(context.Background(), "prod", "anon-mcp")
+		require.NoError(t, err)
+		assert.Equal(t, visibilityTeam, tr.Labels[labelMCPVisibility])
+	})
+}
+
 // TestRegisterMCPUnreachableIs4xxNoOrphan proves an unreachable / mis-speaking MCP
 // server yields an honest 4xx (NOT a 500) and NO CRDs are created (no partial
 // orphan) — the probe fails before any create.
 func TestRegisterMCPUnreachableIs4xxNoOrphan(t *testing.T) {
 	createCalled := false
-	c := fake.NewClientBuilder().
-		WithScheme(testScheme(t)).
-		WithInterceptorFuncs(interceptorCreateFlag(&createCalled)).
-		Build()
+	c := registrantClient(t, interceptorCreateFlag(&createCalled))
 	s, _, _ := newMCPServer(t, c, false)
 
 	rec := httptest.NewRecorder()
@@ -335,10 +385,7 @@ func TestRegisterMCPNonMCPEndpointIs4xx(t *testing.T) {
 func TestRegisterMCPBadKeyIs422(t *testing.T) {
 	mcp := fakeMCPServer(t, true) // requires theMCPKey
 	createCalled := false
-	c := fake.NewClientBuilder().
-		WithScheme(testScheme(t)).
-		WithInterceptorFuncs(interceptorCreateFlag(&createCalled)).
-		Build()
+	c := registrantClient(t, interceptorCreateFlag(&createCalled))
 	s, _, lb := newMCPServer(t, c, false)
 
 	rec := httptest.NewRecorder()
