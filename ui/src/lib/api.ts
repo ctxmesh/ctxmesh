@@ -269,8 +269,9 @@ export interface AgentDetailResponse {
   // dependencies is everything the agent references, each resolved as the caller: the model route
   // and the secret bindings its providers use, the guardrail policy, tool bindings, knowledge bases,
   // memory, approval rules and approvers, and feedback sources. A reference that does not resolve is
-  // listed as `missing`, never dropped. Absent from a BFF older than the Bindings panel.
-  dependencies?: AgentDependency[];
+  // listed as `missing`, never dropped. Absent from a BFF older than the Bindings panel; null when
+  // the read asked for none (agentDetail's `dependencies: false`).
+  dependencies?: AgentDependency[] | null;
 }
 
 export type AgentDependencyKind =
@@ -3355,10 +3356,18 @@ export const api = {
 
   // agentDetail reads one AgentDeployment's full landing projection (m14.7). A
   // 404 = not-found (no such agent), 403 = viewer-can't-read (ForbiddenInline),
-  // 400 = a malformed ns/name — all surface as a typed ApiError.
-  agentDetail: (ns: string, name: string, signal?: AbortSignal) =>
+  // 400 = a malformed ns/name — all surface as a typed ApiError. `dependencies: false`
+  // skips resolving the agent's references (one read each) for a caller that never shows them.
+  agentDetail: (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+    opts?: { dependencies?: boolean },
+  ) =>
     getJSON<AgentDetailResponse>(
-      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}${
+        opts?.dependencies === false ? "?dependencies=0" : ""
+      }`,
       signal,
     ),
 

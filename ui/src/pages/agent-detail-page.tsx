@@ -174,6 +174,10 @@ function resolveTab(raw: string | null): Tab {
  *  feels live, slow enough that a page left open costs nothing worth counting. */
 const AGENT_SETTLE_POLL_MS = 4_000;
 
+/** How many re-checks (ten minutes' worth) before the page stops and offers "Check again". An
+ *  agent that has not settled by then is waiting on something a re-read will not change. */
+const AGENT_SETTLE_MAX_CHECKS = (10 * 60_000) / AGENT_SETTLE_POLL_MS;
+
 type Load =
   | { kind: "loading" }
   | { kind: "ready"; detail: AgentDetailResponse }
@@ -240,9 +244,13 @@ export function AgentDetailPage() {
   // `silent` re-fetches WITHOUT dropping back to the skeleton — the difference between
   // a refresh and a reload. The settle poll below uses it, because flashing the whole
   // page every few seconds while an agent starts is worse than the staleness it fixes.
+  // Reads still out. A settle tick that finds one is skipped, so a slow BFF never has a second read
+  // stacked on the first.
+  const readsInFlight = React.useRef(0);
   const load = React.useCallback((silent = false) => {
     const controller = new AbortController();
     if (!silent) setState({ kind: "loading" });
+    readsInFlight.current += 1;
     api
       .agentDetail(ns, name, controller.signal)
       .then((detail) => {
@@ -265,6 +273,9 @@ export function AgentDetailPage() {
           status: apiErr?.status,
           forbidden: apiErr?.isForbidden ?? false,
         });
+      })
+      .finally(() => {
+        readsInFlight.current -= 1;
       });
     return () => controller.abort();
   }, [ns, name]);
@@ -289,15 +300,26 @@ export function AgentDetailPage() {
     !(state.detail.conditions ?? []).some(
       (c) => c.type === "ModelRouteReady" && c.status === "False" && c.reason === "NotYetServed",
     );
+  // The watch stops after AGENT_SETTLE_MAX_CHECKS and says so; "Check again" starts a new one.
+  const [settleWatch, setSettleWatch] = React.useState(0);
+  const [settleStopped, setSettleStopped] = React.useState(false);
   React.useEffect(() => {
     if (state.kind !== "ready" || settled) return;
+    setSettleStopped(false);
+    let checks = 0;
     const id = window.setInterval(() => {
+      checks += 1;
+      if (checks > AGENT_SETTLE_MAX_CHECKS) {
+        window.clearInterval(id);
+        setSettleStopped(true);
+        return;
+      }
       // Skip while the tab is hidden: a backgrounded page polling a cluster is pure
       // cost, and it re-syncs on the next visible tick anyway.
-      if (document.visibilityState === "visible") load(true);
+      if (document.visibilityState === "visible" && readsInFlight.current === 0) load(true);
     }, AGENT_SETTLE_POLL_MS);
     return () => window.clearInterval(id);
-  }, [state.kind, settled, load]);
+  }, [state.kind, settled, load, settleWatch]);
 
   // ── Loading (§7 A2: header band + a panel skeleton + rail kv bars) ─────────
   if (state.kind === "loading") {
@@ -430,6 +452,25 @@ export function AgentDetailPage() {
       )}
 
       <AgentLifecycle detail={detail} />
+
+      {settleStopped && !settled && (
+        <div className="space-y-3" data-testid="agent-settle-stopped">
+          <QuietNote title="This page has stopped checking on the agent.">
+            It has not settled in ten minutes, so the page no longer re-reads it on its own. What it
+            shows is the last read.
+          </QuietNote>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setSettleWatch((n) => n + 1);
+              load(true);
+            }}
+          >
+            Check again
+          </Button>
+        </div>
+      )}
 
       {/* §4.7 hub grid: the tab's panels on the left, the register that governs
           the agent on the right. The rail persists across tabs (§6.1 A2) and

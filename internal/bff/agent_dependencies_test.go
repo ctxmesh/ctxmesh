@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -418,4 +419,36 @@ func TestAgentDependenciesRouteForbiddenRouteNotFoundIsMissing(t *testing.T) {
 	assert.Equal(t, depMissing, r[0].State)
 	assert.Equal(t, "RouteNotFound", r[0].Reason)
 	assert.Contains(t, r[0].Message, "no ModelRoute of that name")
+}
+
+// TestAgentDetailWithoutDependencies proves ?dependencies=0 returns the agent without reading any of
+// its references (dependencies is null), and that the default still resolves them.
+func TestAgentDetailWithoutDependencies(t *testing.T) {
+	refReads := 0
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(depsAgent(), servedRoute("openai-key"), boundSecretBinding()).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*agentsv1alpha1.AgentDeployment); !ok {
+					refReads++
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/"+detailNS+"/echo?dependencies=0", nil)
+	req.Header.Set("Authorization", "Bearer caller-token")
+	s.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	assert.Equal(t, "null", string(raw["dependencies"]), "skipped is not the same as none")
+	assert.Equal(t, `"echo"`, string(raw["name"]))
+	assert.Zero(t, refReads, "no reference is read when dependencies are not asked for")
+
+	assert.NotEmpty(t, detailDeps(t, c))
+	assert.Positive(t, refReads, "the default still resolves every reference")
 }

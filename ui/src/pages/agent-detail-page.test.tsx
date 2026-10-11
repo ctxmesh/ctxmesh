@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { AgentDetailPage, lifecycleStage } from "@/pages/agent-detail-page";
@@ -2650,5 +2650,75 @@ describe("AgentDetailPage — the Bindings panel (m184.15)", () => {
     const panel = await screen.findByTestId("agent-bindings-panel");
     expect(within(panel).getByTestId("dep-state-guardrailPolicy-pii")).toHaveTextContent("missing");
     expect(within(panel).getByTestId("dep-state-modelRoute-chat")).toHaveTextContent("model loading");
+  });
+});
+
+// An agent that has not settled is re-read every four seconds. The re-reads used to stack when the
+// BFF was slow, and never stopped for an agent that never settled.
+describe("AgentDetailPage — watching an unsettled agent (m184.15)", () => {
+  const starting = { ...DEFAULT_DETAIL, ready: false, phase: "Pending" };
+  const advance = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  const isDetailRead = (url: string, init?: RequestInit) =>
+    url === "/api/agents/prod/billing" && (init?.method ?? "GET") === "GET";
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // Wraps installFetch so the agent's detail reads can be counted and held.
+  function countDetailReads(hold: (n: number) => boolean) {
+    const base = globalThis.fetch;
+    let n = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (isDetailRead(url, init)) {
+          n += 1;
+          if (hold(n)) return new Promise<Response>(() => {});
+        }
+        return base(input, init);
+      }),
+    );
+    return () => n;
+  }
+
+  it("never starts a re-read while one is still out", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    installFetch({ detail: starting });
+    const reads = countDetailReads((n) => n === 2);
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(reads()).toBe(1);
+
+    await advance(4_000);
+    expect(reads()).toBe(2);
+    // The second read never answers; three more ticks must not stack reads behind it.
+    await advance(12_000);
+    expect(reads()).toBe(2);
+  });
+
+  it("stops after ten minutes without settling, and Check again starts over", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    installFetch({ detail: starting });
+    const reads = countDetailReads(() => false);
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    await advance(10 * 60_000 + 4_000);
+    await waitFor(() => expect(screen.getByTestId("agent-settle-stopped")).toBeInTheDocument());
+    const stoppedAt = reads();
+    expect(stoppedAt).toBe(151);
+    await advance(60_000);
+    expect(reads()).toBe(stoppedAt);
+
+    fireEvent.click(within(screen.getByTestId("agent-settle-stopped")).getByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(reads()).toBe(stoppedAt + 1));
+    expect(screen.queryByTestId("agent-settle-stopped")).toBeNull();
+    await advance(4_000);
+    await waitFor(() => expect(reads()).toBe(stoppedAt + 2));
   });
 });

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Play, Rocket } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 
@@ -330,6 +330,10 @@ const SETTLE_POLL_MS = 4_000;
 /** A failed background re-read doubles the wait before the next one, up to this. */
 const SETTLE_RETRY_MAX_MS = 30_000;
 
+/** How long the chat keeps re-reading an agent that has not settled before it stops and offers
+ *  "Check again", as the trace page does for a trace that has not landed. */
+const SETTLE_MAX_MS = 10 * 60_000;
+
 /** Ready, and its model route (if any) is served — the state the chat needs to stop polling. */
 function agentSettled(d: AgentDetailResponse): boolean {
   return (
@@ -344,10 +348,18 @@ function agentSettled(d: AgentDetailResponse): boolean {
  * Reads the agent the chat will talk to, and re-reads it while it settles: a freshly created
  * agent is not Ready yet and its new model route takes the gateway a minute to serve, and the
  * ChatPanel holds Send until it is (ADR 0151). Without the re-read the hold would never lift.
+ * The re-reads stop after SETTLE_MAX_MS (`stopped`); `checkAgain` starts them over.
  */
-function useChatAgent(ns: string, name: string, enabled: boolean): ChatAgent {
+function useChatAgent(
+  ns: string,
+  name: string,
+  enabled: boolean,
+): { agent: ChatAgent; stopped: boolean; checkAgain: () => void } {
   const [state, setState] = useState<ChatAgent>({ kind: "idle" });
+  const [stopped, setStopped] = useState(false);
+  const restartRef = useRef<(() => void) | null>(null);
   useEffect(() => {
+    setStopped(false);
     if (!enabled || !name) {
       setState({ kind: "idle" });
       return;
@@ -356,8 +368,15 @@ function useChatAgent(ns: string, name: string, enabled: boolean): ChatAgent {
     let timer = 0;
     // Consecutive background re-reads that failed. Each one doubles the wait before the next.
     let failures = 0;
+    // Time spent waiting between re-reads since the watch (re)started.
+    let waited = 0;
     const reread = () => {
       const wait = Math.min(SETTLE_POLL_MS * 2 ** failures, SETTLE_RETRY_MAX_MS);
+      if (waited + wait > SETTLE_MAX_MS) {
+        setStopped(true);
+        return;
+      }
+      waited += wait;
       timer = window.setTimeout(() => read(true), wait);
     };
     const read = (silent: boolean) => {
@@ -366,8 +385,9 @@ function useChatAgent(ns: string, name: string, enabled: boolean): ChatAgent {
         return;
       }
       if (!silent) setState({ kind: "loading" });
+      // The chat shows no references, so it does not ask the BFF to resolve them on every read.
       api
-        .agentDetail(ns, name, ctrl.signal)
+        .agentDetail(ns, name, ctrl.signal, { dependencies: false })
         .then((detail) => {
           if (ctrl.signal.aborted) return;
           failures = 0;
@@ -394,13 +414,22 @@ function useChatAgent(ns: string, name: string, enabled: boolean): ChatAgent {
           });
         });
     };
+    restartRef.current = () => {
+      window.clearTimeout(timer);
+      failures = 0;
+      waited = 0;
+      setStopped(false);
+      read(true);
+    };
     timer = window.setTimeout(() => read(false), PICK_DEBOUNCE_MS);
     return () => {
       ctrl.abort();
       window.clearTimeout(timer);
+      restartRef.current = null;
     };
   }, [ns, name, enabled]);
-  return state;
+  const checkAgain = useCallback(() => restartRef.current?.(), []);
+  return { agent: state, stopped, checkAgain };
 }
 
 /** Why a name the picker lists in several namespaces cannot run until one is picked, or undefined. */
@@ -489,7 +518,11 @@ export function PlaygroundPage() {
   const runNamespace = namespace.trim() || pickedNamespace;
   const chatNamespace = runNamespace || BFF_DEFAULT_NAMESPACE;
   const nameError = agentName ? validate(form).name : undefined;
-  const chatAgent = useChatAgent(
+  const {
+    agent: chatAgent,
+    stopped: settleStopped,
+    checkAgain: checkAgentAgain,
+  } = useChatAgent(
     chatNamespace,
     agentName,
     mode === "chat" && canRun && agentName !== "" && !nameError && ambiguousHomes.length === 0,
@@ -895,16 +928,29 @@ export function PlaygroundPage() {
   } else if (chatAgent.kind === "ready") {
     const d = chatAgent.detail;
     chatColumn = (
-      <ChatPanel
-        key={`${chatNamespace}/${agentName}`}
-        ns={chatNamespace}
-        name={agentName}
-        ready={d.ready}
-        memoryBound={d.bindings.some((b) => b.kind === "memory")}
-        modelRoute={(d.conditions ?? []).find((c) => c.type === "ModelRouteReady")}
-        onTraced={(id) => setInspectTrace(id)}
-        onRunFinalized={setLastChatRun}
-      />
+      <div className="min-w-0 space-y-3">
+        {settleStopped && (
+          <div className="space-y-3" data-testid="playground-settle-stopped">
+            <QuietNote title="This page has stopped checking on the agent.">
+              It has not settled in ten minutes, so the chat no longer re-reads it on its own.
+              What it shows is the last read.
+            </QuietNote>
+            <Button variant="outline" size="sm" onClick={checkAgentAgain}>
+              Check again
+            </Button>
+          </div>
+        )}
+        <ChatPanel
+          key={`${chatNamespace}/${agentName}`}
+          ns={chatNamespace}
+          name={agentName}
+          ready={d.ready}
+          memoryBound={d.bindings.some((b) => b.kind === "memory")}
+          modelRoute={(d.conditions ?? []).find((c) => c.type === "ModelRouteReady")}
+          onTraced={(id) => setInspectTrace(id)}
+          onRunFinalized={setLastChatRun}
+        />
+      </div>
     );
   } else {
     chatColumn = (

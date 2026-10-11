@@ -219,6 +219,13 @@ describe("api client", () => {
     expect(res.versions).toEqual(["v1", "v2"]);
   });
 
+  it("agentDetail asks the BFF to skip the references when told to", async () => {
+    const fetchMock = mockFetch({ name: "billing", namespace: "prod", dependencies: null });
+    vi.stubGlobal("fetch", fetchMock);
+    await api.agentDetail("prod", "billing", undefined, { dependencies: false });
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/agents/prod/billing?dependencies=0");
+  });
+
   it("traceDetail reads GET /api/traces/{id}/detail (flat spans)", async () => {
     const fetchMock = mockFetch({
       rollup: { traceId: "t1", name: "run", timestamp: "", costUSD: 0.006, tokens: 1240, latencyMs: 1840, spanCount: 2 },

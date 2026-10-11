@@ -235,7 +235,7 @@ type AgentDetailResponse struct {
 	// Dependencies is everything the agent references (model route, the secret bindings its route
 	// uses, guardrail policy, tool bindings, knowledge bases, memory, approval rules and approvers,
 	// feedback sources), each resolved as the caller. A reference that does not resolve is listed
-	// as missing. Non-nil on the wire.
+	// as missing. Non-nil on the wire, except null when the request asked for none (?dependencies=0).
 	Dependencies []AgentDependency `json:"dependencies"`
 }
 

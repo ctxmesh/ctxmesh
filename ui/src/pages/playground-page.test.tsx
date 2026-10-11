@@ -17,6 +17,7 @@ interface Captured {
   url: string;
   method: string;
   body: string;
+  query: string;
 }
 
 // sseBody wraps SSE frame strings in a ReadableStream-like body (getReader) so the
@@ -72,7 +73,7 @@ function recordingFetch(opts: {
       const path = url.split("?")[0];
       const method = init?.method ?? "GET";
       const body = typeof init?.body === "string" ? init.body : "";
-      calls.push({ url: path, method, body });
+      calls.push({ url: path, method, body, query: url.split("?")[1] ?? "" });
 
       // POST /api/runs — create a run (streaming path, m32.8).
       if (path === "/api/runs" && method === "POST") {
@@ -1136,8 +1137,8 @@ describe("PlaygroundPage — plain-text chat by default (m184.15)", () => {
   });
 
   // The page re-reads an agent that has not settled. One failed re-read used to replace the chat
-  // with an error card, discarding the conversation and the composer.
-  describe("a background re-read that fails", () => {
+  // with an error card, discarding the conversation and the composer, and the re-reads never ended.
+  describe("re-reading an agent until it settles", () => {
     const loadingRoute = {
       type: "ModelRouteReady",
       status: "False",
@@ -1157,7 +1158,7 @@ describe("PlaygroundPage — plain-text chat by default (m184.15)", () => {
       vi.useRealTimers();
     });
 
-    it("keeps the composer and the transcript", async () => {
+    it("keeps the composer and the transcript when a re-read fails", async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       const calls = recordingFetch({
         run: { detail: finished },
@@ -1186,7 +1187,7 @@ describe("PlaygroundPage — plain-text chat by default (m184.15)", () => {
       await waitFor(() => expect(detailReads(calls)).toBe(3));
     });
 
-    it("still lifts the model-loading hold once a later read succeeds", async () => {
+    it("still lifts the model-loading hold once a read after a failed one succeeds", async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       const calls = recordingFetch({
         agentDetailReads: {
@@ -1208,6 +1209,34 @@ describe("PlaygroundPage — plain-text chat by default (m184.15)", () => {
       await waitFor(() => expect(screen.getByTestId("chat-send")).toBeEnabled());
       expect(screen.queryByTestId("chat-route-note")).toBeNull();
       expect(detailReads(calls)).toBe(3);
+    });
+
+    it("stops after ten minutes without settling, and Check again starts over", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const reads: (object | number)[] = Array.from({ length: 151 }, () =>
+        readyDetail("prod", "echo", [loadingRoute]),
+      );
+      reads.push(readyDetail("prod", "echo"));
+      const calls = recordingFetch({ agentDetailReads: { "prod/echo": reads } });
+
+      renderPage("/playground?agent=echo&ns=prod");
+      await screen.findByTestId("chat-input");
+      // The chat never asks the BFF to resolve the agent's references.
+      expect(calls.find((c) => c.url === "/api/agents/prod/echo")?.query).toBe("dependencies=0");
+
+      await advance(10 * 60_000);
+      await waitFor(() => expect(screen.getByTestId("playground-settle-stopped")).toBeInTheDocument());
+      // One read, then one every four seconds for ten minutes, and then none.
+      expect(detailReads(calls)).toBe(151);
+      await advance(60_000);
+      expect(detailReads(calls)).toBe(151);
+      expect(screen.getByTestId("chat-send")).toBeDisabled();
+
+      fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+      await waitFor(() => expect(detailReads(calls)).toBe(152));
+      await waitFor(() => expect(screen.queryByTestId("playground-settle-stopped")).toBeNull());
+      fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hello" } });
+      expect(screen.getByTestId("chat-send")).toBeEnabled();
     });
 
     it("shows the error card when the first read fails", async () => {

@@ -59,6 +59,9 @@ const defaultLogTailLines = 200
 // binding/version lists is DEGRADED, not fatal — a caller allowed to read the agent
 // but not the bindings still gets the agent detail with an empty bindings list,
 // rather than a 403 that hides the agent they can see.
+//
+// ?dependencies=0 skips resolving the agent's references (dependencies is then null): one read per
+// reference is a cost a caller that re-reads the agent only for its status should not pay.
 func (s *Server) handleAgentDetail(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.callerClient(w, r)
 	if !ok {
@@ -119,7 +122,11 @@ func (s *Server) handleAgentDetail(w http.ResponseWriter, r *http.Request) {
 	managedOutsideUI, drift := s.editModeFlags(&ad)
 
 	detail := newAgentDetail(&ad, toolBindings, versions, managedOutsideUI, drift)
-	detail.Dependencies = s.resolveAgentDependencies(r.Context(), caller, &ad, toolBindings, toolBindingsHidden)
+	if r.URL.Query().Get("dependencies") == "0" {
+		detail.Dependencies = nil
+	} else {
+		detail.Dependencies = s.resolveAgentDependencies(r.Context(), caller, &ad, toolBindings, toolBindingsHidden)
+	}
 
 	// U13: read the agent's DURABLE published-template state so the "Published" badge + Unpublish
 	// survive a reload (they were in-session only). A store read on the BFF's own cpDB (the same
