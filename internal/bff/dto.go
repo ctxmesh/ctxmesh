@@ -740,6 +740,21 @@ type TraceDetailResponse struct {
 	Rollup     TraceRollup   `json:"rollup"`
 	Spans      []SpanSummary `json:"spans"`
 	RootSpanID string        `json:"rootSpanId"`
+	// Run is present when a run maps the trace. A trace no run maps (a direct /api/invoke call) has none.
+	Run *TraceRunSteps `json:"run,omitempty"`
+}
+
+// TraceRunSteps is what the run behind a trace recorded, so the console can tell a complete trace from
+// one whose spans are still arriving (the backend ingests generation and tool spans after the root).
+type TraceRunSteps struct {
+	RunID  string `json:"runId"`
+	Status string `json:"status"`
+	// EndedAt is when the run reached a terminal state (RFC3339); empty while it is running or held.
+	EndedAt string `json:"endedAt,omitempty"`
+	// ModelSteps and ToolSteps count the run's recorded step events by kind. Both are 0 until the run
+	// is terminal, and for an agent that emits no step events.
+	ModelSteps int `json:"modelSteps"`
+	ToolSteps  int `json:"toolSteps"`
 }
 
 // --- Connect a provider (ADR 0015) ------------------------------------------

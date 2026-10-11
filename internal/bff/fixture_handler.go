@@ -107,19 +107,29 @@ func (s *Server) runStepDescriptors(runID string) []replay.StepDescriptor {
 		if ev.Kind != run.EventStep {
 			continue
 		}
-		var frame struct {
-			Kind string `json:"kind"`
-			Tool string `json:"tool"`
-		}
-		if json.Unmarshal([]byte(ev.Data), &frame) != nil {
-			continue // a non-frame EventStep (e.g. a workflow plan-approval label)
-		}
-		if frame.Kind != stepFrameKindModel && frame.Kind != stepFrameKindTool {
+		kind, tool, ok := parseStepFrame(ev.Data)
+		if !ok {
 			continue
 		}
-		out = append(out, replay.StepDescriptor{Kind: frame.Kind, ToolName: frame.Tool})
+		out = append(out, replay.StepDescriptor{Kind: kind, ToolName: tool})
 	}
 	return out
+}
+
+// parseStepFrame reads a model or tool step frame from an EventStep's data. ok is false for anything
+// else: EventStep also carries plain-text labels (a workflow plan approval, a dataset export stage).
+func parseStepFrame(data string) (kind, tool string, ok bool) {
+	var frame struct {
+		Kind string `json:"kind"`
+		Tool string `json:"tool"`
+	}
+	if json.Unmarshal([]byte(data), &frame) != nil {
+		return "", "", false
+	}
+	if frame.Kind != stepFrameKindModel && frame.Kind != stepFrameKindTool {
+		return "", "", false
+	}
+	return frame.Kind, frame.Tool, true
 }
 
 // The EventStep frame kinds the fixture stepper joins on (mirrors the SDK `_step_frame` `kind`).

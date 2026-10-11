@@ -113,6 +113,7 @@ func TestTraceDetail_UnrecordedTraceOfAReadableAgentOpens(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, "tr-direct", body.Rollup.TraceID)
 	assert.Len(t, body.Spans, 2)
+	assert.Nil(t, body.Run, "no run maps the trace, so the response names none")
 }
 
 // Every way an unrecorded trace can be refused answers byte-for-byte the same, so a caller cannot learn
@@ -284,4 +285,58 @@ func TestFeedback_UnrecordedTraceFollowsTheTraceRule(t *testing.T) {
 	theirs := get("tr-theirs")
 	assert.Equal(t, http.StatusNotFound, theirs.Code)
 	assert.NotContains(t, theirs.Body.String(), "helpful", "a refused trace's scores must not leak")
+}
+
+// The run behind a trace reports what it recorded, so the console can tell a complete trace from one
+// whose spans are still arriving. Counts appear only once the run is terminal. Proven on the mem store
+// and, with RUN_POSTGRES_TEST_DSN set, on Postgres, whose terminal-run stream is drained by a goroutine.
+func TestTraceDetail_ReportsTheRunsRecordedSteps(t *testing.T) {
+	for name, rs := range fenceStores(t) {
+		t.Run(name, func(t *testing.T) {
+			agent := client.ObjectKey{Namespace: "default", Name: "aha-agent"}
+			seedOwnedRun(t, rs, "r-done", agent.Namespace, agent.Name, "viewer@example.com", "tr-done", "hi")
+			seedOwnedRun(t, rs, "r-live", agent.Namespace, agent.Name, "viewer@example.com", "tr-live", "hi")
+			for _, id := range []string{"r-done", "r-live"} {
+				_, err := rs.Update(id, func(x *run.Run) error { return x.Transition(run.StatusRunning, time.Now()) })
+				require.NoError(t, err)
+				for _, ev := range []struct {
+					kind run.EventKind
+					data string
+				}{
+					{run.EventStep, `{"type":"step","step":1,"kind":"model","tokens":{"prompt":189,"completion":28}}`},
+					{run.EventToken, "pi"},
+					{run.EventStep, `{"type":"step","step":1,"kind":"tool","tool":"echo"}`},
+					{run.EventStep, `{"type":"step","step":2,"kind":"model","tokens":{"prompt":266,"completion":65}}`},
+					{run.EventStep, "plan-approved"},
+				} {
+					require.NoError(t, rs.AppendEvent(id, ev.kind, ev.data))
+				}
+			}
+			_, err := rs.Update("r-done", func(x *run.Run) error { return x.Transition(run.StatusSucceeded, time.Now()) })
+			require.NoError(t, err)
+
+			lf := fakeLangfuseAdapter{detailByID: map[string]TraceDetail{
+				"tr-done": taggedTrace("tr-done", agent.Namespace, agent.Name),
+				"tr-live": taggedTrace("tr-live", agent.Namespace, agent.Name),
+			}}
+			s := traceAuthzServer(t, "viewer@example.com", readsOnly(agent), rs, lf)
+
+			var done TraceDetailResponse
+			rec := getTraceDetail(t, s, "tr-done")
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &done))
+			require.NotNil(t, done.Run)
+			assert.Equal(t, TraceRunSteps{RunID: "r-done", Status: "succeeded", EndedAt: done.Run.EndedAt, ModelSteps: 2, ToolSteps: 1}, *done.Run)
+			_, perr := time.Parse(time.RFC3339Nano, done.Run.EndedAt)
+			assert.NoError(t, perr, "a terminal run says when it ended")
+
+			var live TraceDetailResponse
+			rec = getTraceDetail(t, s, "tr-live")
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &live))
+			require.NotNil(t, live.Run)
+			assert.Equal(t, TraceRunSteps{RunID: "r-live", Status: "running"}, *live.Run,
+				"a live run's log is still growing, so it reports no counts and no end")
+		})
+	}
 }

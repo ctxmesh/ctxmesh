@@ -17,8 +17,10 @@ limitations under the License.
 package bff
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -114,4 +116,59 @@ func (s *Server) authorizeUnrecordedTrace(w http.ResponseWriter, r *http.Request
 		return nil, false
 	}
 	return &detail, true
+}
+
+// traceRunSteps summarizes the run that maps a trace so a reader can tell a complete trace from one whose
+// spans are still arriving: the trace backend ingests a run's generation and tool spans seconds after the
+// launcher's root span. Step counts are reported only once the run is terminal, because a live run's
+// event log is still growing and reading it would wait on the run.
+func (s *Server) traceRunSteps(ctx context.Context, rn *run.Run) *TraceRunSteps {
+	out := &TraceRunSteps{RunID: rn.ID, Status: string(rn.Status)}
+	if !rn.Status.IsTerminal() {
+		return out
+	}
+	out.EndedAt = rn.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	model, tool, err := s.countRecordedSteps(ctx, rn.ID)
+	if err != nil {
+		// Without the counts a reader falls back to watching the span set settle; the trace itself is
+		// still served.
+		s.log.Error(err, "trace detail: reading the run's step events failed", "run", rn.ID)
+		return out
+	}
+	out.ModelSteps, out.ToolSteps = model, tool
+	return out
+}
+
+// countRecordedSteps counts a terminal run's model and tool step frames (ADR 0071 §4). It reads until
+// the store closes the stream, which for a terminal run happens once the backlog is delivered. The
+// in-memory store closes early when a backlog overflows its buffer, so a very long run there can
+// under-count.
+func (s *Server) countRecordedSteps(ctx context.Context, runID string) (model, tool int, err error) {
+	events, cancel, err := s.runStore.Subscribe(runID, 0)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer cancel()
+	for {
+		select {
+		case <-ctx.Done():
+			return 0, 0, ctx.Err()
+		case ev, open := <-events:
+			if !open {
+				return model, tool, nil
+			}
+			if ev.Kind != run.EventStep {
+				continue
+			}
+			kind, _, ok := parseStepFrame(ev.Data)
+			if !ok {
+				continue
+			}
+			if kind == stepFrameKindModel {
+				model++
+			} else {
+				tool++
+			}
+		}
+	}
 }

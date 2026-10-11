@@ -791,6 +791,9 @@ func (s *Server) handleTraceDetail(w http.ResponseWriter, r *http.Request) {
 		Spans:      spans,
 		RootSpanID: detail.RootSpanID,
 	}
+	if access.run != nil {
+		resp.Run = s.traceRunSteps(r.Context(), access.run)
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
