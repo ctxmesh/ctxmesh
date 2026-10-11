@@ -322,3 +322,100 @@ func TestAgentDependenciesNoneIsEmptyList(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	assert.Empty(t, detailDeps(t, c))
 }
+
+// deniedErr is the API server's answer to a read the caller's RBAC does not allow.
+func deniedErr(group, resource string) error {
+	return apierrors.NewForbidden(schema.GroupResource{Group: group, Resource: resource}, "", errors.New("denied"))
+}
+
+// boundSecretBinding is a kubernetes-backed SecretBinding naming Secret "openai", key "api-key".
+func boundSecretBinding() *agentsv1alpha1.SecretBinding {
+	return &agentsv1alpha1.SecretBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "openai-key", Namespace: detailNS},
+		Spec:       agentsv1alpha1.SecretBindingSpec{SecretRef: agentsv1alpha1.SecretKeyRef{Name: "openai", Key: "api-key"}},
+	}
+}
+
+// TestAgentDependenciesSecretForbiddenIsUnknown proves a Secret the caller may not read leaves the
+// secret binding unknown: a denial is not evidence that the Secret is missing.
+func TestAgentDependenciesSecretForbiddenIsUnknown(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(depsAgent(), servedRoute("openai-key"), boundSecretBinding()).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.Secret); ok {
+					return deniedErr("", "secrets")
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+
+	sb := depsByKind(t, detailDeps(t, c), depKindSecretBinding)
+	require.Len(t, sb, 1)
+	assert.Equal(t, depUnknown, sb[0].State, "a denied Secret read is not a missing Secret")
+	assert.Equal(t, "SecretUnreadable", sb[0].Reason)
+}
+
+// TestAgentDependenciesSecretAbsentOrKeyless proves a Secret that does not exist, or exists without
+// the named key, makes the binding notReady: those are answers, not failed reads.
+func TestAgentDependenciesSecretAbsentOrKeyless(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		objects []client.Object
+	}{
+		{name: "secret absent"},
+		{name: "key absent", objects: []client.Object{&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "openai", Namespace: detailNS},
+			Data:       map[string][]byte{"other-key": []byte("x")},
+		}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := append([]client.Object{depsAgent(), servedRoute("openai-key"), boundSecretBinding()}, tc.objects...)
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+
+			sb := depsByKind(t, detailDeps(t, c), depKindSecretBinding)
+			require.Len(t, sb, 1)
+			assert.Equal(t, depNotReady, sb[0].State)
+			assert.Equal(t, "SecretUnresolved", sb[0].Reason)
+			assert.Contains(t, sb[0].Message, `"openai"`)
+		})
+	}
+}
+
+// routeDeniedClient serves the agent but refuses every ModelRoute read, as RBAC does for a caller
+// who may read agents and not routes.
+func routeDeniedClient(t *testing.T, ad *agentsv1alpha1.AgentDeployment) client.Client {
+	t.Helper()
+	return fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*agentsv1alpha1.ModelRoute); ok {
+					return deniedErr("agents.ctxmesh.ai", "modelroutes")
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+}
+
+// TestAgentDependenciesRouteForbiddenWithoutConditionIsUnknown proves a route the caller may not
+// read, with no controller condition to stand in for it, is unknown: never missing.
+func TestAgentDependenciesRouteForbiddenWithoutConditionIsUnknown(t *testing.T) {
+	r := depsByKind(t, detailDeps(t, routeDeniedClient(t, depsAgent())), depKindModelRoute)
+	require.Len(t, r, 1)
+	assert.Equal(t, depUnknown, r[0].State, "a denied route read is not a missing route")
+	assert.Equal(t, "Forbidden", r[0].Reason)
+}
+
+// TestAgentDependenciesRouteForbiddenRouteNotFoundIsMissing proves that when the caller may not read
+// the route, the controller's own RouteNotFound (it reads with its identity) is reported as missing.
+func TestAgentDependenciesRouteForbiddenRouteNotFoundIsMissing(t *testing.T) {
+	ad := depsAgent()
+	ad.Status.Conditions = []metav1.Condition{
+		cond("ModelRouteReady", metav1.ConditionFalse, "RouteNotFound", `MODEL_ROUTE names "chat", and there is no ModelRoute of that name`),
+	}
+	r := depsByKind(t, detailDeps(t, routeDeniedClient(t, ad)), depKindModelRoute)
+	require.Len(t, r, 1)
+	assert.Equal(t, depMissing, r[0].State)
+	assert.Equal(t, "RouteNotFound", r[0].Reason)
+	assert.Contains(t, r[0].Message, "no ModelRoute of that name")
+}
