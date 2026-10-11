@@ -25,7 +25,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
-	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 // feedbackUnattributed labels a score whose name the agent's spec.feedback does not declare. Its raw
@@ -126,8 +125,8 @@ func feedbackSourceByName(spec *agentsv1beta1.FeedbackSpec) map[string]string {
 // declaration's name→source map IS the attribution. Best-effort: no declaration, or an unreadable agent,
 // leaves scores unattributed (the raw data still returns). An undeclared name under a declaration is
 // labelled "unattributed".
-func (s *Server) attributeFeedback(r *http.Request, caller client.Client, rn *run.Run, scores []FeedbackScore) {
-	spec, err := s.agentFeedbackSpec(r, caller, rn.Namespace, rn.Agent)
+func (s *Server) attributeFeedback(r *http.Request, caller client.Client, ns, agentName string, scores []FeedbackScore) {
+	spec, err := s.agentFeedbackSpec(r, caller, ns, agentName)
 	if err != nil || spec == nil {
 		return
 	}

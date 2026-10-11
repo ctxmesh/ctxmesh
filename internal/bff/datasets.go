@@ -423,10 +423,11 @@ type FromRunResponse struct {
 // AppendCase, and returns the new case id.
 //
 // Honest degrade (501) when the dataset store or the Langfuse adapter is unconfigured. 400 on a missing
-// traceId. Caller-scoped (ADR 0011): the caller must authenticate; the identity is used as the label author
-// for the initial case (not the label row — that comes from a subsequent label append).
+// traceId. The trace is read only after authorizeTraceRead proves the caller may read it (ADR 0078): the
+// case it seeds is the trace's own input and output.
 func (s *Server) handleFromRun(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.callerClient(w, r); !ok {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
 		return
 	}
 	if s.datasetStore == nil || s.adapters.Langfuse == nil {
@@ -459,12 +460,21 @@ func (s *Server) handleFromRun(w http.ResponseWriter, r *http.Request) {
 	}
 	traceID := strings.TrimSpace(req.TraceID)
 
-	// Fetch the trace's detail from Langfuse.
-	detail, err := s.adapters.Langfuse.TraceDetail(r.Context(), traceID)
-	if err != nil {
-		s.log.Error(err, "from-run: fetch trace detail", "trace", traceID)
-		writeError(w, http.StatusBadGateway, "failed to fetch trace from Langfuse: "+err.Error())
+	access, ok := s.authorizeTraceRead(w, r, caller, traceID)
+	if !ok {
 		return
+	}
+	var detail TraceDetail
+	if access.detail != nil {
+		detail = *access.detail
+	} else {
+		d, err := s.adapters.Langfuse.TraceDetail(r.Context(), traceID)
+		if err != nil {
+			s.log.Error(err, "from-run: fetch trace detail", "trace", traceID)
+			writeError(w, http.StatusBadGateway, "failed to fetch trace from Langfuse: "+err.Error())
+			return
+		}
+		detail = d
 	}
 
 	// REDACT (the same helper the export executor uses — parity of the case shape, ADR 0062 Fork 1 PII P1).

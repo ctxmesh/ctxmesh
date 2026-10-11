@@ -757,36 +757,41 @@ func (s *Server) handleTraceDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing trace id")
 		return
 	}
-	// Caller-scoped authz (ADR 0011): a trace carries the full span I/O (prompts + model answers), so a
-	// trace id must not be a cross-tenant read oracle. Resolve trace→run→agent and prove the caller can
-	// read that agent through their OWN RBAC before serving. 403 on denial; 404 when no run maps the trace.
-	if _, ok := s.authorizeRunAccess(w, r, caller, id, true); !ok {
+	// Caller-scoped authz (ADR 0078): a trace carries the full span I/O (prompts + model answers), so a
+	// trace id must not be a cross-tenant read oracle.
+	access, ok := s.authorizeTraceRead(w, r, caller, id)
+	if !ok {
 		return
 	}
-	detail, err := s.adapters.Langfuse.TraceDetail(r.Context(), id)
-	if err != nil {
-		if errors.Is(err, ErrTraceNotFound) {
-			// The caller already proved a run maps this trace, so the id is real and theirs; the
-			// spans have not arrived. Still 404 (there is no representation to serve, and changing
-			// the status would break every shipped SDK), but the code says which 404 it is.
-			writeErrorCode(w, http.StatusNotFound, errCodeTracePending,
-				"trace not recorded yet — the agent's spans have not reached the trace backend")
+	detail := access.detail
+	if detail == nil {
+		d, err := s.adapters.Langfuse.TraceDetail(r.Context(), id)
+		if err != nil {
+			if errors.Is(err, ErrTraceNotFound) {
+				// A run maps this trace and the caller may read it, so the id is real and theirs; the
+				// spans have not arrived. Still 404 (there is no representation to serve, and changing
+				// the status would break every shipped SDK), but the code says which 404 it is.
+				writeErrorCode(w, http.StatusNotFound, errCodeTracePending,
+					"trace not recorded yet — the agent's spans have not reached the trace backend")
+				return
+			}
+			s.log.Error(err, "fetch trace detail failed", "traceID", id)
+			writeError(w, http.StatusBadGateway, "failed to fetch trace detail")
 			return
 		}
-		s.log.Error(err, "fetch trace detail failed", "traceID", id)
-		writeError(w, http.StatusBadGateway, "failed to fetch trace detail")
-		return
+		detail = &d
 	}
 	// Non-nil slice so the JSON is [] rather than null for a trace with no spans.
 	spans := detail.Spans
 	if spans == nil {
 		spans = []SpanSummary{}
 	}
-	writeJSON(w, http.StatusOK, TraceDetailResponse{
+	resp := TraceDetailResponse{
 		Rollup:     detail.Rollup,
 		Spans:      spans,
 		RootSpanID: detail.RootSpanID,
-	})
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleFeedback serves GET /api/feedback?traceId=<id> — the feedback panel's
@@ -813,9 +818,8 @@ func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing required query param: traceId")
 		return
 	}
-	// Caller-scoped authz (ADR 0011): scores hang off a trace, so gate them the same as the trace detail —
-	// resolve trace→run→agent and prove the caller can read that agent through their own RBAC.
-	rn, ok := s.authorizeRunAccess(w, r, caller, traceID, true)
+	// Scores hang off a trace, so they are gated exactly as the trace detail is (ADR 0078).
+	access, ok := s.authorizeTraceRead(w, r, caller, traceID)
 	if !ok {
 		return
 	}
@@ -831,7 +835,8 @@ func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	}
 	// Attribute each score to the source the agent's spec.feedback declares, if any (ADR 0152).
 	// Best-effort: no declaration, or an unreadable agent, leaves scores unattributed (the raw data still returns).
-	s.attributeFeedback(r, caller, rn, scores)
+	agentNs, agentName := access.agent()
+	s.attributeFeedback(r, caller, agentNs, agentName, scores)
 	writeJSON(w, http.StatusOK, FeedbackResponse{Scores: scores})
 }
 
