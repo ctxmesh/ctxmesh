@@ -327,6 +327,11 @@ jobs:
       # minutes exhausted once (m52.G3). Carded for M150.
       - name: Install-truth gate (the chart provisions what it consumes)
         run: ./hack/install-truth.sh
+      # The agents route reaches tenants' containers at agent hostnames, which the console's MCP
+      # consent page trusts as openers (ADR 0040 amendment), so the edge must sandbox what they
+      # return. Also lints deploy/edge, which nothing else did.
+      - name: Edge truth (the agents route is sandboxed)
+        run: ./hack/edge-truth.sh
       # M178 — an operator could not size ANY part of this install: 31 limits/requests blocks
       # hardcoded across the chart, none reachable from values, while the same templates read
       # .Values 219 times for everything else. The templates are fixed; this guards the NEXT

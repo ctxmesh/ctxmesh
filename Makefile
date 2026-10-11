@@ -503,6 +503,10 @@ chart-resources-tunable: ## Assert no container's resources are baked into a tem
 install-truth: ## Assert the chart provisions what it consumes (M148). Render-only, no cluster.
 	./hack/install-truth.sh
 
+.PHONY: edge-truth
+edge-truth: ## Lint the platform-edge chart and assert its agents route is sandboxed (ADR 0040). Render-only, no cluster.
+	./hack/edge-truth.sh
+
 .PHONY: helm-verify
 helm-verify: manifests kustomize ## Prove the Helm chart does not drift from `kustomize build config/default` (no-drift gate).
 	@set -e; \

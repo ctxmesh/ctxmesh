@@ -34,7 +34,8 @@ dns:
 # mints the run capability (OBO) for that user + the agent's boundary, and returns it in a header Envoy
 # injects UPSTREAM — so a token-authenticated hit to an agent URL gets the SAME OBO the console front
 # door does, and the agent still only RELAYS the capability (never forges it). Off ⇒ agent URLs stay
-# unauthenticated with no OBO (the pre-ADR-0039 behaviour). The auth service is the BFF itself — it
+# unauthenticated with no OBO (the pre-ADR-0039 behaviour); either way their responses are sandboxed
+# (Content-Security-Policy: sandbox), see agent-routes.yaml. The auth service is the BFF itself — it
 # already owns token verification, identity resolution, boundary computation, and the signing key.
 extAuth:
   enabled: true
@@ -66,7 +67,8 @@ routes:
 # namespace-scoped domain) serves BOTH the machine invoke endpoint AND the browser chatbox, split by
 # path across two HTTPRoutes on the same wildcard host:
 #   `invokePath` (/invoke) → the agent, THROUGH Kourier by Host (Knative keeps its own routing — the
-#                            edge stays additive), guarded by the ext-auth SecurityPolicy (OBO).
+#                            edge stays additive), guarded by the ext-auth SecurityPolicy (OBO), its
+#                            responses sandboxed so no agent serves a document at its hostname.
 #   everything else        → the BFF: the single-agent chatbox SPA + /api/* (login, invoke, MCP
 #                            consent). The app route sets `chatboxHeader` so the BFF pins the SPA to
 #                            the host's agent; NO ext-auth here — the SPA self-authenticates.

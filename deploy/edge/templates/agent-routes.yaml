@@ -1,7 +1,8 @@
 {{- with .Values.agentEdge }}
 # The agent edge (m37.3): each agent's own hostname serves the machine invoke endpoint AND the browser
 # chatbox, split by path. This route is /invoke → the agent THROUGH Kourier by Host — guarded by the
-# ext-auth SecurityPolicy (ADR 0039). Named "agents" so the SecurityPolicy targetRef stays stable.
+# ext-auth SecurityPolicy (ADR 0039) and sandboxed on the way out. Named "agents" so the
+# SecurityPolicy targetRef stays stable.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -28,6 +29,18 @@ spec:
           requestHeaderModifier:
             remove:
               - Authorization
+        # The tenant's container answers here, at an agent hostname, so nothing it returns may be a
+        # document with that origin: the console's consent page trusts an opener at an agent
+        # hostname (ADR 0040 amendment). A sandboxed document has an opaque origin and runs no
+        # script. `set` replaces whatever the agent sent. Callers read /invoke with fetch or SSE,
+        # which a response CSP does not affect. Never on agents-app: the chatbox needs its scripts.
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: Content-Security-Policy
+                value: sandbox
+              - name: X-Content-Type-Options
+                value: nosniff
       backendRefs:
         - name: {{ .agent.service }}
           port: {{ .agent.port }}
