@@ -74,8 +74,9 @@ message; the page shows whose account it is connecting, for which server and age
 the connection on the console, in the same browser, when you press Continue. The console accepts
 a ticket only from the hostname of the agent it was issued for, and never from a link. Pop-ups
 must be allowed for the agent's address. This works with the edge's `baseDomain: localhost` too:
-a single-label base domain that is not an ICANN suffix (`localhost`, `internal`, `corp`) is where
-the agents live, not a public suffix.
+a base domain that can never be delegated (`localhost`, `internal`, `test`, `invalid`, `example`,
+`local`) is where the agents live, not a public suffix. Any other single label is treated as a
+public suffix, so a console at `console.corp` has its agents under `console.corp`.
 
 **Security: an agent could serve a page at its own address and finish a visitor's OAuth consent
 as its author.** The console's consent page trusts a page at an agent's hostname, and with the

@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -294,11 +295,12 @@ func (s *Server) consentOpenerAllowed(opener, agent, ns string) (string, bool) {
 // <agent>.<ns>.<baseDomain> (deploy/edge), so the base is the console host minus its first label,
 // and it must match exactly: a page under any other domain, or a deeper subdomain of the base, is
 // not one the platform serves. A console at the apex of a registrable domain (its parent is a
-// public suffix) has agents directly under itself. A single-label parent that is not on the ICANN
-// list (localhost, internal, corp) is a private base domain, not a public suffix, even though the
-// list's default rule returns it as one. A loopback console has agent hostnames that resolve to
-// loopback by construction: <ip>.sslip.io or <ip>.nip.io for a loopback IPv4, or localhost. A
-// console at any other IP names no agent domain.
+// public suffix) has agents directly under itself. Only a name that can never be delegated
+// (isReservedBaseDomain) is a private base domain when the list returns it by its default rule; any
+// other single label is taken as a public suffix, since it may be a TLD newer than the vendored list
+// under which a third party could register <ns>.<tld>. A loopback console has agent hostnames that
+// resolve to loopback by construction: <ip>.sslip.io or <ip>.nip.io for a loopback IPv4, or
+// localhost. A console at any other IP names no agent domain.
 func agentHostBaseAllows(consoleHost, rest string) bool {
 	if consoleHost == hostLocalhost {
 		return loopbackAgentBase(rest)
@@ -308,13 +310,20 @@ func agentHostBaseAllows(consoleHost, rest string) bool {
 	}
 	base := consoleHost
 	if _, parent, found := strings.Cut(consoleHost, "."); found {
-		suffix, icann := publicsuffix.PublicSuffix(parent)
-		parentIsPublicSuffix := suffix == parent && (icann || strings.Contains(parent, "."))
-		if !parentIsPublicSuffix {
+		if suffix, _ := publicsuffix.PublicSuffix(parent); suffix != parent || isReservedBaseDomain(parent) {
 			base = parent
 		}
 	}
 	return rest == base
+}
+
+// reservedBaseDomainNames are single-label names reserved from delegation (RFC 6761 localhost,
+// test, invalid and example; RFC 6762 local; ICANN's internal), so nobody outside the install can
+// register a name under them and a console at console.<name> has its agents under <name>.
+const reservedBaseDomainNames = "localhost internal test invalid example local"
+
+func isReservedBaseDomain(name string) bool {
+	return slices.Contains(strings.Fields(reservedBaseDomainNames), name)
 }
 
 // loopbackAgentBase reports whether rest resolves to a loopback address by construction.

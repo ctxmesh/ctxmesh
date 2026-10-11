@@ -566,8 +566,8 @@ func TestConsentOpenerAllowed(t *testing.T) {
 			allow:   []string{"http://helper.prod.localhost", "http://helper.prod.127.0.0.1.sslip.io"},
 			refuse:  []string{"http://helper.prod.evil.com", "http://helper.prod.1"},
 		},
-		// A single-label base domain off the ICANN list is private: the public-suffix list's
-		// default rule returns it, but agents live under it, not under the console.
+		// A reserved single label (never delegated) is a private base domain: the public-suffix
+		// list's default rule returns it, but agents live under it, not under the console.
 		{
 			console: "http://console.localhost:9090",
 			allow:   []string{"http://helper.prod.localhost:9090", "http://helper.prod.localhost"},
@@ -581,10 +581,28 @@ func TestConsentOpenerAllowed(t *testing.T) {
 			allow:   []string{"https://helper.prod.internal"},
 			refuse:  []string{"https://helper.prod.console.internal", "https://helper.prod.evil.internal"},
 		},
+		{console: "https://console.test", allow: []string{"https://helper.prod.test"}},
+		{console: "https://console.example", allow: []string{"https://helper.prod.example"}},
+		{console: "https://console.invalid", allow: []string{"https://helper.prod.invalid"}},
+		{console: "https://console.local", allow: []string{"https://helper.prod.local"}},
+		// Any other single label the list returns only by its default rule may be a TLD newer than
+		// the vendored list, where a third party could register prod.<tld>. So it is a public
+		// suffix: console.corp and acme.corp are registrable apexes with their agents under
+		// themselves, as is a console under an unlisted TLD.
 		{
 			console: "https://console.corp",
-			allow:   []string{"https://helper.prod.corp"},
-			refuse:  []string{"https://helper.prod.console.corp"},
+			allow:   []string{"https://helper.prod.console.corp"},
+			refuse:  []string{"https://helper.prod.corp"},
+		},
+		{
+			console: "https://acme.corp",
+			allow:   []string{"https://helper.prod.acme.corp"},
+			refuse:  []string{"https://helper.prod.corp"},
+		},
+		{
+			console: "https://console.newgtld",
+			allow:   []string{"https://helper.prod.console.newgtld"},
+			refuse:  []string{"https://helper.prod.newgtld"},
 		},
 		{
 			console: "https://console.example.com",
