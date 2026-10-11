@@ -217,8 +217,8 @@ func TestToolRegistryIndex_FromStore(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// the store path.
-	idx := toolRegistryIndex(ctx, store, trNS)
+	// the store path, as the server's owner.
+	idx := toolRegistryIndex(ctx, store, trNS, "owner-hash")
 	loc, ok := idx["create_organization"]
 	require.True(t, ok)
 	assert.Equal(t, "scalekit-mcp-server", loc.registry)
@@ -226,6 +226,10 @@ func TestToolRegistryIndex_FromStore(t *testing.T) {
 	assert.Equal(t, "personal", loc.scope)
 	assert.Equal(t, "owner-hash", loc.owner)
 
+	// Another user cannot use the owner's personal server, so it is not indexed for them.
+	assert.Empty(t, toolRegistryIndex(ctx, store, trNS, "someone-else"))
+	assert.Empty(t, toolRegistryIndex(ctx, store, trNS, ""))
+
 	// A namespace with no registries → empty (not nil-panic).
-	assert.Empty(t, toolRegistryIndex(ctx, store, "other-ns"))
+	assert.Empty(t, toolRegistryIndex(ctx, store, "other-ns", "owner-hash"))
 }

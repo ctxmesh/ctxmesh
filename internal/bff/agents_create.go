@@ -167,7 +167,7 @@ func createAgentFromYAML(
 	// BYO-MCP tools live in per-server registries (e.g. "scalekit-mcp-server"), so the
 	// default reference is RegistryNotFound and the binding never goes Ready. Best-
 	// effort: a tool not found in any registry keeps expand's default.
-	idx := toolRegistryIndex(ctx, regStore, ns)
+	idx := toolRegistryIndex(ctx, regStore, ns, callerOwner)
 	rewriteBindingRegistries(objs, idx)
 	// Bind-time owner guard (ADR 0029 edge case): a personal MCP server may be bound to an
 	// agent ONLY by its owner — so a non-owner never gets a mid-run consent CTA for a server
@@ -411,11 +411,13 @@ type toolLoc struct {
 // toolRegistryIndex lists the namespace's ToolRegistries from the Postgres store
 // (ToolRegistry is retired as a CRD, ADR 0044) and maps each tool NAME to its
 // registry + pinned URL/image, so a generated MCPToolBinding can reference the
-// registry the tool actually lives in AND the pin it must use. Registries are
-// sorted by name so a tool present in more than one resolves deterministically
-// (first wins). A nil store or a list error → nil map (the caller keeps expand's
-// default rather than failing the create).
-func toolRegistryIndex(ctx context.Context, store toolregistry.Store, ns string) map[string]toolLoc {
+// registry the tool actually lives in AND the pin it must use. Only registries the
+// caller (callerOwner, their userGrantHash) may use are indexed: another user's
+// private server is skipped, so it can neither be bound nor shadow a server the
+// caller can use. Registries are sorted by name so a tool present in more than one
+// resolves deterministically (first wins). A nil store or a list error → nil map
+// (the caller keeps expand's default rather than failing the create).
+func toolRegistryIndex(ctx context.Context, store toolregistry.Store, ns, callerOwner string) map[string]toolLoc {
 	if store == nil {
 		return nil
 	}
@@ -439,6 +441,9 @@ func toolRegistryIndex(ctx context.Context, store toolregistry.Store, ns string)
 	})
 	idx := make(map[string]toolLoc)
 	for i := range regs {
+		if !mcpScopeVisibleTo(storeToolRegistryToCRD(&regs[i]), callerOwner) {
+			continue
+		}
 		for _, t := range regs[i].Tools {
 			if _, seen := idx[t.Name]; !seen {
 				idx[t.Name] = toolLoc{

@@ -249,6 +249,31 @@ func TestForkRefClosure_NonPublishedTool_Flags(t *testing.T) {
 	assert.Equal(t, "true", forked.Labels[labelForkNeedsRebinding])
 }
 
+// TestForkRefClosure_ToolOnlyOnAnotherUsersPrivateServer_Flags: a tool that only another user's
+// private server in the target namespace offers is not resolvable for the forker — the create
+// cannot bind it — so it is flagged, not treated as already local.
+func TestForkRefClosure_ToolOnlyOnAnotherUsersPrivateServer_Flags(t *testing.T) {
+	art := publishedartifact.NewMemStore()
+	publishRefArt(t, art, "author-ns", `{"name":"assistant","runtime":"managed","tools":["mystery-tool"]}`)
+	tools := toolregistry.NewMemStore()
+	_, err := tools.Upsert(context.Background(), toolregistry.ToolRegistry{
+		Namespace: forkCallerNS, Name: "bob-private",
+		Tools: []toolregistry.ToolEntry{{Name: "mystery-tool", URL: "https://bob.example/mcp"}},
+		Labels: map[string]string{
+			labelManagedBy: managedByMCP, labelMCPScope: scopePersonal, labelMCPOwner: userGrantHash("user:bob"),
+			labelMCPVisibility: visibilityPrivate, labelMCPCredentialSource: credSourceByoOAuth,
+		},
+	})
+	require.NoError(t, err)
+	s, _ := newRefClosureServer(t, art, namespacetenant.NewMemStore(), tools)
+
+	rec := doFork(t, s, "author-ns", "assistant", ForkAgentRequest{Name: "local", Namespace: forkCallerNS})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	var resp ForkAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Contains(t, resp.NeedsRebinding, "tool: mystery-tool")
+}
+
 // TestForkRefClosure_AmbiguousTool_Flags: a tool offered by MORE THAN ONE discoverable published
 // server is ambiguous — the mapping is not cleanly determinable, so it is flagged rather than
 // materializing an arbitrary one (an honest flag beats a wrong materialize).

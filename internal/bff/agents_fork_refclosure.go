@@ -246,7 +246,13 @@ func (s *Server) closeToolRefs(r *http.Request, caller client.Client, tools []st
 	// tool name a locally-registered ToolRegistry offers → its registry (the same index the
 	// create path uses to bind tools). A nil index (no store / read error) → empty map, so every
 	// tool is treated as absent and routed through the published-catalog lookup below.
-	localIdx := toolRegistryIndex(ctx, s.toolRegistryStore, callerNS)
+	// Scoped to the servers THIS caller may use — the create path binds from the same view,
+	// so a tool only another user's private server offers is not "already resolvable" here.
+	callerOwner := ""
+	if username, uErr := callerUsername(ctx, caller); uErr == nil {
+		callerOwner = userGrantHash(username)
+	}
+	localIdx := toolRegistryIndex(ctx, s.toolRegistryStore, callerNS, callerOwner)
 
 	// The published-catalog origin index (tool name → the published server that offers it),
 	// scoped to what THIS caller may discover. Built once (one catalog read) for all tools.

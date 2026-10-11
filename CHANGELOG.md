@@ -47,6 +47,13 @@ something else. Both now treat `TOOL` as a tool, and the run inspector opens on 
 tool call reports no token usage of its own, so it shows no Tokens row; the model call that made
 it does.
 
+**Fixed: another user's private MCP server could block or capture your agent's tools.** Creating
+an agent bound each tool to the first registered server offering it, by name, whoever owned it.
+When that was another user's private server, the create was refused with "tool is on a personal
+MCP server you do not own" even though a shared server offered the same tool; an edit silently
+re-pointed the tool at the private server. Create, edit and fork now consider only the servers
+you can use, and an edit applies the same owner check as a create.
+
 **Fixed: every agent run was cut off at five minutes.** Knative's default request timeout is 300
 seconds, and the platform never set one, while a run may take 600. A run that sends nothing until
 it is done also hit Knative's separate time-to-first-byte limit at the same 300 seconds. Every
