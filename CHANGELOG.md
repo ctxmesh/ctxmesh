@@ -107,7 +107,8 @@ any other failure is a 500 and is logged.
 KnowledgeBase and starting its ingestion checked only that the caller could read it, so the shipped
 `viewer` role could add documents to a corpus other people's agents retrieve from, and start
 ingestions that spend the embedder. Both now need `update` on that KnowledgeBase (403 otherwise),
-checked before it is read; the `developer` and `operator` roles have it.
+checked before it is read; the `developer` and `operator` roles have it. The console no longer offers Upload or Ingest to a caller without it, and
+says why.
 
 **Security: anyone who could read an agent named like a knowledge base could read or cancel its
 ingestion.** An ingestion run was created without a creator, so the person who started one got a

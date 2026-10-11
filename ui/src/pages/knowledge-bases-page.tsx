@@ -40,6 +40,8 @@ import {
   type KBDetail,
   type KBSearchHit,
 } from "@/lib/api";
+import { useCapabilities } from "@/lib/capabilities";
+import { RES_KNOWLEDGEBASES } from "@/lib/nav";
 
 // KnowledgeBasesPage — the KnowledgeBase CR list surface (m68.13, ADR 0061;
 // re-housed on the editorial system in M151 as archetype A1).
@@ -498,6 +500,16 @@ type SearchState =
 //   query-hit-{i}         — one result hit row (0-indexed)
 //   query-unavailable     — the 501 calm state
 
+/** Why a reader sees no Upload or Ingest: both need update on the knowledge base. */
+function ReadOnlyNote({ testId }: { testId: string }) {
+  return (
+    <p className="text-sm text-secondary-foreground" data-testid={testId}>
+      You can read this knowledge base but not change it: adding documents and starting an
+      ingestion need update on it. Ask whoever runs this workspace for that role.
+    </p>
+  );
+}
+
 export function KBDetailPage() {
   // No `useNavigate` here any more: the way back is the PageHeader breadcrumb,
   // which is a real link (right-clickable, middle-clickable) rather than a
@@ -513,6 +525,10 @@ export function KBDetailPage() {
   const [queryTopK, setQueryTopK] = useState(5);
   const [searchState, setSearchState] = useState<SearchState>({ kind: "idle" });
   const abortRef = useRef<AbortController | null>(null);
+  // Adding a document and starting an ingestion change the corpus, which takes update on the
+  // KnowledgeBase. Display-only: the API refuses the caller without it (ADR 0011).
+  const { can } = useCapabilities();
+  const canWrite = can(RES_KNOWLEDGEBASES, "update");
 
   const load = useCallback(() => {
     if (!ns || !name) return;
@@ -742,26 +758,30 @@ export function KBDetailPage() {
                 not searchable until an ingestion chunks, embeds and indexes it —
                 that is the next panel, and it is a separate step on purpose.
               </p>
-              <div className="flex flex-wrap items-center gap-3">
-                <Input
-                  type="file"
-                  data-testid="upload-input"
-                  className="max-w-sm"
-                  onChange={(e) => {
-                    setUploadFile(e.target.files?.[0] ?? null);
-                    setUploadState({ kind: "idle" });
-                  }}
-                  disabled={uploadState.kind === "uploading"}
-                />
-                <Button
-                  data-testid="upload-submit"
-                  onClick={() => void onUpload()}
-                  disabled={!uploadFile || uploadState.kind === "uploading"}
-                >
-                  <Upload className="h-4 w-4" />
-                  {uploadState.kind === "uploading" ? "Uploading…" : "Upload"}
-                </Button>
-              </div>
+              {canWrite ? (
+                <div className="flex flex-wrap items-center gap-3">
+                  <Input
+                    type="file"
+                    data-testid="upload-input"
+                    className="max-w-sm"
+                    onChange={(e) => {
+                      setUploadFile(e.target.files?.[0] ?? null);
+                      setUploadState({ kind: "idle" });
+                    }}
+                    disabled={uploadState.kind === "uploading"}
+                  />
+                  <Button
+                    data-testid="upload-submit"
+                    onClick={() => void onUpload()}
+                    disabled={!uploadFile || uploadState.kind === "uploading"}
+                  >
+                    <Upload className="h-4 w-4" />
+                    {uploadState.kind === "uploading" ? "Uploading…" : "Upload"}
+                  </Button>
+                </div>
+              ) : (
+                <ReadOnlyNote testId="kb-upload-read-only" />
+              )}
               {uploadState.kind === "success" && (
                 <p className="text-sm text-success" data-testid="upload-result">
                   Uploaded:{" "}
@@ -808,14 +828,18 @@ export function KBDetailPage() {
                   </QuietNote>
                 </div>
               )}
-              <Button
-                data-testid="ingest-button"
-                onClick={() => void onIngest()}
-                disabled={ingestState.kind === "running"}
-              >
-                <Play className="h-4 w-4" />
-                {ingestState.kind === "running" ? "Starting…" : "Start ingestion"}
-              </Button>
+              {canWrite ? (
+                <Button
+                  data-testid="ingest-button"
+                  onClick={() => void onIngest()}
+                  disabled={ingestState.kind === "running"}
+                >
+                  <Play className="h-4 w-4" />
+                  {ingestState.kind === "running" ? "Starting…" : "Start ingestion"}
+                </Button>
+              ) : (
+                <ReadOnlyNote testId="kb-ingest-read-only" />
+              )}
               {ingestState.kind === "success" && (
                 <p className="text-sm text-success" data-testid="ingest-result">
                   Ingestion run started:{" "}
