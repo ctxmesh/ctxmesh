@@ -43,7 +43,7 @@ const (
 	// flip a gate at awaiting-promotion → promoted for THAT candidate only. A later
 	// candidate (new revision) re-gates (audit FUNC-4 — a bare "true" no longer permanently
 	// auto-promotes every future passing revision). v1 promotion is human-gated: a passing
-	// score does NOT auto-promote. Auto-promotion/rollback are phase 2.
+	// score does NOT auto-promote. A rollback clears it when it names the version rolled back from.
 	promoteAnnotation = "agents.ctxmesh.ai/promote"
 
 	// warnAnnotation records that a below-threshold candidate was promoted under

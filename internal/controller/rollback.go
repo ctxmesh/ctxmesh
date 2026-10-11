@@ -422,7 +422,8 @@ func (r *AgentDeploymentReconciler) priorVersionOf(
 }
 
 // actuateRollback reverts the AgentDeployment spec to the target version's snapshot, records
-// the rollback on status.rollback, and clears the rollback annotation so it fires once. The
+// the rollback on status.rollback, and clears the rollback annotation so it fires once, along with
+// a promote annotation that approves the version being rolled back from. The
 // spec Update is an ordinary object mutation → captured by the existing Auditor (no new audit
 // path). It re-fetches before each write to avoid a stale-object conflict, and orders the
 // writes so a crash between them is self-healing: annotation-clear + spec-revert first (a
@@ -474,10 +475,14 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 
 	// Revert the serving spec and clear the annotation in the SAME object Update, so the rollback
 	// fires exactly once (the ordinary reconcile then rolls the workload against the reverted spec —
-	// the actuator changes no Knative traffic itself).
+	// the actuator changes no Knative traffic itself). The approval of the version being left goes in
+	// the same write: kept, it would promote that version again the moment its spec is re-applied.
 	fresh.Spec = next
 	if fresh.Annotations != nil {
 		delete(fresh.Annotations, rollbackAnnotation)
+		if approvesVersion(fresh.Annotations[promoteAnnotation], fromVersion) {
+			delete(fresh.Annotations, promoteAnnotation)
+		}
 	}
 	if err := r.Update(ctx, &fresh); err != nil {
 		return false, fmt.Errorf("reverting spec to rollback target %q: %w", av.Name, err)
@@ -560,6 +565,13 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 	// The spec Update above re-enqueues the object; the next reconcile rolls the workload
 	// against the reverted spec. No requeue needed here.
 	return true, nil
+}
+
+// approvesVersion reports whether a promote annotation names a revision of version: "<version>" or
+// "<version>-h<digest>", whatever pod contract named it.
+func approvesVersion(promote, version string) bool {
+	p := strings.TrimSpace(promote)
+	return version != "" && (p == version || strings.HasPrefix(p, version+"-h"))
 }
 
 // rollbackBypass reports whether serveRollbackTarget serves this spec: it is the version the last

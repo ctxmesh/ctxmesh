@@ -1063,3 +1063,57 @@ func TestRollback_EditBackAfterRedeployIsGated(t *testing.T) {
 		})
 	}
 }
+
+// A rollback withdraws the approval of the version it rolls back from. Before, the promote annotation still
+// named that version's revision, so re-applying its spec promoted it at once: all traffic, no canary, no gate.
+func TestRollback_WithdrawsTheApprovalOfTheVersionItLeaves(t *testing.T) {
+	const namespace = "default"
+	canary := &agentsv1beta1.RolloutSpec{Strategy: rolloutStrategyCanary, CanaryPercent: 10}
+	autoCanary := &agentsv1beta1.RolloutSpec{
+		Strategy: rolloutStrategyCanary, CanaryPercent: 10,
+		AutoRollback: &agentsv1beta1.AutoRollbackConfig{Enabled: true},
+	}
+	for _, tc := range []struct {
+		name, agent string
+		rollout     *agentsv1beta1.RolloutSpec
+		auto        bool
+	}{
+		{"canary", "rb-unapprove-canary", canary, false},
+		{"gated", "rb-unapprove-gated", nil, false},
+		{"automatic rollback of a revision a person promoted", "rb-unapprove-auto", autoCanary, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			es := mkEvalSuite(t, tc.agent+"-suite", namespace, "0.7", eval.GateBlock)
+			r := gateReconciler(0.9)
+			r1, r2, v1, _ := promoteOver(t, r, tc.agent, namespace, es.Name, tc.rollout, tc.auto, nil)
+			require.Equal(t, r2, getDeploy(t, tc.agent, namespace).Annotations[promoteAnnotation])
+			if tc.auto {
+				setRegressionDetected(t, tc.agent, namespace, getDeploy(t, tc.agent, namespace).Status.LatestVersion)
+			} else {
+				annotateRollback(t, tc.agent, namespace, v1)
+			}
+			rollBack(t, r, tc.agent, namespace, v1, false)
+			_, approved := getDeploy(t, tc.agent, namespace).Annotations[promoteAnnotation]
+			assert.False(t, approved, "the approval of the version rolled back from is withdrawn")
+			reconcileNN(t, r, tc.agent, namespace)
+			require.Equal(t, r1, assertRollbackServes(t, tc.agent, namespace, v1))
+
+			// Re-applying the regressed version's spec is a change like any other.
+			upd := getDeploy(t, tc.agent, namespace)
+			upd.Spec.Port = 8090
+			require.NoError(t, k8sClient.Update(testCtx, upd))
+			reconcileNN(t, r, tc.agent, namespace)
+
+			d := getDeploy(t, tc.agent, namespace)
+			require.NotNil(t, d.Status.Gate)
+			assert.Equal(t, r2, d.Status.Gate.ScoredRevision)
+			if tc.rollout != nil {
+				assert.Equal(t, eval.PhaseCanary, d.Status.Gate.Phase)
+				assert.Equal(t, map[string]int64{r1: 90, r2: 10}, trafficMap(getKsvc(t, tc.agent, namespace)))
+			} else {
+				assert.Equal(t, eval.PhaseAwaitingPromotion, d.Status.Gate.Phase)
+				assert.Equal(t, map[string]int64{r1: 100}, trafficMap(getKsvc(t, tc.agent, namespace)))
+			}
+		})
+	}
+}

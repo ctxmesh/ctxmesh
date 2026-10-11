@@ -291,3 +291,26 @@ func TestRollbackBypass_WhileTargetServes(t *testing.T) {
 		})
 	}
 }
+
+// TestApprovesVersion: a rollback withdraws an approval of any revision of the version it leaves, whatever
+// pod contract named it, and no other.
+func TestApprovesVersion(t *testing.T) {
+	cases := []struct {
+		name, promote, version string
+		want                   bool
+	}{
+		{"a revision of the version", "a-1111aaaa-h2222bbbb", "a-1111aaaa", true},
+		{"the same pod under an older contract", "a-1111aaaa-h3333cccc", "a-1111aaaa", true},
+		{"a revision named by its version alone", "a-1111aaaa", "a-1111aaaa", true},
+		{"surrounding whitespace", " a-1111aaaa-h2222bbbb ", "a-1111aaaa", true},
+		{"another version", "a-4444dddd-h2222bbbb", "a-1111aaaa", false},
+		{"a legacy bare true", annotationTrue, "a-1111aaaa", false},
+		{"no approval", "", "a-1111aaaa", false},
+		{"no version recorded", "a-1111aaaa-h2222bbbb", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, approvesVersion(tc.promote, tc.version))
+		})
+	}
+}

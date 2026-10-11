@@ -183,6 +183,12 @@ the spec the rollback writes is served this way, and `status.rollback.revertedGe
 which one that is: any later spec change, including an edit back to the restored version after the
 version it replaced has been deployed again, canaries and gates as before.
 
+**Fixed: re-applying a version that was rolled back promoted it at once.** A rollback left the
+`agents.ctxmesh.ai/promote` annotation that approved the version it rolled back from, so applying
+that version's spec again promoted it immediately: all traffic, with no canary and no wait for
+approval. A rollback now removes a promote annotation that names a revision of the version it rolls
+back from, in the same write that reverts the spec.
+
 **Fixed: connecting a provider that was already connected failed with HTTP 400.** Every release
 updated the provider's SecretBinding and ModelRoute without a `resourceVersion`, which the API
 server refuses for a custom resource, so connecting a provider again to change its key or endpoint
