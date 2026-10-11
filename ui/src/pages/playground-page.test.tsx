@@ -1026,6 +1026,45 @@ describe("PlaygroundPage — plain-text chat by default (m184.15)", () => {
     expect(JSON.parse(createCall.body).namespace).toBe("team-b");
   });
 
+  // Picking another agent used to leave the previous agent's detail in place until the new read
+  // landed, so for that moment Send was offered (or held) on the strength of the wrong agent.
+  it("treats a newly picked agent as loading until its own detail is read", async () => {
+    recordingFetch({
+      agents: [
+        { name: "served", namespace: "prod" },
+        { name: "loading", namespace: "prod" },
+      ],
+      agentDetails: {
+        "prod/served": readyDetail("prod", "served"),
+        "prod/loading": readyDetail("prod", "loading", [
+          {
+            type: "ModelRouteReady",
+            status: "False",
+            reason: "NotYetServed",
+            message: "ModelRoute chat: not served yet",
+            lastTransitionTime: "",
+          },
+        ]),
+      },
+    });
+
+    renderPage("/playground?agent=served&ns=prod");
+    fireEvent.change(await screen.findByTestId("chat-input"), { target: { value: "hello" } });
+    expect(screen.getByTestId("chat-send")).toBeEnabled();
+    await waitFor(() =>
+      expect(screen.getByLabelText("Agent").querySelectorAll("option").length).toBeGreaterThan(2),
+    );
+
+    fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "loading" } });
+    // In the same render as the pick: no composer, so no Send carried over from "served".
+    expect(screen.queryByTestId("chat-send")).toBeNull();
+    expect(screen.getByTestId("playground-chat-loading")).toBeInTheDocument();
+
+    fireEvent.change(await screen.findByTestId("chat-input"), { target: { value: "hello" } });
+    expect(screen.getByTestId("chat-send")).toBeDisabled();
+    expect(screen.getByTestId("chat-route-note")).toHaveTextContent(/loading this agent's model/);
+  });
+
   // Under All workspaces one name can exist in several namespaces. The picker used to show it once
   // and run it in whichever namespace the list returned first.
   describe("one name in two workspaces", () => {

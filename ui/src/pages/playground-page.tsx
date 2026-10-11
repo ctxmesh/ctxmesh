@@ -355,15 +355,21 @@ function useChatAgent(
   name: string,
   enabled: boolean,
 ): { agent: ChatAgent; stopped: boolean; checkAgain: () => void } {
-  const [state, setState] = useState<ChatAgent>({ kind: "idle" });
-  const [stopped, setStopped] = useState(false);
+  // Every read is stored with the agent it is about. A read of the agent picked before is not an
+  // answer about this one, so between a pick and its first read the chat is loading: it never
+  // offers Send on the strength of the previous agent's detail.
+  const key = enabled && name ? `${ns}/${name}` : "";
+  const [state, setReadState] = useState<{ key: string; agent: ChatAgent }>({
+    key: "",
+    agent: { kind: "idle" },
+  });
+  const [stoppedKey, setStoppedKey] = useState("");
   const restartRef = useRef<(() => void) | null>(null);
   useEffect(() => {
+    if (!key) return;
+    const setState = (agent: ChatAgent) => setReadState({ key, agent });
+    const setStopped = (stopped: boolean) => setStoppedKey(stopped ? key : "");
     setStopped(false);
-    if (!enabled || !name) {
-      setState({ kind: "idle" });
-      return;
-    }
     const ctrl = new AbortController();
     let timer = 0;
     // Consecutive background re-reads that failed. Each one doubles the wait before the next.
@@ -427,9 +433,14 @@ function useChatAgent(
       window.clearTimeout(timer);
       restartRef.current = null;
     };
-  }, [ns, name, enabled]);
+  }, [key, ns, name]);
   const checkAgain = useCallback(() => restartRef.current?.(), []);
-  return { agent: state, stopped, checkAgain };
+  const agent: ChatAgent = !key
+    ? { kind: "idle" }
+    : state.key === key
+      ? state.agent
+      : { kind: "loading" };
+  return { agent, stopped: key !== "" && stoppedKey === key, checkAgain };
 }
 
 /** Why a name the picker lists in several namespaces cannot run until one is picked, or undefined. */
