@@ -229,6 +229,114 @@ func TestCanary_Split_PromoteAndAbort(t *testing.T) {
 	assert.False(t, stillSet, "the abort annotation is cleared after acting (fires once)")
 }
 
+// abortSecondCanary drives a canary-configured gated agent to an aborted canary: R1 promoted and
+// serving, then a spec change rolls R2, which splits and is aborted. It returns both revision names.
+func abortSecondCanary(t *testing.T, r *AgentDeploymentReconciler, name, namespace, suite string) (r1, r2 string) {
+	t.Helper()
+	deploy := &agentsv1beta1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1beta1.AgentDeploymentSpec{
+			Image:        "ghcr.io/ctxmesh/example-agent:latest",
+			EvalSuiteRef: suite,
+			Rollout:      &agentsv1beta1.RolloutSpec{Strategy: rolloutStrategyCanary, CanaryPercent: 10},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+
+	reconcileNN(t, r, name, namespace)
+	r1 = getDeploy(t, name, namespace).Status.Gate.ScoredRevision
+	require.NotEmpty(t, r1)
+	promoteTo(t, r, name, namespace, r1)
+
+	upd := getDeploy(t, name, namespace)
+	upd.Spec.Port = 8090
+	require.NoError(t, k8sClient.Update(testCtx, upd))
+	reconcileNN(t, r, name, namespace)
+	split := getDeploy(t, name, namespace)
+	require.Equal(t, eval.PhaseCanary, split.Status.Gate.Phase)
+	r2 = split.Status.Gate.ScoredRevision
+	require.NotEqual(t, r1, r2)
+
+	split.Annotations[rolloutAbortAnnotation] = "true"
+	require.NoError(t, k8sClient.Update(testCtx, split))
+	reconcileNN(t, r, name, namespace)
+	require.Equal(t, eval.PhaseAborted, getDeploy(t, name, namespace).Status.Gate.Phase)
+	require.Equal(t, map[string]int64{r1: 100}, trafficMap(getKsvc(t, name, namespace)))
+	return r1, r2
+}
+
+// An aborted canary stays aborted when the candidate's revision name moves but its spec does not.
+// A pod-contract bump does exactly that on upgrade: the previous controller recorded the aborted
+// candidate under its old-contract name, and this one derives a new name for the same spec.
+func TestCanary_AbortSurvivesPodContractChange(t *testing.T) {
+	const name, namespace = "canary-abort-contract", "default"
+	es := mkEvalSuite(t, "canary-abort-contract-suite", namespace, "0.7", eval.GateBlock)
+	r := gateReconciler(0.9)
+	r1, r2 := abortSecondCanary(t, r, name, namespace, es.Name)
+
+	aborted := getDeploy(t, name, namespace)
+	hash, err := specHash(aborted.Spec)
+	require.NoError(t, err)
+	version := agentVersionName(name, hash)
+	require.Equal(t, version, aborted.Status.LatestVersion, "the abort records the candidate's version")
+	preContract := hardeningFold(combinedBindingDigest("", "", "", "", "", "",
+		universalIdentitySADigest(false), "", "", ""), false)
+	require.Equal(t, version+"-h"+traceExportFold(preContract, false), r2,
+		"the test's digest inputs must be the controller's, or the old name below is not what the old code wrote")
+	r2v4 := version + "-h" + podContractFold(preContract, "v4", false)
+	require.NotEqual(t, r2, r2v4)
+
+	// Put back what a v4 controller wrote when it aborted: the candidate under its v4 revision name.
+	aborted.Status.Gate.ScoredRevision = r2v4
+	require.NoError(t, k8sClient.Status().Update(testCtx, aborted))
+	ksvc := getKsvc(t, name, namespace)
+	ksvc.Spec.Template.Name = r2v4
+	require.NoError(t, k8sClient.Update(testCtx, &ksvc))
+
+	reconcileNN(t, r, name, namespace)
+
+	assert.Equal(t, map[string]int64{r1: 100}, trafficMap(getKsvc(t, name, namespace)),
+		"a new revision name for the aborted spec must not reopen the split")
+	after := getDeploy(t, name, namespace)
+	assert.Equal(t, eval.PhaseAborted, after.Status.Gate.Phase)
+	assert.Equal(t, version, after.Status.LatestVersion)
+	assert.Equal(t, r2, after.Status.Gate.ScoredRevision,
+		"status names the candidate's current revision, the one a promote must name")
+
+	// An explicit promote of that revision still overrides the abort.
+	promoteTo(t, r, name, namespace, r2)
+	assert.Equal(t, map[string]int64{r2: 100}, trafficMap(getKsvc(t, name, namespace)))
+	assert.Equal(t, eval.PhasePromoted, getDeploy(t, name, namespace).Status.Gate.Phase)
+}
+
+// Changing the spec after an abort ends it: the new version opens a fresh canary against the
+// revision the abort kept serving.
+func TestCanary_SpecChangeAfterAbortOpensFreshCanary(t *testing.T) {
+	const name, namespace = "canary-abort-respec", "default"
+	es := mkEvalSuite(t, "canary-abort-respec-suite", namespace, "0.7", eval.GateBlock)
+	r := gateReconciler(0.9)
+	r1, r2 := abortSecondCanary(t, r, name, namespace, es.Name)
+
+	reconcileNN(t, r, name, namespace)
+	require.Equal(t, map[string]int64{r1: 100}, trafficMap(getKsvc(t, name, namespace)),
+		"the abort holds while the spec is unchanged")
+
+	upd := getDeploy(t, name, namespace)
+	upd.Spec.Port = 8091
+	require.NoError(t, k8sClient.Update(testCtx, upd))
+	reconcileNN(t, r, name, namespace)
+
+	d := getDeploy(t, name, namespace)
+	assert.Equal(t, eval.PhaseCanary, d.Status.Gate.Phase, "a new spec re-gates and opens a fresh canary")
+	r3 := d.Status.Gate.ScoredRevision
+	assert.NotEqual(t, r2, r3)
+	hash, err := specHash(d.Spec)
+	require.NoError(t, err)
+	assert.Equal(t, agentVersionName(name, hash), d.Status.LatestVersion)
+	assert.Equal(t, map[string]int64{r1: 90, r3: 10}, trafficMap(getKsvc(t, name, namespace)))
+}
+
 // TestCanary_Blocked_NoSplit: a canary-configured deployment whose candidate is
 // BLOCKED by the offline gate (below threshold, gate:block) never opens a split —
 // it holds like any blocked rollout (the old revision keeps serving unchanged).

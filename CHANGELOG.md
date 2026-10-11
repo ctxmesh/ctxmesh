@@ -112,6 +112,11 @@ promotion. A revision created before the upgrade, such as the old arm of a canar
 still records no version until it is replaced. An `AGENT_VERSION` set in `spec.env` still wins, and
 leaves that agent out of per-version scoring.
 
+**Fixed: an aborted canary reopened when its candidate's revision was renamed.** An abort held only
+while the candidate kept its revision name, which also changes on a platform upgrade such as this
+one, so the split reopened at `canaryPercent` to the rejected candidate. It now holds until the
+spec changes or someone promotes the candidate.
+
 **Fixed: connecting a provider that was already connected failed with HTTP 400.** Every release
 updated the provider's SecretBinding and ModelRoute without a `resourceVersion`, which the API
 server refuses for a custom resource, so connecting a provider again to change its key or endpoint

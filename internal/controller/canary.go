@@ -213,8 +213,13 @@ func (r *AgentDeploymentReconciler) reconcileCanary(
 	// old revision until the SPEC changes (a new candidate re-gates fresh) or the
 	// operator promotes it explicitly (which overrides below). Idempotent (no write
 	// when traffic already sits on the old revision).
+	//
+	// Keyed on the VERSION the abort recorded (status.latestVersion, written with the
+	// aborted phase), not on the revision name: the name also moves when the spec does
+	// not — a pod-contract bump, a launcher image, any other pod digest input — and
+	// each such move would reopen the split to a candidate a person rejected.
 	if g := deploy.Status.Gate; g != nil && g.Phase == eval.PhaseAborted &&
-		g.ScoredRevision == candidateRev && !r.promotionApproved(deploy, candidateRev) {
+		deploy.Status.LatestVersion == versionName && !r.promotionApproved(deploy, candidateRev) {
 		if err := r.setCanaryTraffic(ctx, deploy, hash, namedFullTraffic(oldRev)); err != nil {
 			return ctrl.Result{}, fmt.Errorf("canary sticky-abort: setting full-old traffic: %w", err)
 		}
