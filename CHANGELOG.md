@@ -194,6 +194,25 @@ kubectl delete crd approvalpolicies.agents.ctxmesh.ai feedbackstores.agents.ctxm
 path is green (ADR 0152). CI fails on any change to their generated CRDs unless
 `hack/crd-freeze.sum` is updated on purpose.
 
+**Breaking: the API serves only `v1beta1`.** `agents.ctxmesh.ai/v1alpha1` is no longer served for
+any kind (ADR 0100). Author manifests at `agents.ctxmesh.ai/v1beta1`; the fields are identical, so
+the `apiVersion` line is the whole change. `ctxmesh expand` and the console emit `v1beta1`, and Go
+code that imported `github.com/ctxmesh/ctxmesh/api/v1alpha1` imports `.../api/v1beta1` instead.
+`kubectl get agentversions` gains the Deployment column.
+
+Every published release already stores `v1beta1`, so an upgrade rewrites nothing. A cluster whose
+CRDs list `v1alpha1` in `status.storedVersions` cannot take the new CRDs, because Kubernetes
+refuses to remove a version still listed there. Only development builds from before
+`v1beta1` became the storage version are affected. To check, and to migrate one kind before
+upgrading:
+
+```sh
+kubectl get crd -o custom-columns=NAME:.metadata.name,STORED:.status.storedVersions | grep ctxmesh
+kubectl get agentdeployments.agents.ctxmesh.ai -A -o json | kubectl replace -f -
+kubectl patch crd agentdeployments.agents.ctxmesh.ai --subresource=status --type=merge \
+  -p '{"status":{"storedVersions":["v1beta1"]}}'
+```
+
 ## v0.1.0-beta.9 — the first install stopped working, and the gate that would have said so had never run
 
 **Every new install of `v0.1.0-beta.8` fails.** The bundled dev object store is MinIO, and MinIO
