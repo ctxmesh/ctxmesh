@@ -44,6 +44,17 @@ func TestRouteNameForModel(t *testing.T) {
 	assert.Equal(t, "model-route", routeNameForModel("", ""))
 }
 
+// connectRoute is the route the connect flow writes for a connection: named after it, serving
+// its provider type through its own SecretBinding.
+func connectRoute(ns, connection, provider string) *agentsv1beta1.ModelRoute {
+	return &agentsv1beta1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: connection, Namespace: ns, Labels: map[string]string{labelManagedBy: managedByConnect}},
+		Spec: agentsv1beta1.ModelRouteSpec{Providers: []agentsv1beta1.ProviderRef{{
+			Provider: provider, Model: "connect-default", Priority: 1, SecretBindingRef: connection,
+		}}},
+	}
+}
+
 // TestEnsureRouteForModel pins the m21 seam: a picked (provider, model) get-or-creates
 // a ModelRoute serving it, reusing the provider's connect SecretBinding, idempotently.
 func TestEnsureRouteForModel(t *testing.T) {
@@ -51,7 +62,7 @@ func TestEnsureRouteForModel(t *testing.T) {
 
 	t.Run("creates a route serving the model, reusing the provider binding", func(t *testing.T) {
 		scheme := testScheme(t)
-		c := fake.NewClientBuilder().WithScheme(scheme).Build()
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(connectRoute("default", "anthropic", "anthropic")).Build()
 
 		name, cerr := ensureRouteForModel(ctx, c, scheme, "default", "anthropic", "claude-sonnet-5")
 		require.Nil(t, cerr)
@@ -70,7 +81,7 @@ func TestEnsureRouteForModel(t *testing.T) {
 
 	t.Run("idempotent: a second call reuses the same route, no duplicate", func(t *testing.T) {
 		scheme := testScheme(t)
-		c := fake.NewClientBuilder().WithScheme(scheme).Build()
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(connectRoute("default", "anthropic", "anthropic")).Build()
 
 		n1, e1 := ensureRouteForModel(ctx, c, scheme, "default", "anthropic", "claude-opus-4-8")
 		n2, e2 := ensureRouteForModel(ctx, c, scheme, "default", "anthropic", "claude-opus-4-8")
@@ -80,7 +91,23 @@ func TestEnsureRouteForModel(t *testing.T) {
 
 		var list agentsv1beta1.ModelRouteList
 		require.NoError(t, c.List(ctx, &list))
-		assert.Len(t, list.Items, 1, "the same (provider, model) must reuse ONE route")
+		assert.Len(t, list.Items, 2, "the connection's route plus ONE route for the (connection, model)")
+	})
+
+	// A route guessed from the connection's name would name a provider and a binding that do not
+	// exist, so the agent built on it could never answer.
+	t.Run("a connection that does not exist is a 400 naming it, and no route is made", func(t *testing.T) {
+		scheme := testScheme(t)
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(connectRoute("other", "my-llm", "openai")).Build()
+
+		_, cerr := ensureRouteForModel(ctx, c, scheme, "default", "my-llm", "mock-large")
+		require.NotNil(t, cerr)
+		assert.Equal(t, 400, cerr.status)
+		assert.Contains(t, cerr.msg, `connection "my-llm" does not exist in namespace "default"`)
+
+		var list agentsv1beta1.ModelRouteList
+		require.NoError(t, c.List(ctx, &list, client.InNamespace("default")))
+		assert.Empty(t, list.Items)
 	})
 
 	t.Run("missing provider/model is a 400, not a phantom route", func(t *testing.T) {

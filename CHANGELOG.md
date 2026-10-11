@@ -126,6 +126,13 @@ everyone. The `developer` and `operator` roles now grant `get` and `list` on `po
 `pods/log`, in the namespaces they are bound in, as Kubernetes' own `view` and `edit` roles do. The
 `viewer` role does not.
 
+**Fixed: creating an agent on a connection that does not exist made an agent that could never
+answer.** A model-first create (`POST /api/agents` with `model.connection`) naming a connection the
+namespace does not have built a model route from the connection's name, with a provider guessed
+from it and a SecretBinding that does not exist. It is now refused with HTTP 400 naming the
+connection, and nothing is created. A client that sends only `model.provider` still resolves the
+connection named after that provider.
+
 **Security: an agent could serve a page at its own address and finish a visitor's OAuth consent
 as its author.** The console's consent page trusts a page at an agent's hostname, and with the
 edge's `extAuth.enabled: false`, `/invoke` at every agent hostname reaches the agent's own

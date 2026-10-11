@@ -145,7 +145,7 @@ func TestCreateAgentHandlerCreatesCRD(t *testing.T) {
 // references THAT route (via the MODEL_ROUTE env expand emits) — the user picked a model,
 // the platform managed the route.
 func TestCreateAgentHandlerModelPickEnsuresRoute(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(connectRoute("prod", "anthropic", "anthropic")).Build()
 	s := newConfigServer(t, c)
 
 	reqBody, _ := json.Marshal(CreateAgentRequest{
@@ -178,6 +178,42 @@ func TestCreateAgentHandlerModelPickEnsuresRoute(t *testing.T) {
 	}
 	assert.Equal(t, "anthropic-claude-sonnet-5", route,
 		"the agent must reference the platform-ensured route for the picked model")
+}
+
+// TestCreateAgentHandlerUnknownConnectionIsRefused: a model-first create naming a connection the
+// namespace does not have is refused with a 400 naming it, and nothing is created, while the same
+// request naming a connection that exists creates the agent on that connection.
+func TestCreateAgentHandlerUnknownConnectionIsRefused(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(connectRoute("prod", "team-llm", "openai")).Build()
+	s := newConfigServer(t, c)
+	create := func(connection string) *httptest.ResponseRecorder {
+		reqBody, err := json.Marshal(CreateAgentRequest{
+			AgentYAML: sampleAgentYAML,
+			Namespace: "prod",
+			Model:     &ModelPick{Connection: connection, Provider: "custom", Model: "mock-large"},
+		})
+		require.NoError(t, err)
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(reqBody)))
+		return rec
+	}
+
+	rec := create("no-such-llm")
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `connection \"no-such-llm\" does not exist`)
+	var routes agentsv1beta1.ModelRouteList
+	require.NoError(t, c.List(context.Background(), &routes, client.InNamespace("prod")))
+	assert.Len(t, routes.Items, 1, "only the existing connection's route")
+	var agents agentsv1beta1.AgentDeploymentList
+	require.NoError(t, c.List(context.Background(), &agents, client.InNamespace("prod")))
+	assert.Empty(t, agents.Items)
+
+	rec = create("team-llm")
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var mr agentsv1beta1.ModelRoute
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "team-llm-mock-large", Namespace: "prod"}, &mr))
+	assert.Equal(t, "openai", mr.Spec.Providers[0].Provider, "the connection's provider, not the request's")
+	assert.Equal(t, "team-llm", mr.Spec.Providers[0].SecretBindingRef)
 }
 
 func TestCreateAgentHandlerMultiDoc(t *testing.T) {
