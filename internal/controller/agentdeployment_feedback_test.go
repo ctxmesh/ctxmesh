@@ -26,6 +26,9 @@ import (
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
@@ -118,18 +121,47 @@ func TestAgentDeployment_FeedbackModeDefaultsToEnforce(t *testing.T) {
 	assert.Equal(t, agentsv1beta1.ScoreNumeric, got.Spec.Feedback.Human.Scores[0].DataType)
 }
 
-// TestAgentDeployment_FeedbackValidatedInBothVersions proves the v1beta1 schema carries the same
-// rules: both served versions share the spec type, and a rule present in only one would let an
-// incoherent declaration in through the other.
-func TestAgentDeployment_FeedbackValidatedInBothVersions(t *testing.T) {
+// TestAgentDeployment_FeedbackValidatedInEveryServedVersion proves the feedback rules hold in every
+// version the API server serves, read from the installed CRD rather than assumed: conversion is None,
+// so a served version lacking a rule would admit an incoherent declaration the others reject.
+func TestAgentDeployment_FeedbackValidatedInEveryServedVersion(t *testing.T) {
+	crd := &unstructured.Unstructured{}
+	crd.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition",
+	})
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "agentdeployments.agents.ctxmesh.ai"}, crd))
+	versions, found, err := unstructured.NestedSlice(crd.Object, "spec", "versions")
+	require.NoError(t, err)
+	require.True(t, found, "the AgentDeployment CRD lists no versions")
+
+	var served []string
+	for _, v := range versions {
+		m, ok := v.(map[string]any)
+		require.True(t, ok, "spec.versions entry is not an object")
+		if s, _ := m["served"].(bool); s {
+			name, _ := m["name"].(string)
+			served = append(served, name)
+		}
+	}
+	require.NotEmpty(t, served, "the AgentDeployment CRD serves no version")
+
 	agent := &agentsv1beta1.AgentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "fb-cel-beta", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "fb-cel-served", Namespace: "default"},
 		Spec: feedbackAgentSpec(&agentsv1beta1.FeedbackSpec{
 			Human:    &agentsv1beta1.HumanSource{Scores: []agentsv1beta1.ScoreDecl{{Name: "shared"}}},
 			External: []agentsv1beta1.ExternalSource{{Name: "ch", Score: agentsv1beta1.ScoreDecl{Name: "shared"}}},
 		}),
 	}
-	err := k8sClient.Create(testCtx, agent)
-	require.Error(t, err, "v1beta1 must reject a duplicate score name too")
-	assert.True(t, apierrors.IsInvalid(err), "rejection must be a validation error, got %v", err)
+	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(agent)
+	require.NoError(t, err)
+	for _, version := range served {
+		t.Run(version, func(t *testing.T) {
+			obj := &unstructured.Unstructured{Object: runtime.DeepCopyJSON(content)}
+			obj.SetAPIVersion("agents.ctxmesh.ai/" + version)
+			obj.SetKind("AgentDeployment")
+			err := k8sClient.Create(testCtx, obj)
+			require.Error(t, err, "%s must reject a duplicate score name", version)
+			assert.True(t, apierrors.IsInvalid(err), "rejection must be a validation error, got %v", err)
+		})
+	}
 }

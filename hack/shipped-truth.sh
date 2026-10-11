@@ -231,7 +231,7 @@ row m139 test internal/controller/canary_autoprogress_test.go TestNextCanaryStep
 row m139 test internal/controller/canary_controller_test.go TestCanary_AutoProgress "ADR 0113: canary auto-progress (envtest)"
 row m139 has internal/controller/canary_controller_test.go "func TestCanary_Split" "ADR 0113: the canary traffic split has envtest coverage"
 row m139 test internal/controller/agentdeployment_feedback_test.go TestAgentDeployment_FeedbackValidatedAtAdmission "ADR 0152: a malformed feedback declaration is refused at admission"
-row m139 test internal/controller/agentdeployment_feedback_test.go TestAgentDeployment_FeedbackValidatedInBothVersions "ADR 0152: the feedback rules hold in both served versions"
+row m139 test internal/controller/agentdeployment_feedback_test.go TestAgentDeployment_FeedbackValidatedInEveryServedVersion "ADR 0152: the feedback rules hold in every served version"
 row m139 test internal/bff/feedback_spec_test.go TestSubmitFeedback_DeclaredName_Relayed "ADR 0112: a declared feedback name is relayed"
 row m139 test internal/bff/feedback_spec_test.go TestSubmitFeedback_UndeclaredName_EnforceRejected "ADR 0112: an undeclared feedback name is rejected in Enforce"
 row m139 test internal/bff/feedback_spec_test.go TestFeedbackRead_AttributesSources "ADR 0112: feedback reads attribute their sources"
