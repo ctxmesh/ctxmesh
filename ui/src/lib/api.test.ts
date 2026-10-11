@@ -169,15 +169,17 @@ describe("api client", () => {
     expect(authHeader(fetchMock)).toBe("Bearer paste-me");
   });
 
-  it("listTools reads the merged catalog from GET /api/tools", async () => {
+  it("listTools reads the merged catalog from GET /api/tools, in the namespace it is given", async () => {
     const fetchMock = mockFetch({
       tools: [{ name: "get_order", source: "acme-mcp", approvalStatus: "approved" }],
     });
     vi.stubGlobal("fetch", fetchMock);
-    const res = await api.listTools();
+    const res = await api.listTools("team-a");
     expect(res.tools).toHaveLength(1);
     expect(res.tools[0].name).toBe("get_order");
-    expect(fetchMock.mock.calls[0][0]).toBe("/api/tools");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/tools?namespace=team-a");
+    await api.listTools("");
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/tools");
   });
 
   it("generateAgent returns the valid config on 200", async () => {

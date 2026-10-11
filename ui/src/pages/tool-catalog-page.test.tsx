@@ -101,7 +101,7 @@ function installFetch(opts: FetchSetup = {}) {
         return j({ namespace: "", allowed: opts.caps ?? EDITOR_CAPS });
 
       // tool catalog
-      if (url === "/api/tools" && method === "GET") {
+      if (url.split("?")[0] === "/api/tools" && method === "GET") {
         const status = opts.toolsStatus ?? 200;
         const ok = status < 400;
         return Promise.resolve({
@@ -437,6 +437,32 @@ describe("ToolCatalogPage — bind wizard", () => {
     const statusEl = await screen.findByTestId("binding-propagation-status");
     expect(statusEl).toHaveAttribute("data-status", "error");
     expect(statusEl).toHaveTextContent(/Not allowed/i);
+  });
+});
+
+describe("ToolCatalogPage — the namespace it reads", () => {
+  // A persona bound by RoleBinding can list registries only in its own namespaces, so the
+  // catalog reads the selected workspace; "All workspaces" asks for every namespace the
+  // caller may list, which the BFF answers namespace by namespace.
+  it.each([
+    ["team-a", "/api/tools?namespace=team-a"],
+    ["", "/api/tools"],
+  ])("workspace %j reads %s", async (selected, want) => {
+    localStorage.setItem("ctxmesh.namespace", selected);
+    const calls = installFetch({ caps: EDITOR_CAPS });
+    render(
+      <MemoryRouter>
+        <ToastProvider>
+          <NamespaceProvider>
+            <CapabilitiesProvider>
+              <ToolCatalogPage />
+            </CapabilitiesProvider>
+          </NamespaceProvider>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    await screen.findByTestId("catalog-tool-code-search");
+    expect(calls.filter((c) => c.url.split("?")[0] === "/api/tools").map((c) => c.url)).toEqual([want]);
   });
 });
 

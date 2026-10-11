@@ -116,10 +116,42 @@ func (s *Server) mcpGetToolRegistry(ctx context.Context, caller client.Client, n
 // projected), optionally namespace-scoped and label-filtered (e.g.
 // managed-by=ctxmesh-mcp for the BYO-server surfaces). labels are AND-ed
 // equality filters, matching the store's ListOptions.Labels.
+//
+// An empty ns lists every namespace the caller may list registries in. A caller allowed
+// cluster-wide gets them all in one check; a caller bound per namespace (the chart's
+// default RoleBindings, which never grant a cluster-wide list) gets the registries of each
+// namespace where their own `list toolregistries` is allowed, checked once per namespace
+// the store holds. Only allowed namespaces reach the result, so this says nothing about the
+// others. A caller allowed in none of them gets the cluster-wide denial: an empty list would
+// claim they can see the catalog and it is empty.
 func (s *Server) mcpListToolRegistries(ctx context.Context, caller client.Client, ns string, labels map[string]string) (*agentsv1beta1.ToolRegistryList, error) {
-	if err := s.authorizeStore(ctx, caller, authz.VerbList, resourceToolRegistries, ns, ""); err != nil {
-		return nil, toolRegistryReadErrAsAPIError(err, "")
+	var allowed map[string]bool // nil ⇒ every listed namespace is allowed
+	denied := s.authorizeStore(ctx, caller, authz.VerbList, resourceToolRegistries, ns, "")
+	if denied != nil {
+		if ns != "" || !errors.Is(denied, authz.ErrForbidden) {
+			return nil, toolRegistryReadErrAsAPIError(denied, "")
+		}
+		allowed = map[string]bool{}
 	}
+	mayList := func(namespace string) (bool, error) {
+		if allowed == nil {
+			return true, nil
+		}
+		if ok, seen := allowed[namespace]; seen {
+			return ok, nil
+		}
+		err := s.authorizeStore(ctx, caller, authz.VerbList, resourceToolRegistries, namespace, "")
+		switch {
+		case err == nil:
+			allowed[namespace] = true
+		case errors.Is(err, authz.ErrForbidden):
+			allowed[namespace] = false
+		default:
+			return false, toolRegistryReadErrAsAPIError(err, "")
+		}
+		return allowed[namespace], nil
+	}
+
 	out := &agentsv1beta1.ToolRegistryList{}
 	token := ""
 	for {
@@ -130,12 +162,22 @@ func (s *Server) mcpListToolRegistries(ctx context.Context, caller client.Client
 			return nil, toolRegistryReadErrAsAPIError(err, "")
 		}
 		for i := range page.Items {
-			out.Items = append(out.Items, *storeToolRegistryToCRD(&page.Items[i]))
+			ok, mErr := mayList(page.Items[i].Namespace)
+			if mErr != nil {
+				return nil, mErr
+			}
+			if ok {
+				out.Items = append(out.Items, *storeToolRegistryToCRD(&page.Items[i]))
+			}
 		}
 		if page.NextPage == "" {
 			break
 		}
 		token = page.NextPage
+	}
+	// Every allowed namespace was probed because it holds a registry, so none allowed ⇔ none listed.
+	if allowed != nil && len(out.Items) == 0 {
+		return nil, toolRegistryReadErrAsAPIError(denied, "")
 	}
 	return out, nil
 }

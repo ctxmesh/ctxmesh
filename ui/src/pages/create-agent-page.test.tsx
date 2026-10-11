@@ -49,7 +49,7 @@ function recordingFetch(opts: {
         return j({ namespace: "", allowed: opts.caps ?? { agentdeployments: { create: true } } });
       if (url.split("?")[0] === "/api/providers" && method === "GET")
         return j({ providers: opts.providers ?? [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4"], secretName: "anthropic", ready: true }] });
-      if (url === "/api/tools")
+      if (url.split("?")[0] === "/api/tools")
         return j({ tools: opts.tools ?? [] });
       if (url === "/api/agents/generate" && method === "POST") {
         const r = opts.generate
@@ -331,7 +331,8 @@ describe("CreateAgentPage — the shared review, tool picker + Create", () => {
 
   it("the tool picker loads GET /api/tools with curated + user-added + schema/pending badges", async () => {
     const calls = await reachReviewViaGenerate();
-    expect(calls.find((c) => c.url === "/api/tools")).toBeDefined();
+    // The picker reads the catalog of the namespace the agent is created in.
+    expect(calls.find((c) => c.url === "/api/tools?namespace=default")).toBeDefined();
     // Both tools render; the pending one carries the honest badge; a schema tool
     // shows the schema badge.
     const list = await screen.findByTestId("tool-picker-list");
@@ -489,7 +490,7 @@ describe("CreateAgentPage — refine chat + draft lifecycle (m71.4/m71.5)", () =
           return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
         if (url.split("?")[0] === "/api/providers" && method === "GET")
           return j({ providers: [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4"], secretName: "s", ready: true }] });
-        if (url === "/api/tools")
+        if (url.split("?")[0] === "/api/tools")
           return j({ tools: [] });
         if (url === "/api/agents/generate" && method === "POST")
           return j({ agentYAML: "name: test-agent\nruntime: managed\n", expanded: "kind: AgentDeployment\n", model: "claude-sonnet-4" });
@@ -696,7 +697,7 @@ describe("CreateAgentPage — m72.1 smart defaults", () => {
           return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
         if (url.split("?")[0] === "/api/providers" && method === "GET")
           return j({ providers: [providerEntry], items: [providerEntry] });
-        if (url === "/api/tools") return j({ tools: [] });
+        if (url.split("?")[0] === "/api/tools") return j({ tools: [] });
         if (url.startsWith("/api/modelroutes")) return j({ items: [] });
         if (url.startsWith("/api/promptversions")) return j({ items: [] });
         if (url === "/api/agents/check-requirements" && method === "POST")
@@ -790,7 +791,7 @@ describe("CreateAgentPage — m72.3 check-requirements checklist (advisory)", ()
           return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
         if (url.split("?")[0] === "/api/providers" && method === "GET")
           return j({ providers: [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4-6"], secretName: "s", ready: true }] });
-        if (url === "/api/tools") return j({ tools: [] });
+        if (url.split("?")[0] === "/api/tools") return j({ tools: [] });
         if (url === "/api/agents/generate" && method === "POST")
           return j({ agentYAML: "name: test-agent\nruntime: managed\nmodel:\n  route: anthropic\ntools:\n  - get_order\n", expanded: "", model: "claude-sonnet-4-6" });
         if (url === "/api/agents/check-requirements" && method === "POST")
@@ -881,7 +882,7 @@ describe("CreateAgentPage — m72.5 recipe gallery", () => {
           { name: "order-bot", title: "Order Bot", description: "Handles order queries.", icon: "🛒", spec: recipeSpec },
           { name: "summarizer", title: "Summarizer", description: "Condenses long docs.", icon: "📝", spec: "name: summarizer\nruntime: managed\n" },
         ]});
-        if (url === "/api/tools") return j({ tools: [] });
+        if (url.split("?")[0] === "/api/tools") return j({ tools: [] });
         if (url === "/api/agents/check-requirements" && method === "POST")
           return j({ model: { required: false, connected: true }, tools: [] });
         if (url === "/api/expand" && method === "POST")
@@ -956,7 +957,7 @@ describe("CreateAgentPage — m74 P1-2: ?recipe=<name> pre-fills the create flow
           return j({ recipes: [
             { name: "order-bot", title: "Order Bot", description: "Handles orders.", icon: "🛒", spec: recipeSpec },
           ]});
-        if (url === "/api/tools") return j({ tools: [] });
+        if (url.split("?")[0] === "/api/tools") return j({ tools: [] });
         if (url === "/api/agents/check-requirements" && method === "POST")
           return j({ model: { required: false, connected: true }, tools: [] });
         if (url === "/api/expand" && method === "POST")
@@ -1047,7 +1048,7 @@ describe("CreateAgentPage — a requirement that wasn't checked is not a satisfi
           return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
         if (url.split("?")[0] === "/api/providers" && method === "GET")
           return j({ providers: [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4"], secretName: "s", ready: true }] });
-        if (url === "/api/tools") return j({ tools: [] });
+        if (url.split("?")[0] === "/api/tools") return j({ tools: [] });
         if (url === "/api/agents/generate" && method === "POST")
           return j({ agentYAML: "name: req-agent\nruntime: managed\ntools:\n  - get_order\n", expanded: "kind: AgentDeployment\n", model: "m" });
         if (url === "/api/agents/check-requirements" && method === "POST") {

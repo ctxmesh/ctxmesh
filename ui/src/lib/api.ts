@@ -3947,8 +3947,12 @@ export const api = {
   // is an honest "can't list tools" surfaced via ApiError (the picker degrades
   // to an empty catalog + note); a 200 carries every bindable tool with its
   // source + approval state. The `tools` slice is non-null on the wire.
-  listTools: (signal?: AbortSignal) =>
-    getJSON<ToolListResponse>("/api/tools", signal),
+  // namespace "" lists every namespace the caller may list tool registries in.
+  listTools: (namespace: string, signal?: AbortSignal) =>
+    getJSON<ToolListResponse>(
+      `/api/tools${namespace ? `?namespace=${encodeURIComponent(namespace)}` : ""}`,
+      signal,
+    ),
 
   // generateAgent runs create-from-prompt (ADR 0014): a description → a
   // server-side LLM → the simplified agent.yaml, expand-validated. It NEVER

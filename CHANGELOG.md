@@ -167,6 +167,15 @@ agent's own pause, saying which sub-agent asked. Connect resumes the sub-agent's
 follows the supervisor on to its answer, and the hold links to the sub-agent's run. If the stream
 ends while the supervisor waits, the pause is found from the supervisor's run.
 
+**Fixed: the tool catalog was refused to anyone bound to a namespace.** The console read
+`/api/tools` without a namespace, and the BFF then asked whether the caller may list tool registries
+in every namespace, which a RoleBinding (the chart's default way of granting a persona) never
+allows: the catalog, and the bind wizard behind it, answered 403. The catalog now reads the selected
+workspace, and the create-agent tool picker the namespace the agent is created in. With "All
+workspaces" selected, or with no namespace, `/api/tools`, `/api/mcpservers` and `/api/mcp/approvals`
+list every namespace whose registries the caller may list, checked namespace by namespace; a caller
+who may list them nowhere is still refused with 403.
+
 **Security: a tool binding could name a server its author may not use.** A
 `POST /api/mcptoolbindings` that gave `registryRef`, `mode` and `server`, and every
 `PUT /api/mcptoolbindings/{ns}/{name}`, were written as sent, so a binding could name another

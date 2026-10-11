@@ -1981,8 +1981,9 @@ function SharedReview({
   >({ kind: "loading" });
   React.useEffect(() => {
     const controller = new AbortController();
+    // The agent can only bind tools whose servers are in the namespace it is created in.
     api
-      .listTools(controller.signal)
+      .listTools(targetNs, controller.signal)
       .then((res) => {
         if (controller.signal.aborted) return;
         setCatalog({ kind: "ready", tools: res.tools });
@@ -1998,7 +1999,7 @@ function SharedReview({
         });
       });
     return () => controller.abort();
-  }, []);
+  }, [targetNs]);
 
   // The final agent.yaml = the base config with the selected tools injected as
   // the `tools` field — the SAME field expand + generation use. Preview + Create

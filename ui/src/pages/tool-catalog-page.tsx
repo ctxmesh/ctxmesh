@@ -195,11 +195,13 @@ export function ToolCatalogPage() {
   // Binding is a write op — gated on mcptoolbindings/create. Display-only;
   // real gate is the API 403 if the caller somehow submits without the right.
   const canBind = can("mcptoolbindings", "create");
+  // The shell's selection: one workspace, or "" for every namespace the caller may list.
+  const { namespace } = useNamespace();
 
   const load = React.useCallback((signal?: AbortSignal) => {
     setPage({ kind: "loading" });
     api
-      .listTools(signal)
+      .listTools(namespace, signal)
       .then((res) => {
         if (signal?.aborted) return;
         if (res.tools.length === 0) {
@@ -223,7 +225,7 @@ export function ToolCatalogPage() {
           message: err instanceof Error ? err.message : "request failed",
         });
       });
-  }, []);
+  }, [namespace]);
 
   React.useEffect(() => {
     const controller = new AbortController();
