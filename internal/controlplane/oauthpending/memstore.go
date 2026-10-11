@@ -25,8 +25,9 @@ import (
 
 // memStore is the in-memory twin for tests and a BFF built without the control-plane store. It
 // seals like the Postgres store so both pass one conformance suite; it is shared only within one
-// process, so it cannot serve more than one replica.
+// process, so it cannot serve more than one replica, and its clock is that process's clock.
 type memStore struct {
+	now     func() time.Time
 	mu      sync.Mutex
 	records map[string]memRecord
 }
@@ -37,10 +38,18 @@ type memRecord struct {
 	expiresAt time.Time
 }
 
-// NewMemStore returns an in-memory Store.
-func NewMemStore() Store { return &memStore{records: map[string]memRecord{}} }
+// NewMemStore returns an in-memory Store on the wall clock.
+func NewMemStore() Store { return NewMemStoreWithClock(time.Now) }
 
-func (m *memStore) Put(_ context.Context, kind Kind, handle string, payload []byte, expiresAt time.Time) error {
+// NewMemStoreWithClock returns an in-memory Store whose expiry is measured by now.
+func NewMemStoreWithClock(now func() time.Time) Store {
+	return &memStore{now: now, records: map[string]memRecord{}}
+}
+
+func (m *memStore) Put(_ context.Context, kind Kind, handle string, payload []byte, ttl time.Duration) error {
+	if err := checkTTL(ttl); err != nil {
+		return err
+	}
 	id, sealed, err := seal(kind, handle, payload)
 	if err != nil {
 		return err
@@ -50,11 +59,11 @@ func (m *memStore) Put(_ context.Context, kind Kind, handle string, payload []by
 	if _, exists := m.records[id]; exists {
 		return fmt.Errorf("oauthpending: duplicate %s record", kind)
 	}
-	m.records[id] = memRecord{kind: kind, sealed: sealed, expiresAt: expiresAt}
+	m.records[id] = memRecord{kind: kind, sealed: sealed, expiresAt: m.now().Add(ttl)}
 	return nil
 }
 
-func (m *memStore) Take(_ context.Context, kind Kind, handle string, now time.Time) ([]byte, bool, error) {
+func (m *memStore) Take(_ context.Context, kind Kind, handle string) ([]byte, bool, error) {
 	if err := checkArgs(kind, handle); err != nil {
 		return nil, false, err
 	}
@@ -63,7 +72,7 @@ func (m *memStore) Take(_ context.Context, kind Kind, handle string, now time.Ti
 	rec, ok := m.records[id]
 	delete(m.records, id)
 	m.mu.Unlock()
-	if !ok || rec.kind != kind || !now.Before(rec.expiresAt) {
+	if !ok || rec.kind != kind || !m.now().Before(rec.expiresAt) {
 		return nil, false, nil
 	}
 	payload, err := open(kind, handle, id, rec.sealed)
@@ -73,9 +82,10 @@ func (m *memStore) Take(_ context.Context, kind Kind, handle string, now time.Ti
 	return payload, true, nil
 }
 
-func (m *memStore) DeleteExpired(_ context.Context, now time.Time) (int64, error) {
+func (m *memStore) DeleteExpired(_ context.Context) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	now := m.now()
 	var n int64
 	for id, rec := range m.records {
 		if !now.Before(rec.expiresAt) {

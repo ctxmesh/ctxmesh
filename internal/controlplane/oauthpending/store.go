@@ -57,15 +57,20 @@ const MinHandleLen = 32
 
 // Store holds sealed records until they are taken or expire. Implementations never see a handle in
 // stored form and never log one.
+//
+// Expiry is measured on the store's own clock, never a caller's: replicas' clocks disagree, and a
+// replica running ahead would otherwise expire, or sweep away, records another replica just wrote.
+// The Postgres store uses the database's now() for the expiry it writes, reads and sweeps.
 type Store interface {
-	// Put stores payload under handle until expiresAt. A duplicate handle of the same kind is an error.
-	Put(ctx context.Context, kind Kind, handle string, payload []byte, expiresAt time.Time) error
+	// Put stores payload under handle for ttl, which must be positive. A duplicate handle of the
+	// same kind is an error.
+	Put(ctx context.Context, kind Kind, handle string, payload []byte, ttl time.Duration) error
 	// Take removes the record for handle and returns its payload. It returns (nil, false, nil) when no
-	// record exists, it was already taken, or it had expired at now; the record is removed in every
-	// case, so a handle is good for one Take at most.
-	Take(ctx context.Context, kind Kind, handle string, now time.Time) ([]byte, bool, error)
-	// DeleteExpired removes every record that had expired at now and reports how many.
-	DeleteExpired(ctx context.Context, now time.Time) (int64, error)
+	// record exists, it was already taken, or it has expired; the record is removed in every case,
+	// so a handle is good for one Take at most.
+	Take(ctx context.Context, kind Kind, handle string) ([]byte, bool, error)
+	// DeleteExpired removes every expired record and reports how many.
+	DeleteExpired(ctx context.Context) (int64, error)
 }
 
 // Domain-separation labels: the id and the key derived from one handle must be unrelated values.
@@ -75,6 +80,13 @@ const (
 )
 
 func validKind(k Kind) bool { return k == KindFlow || k == KindTicket }
+
+func checkTTL(ttl time.Duration) error {
+	if ttl <= 0 {
+		return fmt.Errorf("oauthpending: ttl %s is not positive: %w", ttl, controlplane.ErrInvalid)
+	}
+	return nil
+}
 
 func checkArgs(kind Kind, handle string) error {
 	if !validKind(kind) {

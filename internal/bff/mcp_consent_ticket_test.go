@@ -57,21 +57,25 @@ type ticketEnv struct {
 	c       client.WithWatch
 	grants  *fakeGrantWriter
 	backend oauthpending.Store
+	// now is the default in-memory backend's clock.
+	now func() time.Time
 }
 
 func newTicketEnv(t *testing.T, backend oauthpending.Store) *ticketEnv {
 	t.Helper()
 	oauth := newFakeOAuthServer(t)
 	oauth.expectChallenge = ""
+	e := &ticketEnv{
+		oauth:  oauth,
+		c:      fake.NewClientBuilder().WithScheme(testScheme(t)).Build(),
+		grants: &fakeGrantWriter{},
+		now:    time.Now,
+	}
 	if backend == nil {
-		backend = oauthpending.NewMemStore()
+		backend = oauthpending.NewMemStoreWithClock(func() time.Time { return e.now() })
 	}
-	return &ticketEnv{
-		oauth:   oauth,
-		c:       fake.NewClientBuilder().WithScheme(testScheme(t)).Build(),
-		grants:  &fakeGrantWriter{},
-		backend: backend,
-	}
+	e.backend = backend
+	return e
 }
 
 func (e *ticketEnv) replica(t *testing.T) ticketReplica {
@@ -237,9 +241,9 @@ func TestConsentTicketRefusals(t *testing.T) {
 		env := newTicketEnv(t, nil)
 		r := env.replica(t)
 		base := time.Now()
-		r.s.oauthFlows.now = func() time.Time { return base }
+		env.now = func() time.Time { return base }
 		_, minted := mintTicket(t, r.s, ticketAgent, nil)
-		r.s.oauthFlows.now = func() time.Time { return base.Add(consentTicketTTL) }
+		env.now = func() time.Time { return base.Add(consentTicketTTL) }
 
 		rec, _ := redeemTicket(t, r.s, minted.Ticket, ticketAgentOrigin, nil)
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -402,6 +406,19 @@ func TestConsentCompletesAcrossReplicas(t *testing.T) {
 
 				again, _ := redeemTicket(t, a.s, minted.Ticket, ticketAgentOrigin, nil)
 				assert.Equal(t, http.StatusBadRequest, again.Code, "single use holds across replicas")
+			})
+			t.Run("a replica whose clock runs ahead does not expire another replica's ticket", func(t *testing.T) {
+				env := newTicketEnv(t, newBackend(t))
+				a, b := env.replica(t), env.replica(t)
+				b.s.oauthFlows.now = func() time.Time { return time.Now().Add(2 * consentTicketTTL) }
+
+				_, minted := mintTicket(t, a.s, ticketAgent, nil)
+				require.NotEmpty(t, minted.Ticket)
+				_, other := mintTicket(t, b.s, ticketAgent, nil) // b's first put sweeps
+				require.NotEmpty(t, other.Ticket)
+
+				rec, _ := redeemTicket(t, a.s, minted.Ticket, ticketAgentOrigin, nil)
+				assert.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
 			})
 			t.Run("a consent begun on one replica completes on another", func(t *testing.T) {
 				env := newTicketEnv(t, newBackend(t))

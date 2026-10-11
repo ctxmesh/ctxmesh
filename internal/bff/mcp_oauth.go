@@ -212,14 +212,14 @@ type pendingOAuthFlow struct {
 	// (consentOpenerAllowed). The callback relays the "connected" signal to it. Empty ⇒ same-origin
 	// (the popup's own origin is the opener) — the default single-origin console behaviour.
 	openerOrigin string
-	// expiresAt bounds the flow's lifetime (register time + pendingFlowTTL).
-	expiresAt time.Time
 }
 
 // pendingOAuthStore holds in-flight OAuth flows and consent tickets in the control-plane store
 // (oauthpending), so a callback or a redeem may reach any BFF replica. The state and the ticket are
 // the handles: the store keeps neither, and seals each record under a key derived from its handle.
-// now is the clock, overridable in tests so TTL expiry is deterministic.
+// Expiry is the store's: this replica's clock never decides whether another replica's record is
+// live. now paces the sweep and, for the in-memory store, is that store's clock (overridable in
+// tests so TTL expiry is deterministic).
 type pendingOAuthStore struct {
 	backend oauthpending.Store
 	now     func() time.Time
@@ -236,10 +236,11 @@ const pendingSweepInterval = time.Minute
 // newPendingOAuthStore wraps backend, or an in-memory store when backend is nil (tests, and a BFF
 // built without the control-plane store, which serves one replica only).
 func newPendingOAuthStore(backend oauthpending.Store, log logr.Logger) *pendingOAuthStore {
-	if backend == nil {
-		backend = oauthpending.NewMemStore()
+	s := &pendingOAuthStore{backend: backend, now: time.Now, log: log}
+	if s.backend == nil {
+		s.backend = oauthpending.NewMemStoreWithClock(func() time.Time { return s.now() })
 	}
-	return &pendingOAuthStore{backend: backend, now: time.Now, log: log}
+	return s
 }
 
 // pendingFlowRecord is the stored form of a pendingOAuthFlow. The state is the record's handle and
@@ -258,7 +259,7 @@ type pendingFlowRecord struct {
 	OpenerOrigin   string         `json:"openerOrigin,omitempty"`
 }
 
-// put records a pending flow, keyed by its state, until f.expiresAt.
+// put records a pending flow, keyed by its state, for pendingFlowTTL.
 func (s *pendingOAuthStore) put(ctx context.Context, f *pendingOAuthFlow) error {
 	payload, err := json.Marshal(pendingFlowRecord{
 		CodeVerifier:   f.codeVerifier,
@@ -277,7 +278,7 @@ func (s *pendingOAuthStore) put(ctx context.Context, f *pendingOAuthFlow) error 
 		return fmt.Errorf("encode pending OAuth flow: %w", err)
 	}
 	s.sweep(ctx)
-	return s.backend.Put(ctx, oauthpending.KindFlow, f.state, payload, f.expiresAt)
+	return s.backend.Put(ctx, oauthpending.KindFlow, f.state, payload, pendingFlowTTL)
 }
 
 // take removes and returns the flow for state. ok is false when the state is unknown, expired, or
@@ -286,7 +287,7 @@ func (s *pendingOAuthStore) take(ctx context.Context, state string) (flow *pendi
 	if len(state) < oauthpending.MinHandleLen {
 		return nil, false, nil // never issued by startOAuthFlow
 	}
-	payload, ok, err := s.backend.Take(ctx, oauthpending.KindFlow, state, s.now())
+	payload, ok, err := s.backend.Take(ctx, oauthpending.KindFlow, state)
 	if err != nil || !ok {
 		return nil, false, err
 	}
@@ -310,14 +311,14 @@ func (s *pendingOAuthStore) take(ctx context.Context, state string) (flow *pendi
 	}, true, nil
 }
 
-// putTicket records a consent ticket until expiresAt.
-func (s *pendingOAuthStore) putTicket(ctx context.Context, ticket string, t consentTicket, expiresAt time.Time) error {
+// putTicket records a consent ticket for consentTicketTTL.
+func (s *pendingOAuthStore) putTicket(ctx context.Context, ticket string, t consentTicket) error {
 	payload, err := json.Marshal(t)
 	if err != nil {
 		return fmt.Errorf("encode consent ticket: %w", err)
 	}
 	s.sweep(ctx)
-	return s.backend.Put(ctx, oauthpending.KindTicket, ticket, payload, expiresAt)
+	return s.backend.Put(ctx, oauthpending.KindTicket, ticket, payload, consentTicketTTL)
 }
 
 // takeTicket removes and returns the consent ticket. ok is false when it is unknown, expired, or
@@ -326,7 +327,7 @@ func (s *pendingOAuthStore) takeTicket(ctx context.Context, ticket string) (t *c
 	if len(ticket) < oauthpending.MinHandleLen {
 		return nil, false, nil // never minted
 	}
-	payload, ok, err := s.backend.Take(ctx, oauthpending.KindTicket, ticket, s.now())
+	payload, ok, err := s.backend.Take(ctx, oauthpending.KindTicket, ticket)
 	if err != nil || !ok {
 		return nil, false, err
 	}
@@ -350,7 +351,7 @@ func (s *pendingOAuthStore) sweep(ctx context.Context) {
 	if !due {
 		return
 	}
-	if _, err := s.backend.DeleteExpired(ctx, now); err != nil {
+	if _, err := s.backend.DeleteExpired(ctx); err != nil {
 		s.log.Error(err, "sweeping expired OAuth consent records failed; they are refused on read")
 	}
 }
@@ -395,7 +396,6 @@ func (s *Server) startOAuthFlow(ctx context.Context, cfg mcpOAuthConfig, tmpl pe
 	flow.state = st
 	flow.codeVerifier = verifier
 	flow.oauth = cfg
-	flow.expiresAt = s.oauthFlows.now().Add(pendingFlowTTL)
 	if err := s.oauthFlows.put(ctx, &flow); err != nil {
 		return "", "", err
 	}

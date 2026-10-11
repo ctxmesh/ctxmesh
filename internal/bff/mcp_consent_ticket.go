@@ -119,7 +119,7 @@ func (s *Server) handleMintConsentTicket(w http.ResponseWriter, r *http.Request)
 		ServerURL:     plan.serverURL,
 		Boundary:      plan.boundary,
 		Agent:         agent,
-	}, s.oauthFlows.now().Add(consentTicketTTL)); err != nil {
+	}); err != nil {
 		s.log.Error(err, "store MCP consent ticket failed", "server", plan.server)
 		writeError(w, http.StatusInternalServerError, "failed to start the consent flow")
 		return

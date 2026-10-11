@@ -78,7 +78,8 @@ must be allowed for the agent's address.
 OAuth flows were kept in the memory of the BFF pod that started them, so with more than one
 replica (the production overlay runs two) a callback that reached the other pod failed as an
 unknown state. Pending flows are now kept in the control-plane database, sealed under a key
-derived from their state, and any replica completes them.
+derived from their state, and any replica completes them. Their deadlines are set and checked by
+the database's clock, so a replica whose clock runs ahead cannot expire another's.
 
 **Fixed: the console never recognised a real tool call in a trace.** Langfuse records the
 platform's tool calls as `TOOL` observations, and the run inspector and trace explorer only

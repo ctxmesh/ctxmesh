@@ -25,7 +25,8 @@ import (
 )
 
 // pgStore is the Postgres Store over the oauth_pending table (migration 0028, applied by
-// controlplane.Migrate).
+// controlplane.Migrate). Every expiry is computed and compared with the database's now(), so
+// every replica sees the same deadline whatever its own clock says.
 type pgStore struct {
 	db *sql.DB
 }
@@ -33,14 +34,18 @@ type pgStore struct {
 // NewPostgresStore returns a Store over the control-plane DB handle.
 func NewPostgresStore(db *sql.DB) Store { return &pgStore{db: db} }
 
-func (s *pgStore) Put(ctx context.Context, kind Kind, handle string, payload []byte, expiresAt time.Time) error {
+func (s *pgStore) Put(ctx context.Context, kind Kind, handle string, payload []byte, ttl time.Duration) error {
+	if err := checkTTL(ttl); err != nil {
+		return err
+	}
 	id, sealed, err := seal(kind, handle, payload)
 	if err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO oauth_pending (id, kind, sealed, expires_at) VALUES ($1, $2, $3, $4)`,
-		id, string(kind), sealed, expiresAt.UTC()); err != nil {
+		`INSERT INTO oauth_pending (id, kind, sealed, expires_at)
+		 VALUES ($1, $2, $3, now() + make_interval(secs => $4))`,
+		id, string(kind), sealed, ttl.Seconds()); err != nil {
 		return fmt.Errorf("oauthpending: put %s record: %w", kind, err)
 	}
 	return nil
@@ -48,25 +53,25 @@ func (s *pgStore) Put(ctx context.Context, kind Kind, handle string, payload []b
 
 // Take deletes and returns in one statement, so two concurrent takers of one handle cannot both
 // receive the record.
-func (s *pgStore) Take(ctx context.Context, kind Kind, handle string, now time.Time) ([]byte, bool, error) {
+func (s *pgStore) Take(ctx context.Context, kind Kind, handle string) ([]byte, bool, error) {
 	if err := checkArgs(kind, handle); err != nil {
 		return nil, false, err
 	}
 	id := recordID(kind, handle)
 	var (
-		sealed    []byte
-		expiresAt time.Time
+		sealed []byte
+		live   bool
 	)
 	err := s.db.QueryRowContext(ctx,
-		`DELETE FROM oauth_pending WHERE id = $1 AND kind = $2 RETURNING sealed, expires_at`,
-		id, string(kind)).Scan(&sealed, &expiresAt)
+		`DELETE FROM oauth_pending WHERE id = $1 AND kind = $2 RETURNING sealed, expires_at > now()`,
+		id, string(kind)).Scan(&sealed, &live)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
 	}
 	if err != nil {
 		return nil, false, fmt.Errorf("oauthpending: take %s record: %w", kind, err)
 	}
-	if !now.Before(expiresAt) {
+	if !live {
 		return nil, false, nil
 	}
 	payload, err := open(kind, handle, id, sealed)
@@ -76,8 +81,8 @@ func (s *pgStore) Take(ctx context.Context, kind Kind, handle string, now time.T
 	return payload, true, nil
 }
 
-func (s *pgStore) DeleteExpired(ctx context.Context, now time.Time) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM oauth_pending WHERE expires_at <= $1`, now.UTC())
+func (s *pgStore) DeleteExpired(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM oauth_pending WHERE expires_at <= now()`)
 	if err != nil {
 		return 0, fmt.Errorf("oauthpending: delete expired: %w", err)
 	}
