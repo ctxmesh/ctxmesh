@@ -6,9 +6,14 @@ import { RunInspector } from "@/components/dashboard/run-inspector";
 import type { SpanSummary } from "@/lib/api";
 
 // The run inspector builds the tree/waterfall CLIENT-side from the BFF's FLAT
-// span list (parentId-linked). These tests prove: the tree nests a tool span
-// under a generation with its tokens/cost visible (the aha 🧪), a redacted span
-// shows the marker (never a blank/leak), and a status:error span shows the dot.
+// span list (parentId-linked). These tests prove: the tree nests a tool call
+// under the generation that made it, the tool call is the default selection, a
+// redacted span shows the marker (never a blank/leak), and a status:error span
+// shows the dot.
+//
+// The fixture has the shape Langfuse returns for a platform run: the model call
+// is a GENERATION carrying the token usage, the tool call is a TOOL observation
+// with none of its own.
 
 function span(over: Partial<SpanSummary>): SpanSummary {
   return {
@@ -19,13 +24,14 @@ function span(over: Partial<SpanSummary>): SpanSummary {
   };
 }
 
-// A run with: a root SPAN, a GENERATION child (llm), a tool SPAN nested under the
-// generation (tokens/cost), a redacted tool span, and an error span.
+// A run with: a root SPAN, a GENERATION child (the model call, with tokens/cost),
+// a TOOL call nested under the generation (no tokens of its own), a redacted
+// tool call, and an error span.
 const SPANS: SpanSummary[] = [
   span({ id: "root", parentId: "", type: "SPAN", name: "run: billing-agent", startMs: 0, durationMs: 1840 }),
   span({ id: "gen", parentId: "root", type: "GENERATION", name: "generation", startMs: 20, durationMs: 520, model: "claude-sonnet-4", tokensIn: 620, tokensOut: 240, costUSD: 0.003, input: '{"q":1}', output: '{"a":2}' }),
-  span({ id: "tool", parentId: "gen", type: "SPAN", name: "tool: get_invoice", startMs: 560, durationMs: 180, tokensIn: 12, tokensOut: 4, costUSD: 0.0001, input: '{"id":4021}', output: '{"status":"shipped"}' }),
-  span({ id: "redacted", parentId: "root", type: "SPAN", name: "tool: search_docs", startMs: 760, durationMs: 320, inputRedacted: true, outputRedacted: true }),
+  span({ id: "tool", parentId: "gen", type: "TOOL", name: "get_invoice", startMs: 560, durationMs: 180, input: '{"id":4021}', output: '{"status":"shipped"}' }),
+  span({ id: "redacted", parentId: "root", type: "TOOL", name: "search_docs", startMs: 760, durationMs: 320, inputRedacted: true, outputRedacted: true }),
   span({ id: "err", parentId: "root", type: "SPAN", name: "tool: broken", startMs: 1100, durationMs: 40, level: "ERROR", status: "error" }),
 ];
 
@@ -55,7 +61,7 @@ afterEach(() => {
 });
 
 describe("RunInspector (native summary from flat spans)", () => {
-  it("builds the tree — a tool span nested under a generation, tokens/cost visible", async () => {
+  it("builds the tree — a tool call nested under the generation that made it", async () => {
     stubTrace(SPANS);
     render(<MemoryRouter><RunInspector traceId="t1" /></MemoryRouter>);
     // The tool span row renders.
@@ -70,10 +76,40 @@ describe("RunInspector (native summary from flat spans)", () => {
     };
     expect(padOf(toolRow)).toBeGreaterThan(padOf(screen.getByTestId("span-row-gen")));
 
-    // The tool span is the default selection (the aha) — its tokens + cost show.
+    // The tool call is the default selection (the aha): its kind, input and
+    // output show. It reports no token usage, so there is no Tokens row to fake.
     const detail = screen.getByTestId("span-detail");
-    expect(detail).toHaveTextContent("12 in / 4 out");
-    expect(detail).toHaveTextContent("$0.00010");
+    expect(detail).toHaveTextContent("get_invoice");
+    expect(detail).toHaveTextContent("tool");
+    expect(detail).toHaveTextContent('{"status":"shipped"}');
+    expect(within(detail).queryByText("Tokens")).toBeNull();
+  });
+
+  it("classifies a TOOL observation as a tool and selects it over a SPAN-typed fallback", async () => {
+    // A SPAN that the legacy heuristic would also call a tool starts FIRST; the
+    // real tool call (TOOL) must still be the default selection.
+    stubTrace([
+      span({ id: "root", parentId: "", type: "SPAN", name: "run", startMs: 0, durationMs: 900 }),
+      span({ id: "step", parentId: "root", type: "SPAN", name: "plan", startMs: 10, durationMs: 50 }),
+      span({ id: "gen", parentId: "root", type: "GENERATION", name: "generation", startMs: 100, durationMs: 300, model: "claude-haiku-4-5", tokensIn: 410, tokensOut: 37, costUSD: 0.0004 }),
+      span({ id: "wc", parentId: "root", type: "TOOL", name: "word-count", startMs: 420, durationMs: 12, input: '{"text":"a b c"}', output: "3" }),
+    ]);
+    render(<MemoryRouter><RunInspector traceId="t1" /></MemoryRouter>);
+    await screen.findByTestId("span-row-wc");
+    const detail = screen.getByTestId("span-detail");
+    expect(detail).toHaveTextContent("word-count");
+    expect(within(detail).getByText("tool")).toBeInTheDocument();
+    expect(within(detail).queryByText("Tokens")).toBeNull();
+  });
+
+  it("shows Tokens on the generation row, where the usage is", async () => {
+    stubTrace(SPANS);
+    render(<MemoryRouter><RunInspector traceId="t1" /></MemoryRouter>);
+    fireEvent.click(await screen.findByTestId("span-row-gen"));
+    const detail = screen.getByTestId("span-detail");
+    expect(within(detail).getByText("Tokens")).toBeInTheDocument();
+    expect(detail).toHaveTextContent("620 in / 240 out");
+    expect(detail).toHaveTextContent("$0.003");
   });
 
   it("shows a generation's model + tokens when selected", async () => {

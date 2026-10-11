@@ -656,8 +656,8 @@ type SpanSummary struct {
 	// ParentID is the parent observation id, or "" for a root span. The UI builds
 	// the tree from this; the BFF keeps the list flat (never pre-nested).
 	ParentID string `json:"parentId"`
-	// Type is the observation type: "SPAN" | "GENERATION" | "EVENT". The tool call
-	// surfaces as a SPAN/GENERATION so the panel can mark the tool span.
+	// Type is the Langfuse observation type, passed through: "GENERATION" for a
+	// model call, "TOOL" for a tool call, "SPAN", "EVENT" and the other agent types.
 	Type string `json:"type"`
 	// Name is the observation name (the step label the panel renders).
 	Name string `json:"name"`

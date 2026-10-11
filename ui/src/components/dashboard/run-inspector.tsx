@@ -21,8 +21,9 @@ import { api, ApiError, type SpanSummary, type TraceDetailResponse } from "@/lib
 // attempt to reveal. A `status: "error"` (Level ERROR) span shows the error dot.
 
 // spanKind classifies a flat span into a display kind for its color/label: the
-// GENERATION observations are LLM calls; a SPAN named like a tool call is a tool
-// span (the aha — its tokens/cost are visible); the root (no parent) is the run.
+// GENERATION observations are LLM calls; a TOOL observation is a tool call (the
+// platform's tool span arrives from Langfuse typed TOOL); the root is the run.
+// A tool call has no token usage of its own — the generation that chose it does.
 type SpanKind = "run" | "llm" | "tool" | "internal";
 
 const KIND_DOT: Record<SpanKind, string> = {
@@ -35,8 +36,8 @@ const KIND_DOT: Record<SpanKind, string> = {
 function classifySpan(span: SpanSummary, isRoot: boolean): SpanKind {
   if (isRoot) return "run";
   if (span.type === "GENERATION") return "llm";
-  // A non-generation SPAN that isn't the root is a tool/step call. The tool span
-  // is the one that carries the aha — surface it as a distinct "tool" kind.
+  if (span.type === "TOOL") return "tool";
+  // Traces recorded before Langfuse typed tool calls carry them as plain SPANs.
   if (span.type === "SPAN") return "tool";
   return "internal";
 }
@@ -204,10 +205,13 @@ export function RunInspector({ traceId }: { traceId: string }) {
     [state],
   );
 
-  // Default selection: the first tool span, else the root, else the first node.
+  // Default selection: the first real tool call (TOOL), else the first span the
+  // SPAN fallback calls a tool, else the root, else the first node.
   const effectiveSelected = React.useMemo(() => {
     if (selectedId) return selectedId;
-    const tool = nodes.find((n) => n.kind === "tool");
+    const tool =
+      nodes.find((n) => n.kind === "tool" && n.span.type === "TOOL") ??
+      nodes.find((n) => n.kind === "tool");
     if (tool) return tool.span.id;
     return nodes[0]?.span.id ?? null;
   }, [selectedId, nodes]);
@@ -394,8 +398,8 @@ export function RunInspector({ traceId }: { traceId: string }) {
   );
 }
 
-// SpanDetail renders one selected span: identity + timing + (for a generation)
-// tokens/cost, then input/output — or a REDACTED marker over the structure when
+// SpanDetail renders one selected span: identity + timing + tokens (only when the
+// span reports usage — a generation does, a tool call does not) + cost, then input/output — or a REDACTED marker over the structure when
 // the content was scrubbed (never a blank, never a reveal attempt).
 function SpanDetail({ node }: { node: TreeNode }) {
   const s = node.span;

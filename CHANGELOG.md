@@ -40,6 +40,13 @@ the error whether it answered. Both now check the caller's permission first: a r
 403 (401 for a token the API server rejects) and nothing is contacted. Registration without the
 control-plane store is refused with 501 instead of failing after the probe.
 
+**Fixed: the console never recognised a real tool call in a trace.** Langfuse records the
+platform's tool calls as `TOOL` observations, and the run inspector and trace explorer only
+treated `SPAN`s as tools. A tool call showed as an internal step, and the run inspector opened on
+something else. Both now treat `TOOL` as a tool, and the run inspector opens on the tool call. A
+tool call reports no token usage of its own, so it shows no Tokens row; the model call that made
+it does.
+
 **Fixed: every agent run was cut off at five minutes.** Knative's default request timeout is 300
 seconds, and the platform never set one, while a run may take 600. A run that sends nothing until
 it is done also hit Knative's separate time-to-first-byte limit at the same 300 seconds. Every

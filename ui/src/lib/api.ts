@@ -485,7 +485,8 @@ export interface RollbackResponse {
 export interface SpanSummary {
   id: string;
   parentId: string;
-  // "SPAN" | "GENERATION" | "EVENT" — the tool call surfaces as a SPAN/GENERATION.
+  // The Langfuse observation type: "GENERATION" (a model call), "TOOL" (a tool
+  // call), "SPAN", "EVENT", and the other agent types Langfuse records.
   type: string;
   name: string;
   startMs: number;
