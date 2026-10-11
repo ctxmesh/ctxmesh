@@ -403,6 +403,12 @@ function useChatAgent(ns: string, name: string, enabled: boolean): ChatAgent {
   return state;
 }
 
+/** Why a name the picker lists in several namespaces cannot run until one is picked, or undefined. */
+function ambiguousMessage(name: string, homes: string[]): string | undefined {
+  if (homes.length === 0) return undefined;
+  return `${name} exists in ${homes.join(", ")}. Pick which one from the list.`;
+}
+
 /** Milliseconds from a finished run's creation to its last state change, or undefined. */
 function runDuration(detail: RunDetail): number | undefined {
   if (!["succeeded", "completed", "failed", "cancelled"].includes(detail.status)) return undefined;
@@ -442,6 +448,9 @@ export function PlaygroundPage() {
   );
   const [namespaceOptions, setNamespaceOptions] = useState<string[]>([]);
   const [agentOptions, setAgentOptions] = useState<AgentOption[]>([]);
+  // The namespace of an agent picked as namespace/name, which the picker offers under All
+  // workspaces when one name exists in more than one namespace.
+  const [pickedNs, setPickedNs] = useState("");
   const didInitRef = useRef(false);
   // A same-tab (popup-blocked) MCP OAuth return the boot handler stashed (DX-6) — surfaced as
   // a notice so consent-on-a-blocked-popup no longer ends in silence.
@@ -451,18 +460,52 @@ export function PlaygroundPage() {
   const [inspectTrace, setInspectTrace] = useState<string | null>(null);
 
   // With no namespace picked, the agent list spans every namespace the caller can read, so a
-  // picked agent runs in ITS namespace — not the BFF's default, where it does not exist.
+  // picked agent runs in ITS namespace — not the BFF's default, where it does not exist. A name
+  // that exists in more than one namespace is offered once per namespace, as namespace/name, and
+  // runs in the one picked; until one is picked the page does not guess.
   const agentName = form.name.trim();
-  const agentNames = useMemo(() => [...new Set(agentOptions.map((o) => o.name))], [agentOptions]);
-  const pickedNamespace = agentOptions.find((o) => o.name === agentName)?.namespace ?? "";
+  const scoped = namespace.trim() !== "";
+  const homesByName = useMemo(() => {
+    const homes = new Map<string, string[]>();
+    for (const o of agentOptions) {
+      const list = homes.get(o.name) ?? [];
+      if (!list.includes(o.namespace)) list.push(o.namespace);
+      homes.set(o.name, list);
+    }
+    return homes;
+  }, [agentOptions]);
+  const agentPickerOptions = useMemo(() => {
+    const values = agentOptions.map((o) =>
+      !scoped && (homesByName.get(o.name)?.length ?? 0) > 1 ? `${o.namespace}/${o.name}` : o.name,
+    );
+    return [...new Set(values)];
+  }, [agentOptions, homesByName, scoped]);
+  const homes = scoped ? [] : (homesByName.get(agentName) ?? []);
+  const pickedNamespace =
+    homes.length === 1 ? homes[0] : homes.includes(pickedNs) ? pickedNs : "";
+  const ambiguousHomes = homes.length > 1 && !pickedNamespace ? homes : [];
+  const agentPickerValue =
+    homes.length > 1 && pickedNamespace ? `${pickedNamespace}/${agentName}` : form.name;
   const runNamespace = namespace.trim() || pickedNamespace;
   const chatNamespace = runNamespace || BFF_DEFAULT_NAMESPACE;
   const nameError = agentName ? validate(form).name : undefined;
   const chatAgent = useChatAgent(
     chatNamespace,
     agentName,
-    mode === "chat" && canRun && agentName !== "" && !nameError,
+    mode === "chat" && canRun && agentName !== "" && !nameError && ambiguousHomes.length === 0,
   );
+
+  // A namespace/name option names both; anything else is a name, picked or typed.
+  function pickAgent(value: string) {
+    const slash = value.indexOf("/");
+    if (slash > 0 && agentPickerOptions.includes(value)) {
+      setPickedNs(value.slice(0, slash));
+      set("name", value.slice(slash + 1));
+      return;
+    }
+    setPickedNs("");
+    set("name", value);
+  }
 
   // The durable run engine (ADR 0093) — the SAME create-or-resume → stream → finalize engine the
   // console ChatPanel uses (this page previously duplicated it in onRun + onApprove). It owns the
@@ -563,7 +606,7 @@ export function PlaygroundPage() {
     // fields validated by "Export to CRD"; requiring them here wrongly BLOCKED invoking a
     // live agent (the run silently never fired → no response, no consent CTA). Validate the
     // name only for a run.
-    const runNameError = validate(form).name;
+    const runNameError = validate(form).name ?? ambiguousMessage(agentName, ambiguousHomes);
     if (runNameError) {
       setErrors({ name: runNameError });
       setRun({ kind: "error", message: runNameError });
@@ -758,8 +801,11 @@ export function PlaygroundPage() {
     { key: "Agent", value: agentName || undefined, absent: "not chosen yet" },
     {
       key: "Workspace",
-      value: (mode === "chat" && agentName ? chatNamespace : runNamespace) || undefined,
-      absent: "default",
+      value:
+        ambiguousHomes.length > 0
+          ? undefined
+          : (mode === "chat" && agentName ? chatNamespace : runNamespace) || undefined,
+      absent: ambiguousHomes.length > 0 ? "not chosen yet" : "default",
     },
     {
       key: "Run id",
@@ -813,6 +859,12 @@ export function PlaygroundPage() {
     );
   } else if (nameError) {
     chatColumn = chatPlaceholder("playground-chat-invalid", "That isn't an agent name.", nameError);
+  } else if (ambiguousHomes.length > 0) {
+    chatColumn = chatPlaceholder(
+      "playground-chat-ambiguous",
+      `There is an agent named ${agentName} in more than one workspace.`,
+      `Pick the one to talk to from the list: ${ambiguousHomes.map((ns) => `${ns}/${agentName}`).join(", ")}.`,
+    );
   } else if (chatAgent.kind === "missing") {
     chatColumn = chatPlaceholder(
       "playground-chat-missing",
@@ -931,9 +983,9 @@ export function PlaygroundPage() {
               >
                 <ComboSelect
                   id="name"
-                  value={form.name}
-                  options={agentNames}
-                  onChange={(v) => set("name", v)}
+                  value={agentPickerValue}
+                  options={agentPickerOptions}
+                  onChange={pickAgent}
                   placeholder="— pick an agent —"
                   customPlaceholder="new agent name"
                   testId="playground-agent"

@@ -1025,6 +1025,116 @@ describe("PlaygroundPage — plain-text chat by default (m184.15)", () => {
     expect(JSON.parse(createCall.body).namespace).toBe("team-b");
   });
 
+  // Under All workspaces one name can exist in several namespaces. The picker used to show it once
+  // and run it in whichever namespace the list returned first.
+  describe("one name in two workspaces", () => {
+    const twins = [
+      { name: "echo", namespace: "team-a" },
+      { name: "echo", namespace: "team-b" },
+    ];
+    const agentOptionValues = () =>
+      Array.from(screen.getByLabelText("Agent").querySelectorAll("option")).map((o) => [
+        o.getAttribute("value"),
+        o.textContent,
+      ]);
+
+    it("offers each as namespace/name, and the chat runs in the one picked", async () => {
+      const calls = recordingFetch({
+        run: { detail: finished },
+        agents: twins,
+        agentDetails: {
+          "team-a/echo": readyDetail("team-a", "echo"),
+          "team-b/echo": readyDetail("team-b", "echo"),
+        },
+      });
+
+      renderPage("/playground");
+      await waitFor(() =>
+        expect(agentOptionValues()).toEqual(
+          expect.arrayContaining([
+            ["team-a/echo", "team-a/echo"],
+            ["team-b/echo", "team-b/echo"],
+          ]),
+        ),
+      );
+      expect(agentOptionValues().some(([v]) => v === "echo")).toBe(false);
+
+      fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "team-b/echo" } });
+      expect(screen.getByLabelText("Agent")).toHaveValue("team-b/echo");
+      const composer = await screen.findByTestId("chat-input");
+      fireEvent.change(composer, { target: { value: "hi" } });
+      fireEvent.click(screen.getByTestId("chat-send"));
+
+      const createCall = await waitFor(() => {
+        const c = calls.find((x) => x.url === "/api/runs" && x.method === "POST");
+        expect(c).toBeDefined();
+        return c!;
+      });
+      expect(JSON.parse(createCall.body)).toMatchObject({ agent: "echo", namespace: "team-b" });
+      expect(calls.some((c) => c.url === "/api/agents/team-b/echo")).toBe(true);
+      expect(calls.some((c) => c.url === "/api/agents/team-a/echo")).toBe(false);
+    });
+
+    it("runs the JSON request and connects in the one picked", async () => {
+      const popup = { closed: false } as Window;
+      vi.stubGlobal("open", vi.fn(() => popup));
+      const calls = recordingFetch({
+        agents: twins,
+        run: {
+          detail: {
+            id: "run-1",
+            status: "requires_action",
+            traceId: "trace-xyz",
+            messages: [{ role: "assistant", content: "please connect your account" }],
+            requiresAction: { kind: "consent_required", servers: ["crm"] },
+          },
+        },
+      });
+
+      renderPage("/playground?mode=json");
+      await waitFor(() =>
+        expect(agentOptionValues().some(([v]) => v === "team-a/echo")).toBe(true),
+      );
+      fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "team-a/echo" } });
+      fill("Message (JSON)", '{"prompt":"hi"}');
+      fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
+
+      const createCall = await waitFor(() => {
+        const c = calls.find((x) => x.url === "/api/runs" && x.method === "POST");
+        expect(c).toBeDefined();
+        return c!;
+      });
+      expect(JSON.parse(createCall.body)).toMatchObject({ agent: "echo", namespace: "team-a" });
+
+      fireEvent.click(await screen.findByTestId("connect-crm"));
+      const grant = await waitFor(() => {
+        const c = calls.find((x) => x.url === "/api/mcp/oauth/grant");
+        expect(c).toBeDefined();
+        return c!;
+      });
+      expect(JSON.parse(grant.body).namespace).toBe("team-a");
+    });
+
+    it("does not guess which one a bare name means", async () => {
+      const calls = recordingFetch({ agents: twins });
+
+      renderPage("/playground?agent=echo");
+      expect(await screen.findByTestId("playground-chat-ambiguous")).toHaveTextContent(
+        "team-a/echo, team-b/echo",
+      );
+      expect(calls.some((c) => /^\/api\/agents\/[^/]+\/echo$/.test(c.url))).toBe(false);
+
+      fireEvent.click(screen.getByTestId("playground-mode-json"));
+      fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
+      await waitFor(() =>
+        expect(
+          screen.getAllByRole("alert").some((a) => /echo exists in team-a, team-b/.test(a.textContent ?? "")),
+        ).toBe(true),
+      );
+      expect(calls.some((c) => c.url === "/api/runs")).toBe(false);
+    });
+  });
+
   // The page re-reads an agent that has not settled. One failed re-read used to replace the chat
   // with an error card, discarding the conversation and the composer.
   describe("a background re-read that fails", () => {
