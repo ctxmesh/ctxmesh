@@ -35,6 +35,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/yaml"
@@ -289,6 +290,14 @@ func newRBACConnectServer(t *testing.T, c client.Client) (*Server, *fakeCallerCl
 // there, and returns a client acting as that user.
 func personaUser(t *testing.T, admin client.Client, ns, user string, roles ...string) client.Client {
 	t.Helper()
+	c, _ := personaUserConfig(t, admin, ns, user, roles...)
+	return c
+}
+
+// personaUserConfig is personaUser that also returns the user's rest.Config, for a test that
+// needs a typed clientset (the pod-log stream) acting as the same user.
+func personaUserConfig(t *testing.T, admin client.Client, ns, user string, roles ...string) (client.Client, *rest.Config) {
+	t.Helper()
 	ctx := context.Background()
 	for _, r := range roles {
 		require.NoError(t, admin.Create(ctx, &rbacv1.RoleBinding{
@@ -305,7 +314,7 @@ func personaUser(t *testing.T, admin client.Client, ns, user string, roles ...st
 	var secret corev1.Secret
 	err = c.Get(ctx, client.ObjectKey{Namespace: ns, Name: "anything"}, &secret)
 	require.True(t, apierrors.IsForbidden(err), "%s must not be able to read Secrets; got %v", user, err)
-	return c
+	return c, authed.Config()
 }
 
 // installPersona creates a shipped persona ClusterRole from config/rbac under its built name

@@ -120,6 +120,12 @@ line per line of it, with the sequence number in `id:`. A client that parsed the
 payload directly instead. After a consent or an approval, the chat resumes the run's stream after
 the event that paused it.
 
+**Fixed: no shipped role could watch an agent's live output.** The live output on an agent's page
+reads the agent's pod log as the caller, and no shipped role granted it, so the console hid it from
+everyone. The `developer` and `operator` roles now grant `get` and `list` on `pods` and `get` on
+`pods/log`, in the namespaces they are bound in, as Kubernetes' own `view` and `edit` roles do. The
+`viewer` role does not.
+
 **Security: an agent could serve a page at its own address and finish a visitor's OAuth consent
 as its author.** The console's consent page trusts a page at an agent's hostname, and with the
 edge's `extAuth.enabled: false`, `/invoke` at every agent hostname reaches the agent's own

@@ -101,3 +101,19 @@ rules:
   - get
   - list
   - delete
+# The live output tail on an agent's page (GET /api/agents/{ns}/{name}/logs) runs as the
+# caller: it lists the agent's pods, then reads one pod's log. Kubernetes' own view and edit
+# roles grant the same. The viewer persona deliberately does not get these.
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ""
+  resources:
+  - pods/log
+  verbs:
+  - get
