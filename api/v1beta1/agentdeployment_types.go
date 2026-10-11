@@ -988,6 +988,13 @@ type RollbackStatus struct {
 	// +kubebuilder:validation:MaxLength=253
 	RolledBackTo string `json:"rolledBackTo,omitempty"`
 
+	// revertedGeneration is the metadata.generation of the spec the last rollback wrote. Only that
+	// spec is served as the rollback: rolledBackTo takes all traffic at once, without a canary, an
+	// approval or the eval gate. Any later change to the spec, including an edit back to the same
+	// version, rolls out like any other change.
+	// +optional
+	RevertedGeneration int64 `json:"revertedGeneration,omitempty"`
+
 	// lastRollbackAt is when the last SUCCESSFUL rollback was actuated. The cooldown
 	// guard refuses a second rollback within rollbackCooldown of this time.
 	// +optional

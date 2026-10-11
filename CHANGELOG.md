@@ -178,8 +178,10 @@ recorded as promoted, and an automatically promoted revision no longer drops to
 canary, the version a rollback restored opened as a new canary candidate, with `canaryPercent` of
 the traffic, and after an automatic rollback the freeze held that split while `RolledBack=True`. A
 gated agent without a canary held the restored version at `awaiting-promotion`. The version a
-rollback restores now takes all traffic at once, with no canary, approval or eval-gate run; a later
-spec change, including an edit back to that version after another has served, canaries as before.
+rollback restores now takes all traffic at once, with no canary, approval or eval-gate run. Only
+the spec the rollback writes is served this way, and `status.rollback.revertedGeneration` records
+which one that is: any later spec change, including an edit back to the restored version after the
+version it replaced has been deployed again, canaries and gates as before.
 
 **Fixed: connecting a provider that was already connected failed with HTTP 400.** Every release
 updated the provider's SecretBinding and ModelRoute without a `resourceVersion`, which the API

@@ -528,6 +528,7 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 		rb = &agentsv1beta1.RollbackStatus{}
 	}
 	rb.RolledBackTo = served
+	rb.RevertedGeneration = fresh.Generation // from the revert's Update response; withStatus may be a cached read
 	rb.LastRollbackAt = &now
 	if freeze {
 		// Auto-rollback freezes further AUTO-actions until a human acks (clears this). Set it
@@ -567,28 +568,31 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 // revision, not the pod). The gate stays un-run for the target while it serves: re-scoring it, a
 // blocked or unscored verdict would report "previous revision keeps serving" over the revision serving
 // every request.
-func rollbackBypass(st agentsv1beta1.AgentDeploymentStatus, versionName string, cand candidateRevision) bool {
-	if rollbackTargetPending(st, versionName) {
+func rollbackBypass(deploy *agentsv1beta1.AgentDeployment, versionName string, cand candidateRevision) bool {
+	if rollbackTargetPending(deploy, versionName) {
 		return true
 	}
+	st := deploy.Status
 	rb, g := st.Rollback, st.Gate
 	return rb != nil && rb.RolledBackTo == versionName && st.LatestVersion == versionName &&
 		g != nil && g.Reason == reasonRollbackTarget && cand.names(g.ScoredRevision)
 }
 
-// rollbackTargetPending reports whether versionName is the version the last rollback reverted to and
-// has not been served since: status.latestVersion still names the version that rollback reverted from.
-// Once the target serves, or any other version is recorded after it, a spec that matches the target is
-// an ordinary change, so a later edit back to it canaries and gates like any other.
+// rollbackTargetPending reports whether the spec is still the one the last rollback wrote and its version
+// has not served yet. The bypass belongs to that spec alone: after any later spec change, including an
+// edit back to the restored version once another has served, a spec that matches the target canaries
+// and gates like any other. The version recorded as latest cannot tell those apart, because the version
+// the rollback left can be deployed and recorded again.
 //
 // rolledBackTo names the version the reverted spec hashes to, which is the reconcile's versionName,
 // including when kept governance gives the reverted spec a version of its own (actuateRollback).
-func rollbackTargetPending(st agentsv1beta1.AgentDeploymentStatus, versionName string) bool {
-	rb := st.Rollback
-	if rb == nil || rb.RolledBackTo == "" || rb.RolledBackTo != versionName || len(rb.History) == 0 {
+func rollbackTargetPending(deploy *agentsv1beta1.AgentDeployment, versionName string) bool {
+	rb := deploy.Status.Rollback
+	if rb == nil || rb.RevertedGeneration == 0 || rb.RevertedGeneration != deploy.Generation ||
+		rb.RolledBackTo != versionName {
 		return false
 	}
-	return st.LatestVersion != versionName && rb.History[0].FromVersion == st.LatestVersion
+	return deploy.Status.LatestVersion != versionName
 }
 
 // serveRollbackTarget pins all traffic to the rollback target's revision in the same write that applies

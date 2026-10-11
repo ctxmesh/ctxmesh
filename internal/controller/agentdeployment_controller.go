@@ -630,7 +630,7 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 
 	// A rollback returns to a version that has served: it takes all traffic at once, without a
 	// canary, an approval or a re-run of the gate (ADR 0062, 2026-10-11 amendment).
-	if rollbackBypass(deploy.Status, versionName, cand) {
+	if rollbackBypass(deploy, versionName, cand) {
 		return r.serveRollbackTarget(ctx, deploy, hash, versionName, candidateRev)
 	}
 

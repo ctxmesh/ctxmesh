@@ -808,6 +808,8 @@ func rollBack(t *testing.T, r *AgentDeploymentReconciler, name, namespace, v1 st
 	require.NoError(t, err)
 	require.Equal(t, agentVersionName(name, hash), rolledBackTo,
 		"rolledBackTo is the version the next reconcile computes for the reverted spec")
+	require.Equal(t, reverted.Generation, reverted.Status.Rollback.RevertedGeneration,
+		"the rollback records the generation of the spec it wrote")
 	if keptGovernance {
 		require.NotEqual(t, v1, rolledBackTo, "the kept governance makes the reverted spec a version of its own")
 	} else {
@@ -1007,4 +1009,57 @@ func TestRollback_LaterSpecChangeCanaries(t *testing.T) {
 	require.Equal(t, v1, d.Status.Rollback.RolledBackTo, "the spec matches the version the rollback restored")
 	assert.Equal(t, eval.PhaseCanary, d.Status.Gate.Phase)
 	assert.Equal(t, map[string]int64{r3: 90, r1: 10}, trafficMap(getKsvc(t, name, namespace)))
+}
+
+// The bypass belongs to the spec the rollback wrote. After the restored version has served and the version
+// it replaced has been deployed and served again, an edit back to the restored version is an ordinary change.
+// Before, the history still named the re-deployed version as the one the rollback left, so the edit was
+// served as the rollback target: promoted, with no canary and no gate.
+func TestRollback_EditBackAfterRedeployIsGated(t *testing.T) {
+	const namespace = "default"
+	for _, tc := range []struct {
+		name, agent string
+		rollout     *agentsv1beta1.RolloutSpec
+	}{
+		{"canary", "rb-editback-canary", &agentsv1beta1.RolloutSpec{Strategy: rolloutStrategyCanary, CanaryPercent: 10}},
+		{"gated", "rb-editback-gated", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			es := mkEvalSuite(t, tc.agent+"-suite", namespace, "0.7", eval.GateBlock)
+			r := gateReconciler(0.9)
+			r1, r2, v1, _ := rollbackAfterPromotion(t, r, tc.agent, namespace, es.Name, tc.rollout, false, nil)
+			reconcileNN(t, r, tc.agent, namespace)
+			require.Equal(t, r1, assertRollbackServes(t, tc.agent, namespace, v1))
+
+			// The version the rollback replaced is deployed again and serves.
+			upd := getDeploy(t, tc.agent, namespace)
+			upd.Spec.Port = 8090
+			require.NoError(t, k8sClient.Update(testCtx, upd))
+			reconcileNN(t, r, tc.agent, namespace)
+			promoteTo(t, r, tc.agent, namespace, r2)
+			require.Equal(t, r2, getKsvc(t, tc.agent, namespace).Spec.Template.Name)
+			require.Equal(t, map[string]int64{r2: 100}, trafficMap(getKsvc(t, tc.agent, namespace)))
+			require.Equal(t, eval.PhasePromoted, getDeploy(t, tc.agent, namespace).Status.Gate.Phase)
+
+			// An edit back to the restored version.
+			upd = getDeploy(t, tc.agent, namespace)
+			upd.Spec.Port = 8080
+			require.NoError(t, k8sClient.Update(testCtx, upd))
+			reconcileNN(t, r, tc.agent, namespace)
+
+			d := getDeploy(t, tc.agent, namespace)
+			require.Equal(t, v1, d.Status.Rollback.RolledBackTo, "the spec matches the version the rollback restored")
+			require.NotNil(t, d.Status.Gate)
+			assert.NotEqual(t, reasonRollbackTarget, d.Status.Gate.Reason, "the edit is not the rollback")
+			assert.Equal(t, r1, d.Status.Gate.ScoredRevision)
+			if tc.rollout != nil {
+				assert.Equal(t, eval.PhaseCanary, d.Status.Gate.Phase)
+				assert.Equal(t, map[string]int64{r2: 90, r1: 10}, trafficMap(getKsvc(t, tc.agent, namespace)))
+			} else {
+				assert.Equal(t, eval.PhaseAwaitingPromotion, d.Status.Gate.Phase)
+				assert.Equal(t, map[string]int64{r2: 100}, trafficMap(getKsvc(t, tc.agent, namespace)),
+					"the version that serves keeps serving until the edit is approved")
+			}
+		})
+	}
 }

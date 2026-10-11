@@ -1389,6 +1389,14 @@ spec:
                       guard refuses a second rollback within rollbackCooldown of this time.
                     format: date-time
                     type: string
+                  revertedGeneration:
+                    description: |-
+                      revertedGeneration is the metadata.generation of the spec the last rollback wrote. Only that
+                      spec is served as the rollback: rolledBackTo takes all traffic at once, without a canary, an
+                      approval or the eval gate. Any later change to the spec, including an edit back to the same
+                      version, rolls out like any other change.
+                    format: int64
+                    type: integer
                   rolledBackTo:
                     description: |-
                       rolledBackTo is the AgentVersion the serving spec was last reverted to (see
