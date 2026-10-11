@@ -36,7 +36,7 @@ import {
 } from "@/lib/api";
 import { formatLatency } from "@/lib/format";
 import { markRunCompleted } from "@/lib/first-run";
-import { useDurableRun } from "@/lib/use-durable-run";
+import { useDurableRun, type RunPause } from "@/lib/use-durable-run";
 import {
   isValidHttpUrl,
   MCP_OAUTH_MESSAGE,
@@ -559,14 +559,14 @@ export function PlaygroundPage() {
   // workflow nodes) so the define/run/export chrome is unchanged.
   const runEngine = useDurableRun({
     onForbidden: () => reprobe(),
-    onFinalized: (detail) => {
+    onFinalized: (detail, pause) => {
       // The Home checklist's "Run your agent" step reads a Langfuse-backed feed that is ready and
       // EMPTY on a default install, so it never checked off for a user who had just watched a run
       // finish. Record what the browser saw, under the namespace the run went to (the BFF's default
       // when none is named). Any terminal result counts: the step asks the user to send a message
       // and watch the trace, which a failed run also satisfies.
       markRunCompleted(chatNamespace);
-      setRun(finalizedRun(detail));
+      setRun(finalizedRun(detail, pause));
     },
     onFinalizeError: (err) => setRun(errorRun(err)),
   });
@@ -673,15 +673,20 @@ export function PlaygroundPage() {
     });
   }
 
-  // onApprove / onDeny resolve a human-in-the-loop pause (m32.4). Approve RESUMES the same run
+  // onApprove / onDeny resolve a human-in-the-loop pause (m32.4). Approve RESUMES the paused run
   // (the engine re-streams to completion). Deny resolves it to a terminal "denied" state
   // directly (no re-stream). Both go through POST /api/runs/{id}/resume.
   async function onApprove(_runId: string) {
-    // The engine resumes the run it is currently holding (the paused run == _runId).
+    // The engine resumes the run that asked (the paused run == _runId).
     await runEngine.resume("approve");
   }
 
   async function onDeny(runId: string) {
+    // A sub-agent's approval: denying it ends only the sub-run, and the engine follows the run on.
+    if (runEngine.pause?.descendant) {
+      await runEngine.resume("deny");
+      return;
+    }
     try {
       await api.resumeRun(runId, "deny");
       setRun({
@@ -1679,12 +1684,13 @@ function WorkflowGraphSection({
 // this page's richer `Run` union — the traceId + response + consent/approval affordances +
 // workflow nodes the run panel renders. A failed run maps to the error state (no trace
 // panel). This is exactly the projection the page's old inline finalizeRun did, now fed by the
-// hook's onFinalized callback.
-function finalizedRun(detail: RunDetail): Run {
+// hook's onFinalized callback. pause is what the run waits on, its own or a delegated sub-run's;
+// an approval names the run that asked, which is the one approve and deny resolve.
+function finalizedRun(detail: RunDetail, pause?: RunPause): Run {
   if (detail.status === "failed") {
     return { kind: "error", message: detail.error || "The run failed." };
   }
-  const ra = detail.requiresAction;
+  const ra = pause?.action;
   const lastMessage = detail.messages?.length
     ? detail.messages[detail.messages.length - 1].content
     : "";
@@ -1706,7 +1712,7 @@ function finalizedRun(detail: RunDetail): Run {
     consentRequired: ra?.kind === "consent_required" ? ra.servers : undefined,
     approval:
       ra?.kind === "approval"
-        ? { runId: detail.id, key: ra.key ?? "", summary: ra.message ?? "" }
+        ? { runId: pause?.runId ?? detail.id, key: ra.key ?? "", summary: ra.message ?? "" }
         : undefined,
     took: runDuration(detail),
     workflowRef: detail.workflowRef,

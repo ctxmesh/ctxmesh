@@ -127,6 +127,8 @@ type ChatTurn = {
   consentRequired?: string[];
   /** The run paused on a person's DECISION (approval / plan approval), not on consent. */
   heldFor?: "approval" | "plan_approval";
+  /** The sub-agent whose run is paused, when the pause is a sub-run's rather than this run's. */
+  pausedSubRun?: { runId: string; agent?: string };
   pending?: boolean;
   error?: string;
   // a forbidden run (viewer without invoke rights) gets the ForbiddenInline treatment —
@@ -155,6 +157,22 @@ function clock(ms: number): string {
 
 /** ModelRouteReady reasons that mean a message would fail now (ADR 0151). */
 const ROUTE_HOLD_REASONS = new Set(["NotYetServed", "GatewayAbsent", "SecretUnresolved"]);
+
+/** Names the sub-agent a pause came from, when it was not this agent's own. */
+function SubAgentNote({ turn }: { turn: ChatTurn }) {
+  if (!turn.pausedSubRun) return null;
+  return (
+    <span className="mt-2 block text-secondary-foreground" data-testid="chat-sub-agent-pause">
+      It was asked by{" "}
+      {turn.pausedSubRun.agent ? (
+        <span className="font-mono text-xs">{turn.pausedSubRun.agent}</span>
+      ) : (
+        "a sub-agent"
+      )}
+      , which this agent handed part of the work to.
+    </span>
+  );
+}
 
 /** The reading column (§6.1 A10). Everything the transcript owns sits inside it. */
 const COLUMN = "mx-auto w-full max-w-[46rem]";
@@ -213,14 +231,16 @@ export function ChatPanel({
   // are projected via the state-effect below. A forbidden run reprobes the RBAC-aware chrome.
   const run = useDurableRun({
     onForbidden: () => reprobe(),
-    onFinalized: (detail) => {
+    onFinalized: (detail, pause) => {
       // A finished turn is a run the person watched happen, which is what Home's "Run your agent"
       // step asks for (see first-run.ts).
       markRunCompleted(ns);
       onRunFinalized?.(detail);
       const turnId = activeTurnRef.current;
       if (turnId === null) return;
-      const ra = detail.requiresAction;
+      // The action is this run's own, or that of a sub-agent it delegated to: either way the
+      // reader is asked the same thing, and resuming gives the answer to the run that asked.
+      const ra = pause?.action;
       const consentRequired =
         ra?.kind === "consent_required" ? ra.servers ?? [] : undefined;
       // A run that paused on a DECISION is held, not failed and not finished. It is a
@@ -244,6 +264,7 @@ export function ChatPanel({
                 traceId: detail.traceId,
                 consentRequired: consentRequired && consentRequired.length > 0 ? consentRequired : undefined,
                 heldFor,
+                pausedSubRun: pause?.descendant ? { runId: pause.runId, agent: pause.agent } : undefined,
                 error: failed ? detail.error || "The run failed." : undefined,
                 forbidden: false,
               }
@@ -590,6 +611,7 @@ export function ChatPanel({
             allowed to borrow anyone else&rsquo;s. Connect, and it carries on
             from where it stopped. Nothing has been lost while it waits.
           </span>
+          <SubAgentNote turn={t} />
           <span className="mt-2.5 flex flex-wrap gap-2">
             {(t.consentRequired ?? []).map((server) => (
               <Button
@@ -624,6 +646,8 @@ export function ChatPanel({
    */
   function holdStep(t: ChatTurn): TimelineStep {
     const plan = t.heldFor === "plan_approval";
+    // The decision belongs to the run that asked for it: a sub-agent's, when it was one.
+    const heldRun = t.pausedSubRun?.runId ?? t.runId;
     return {
       id: `hold-${t.id}`,
       tone: "hold",
@@ -640,12 +664,13 @@ export function ChatPanel({
             It is held, not failed: nothing has been done yet and the answer
             keeps its place in the queue until someone decides.
           </span>
-          {!endUser && t.runId && (
+          <SubAgentNote turn={t} />
+          {!endUser && heldRun && (
             <span className="mt-2.5 block">
               <NextStepLink
                 label="Review the hold"
-                to={`/runs/${encodeURIComponent(t.runId)}`}
-                ariaLabel={`Review the hold on run ${t.runId}`}
+                to={`/runs/${encodeURIComponent(heldRun)}`}
+                ariaLabel={`Review the hold on run ${heldRun}`}
               />
             </span>
           )}

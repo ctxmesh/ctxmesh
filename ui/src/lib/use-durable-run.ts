@@ -45,6 +45,21 @@ export type DurableRunStatus =
   | "error"
   | "forbidden";
 
+// RunPause is the action a run is waiting on, and which run must be resumed to give it. A
+// supervisor that delegated waits on its sub-run, so when the sub-run pauses for consent or an
+// approval the action is the sub-run's: the supervisor's stream names it in a
+// `descendant-requires-action` frame (ADR 0075 §4) and the supervisor itself never pauses.
+export interface RunPause {
+  /** The paused run: the run itself, or a sub-run it delegated to. */
+  runId: string;
+  /** The paused run's agent and namespace. */
+  agent?: string;
+  namespace?: string;
+  action: RunAction;
+  /** The paused run is a sub-run of the run being watched. */
+  descendant: boolean;
+}
+
 // DurableRunState is the observable state the consumer renders from.
 export interface DurableRunState {
   status: DurableRunStatus;
@@ -60,9 +75,11 @@ export interface DurableRunState {
   // detail is the finalized RunDetail (traceId, requiresAction, workflow nodes, run status) —
   // present once status is "done". The consumer projects it into its own view.
   detail?: RunDetail;
-  // traceId / requiresAction are lifted from the finalized detail for convenience.
+  // traceId is lifted from the finalized detail for convenience. requiresAction is the action the
+  // run waits on, its own or a sub-run's; pause says which run resume() gives it to.
   traceId?: string;
   requiresAction?: RunAction;
+  pause?: RunPause;
   // error / forbidden mirror the failure state (status "error" / "forbidden").
   error?: string;
   forbidden: boolean;
@@ -73,14 +90,28 @@ export interface UseDurableRunOptions {
   // reprobe() its RBAC-aware chrome (a cached "yes" was stale, ADR 0011).
   onForbidden?: (message: string) => void;
   // onFinalized fires exactly once per run when the finalized detail is read (stream close or a
-  // requires_action pause). The surface projects the detail into its own view here.
-  onFinalized?: (detail: RunDetail) => void;
+  // requires_action pause). The surface projects the detail into its own view here. pause is set
+  // when the run waits on an action, its own or a sub-run's; detail is always the watched run's.
+  onFinalized?: (detail: RunDetail, pause?: RunPause) => void;
   // onFinalizeError fires when getRun itself fails (a rare finalize-time error). The surface
   // renders it; forbidden finalize errors also trigger onForbidden.
   onFinalizeError?: (err: unknown) => void;
 }
 
 const IDLE: DurableRunState = { status: "idle", responseText: "", step: "", forbidden: false };
+
+// subRunPause reads a sub-run and returns what it waits on, or undefined when it no longer waits.
+async function subRunPause(id: string): Promise<RunPause | undefined> {
+  const sub = await api.getRun(id);
+  if (sub.status !== "requires_action" || !sub.requiresAction) return undefined;
+  return {
+    runId: sub.id,
+    agent: sub.agent,
+    namespace: sub.namespace,
+    action: sub.requiresAction,
+    descendant: true,
+  };
+}
 
 // StartArgs mirrors CreateRunRequest — the create-or-resume input. conversationId is optional
 // (single-shot Playground omits it; ChatPanel threads it), so ONE hook serves both.
@@ -89,8 +120,9 @@ export type StartArgs = CreateRunRequest;
 export interface UseDurableRunResult extends DurableRunState {
   // start creates a fresh durable run and streams it to a terminal/paused state.
   start: (args: StartArgs) => Promise<void>;
-  // resume re-enters the current run paused in requires_action (POST .../resume) and re-streams
-  // it. No decision → a consent connect-and-continue; "approve" | "deny" → a HITL gate.
+  // resume gives the paused run its action (POST .../resume): the run itself, or the sub-run it
+  // waits on. It then re-streams the watched run after the pause. No decision → a consent
+  // connect-and-continue; "approve" | "deny" → a HITL gate.
   resume: (decision?: "approve" | "deny", reason?: string) => Promise<void>;
   // cancel stops the live stream and cancels the run server-side (best-effort), then resets.
   cancel: () => Promise<void>;
@@ -124,11 +156,24 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
   // finalizeRun reads the structured run state after the stream ends (or pauses at
   // requires_action) — the SSE stream carries tokens but not traceId / requiresAction / nodes,
   // which live on the run object. Mirrors the Playground's finalizeRun.
-  const finalizeRun = React.useCallback(async (runId: string, streamed: string) => {
+  const finalizeRun = React.useCallback(async (runId: string, streamed: string, subPause?: RunPause) => {
     setState((s) => ({ ...s, status: "finalizing" }));
     let detail: RunDetail;
+    let pause = subPause;
     try {
       detail = await api.getRun(runId);
+      if (!pause && detail.requiresAction) {
+        pause = {
+          runId: detail.id,
+          agent: detail.agent,
+          namespace: detail.namespace,
+          action: detail.requiresAction,
+          descendant: false,
+        };
+      }
+      // The stream ended while this run waits on a paused sub-run, without the frame naming it.
+      const waitingOn = detail.descendantsRequiringAction?.[0];
+      if (!pause && waitingOn) pause = await subRunPause(waitingOn.runId);
     } catch (err) {
       if (err instanceof ApiError && err.isForbidden) optsRef.current.onForbidden?.(err.message);
       optsRef.current.onFinalizeError?.(err);
@@ -152,12 +197,13 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
       responseText: lastMessage,
       detail,
       traceId: detail.traceId,
-      requiresAction: detail.requiresAction,
+      requiresAction: pause?.action,
+      pause,
       // A finalized run that FAILED surfaces its error so the surface can show it.
       error: detail.status === "failed" ? detail.error || "The run failed." : undefined,
       forbidden: false,
     }));
-    optsRef.current.onFinalized?.(detail);
+    optsRef.current.onFinalized?.(detail, pause);
   }, []);
 
   // streamRun opens the SSE event stream for an already-created/resumed run and drives it to a
@@ -165,7 +211,15 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
   // byte-identical (the Playground duplicated this).
   const streamRun = React.useCallback(
     (runId: string, fromSeq = 0) => {
-      setState((s) => ({ ...s, status: "streaming", runId, responseText: "", step: "" }));
+      setState((s) => ({
+        ...s,
+        status: "streaming",
+        runId,
+        responseText: "",
+        step: "",
+        requiresAction: undefined,
+        pause: undefined,
+      }));
       lastSeqRef.current = { runId, seq: fromSeq };
       let acc = "";
       let step = "";
@@ -196,6 +250,35 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
           } else if (kind === "state" && data === "requires_action") {
             // requires_action is NOT terminal, so the stream stays open — stop it and finalize.
             finalize();
+          } else if (kind === "descendant-requires-action" && data) {
+            // A sub-run this run delegated to paused. This run waits on it and its stream stays
+            // open, so the action is read from the sub-run. One that has already moved on (someone
+            // resolved it elsewhere) needs nothing here, and the stream carries on.
+            const at = seq;
+            subRunPause(data)
+              .then((pause) => {
+                if (finalized || !pause) return;
+                finalized = true;
+                stopStream();
+                // Resume after THIS frame, so a second sub-run's pause that arrived meanwhile is
+                // read again rather than skipped.
+                if (at > 0) lastSeqRef.current = { runId, seq: at };
+                void finalizeRun(runId, acc, pause);
+              })
+              .catch((err: unknown) => {
+                if (finalized) return;
+                finalized = true;
+                stopStream();
+                const forbidden = err instanceof ApiError && err.isForbidden;
+                if (forbidden) optsRef.current.onForbidden?.(err.message);
+                const reason = err instanceof Error ? err.message : "request failed";
+                setState((s) => ({
+                  ...s,
+                  status: forbidden ? "forbidden" : "error",
+                  error: `A sub-agent this run delegated to is waiting for an action, and it could not be read: ${reason}`,
+                  forbidden,
+                }));
+              });
           }
         },
         onClose: finalize,
@@ -243,10 +326,10 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
     async (decision?: "approve" | "deny", reason?: string) => {
       const runId = state.runId;
       if (!runId) return;
+      const pause = state.pause;
       stopStream();
-      // A deny is terminal — no re-stream; the consumer projects "denied" itself.
       try {
-        await api.resumeRun(runId, decision, reason);
+        await api.resumeRun(pause?.runId ?? runId, decision, reason);
       } catch (err) {
         const forbidden = err instanceof ApiError && err.isForbidden;
         if (forbidden) optsRef.current.onForbidden?.(err.message);
@@ -258,15 +341,16 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
         }));
         return;
       }
-      if (decision === "deny") {
-        // A denied run is finalized without a re-stream; read its terminal state.
+      if (decision === "deny" && !pause?.descendant) {
+        // A denied run is finalized without a re-stream; read its terminal state. A denied sub-run
+        // ends only the sub-run, so the watched run is followed on to whatever it does next.
         void finalizeRun(runId, "");
         return;
       }
       const last = lastSeqRef.current;
       streamRun(runId, last?.runId === runId ? last.seq : 0);
     },
-    [state.runId, stopStream, streamRun, finalizeRun],
+    [state.runId, state.pause, stopStream, streamRun, finalizeRun],
   );
 
   const cancel = React.useCallback(async () => {

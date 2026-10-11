@@ -9,9 +9,13 @@ import { DevModeContext } from "@/lib/dev-mode";
 import { MCP_CONSENT_READY, MCP_CONSENT_TICKET, MCP_OAUTH_MESSAGE } from "@/lib/oauth-popup";
 import {
   chunked,
+  DESCENDANT_ANSWER,
+  DESCENDANT_PAUSE_SEQ,
+  descendantGolden,
   golden,
   GOLDEN_REQUIRES_ACTION_SEQ,
   GOLDEN_TEXT,
+  RUN_DESCENDANT_PAUSED,
 } from "@/test/run-events-golden";
 
 // ChatPanel converges on DURABLE runs (ADR 0093): each cluster chat turn is createRun →
@@ -68,6 +72,8 @@ interface RunMock {
   // A stream per /events request, given the request's Last-Event-ID; `open` keeps it from closing.
   stream?: (lastEventId: string | null) => { frames: string[]; open?: boolean };
   details?: unknown[]; // successive GET /api/runs/{id} responses (consent → success)
+  // Successive GET /api/runs/{id} responses per run id, for a turn that reads more than one run.
+  detailsById?: Record<string, unknown[]>;
   createOk?: boolean;
   createStatus?: number;
   createJson?: unknown;
@@ -78,6 +84,7 @@ interface RunMock {
 function recordingFetch(run: RunMock = {}) {
   const calls: Captured[] = [];
   let detailIdx = 0;
+  const byIdIdx: Record<string, number> = {};
   vi.stubGlobal(
     "fetch",
     vi.fn((input: string | URL, init?: RequestInit) => {
@@ -123,6 +130,13 @@ function recordingFetch(run: RunMock = {}) {
       if (path.startsWith("/api/runs/") && path.endsWith("/resume"))
         return j({ id: "run-1", status: "running" });
       // GET /api/runs/{id} — successive structured details (consent → success).
+      const byId = run.detailsById?.[path.slice("/api/runs/".length)];
+      if (path.startsWith("/api/runs/") && byId) {
+        const id = path.slice("/api/runs/".length);
+        const i = byIdIdx[id] ?? 0;
+        byIdIdx[id] = i + 1;
+        return j(byId[Math.min(i, byId.length - 1)]);
+      }
       if (path.startsWith("/api/runs/")) {
         const details = run.details ?? [
           {
@@ -338,6 +352,119 @@ describe("ChatPanel (durable runs, ADR 0093)", () => {
     );
     expect(screen.getByRole("link", { name: "Review the hold on run run-1" })).toBeInTheDocument();
     expect(calls.find((c) => c.url === "/api/runs/run-1/events")?.signal?.aborted).toBe(true);
+  });
+
+  // A supervisor that delegated waits on its sub-run, so when the sub-run pauses the supervisor's
+  // stream only names it (`descendant-requires-action`). These replay the server's bytes for that,
+  // and the paused sub-run's detail as its handler served it.
+  const SUPERVISOR = "run-supervisor";
+  const SUB = RUN_DESCENDANT_PAUSED.id;
+  const supervisorDone = {
+    id: SUPERVISOR,
+    status: "succeeded",
+    traceId: "trace-supervisor",
+    messages: [{ role: "assistant", content: DESCENDANT_ANSWER }],
+  };
+  const supervisorWaiting = { id: SUPERVISOR, status: "waiting", messages: [] };
+  const supervisorStream = (lastEventId: string | null) =>
+    lastEventId === null
+      ? { frames: chunked(descendantGolden(0, DESCENDANT_PAUSE_SEQ), 17), open: true }
+      : { frames: [descendantGolden(Number(lastEventId))] };
+
+  it("(h) a sub-agent's consent pause shows the same Connect, and connecting resumes the sub-run until the turn ends", async () => {
+    const popup = { closed: false } as Window;
+    vi.stubGlobal("open", vi.fn(() => popup));
+    const calls = recordingFetch({
+      createJson: { id: SUPERVISOR, status: "queued" },
+      stream: supervisorStream,
+      detailsById: {
+        [SUPERVISOR]: [supervisorWaiting, supervisorDone],
+        [SUB]: [RUN_DESCENDANT_PAUSED],
+      },
+    });
+    renderChat(false);
+    await sendMessage("research ctxmesh");
+
+    const connect = await screen.findByTestId("connect-search-mcp");
+    expect(connect).toHaveTextContent("Connect search-mcp");
+    expect(screen.getByTestId("chat-consent")).toHaveTextContent("Connect your account to continue");
+    expect(screen.getByTestId("chat-sub-agent-pause")).toHaveTextContent("It was asked by researcher");
+    const first = calls.filter((c) => c.url === `/api/runs/${SUPERVISOR}/events`);
+    expect(first).toHaveLength(1);
+    expect(first[0].signal?.aborted).toBe(true);
+
+    fireEvent.click(connect);
+    await waitFor(() => expect(calls.find((c) => c.url === "/api/mcp/oauth/grant")).toBeDefined());
+    // The grant is scoped to the agent being chatted with: its sub-runs share its trust boundary.
+    expect(JSON.parse(calls.find((c) => c.url === "/api/mcp/oauth/grant")!.body)).toMatchObject({
+      server: "search-mcp",
+      agent: "scalekit-agent",
+    });
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: MCP_OAUTH_MESSAGE, server: "search-mcp", error: "" },
+        origin: window.location.origin,
+      }),
+    );
+
+    // The sub-run is the one resumed; the supervisor is followed on from after the pause.
+    await waitFor(() =>
+      expect(calls.find((c) => c.url === `/api/runs/${SUB}/resume` && c.method === "POST")).toBeDefined(),
+    );
+    expect(calls.find((c) => c.url === `/api/runs/${SUPERVISOR}/resume`)).toBeUndefined();
+    expect(calls.filter((c) => c.url === "/api/runs" && c.method === "POST")).toHaveLength(1);
+    await waitFor(() =>
+      expect(calls.filter((c) => c.url === `/api/runs/${SUPERVISOR}/events`)).toHaveLength(2),
+    );
+    expect(calls.filter((c) => c.url === `/api/runs/${SUPERVISOR}/events`)[1].lastEventId).toBe(
+      String(DESCENDANT_PAUSE_SEQ),
+    );
+    await waitFor(() => expect(screen.getByTestId("open-trace")).toHaveTextContent("trace-supervisor"));
+    expect(screen.getByTestId("chat-turn-agent")).toHaveTextContent(DESCENDANT_ANSWER);
+    expect(screen.queryByTestId("connect-search-mcp")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("chat-sub-agent-pause")).not.toBeInTheDocument();
+  });
+
+  it("(i) a sub-agent's approval pause shows the hold, pointing at the sub-run", async () => {
+    recordingFetch({
+      createJson: { id: SUPERVISOR, status: "queued" },
+      stream: supervisorStream,
+      detailsById: {
+        [SUPERVISOR]: [supervisorWaiting],
+        [SUB]: [
+          {
+            ...RUN_DESCENDANT_PAUSED,
+            requiresAction: { kind: "approval", key: "tool:search", message: "approve the search" },
+          },
+        ],
+      },
+    });
+    renderChat(false);
+    await sendMessage("research ctxmesh");
+
+    expect(await screen.findByTestId("chat-hold")).toHaveTextContent(
+      "A person has to approve this before it goes on",
+    );
+    expect(screen.getByRole("link", { name: `Review the hold on run ${SUB}` })).toBeInTheDocument();
+    expect(screen.getByTestId("chat-sub-agent-pause")).toHaveTextContent("researcher");
+  });
+
+  it("(j) a sub-run that has already moved on asks nothing, and the turn follows the supervisor to its answer", async () => {
+    const calls = recordingFetch({
+      createJson: { id: SUPERVISOR, status: "queued" },
+      stream: () => ({ frames: chunked(descendantGolden(), 17) }),
+      detailsById: {
+        [SUPERVISOR]: [supervisorDone],
+        [SUB]: [{ ...RUN_DESCENDANT_PAUSED, status: "succeeded", requiresAction: undefined }],
+      },
+    });
+    renderChat(false);
+    await sendMessage("research ctxmesh");
+
+    await waitFor(() => expect(screen.getByTestId("open-trace")).toHaveTextContent("trace-supervisor"));
+    expect(screen.getByTestId("chat-turn-agent")).toHaveTextContent(DESCENDANT_ANSWER);
+    expect(screen.queryByTestId("chat-consent")).not.toBeInTheDocument();
+    expect(calls.filter((c) => c.url === `/api/runs/${SUPERVISOR}/events`)).toHaveLength(1);
   });
 
   it("(c) a consent_required finalize shows Connect → clicking connect RESUMES the same run (not a new createRun)", async () => {

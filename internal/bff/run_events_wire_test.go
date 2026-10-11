@@ -17,13 +17,16 @@ limitations under the License.
 package bff
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -218,4 +221,160 @@ func TestSSEFrame(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The descendant-pause goldens: a supervisor delegates, its sub-agent pauses for consent, the person
+// connects and resumes the sub-run, and the supervisor finishes. runEventsDescendantGolden is the
+// supervisor's stream; runDescendantPausedGolden is GET /api/runs/{sub} while the sub-run waits (its
+// timestamps fixed, since they are wall-clock). Regenerate both with
+//
+//	UPDATE_FIXTURES=1 go test ./internal/bff -run TestRunEventsWire_DescendantPauseMatchesGolden
+var (
+	runEventsDescendantGolden = filepath.Join("..", "..", "sdk", "run-events-descendant.golden.sse")
+	runDescendantPausedGolden = filepath.Join("..", "..", "sdk", "run-descendant-paused.golden.json")
+)
+
+const (
+	goldenSupervisorEndpoint = "http://supervisor.prod.svc.cluster.local"
+	goldenResearcherEndpoint = "http://researcher.prod.svc.cluster.local"
+	goldenSupervisorAnswer   = "The researcher found 3 sources."
+)
+
+// scriptedInvoke answers each endpoint's calls in order, streaming a reply's tokens when it has any.
+type scriptedInvoke struct {
+	mu      sync.Mutex
+	replies map[string][]scriptedReply
+}
+
+type scriptedReply struct {
+	tokens []string
+	body   string
+}
+
+func (s *scriptedInvoke) next(endpoint string) (scriptedReply, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	q := s.replies[endpoint]
+	if len(q) == 0 {
+		return scriptedReply{}, fmt.Errorf("no scripted reply left for %s", endpoint)
+	}
+	s.replies[endpoint] = q[1:]
+	return q[0], nil
+}
+
+func (s *scriptedInvoke) Invoke(_ context.Context, endpoint string, _ []byte) ([]byte, string, error) {
+	r, err := s.next(endpoint)
+	return []byte(r.body), "trace-supervisor", err
+}
+
+func (s *scriptedInvoke) InvokeStream(_ context.Context, endpoint string, _ []byte, onToken func(string), _ func(string)) ([]byte, string, error) {
+	r, err := s.next(endpoint)
+	for _, tok := range r.tokens {
+		onToken(tok)
+	}
+	return []byte(r.body), "trace-supervisor", err
+}
+
+// runDescendantPause drives the descendant-pause scenario through the real run paths (executeRun, the
+// delegate suspend, the resume handler, the wake) and returns the supervisor's and sub-run's ids and
+// the sub-run's detail as GET /api/runs/{sub} served it while it waited.
+func runDescendantPause(t *testing.T) (s *Server, rootID, subID string, paused []byte) {
+	t.Helper()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(
+		readyAgent("supervisor", "prod", goldenSupervisorEndpoint),
+		readyAgent("researcher", "prod", goldenResearcherEndpoint),
+	).Build()
+	inv := &scriptedInvoke{replies: map[string][]scriptedReply{
+		goldenSupervisorEndpoint: {
+			{body: `{"delegate_waiting":{"checkpoint":"cp-1","delegates":[{"sub_agent":"researcher","endpoint":"` +
+				goldenResearcherEndpoint + `","input":{"input":"find sources"},"step":"1","call_id":"call-1"}]}}`},
+			{tokens: []string{"The researcher ", "found 3 sources."}, body: `{"output":"` + goldenSupervisorAnswer + `"}`},
+		},
+		goldenResearcherEndpoint: {
+			{body: `{"consent_required":["search-mcp"]}`},
+			{body: `{"output":"3 sources"}`},
+		},
+	}}
+	s = newInvokeServerNoWorkers(t, newFakeFactory(c), inv)
+	ctx := context.Background()
+
+	rootID = "run-supervisor"
+	input := []byte(`{"input":"research ctxmesh"}`)
+	require.NoError(t, s.runStore.Create(run.New(rootID, "prod", "supervisor", input, "", time.Now())))
+	s.executeRun(ctx, rootID, goldenSupervisorEndpoint, input)
+	root, err := s.runStore.Get(rootID)
+	require.NoError(t, err)
+	require.Equal(t, run.StatusWaiting, root.Status, root.Error)
+
+	subID = run.SpawnRunID(rootID, "1", "call-1")
+	s.executeRun(ctx, subID, goldenResearcherEndpoint, []byte(`{"input":"find sources"}`))
+	sub, err := s.runStore.Get(subID)
+	require.NoError(t, err)
+	require.Equal(t, run.StatusRequiresAction, sub.Status, sub.Error)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/"+subID, nil)
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var detail map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
+	detail["createdAt"], detail["updatedAt"] = "2026-10-12T09:00:00Z", "2026-10-12T09:00:01Z"
+	paused, err = json.MarshalIndent(detail, "", "  ")
+	require.NoError(t, err)
+	paused = append(paused, '\n')
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/runs/"+subID+"/resume", nil)
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	require.Eventually(t, func() bool {
+		r, gErr := s.runStore.Get(rootID)
+		return gErr == nil && r.Status == run.StatusQueued
+	}, 5*time.Second, 10*time.Millisecond, "the sub-run's completion wakes the supervisor")
+
+	s.executeRun(ctx, rootID, goldenSupervisorEndpoint, input)
+	root, err = s.runStore.Get(rootID)
+	require.NoError(t, err)
+	require.Equal(t, run.StatusSucceeded, root.Status, root.Error)
+	return s, rootID, subID, paused
+}
+
+// TestRunEventsWire_DescendantPauseMatchesGolden pins the supervisor's stream and the paused sub-run's
+// detail to the fixtures the console's chat test replays, and proves the supervisor's stream names the
+// paused sub-run and resumes after it.
+func TestRunEventsWire_DescendantPauseMatchesGolden(t *testing.T) {
+	s, rootID, subID, paused := runDescendantPause(t)
+
+	body := readRunEvents(t, s, rootID, "")
+	if os.Getenv("UPDATE_FIXTURES") == "1" {
+		require.NoError(t, os.WriteFile(runEventsDescendantGolden, []byte(body), 0o644))
+		require.NoError(t, os.WriteFile(runDescendantPausedGolden, paused, 0o644))
+	}
+	want, err := os.ReadFile(runEventsDescendantGolden)
+	require.NoError(t, err, "the committed fixture is missing; regenerate it with UPDATE_FIXTURES=1")
+	require.Equal(t, string(want), body, "the supervisor's stream changed; regenerate %s (UPDATE_FIXTURES=1)", runEventsDescendantGolden)
+	wantDetail, err := os.ReadFile(runDescendantPausedGolden)
+	require.NoError(t, err, "the committed fixture is missing; regenerate it with UPDATE_FIXTURES=1")
+	require.Equal(t, string(wantDetail), string(paused), "the paused sub-run's detail changed; regenerate %s", runDescendantPausedGolden)
+
+	var crumb sseEvent
+	for _, ev := range parseSSE(t, body) {
+		if ev.event == string(run.EventDescendantAction) {
+			crumb = ev
+		}
+	}
+	require.Equal(t, subID, crumb.data, "the supervisor's stream names the paused sub-run")
+	cut := strings.Index(body, "id: "+crumb.id+"\n")
+	require.GreaterOrEqual(t, cut, 0)
+	after := body[cut+strings.Index(body[cut:], "\n\n")+2:]
+	assert.Equal(t, after, readRunEvents(t, s, rootID, crumb.id), "a client resuming after the pause gets the rest")
+	assert.Contains(t, after, "data: "+goldenSupervisorAnswer)
+
+	var detail RunDetailDTO
+	require.NoError(t, json.Unmarshal(paused, &detail))
+	require.NotNil(t, detail.RequiresAction)
+	assert.Equal(t, []string{"search-mcp"}, detail.RequiresAction.Servers)
+	assert.Equal(t, rootID, detail.RootRunID)
 }

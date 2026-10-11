@@ -140,6 +140,14 @@ workspace got 403 on the page, and adding a trace to a dataset or labelling a ca
 with no workspace selected says so instead of asking. The dataset list also showed a dataset
 whose cases could not be read as having 0 cases; it is now an HTTP 500.
 
+**Fixed: the chat looked stuck when a sub-agent needed a Connect or an approval.** A supervisor
+that delegated waits on its sub-agent's run, and when that run paused for consent or an approval
+the supervisor's run event stream only named it (`descendant-requires-action`), which the chat and
+the Playground ignored. Both now read the sub-agent's run and show the same prompt as for the
+agent's own pause, saying which sub-agent asked. Connect resumes the sub-agent's run, the chat
+follows the supervisor on to its answer, and the hold links to the sub-agent's run. If the stream
+ends while the supervisor waits, the pause is found from the supervisor's run.
+
 **Security: an agent could serve a page at its own address and finish a visitor's OAuth consent
 as its author.** The console's consent page trusts a page at an agent's hostname, and with the
 edge's `extAuth.enabled: false`, `/invoke` at every agent hostname reaches the agent's own
