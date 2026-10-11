@@ -1018,6 +1018,39 @@ type MCPGrantConsentRequest struct {
 	Auth *MCPAuthRequest `json:"auth"`
 }
 
+// MCPConsentTicketRequest is the POST /api/mcp/oauth/ticket body (ADR 0040 amendment): a chatbox
+// on an agent's own hostname asks for a ticket to begin consent on the console origin. Agent is
+// required; the console accepts the ticket only from that agent's hostname.
+type MCPConsentTicketRequest struct {
+	Server    string `json:"server"`
+	Namespace string `json:"namespace"`
+	Agent     string `json:"agent"`
+}
+
+// MCPConsentTicketResponse carries a single-use consent ticket and the console page that redeems
+// it. The ticket is handed to that page by postMessage, never in a URL.
+type MCPConsentTicketResponse struct {
+	Ticket string `json:"ticket"`
+	// ConnectURL is the console's /connect page.
+	ConnectURL string `json:"connectURL"`
+	// ExpiresIn is the ticket's lifetime in seconds.
+	ExpiresIn int `json:"expiresIn"`
+}
+
+// MCPConsentRedeemRequest is the POST /api/mcp/oauth/grant/redeem body, sent by the console's
+// /connect page. OpenerOrigin is the origin of the window that delivered the ticket.
+type MCPConsentRedeemRequest struct {
+	Ticket       string `json:"ticket"`
+	OpenerOrigin string `json:"openerOrigin"`
+}
+
+// MCPConsentRedeemResponse carries the authorization URL the /connect page navigates to. No
+// token, verifier or state.
+type MCPConsentRedeemResponse struct {
+	Status           string `json:"status"`
+	AuthorizationURL string `json:"authorizationURL"`
+}
+
 // MCPGrantResponse is returned by the per-user grant endpoints (m17.3). It carries
 // the (user, server) identity of the grant + the action outcome — DELIBERATELY no
 // token material. User is the HASHED invoking-user identity (the label value), never

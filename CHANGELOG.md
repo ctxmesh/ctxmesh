@@ -65,6 +65,12 @@ connection must be finished in the browser, and at the address, where it started
 `bff.consoleURL` set, start consent from the console at that URL: Connect from an agent's own
 hostname, or from the console reached at another address, is refused.
 
+**Fixed: an OAuth connection failed when its callback reached another BFF replica.** Pending
+OAuth flows were kept in the memory of the BFF pod that started them, so with more than one
+replica (the production overlay runs two) a callback that reached the other pod failed as an
+unknown state. Pending flows are now kept in the control-plane database, sealed under a key
+derived from their state, and any replica completes them.
+
 **Fixed: the console never recognised a real tool call in a trace.** Langfuse records the
 platform's tool calls as `TOOL` observations, and the run inspector and trace explorer only
 treated `SPAN`s as tools. A tool call showed as an internal step, and the run inspector opened on

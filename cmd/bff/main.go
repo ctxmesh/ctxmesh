@@ -62,6 +62,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/killscope"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/oauthpending"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/publishedartifact"
@@ -634,6 +635,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		OIDCIssuer:                  flags.oidcIssuer,
 		OIDCClientID:                flags.oidcClientID,
 		ConsoleURL:                  os.Getenv("CONSOLE_URL"), // ADR 0040: canonical MCP-consent callback + relay origin
+		OAuthPendingStore:           oauthpending.NewPostgresStore(cpDB),
 		Log:                         ctrl.Log.WithName("bff.server"),
 	})
 

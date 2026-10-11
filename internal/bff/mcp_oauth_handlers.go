@@ -155,7 +155,7 @@ func (s *Server) beginMCPOAuthRegistration(w http.ResponseWriter, r *http.Reques
 	// handler), so this is always non-empty.
 	callerToken := bearerToken(r)
 
-	authURL, state, err := s.startOAuthFlow(cfg, pendingOAuthFlow{
+	authURL, state, err := s.startOAuthFlow(r.Context(), cfg, pendingOAuthFlow{
 		callerToken:    callerToken,
 		registrantHash: userGrantHash(username),
 		serverName:     name,
@@ -175,7 +175,7 @@ func (s *Server) beginMCPOAuthRegistration(w http.ResponseWriter, r *http.Reques
 	// AuthorizationURL and redirects the browser. No secret material here.
 	setOAuthBindingCookie(w, r, state)
 	writeJSON(w, http.StatusAccepted, OAuthPendingResponse{
-		Status:           "authorization_required",
+		Status:           oauthStatusAuthorizationRequired,
 		AuthorizationURL: authURL,
 		State:            state,
 		Server: MCPServerSummary{
@@ -385,7 +385,9 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 	// the pending flow. The error code is sanitized before it enters the message.
 	if oauthErr := strings.TrimSpace(q.Get("error")); oauthErr != "" {
 		if state != "" {
-			s.oauthFlows.take(state) // consume the abandoned flow
+			if _, _, err := s.oauthFlows.take(r.Context(), state); err != nil { // consume the abandoned flow
+				s.log.Error(err, "discard declined MCP OAuth flow failed; it expires on its own")
+			}
 		}
 		oauthCallbackError(w, r, "the OAuth authorization was not granted ("+oauthErrorCode(oauthErr)+")")
 		return
@@ -403,7 +405,12 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 	// (1) CSRF: resolve + CONSUME the pending flow by state. An unknown/expired/
 	// mismatched state finds no flow → a 400, and NO token exchange happens. take()
 	// removes the flow so a replayed callback (same state) cannot re-exchange.
-	flow, ok := s.oauthFlows.take(state)
+	flow, ok, err := s.oauthFlows.take(r.Context(), state)
+	if err != nil {
+		s.log.Error(err, "read pending MCP OAuth flow failed")
+		oauthCallbackError(w, r, "could not read this connection's state (start the connection again)")
+		return
+	}
 	if !ok {
 		oauthCallbackError(w, r, "unknown or expired OAuth state (start the connection again)")
 		return

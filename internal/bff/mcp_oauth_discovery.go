@@ -238,7 +238,7 @@ func clientMetadataURLPubliclyReachable(rawURL string) bool {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
-	if host == "" || host == "localhost" ||
+	if host == "" || host == hostLocalhost ||
 		strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") {
 		return false
 	}

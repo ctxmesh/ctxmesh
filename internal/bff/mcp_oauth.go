@@ -30,6 +30,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
+
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/oauthpending"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
@@ -40,8 +43,8 @@ import (
 //
 //	register  → the BFF starts an Auth-Code+PKCE flow: it generates a
 //	            code_verifier + S256 code_challenge + a random state, persists the
-//	            pending flow SERVER-SIDE (an in-memory, short-TTL store keyed by
-//	            state — the code_verifier lives ONLY here, never in the browser),
+//	            pending flow SERVER-SIDE (the control-plane store, sealed under a key
+//	            derived from the state — the code_verifier never reaches the browser),
 //	            and returns ONLY the authorization URL + the opaque state handle
 //	            for the SPA to redirect to.
 //	callback  → GET /api/mcp/oauth/callback?code=&state=. The BFF validates state
@@ -63,9 +66,16 @@ import (
 // OAuth 2.1 tier (vs a bare key or an open server).
 const oauthAuthType = "oauth"
 
+// oauthStatusAuthorizationRequired is the status of a response that starts an OAuth flow: the
+// browser must now visit the authorization URL.
+const oauthStatusAuthorizationRequired = "authorization_required"
+
+// hostLocalhost is the loopback hostname (RFC 6761).
+const hostLocalhost = "localhost"
+
 // pendingFlowTTL bounds how long a started OAuth flow may sit before the user
 // completes the browser redirect + consent. A short window limits the blast
-// radius of a leaked/guessed state and keeps the in-memory store bounded. The
+// radius of a leaked/guessed state and keeps the pending-flow store small. The
 // OAuth spec recommends the authorization-code round-trip complete promptly; 10
 // minutes is generous for a human consent screen.
 const pendingFlowTTL = 10 * time.Minute
@@ -197,68 +207,151 @@ type pendingOAuthFlow struct {
 	boundary string
 	// openerOrigin, when non-empty, is the validated browser origin that opened the consent popup
 	// (ADR 0040) — the agent hostname when consent is initiated from the chatbox at the agent's own
-	// URL. It is captured (from the Origin header) + allowlisted at consent-begin, and carried through
-	// so the callback can relay the "connected" signal back to THAT origin cross-origin. Empty ⇒
-	// same-origin (the popup's own origin is the opener) — the default single-origin console behaviour.
+	// URL. A direct begin takes it from the Origin header (allowedOpenerOrigin); a redeemed consent
+	// ticket takes the opener /connect reported, accepted only as the ticket's agent hostname
+	// (consentOpenerAllowed). The callback relays the "connected" signal to it. Empty ⇒ same-origin
+	// (the popup's own origin is the opener) — the default single-origin console behaviour.
 	openerOrigin string
 	// expiresAt bounds the flow's lifetime (register time + pendingFlowTTL).
 	expiresAt time.Time
 }
 
-// pendingOAuthStore is the server-side, short-TTL store of in-flight OAuth flows,
-// keyed by state. It is in-memory (single-process; a multi-replica BFF would use
-// a shared store — an explicit later step, noted for the reviewer). The
-// code_verifier + caller token live ONLY here; nothing in this store ever reaches
-// the browser. Access is mutex-guarded so concurrent register/callback are safe.
+// pendingOAuthStore holds in-flight OAuth flows and consent tickets in the control-plane store
+// (oauthpending), so a callback or a redeem may reach any BFF replica. The state and the ticket are
+// the handles: the store keeps neither, and seals each record under a key derived from its handle.
+// now is the clock, overridable in tests so TTL expiry is deterministic.
 type pendingOAuthStore struct {
-	mu    sync.Mutex
-	flows map[string]*pendingOAuthFlow
-	// now is the clock, overridable in tests so TTL expiry is deterministic.
-	now func() time.Time
+	backend oauthpending.Store
+	now     func() time.Time
+	log     logr.Logger
+
+	mu        sync.Mutex
+	lastSweep time.Time
 }
 
-// newPendingOAuthStore builds an empty pending-flow store using the wall clock.
-func newPendingOAuthStore() *pendingOAuthStore {
-	return &pendingOAuthStore{
-		flows: make(map[string]*pendingOAuthFlow),
-		now:   time.Now,
+// pendingSweepInterval bounds how often a put also deletes expired records. Expired records are
+// already refused on read; the sweep only keeps the table small.
+const pendingSweepInterval = time.Minute
+
+// newPendingOAuthStore wraps backend, or an in-memory store when backend is nil (tests, and a BFF
+// built without the control-plane store, which serves one replica only).
+func newPendingOAuthStore(backend oauthpending.Store, log logr.Logger) *pendingOAuthStore {
+	if backend == nil {
+		backend = oauthpending.NewMemStore()
 	}
+	return &pendingOAuthStore{backend: backend, now: time.Now, log: log}
 }
 
-// put records a pending flow, keyed by its state. It opportunistically evicts
-// expired flows so the map stays bounded without a background janitor.
-func (s *pendingOAuthStore) put(f *pendingOAuthFlow) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.evictExpiredLocked()
-	s.flows[f.state] = f
+// pendingFlowRecord is the stored form of a pendingOAuthFlow. The state is the record's handle and
+// the expiry its column, so neither is repeated here.
+type pendingFlowRecord struct {
+	CodeVerifier   string         `json:"codeVerifier"`
+	OAuth          mcpOAuthConfig `json:"oauth"`
+	CallerToken    string         `json:"callerToken"`
+	ServerName     string         `json:"serverName"`
+	Namespace      string         `json:"namespace"`
+	ServerURL      string         `json:"serverUrl"`
+	Status         string         `json:"status,omitempty"`
+	GrantUserHash  string         `json:"grantUserHash,omitempty"`
+	RegistrantHash string         `json:"registrantHash,omitempty"`
+	Boundary       string         `json:"boundary,omitempty"`
+	OpenerOrigin   string         `json:"openerOrigin,omitempty"`
 }
 
-// take atomically removes and returns the flow for state, or (nil,false) when the
-// state is unknown OR expired. Removing on take makes the authorization code
-// single-use at the flow level: a replayed callback finds no flow. An expired
-// flow is treated as unknown (and removed).
-func (s *pendingOAuthStore) take(state string) (*pendingOAuthFlow, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	f, ok := s.flows[state]
-	if !ok {
-		return nil, false
+// put records a pending flow, keyed by its state, until f.expiresAt.
+func (s *pendingOAuthStore) put(ctx context.Context, f *pendingOAuthFlow) error {
+	payload, err := json.Marshal(pendingFlowRecord{
+		CodeVerifier:   f.codeVerifier,
+		OAuth:          f.oauth,
+		CallerToken:    f.callerToken,
+		ServerName:     f.serverName,
+		Namespace:      f.namespace,
+		ServerURL:      f.serverURL,
+		Status:         f.status,
+		GrantUserHash:  f.grantUserHash,
+		RegistrantHash: f.registrantHash,
+		Boundary:       f.boundary,
+		OpenerOrigin:   f.openerOrigin,
+	})
+	if err != nil {
+		return fmt.Errorf("encode pending OAuth flow: %w", err)
 	}
-	delete(s.flows, state)
-	if s.now().After(f.expiresAt) {
-		return nil, false
-	}
-	return f, true
+	s.sweep(ctx)
+	return s.backend.Put(ctx, oauthpending.KindFlow, f.state, payload, f.expiresAt)
 }
 
-// evictExpiredLocked drops every flow past its TTL. Caller holds s.mu.
-func (s *pendingOAuthStore) evictExpiredLocked() {
+// take removes and returns the flow for state. ok is false when the state is unknown, expired, or
+// already taken: a replayed callback finds no flow.
+func (s *pendingOAuthStore) take(ctx context.Context, state string) (flow *pendingOAuthFlow, ok bool, err error) {
+	if len(state) < oauthpending.MinHandleLen {
+		return nil, false, nil // never issued by startOAuthFlow
+	}
+	payload, ok, err := s.backend.Take(ctx, oauthpending.KindFlow, state, s.now())
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	var rec pendingFlowRecord
+	if err := json.Unmarshal(payload, &rec); err != nil {
+		return nil, false, fmt.Errorf("decode pending OAuth flow: %w", err)
+	}
+	return &pendingOAuthFlow{
+		state:          state,
+		codeVerifier:   rec.CodeVerifier,
+		oauth:          rec.OAuth,
+		callerToken:    rec.CallerToken,
+		serverName:     rec.ServerName,
+		namespace:      rec.Namespace,
+		serverURL:      rec.ServerURL,
+		status:         rec.Status,
+		grantUserHash:  rec.GrantUserHash,
+		registrantHash: rec.RegistrantHash,
+		boundary:       rec.Boundary,
+		openerOrigin:   rec.OpenerOrigin,
+	}, true, nil
+}
+
+// putTicket records a consent ticket until expiresAt.
+func (s *pendingOAuthStore) putTicket(ctx context.Context, ticket string, t consentTicket, expiresAt time.Time) error {
+	payload, err := json.Marshal(t)
+	if err != nil {
+		return fmt.Errorf("encode consent ticket: %w", err)
+	}
+	s.sweep(ctx)
+	return s.backend.Put(ctx, oauthpending.KindTicket, ticket, payload, expiresAt)
+}
+
+// takeTicket removes and returns the consent ticket. ok is false when it is unknown, expired, or
+// already redeemed.
+func (s *pendingOAuthStore) takeTicket(ctx context.Context, ticket string) (t *consentTicket, ok bool, err error) {
+	if len(ticket) < oauthpending.MinHandleLen {
+		return nil, false, nil // never minted
+	}
+	payload, ok, err := s.backend.Take(ctx, oauthpending.KindTicket, ticket, s.now())
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	var out consentTicket
+	if err := json.Unmarshal(payload, &out); err != nil {
+		return nil, false, fmt.Errorf("decode consent ticket: %w", err)
+	}
+	return &out, true, nil
+}
+
+// sweep deletes expired records at most once per pendingSweepInterval. A failed sweep costs only
+// table size (expired records are refused on read), so it does not fail the put.
+func (s *pendingOAuthStore) sweep(ctx context.Context) {
 	now := s.now()
-	for k, f := range s.flows {
-		if now.After(f.expiresAt) {
-			delete(s.flows, k)
-		}
+	s.mu.Lock()
+	due := now.Sub(s.lastSweep) >= pendingSweepInterval
+	if due {
+		s.lastSweep = now
+	}
+	s.mu.Unlock()
+	if !due {
+		return
+	}
+	if _, err := s.backend.DeleteExpired(ctx, now); err != nil {
+		s.log.Error(err, "sweeping expired OAuth consent records failed; they are refused on read")
 	}
 }
 
@@ -286,7 +379,7 @@ func pkceChallengeS256(verifier string) string {
 // opaque state handle. The code_verifier is stored ONLY in the flow — the URL
 // carries only the S256 code_challenge (public by design) + state + client id +
 // redirect + scope. Nothing secret crosses to the browser.
-func (s *Server) startOAuthFlow(cfg mcpOAuthConfig, tmpl pendingOAuthFlow) (authURL, state string, err error) {
+func (s *Server) startOAuthFlow(ctx context.Context, cfg mcpOAuthConfig, tmpl pendingOAuthFlow) (authURL, state string, err error) {
 	// A 32-byte verifier yields a 43-char base64url string — within RFC 7636's
 	// 43..128 range. The state is likewise 32 bytes of entropy.
 	verifier, err := randToken(32)
@@ -303,7 +396,9 @@ func (s *Server) startOAuthFlow(cfg mcpOAuthConfig, tmpl pendingOAuthFlow) (auth
 	flow.codeVerifier = verifier
 	flow.oauth = cfg
 	flow.expiresAt = s.oauthFlows.now().Add(pendingFlowTTL)
-	s.oauthFlows.put(&flow)
+	if err := s.oauthFlows.put(ctx, &flow); err != nil {
+		return "", "", err
+	}
 
 	u, err := url.Parse(strings.TrimSpace(cfg.AuthorizationEndpoint))
 	if err != nil {

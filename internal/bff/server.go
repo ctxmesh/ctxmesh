@@ -44,6 +44,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/killscope"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/oauthpending"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/publishedartifact"
@@ -403,11 +404,10 @@ type Server struct {
 	// default / dev). Built in NewServer from TOKEN_SERVICE_URL.
 	grantStore credresolve.GrantWriter
 
-	// oauthFlows is the SERVER-SIDE, short-TTL store of in-flight MCP OAuth 2.1
-	// authorization flows (m17.2, ADR 0016), keyed by the CSRF `state`. It holds the
-	// PKCE code_verifier + the registering caller's token — NEVER surfaced to the
-	// browser. Always non-nil (initialized in NewServer) so the OAuth register +
-	// callback handlers can use it whenever MCP is enabled.
+	// oauthFlows holds in-flight MCP OAuth flows (keyed by state) and consent tickets in the
+	// control-plane store, so any replica can complete them (ADR 0040 amendment). It holds the
+	// PKCE code_verifier + the caller's token, sealed and NEVER surfaced to the browser. Always
+	// non-nil (initialized in NewServer).
 	oauthFlows *pendingOAuthStore
 
 	// promptResolver is the OPTIONAL server-side seam for resolving a git-pointer
@@ -533,6 +533,10 @@ type Options struct {
 	// writes the grant Secret directly (kubernetes default). Built in cmd/bff/main.go from
 	// TOKEN_SERVICE_URL (a credplane.Client over mTLS).
 	GrantStore credresolve.GrantWriter
+	// OAuthPendingStore holds in-flight MCP OAuth flows and consent tickets (ADR 0040 amendment)
+	// in the control-plane DB, so a callback or redeem that reaches another replica completes. nil
+	// ⇒ in-memory, which serves one replica only. Wired from CONTROLPLANE_DSN in cmd/bff/main.go.
+	OAuthPendingStore oauthpending.Store
 	// MCPCapabilityPrivateSeedB64 is the base64-encoded Ed25519 private seed the BFF signs
 	// run capabilities with (runcap, ADR 0030 §2/§5) — a per-cluster platform Secret. Empty
 	// ⇒ capability minting is DISABLED (an /invoke carries no capability header). Wired from
@@ -708,7 +712,7 @@ func NewServer(opts Options) *Server {
 		tokenServiceURL:          strings.TrimRight(strings.TrimSpace(opts.TokenServiceURL), "/"),
 		tokenServiceClient:       opts.TokenServiceHTTPClient,
 		grantStore:               opts.GrantStore,
-		oauthFlows:               newPendingOAuthStore(),
+		oauthFlows:               newPendingOAuthStore(opts.OAuthPendingStore, opts.Log),
 		promptResolver:           opts.PromptResolver,
 		runStore:                 opts.RunStore,
 		convStore:                opts.ConvStore,
@@ -1588,6 +1592,10 @@ func (s *Server) Handler() http.Handler {
 			// distinct patterns.
 			authed.HandleFunc("POST /api/mcp/oauth/grant", s.beginMCPGrantConsent)
 			authed.HandleFunc("DELETE /api/mcp/oauth/grant/{server}", s.handleRevokeMCPGrant)
+			// A chatbox on an agent's own hostname mints a consent ticket here and redeems it on
+			// the console origin (ADR 0040 amendment); the redeem route is registered outside
+			// requireAuth below.
+			authed.HandleFunc("POST /api/mcp/oauth/ticket", s.handleMintConsentTicket)
 			// Admin org-credential (m25.9, ADR 0029 §7): promote a server to org scope + set
 			// its shared credential. Admin gate is RBAC-by-construction — the ToolRegistry
 			// scope change is written caller-scoped (a viewer can't update it → 403).
@@ -1630,6 +1638,7 @@ func (s *Server) Handler() http.Handler {
 			authed.Handle("GET /api/mcpservers/{ns}/{name}/references", notImplemented("caller-scoped MCP references"))
 			authed.Handle("GET /api/tools", notImplemented("caller-scoped tool catalog"))
 			authed.Handle("POST /api/mcp/oauth/grant", notImplemented("caller-scoped MCP grant consent"))
+			authed.Handle("POST /api/mcp/oauth/ticket", notImplemented("caller-scoped MCP consent ticket"))
 			authed.Handle("DELETE /api/mcp/oauth/grant/{server}", notImplemented("caller-scoped MCP grant revoke"))
 			authed.Handle("GET /api/mcp/approvals", notImplemented("caller-scoped MCP approval queue"))
 			authed.Handle("POST /api/mcp/approvals/{ns}/{name}", notImplemented("caller-scoped MCP approve"))
@@ -1661,8 +1670,12 @@ func (s *Server) Handler() http.Handler {
 		api.HandleFunc("GET /api/mcp/oauth/client-metadata", s.handleMCPOAuthClientMetadata)
 		if s.callerClients != nil {
 			api.HandleFunc("GET /api/mcp/oauth/callback", s.handleMCPOAuthCallback)
+			// The console's /connect page redeems a consent ticket here; the ticket is the
+			// credential, as the state is for the callback (ADR 0040 amendment).
+			api.HandleFunc("POST /api/mcp/oauth/grant/redeem", s.handleRedeemConsentTicket)
 		} else {
 			api.Handle("GET /api/mcp/oauth/callback", notImplemented("caller-scoped MCP OAuth callback"))
+			api.Handle("POST /api/mcp/oauth/grant/redeem", notImplemented("caller-scoped MCP consent redeem"))
 		}
 	}
 
@@ -1898,6 +1911,7 @@ var agentOriginAPIAllowlist = []string{
 	"GET /api/runs/{id}/events",
 	"POST /api/runs/{id}/resume",
 	"POST /api/mcp/oauth/grant",
+	"POST /api/mcp/oauth/ticket", // the redeem is console-origin only (ADR 0040 amendment)
 	"GET /api/mcp/oauth/callback",
 	"GET /api/mcp/oauth/client-metadata",
 	"GET /api/traces/{id}",

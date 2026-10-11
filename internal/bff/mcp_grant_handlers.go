@@ -100,16 +100,10 @@ func callerUsername(ctx context.Context, caller client.Client) (string, error) {
 
 // beginMCPGrantConsent serves POST /api/mcp/oauth/grant — a user initiating OAuth
 // consent for an ALREADY-REGISTERED OAuth server so their per-user grant is stored
-// (m17.3, ADR 0016 §5). It:
-//  1. recovers the server's OAuth client config from the register-time annotations
-//     (ADR 0031) — so the caller begins consent from just {server, ns}; this also
-//     confirms the server is a registered OAuth server (a non-OAuth / absent /
-//     unreadable server → an honest 4xx);
-//  2. resolves the caller's identity (SelfSubjectReview, caller-scoped) — the grant
-//     is keyed to THIS user, never a client-supplied user field;
-//  3. starts the m17.2 Auth-Code + PKCE flow with the recovered OAuth config, marked
-//     with the caller's HASHED identity so the shared callback stores a
-//     (user, server) grant Secret.
+// (m17.3, ADR 0016 §5). prepareGrantConsent validates the request and resolves who is
+// consenting; this starts the m17.2 Auth-Code + PKCE flow, marked with the caller's
+// HASHED identity so the shared callback stores a (user, server) grant Secret, and binds
+// it to this browser.
 //
 // It returns 202 + the authorization URL + state (the m17.2 pending shape) — NO
 // token, NO verifier. The request carries only {server, ns} (an optional auth block
@@ -131,7 +125,70 @@ func (s *Server) beginMCPGrantConsent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, perr.status, perr.msg)
 		return
 	}
+	plan, pErr := s.prepareGrantConsent(r, caller, req)
+	if pErr != nil {
+		writeError(w, pErr.status, pErr.msg)
+		return
+	}
 
+	// The callback's grant-Secret write runs as this user: the redirect back carries no
+	// Authorization header, so the flow carries the identity that gates the write (ADR 0011).
+	authURL, state, sErr := s.startOAuthFlow(r.Context(), plan.cfg, pendingOAuthFlow{
+		callerToken:   bearerToken(r),
+		serverName:    plan.server,
+		namespace:     plan.namespace,
+		serverURL:     plan.serverURL,
+		grantUserHash: plan.userHash,
+		boundary:      plan.boundary,
+		// Where to relay the "connected" signal after the callback (ADR 0040) — the agent hostname
+		// that opened the popup, or "" (same-origin) when off-domain / no console configured.
+		openerOrigin: s.allowedOpenerOrigin(r),
+	})
+	if sErr != nil {
+		s.log.Error(sErr, "start MCP grant consent flow failed", "server", plan.server)
+		writeError(w, http.StatusInternalServerError, "failed to start the consent flow")
+		return
+	}
+	setOAuthBindingCookie(w, r, state)
+
+	writeJSON(w, http.StatusAccepted, OAuthPendingResponse{
+		Status:           oauthStatusAuthorizationRequired,
+		AuthorizationURL: authURL,
+		State:            state,
+		Server: MCPServerSummary{
+			Name:      plan.server,
+			Namespace: plan.namespace,
+			URL:       plan.serverURL,
+			AuthType:  oauthAuthType,
+		},
+	})
+}
+
+// grantConsentPlan is everything a per-user consent needs once its request is validated: the
+// OAuth config to run, the server it is for, and who is consenting within which boundary.
+type grantConsentPlan struct {
+	cfg       mcpOAuthConfig
+	server    string
+	namespace string
+	serverURL string
+	// userHash is the hashed username of the consenting caller (never the raw username).
+	userHash string
+	// boundary is the trust boundary the grant is stored under (ADR 0033); "" ⇒ unscoped.
+	boundary string
+}
+
+// prepareGrantConsent validates a consent request and resolves who is consenting, without
+// starting a flow. It is shared by the direct begin and the consent-ticket mint, so both apply
+// the same checks:
+//  1. recovers the server's OAuth client config from the register-time annotations (ADR
+//     0031), which also confirms the server is a registered OAuth server the caller can read;
+//  2. refuses a request that would repoint a registered endpoint, and applies a client-config
+//     overlay only for a caller who may update the registration;
+//  3. resolves the caller's identity (SelfSubjectReview, caller-scoped) — the grant is keyed
+//     to THIS user, never a client-supplied user field;
+//  4. resolves the connecting agent's trust boundary when an agent is named.
+func (s *Server) prepareGrantConsent(r *http.Request, caller client.Client, req MCPGrantConsentRequest) (grantConsentPlan, *createError) {
+	ctx := r.Context()
 	ns := strings.TrimSpace(req.Namespace)
 	if ns == "" {
 		ns = defaultCreateNamespace
@@ -144,104 +201,70 @@ func (s *Server) beginMCPGrantConsent(w http.ResponseWriter, r *http.Request) {
 	// unreadable server → an honest 4xx. A caller who may update the server's registration MAY
 	// still pass an explicit auth block for a legacy server registered before config
 	// persistence; non-empty request fields overlay the recovered base.
-	cfg, serverURL, cErr := s.recoverRegisteredOAuth(r.Context(), caller, ns, server)
+	cfg, serverURL, cErr := s.recoverRegisteredOAuth(ctx, caller, ns, server)
 	if cErr != nil {
-		writeError(w, cErr.status, cErr.msg)
-		return
+		return grantConsentPlan{}, cErr
 	}
 	if oErr := refuseEndpointOverride(cfg, req.Auth); oErr != nil {
-		writeError(w, oErr.status, oErr.msg)
-		return
+		return grantConsentPlan{}, oErr
 	}
-	auth, aErr := s.consentClientConfigOverlay(r.Context(), caller, ns, server, req.Auth)
+	auth, aErr := s.consentClientConfigOverlay(ctx, caller, ns, server, req.Auth)
 	if aErr != nil {
-		writeError(w, aErr.status, aErr.msg)
-		return
+		return grantConsentPlan{}, aErr
 	}
 	cfg = overlayOAuthConfig(cfg, auth)
 
 	// The redirect_uri is SERVER-controlled (ADR 0040): one canonical, pre-registered callback for
-	// every consent regardless of the initiating origin. Consent opened from an agent's own hostname
-	// would otherwise send that hostname's unregistered callback and be refused by the provider. The
-	// SPA-supplied origin is only a hint; the canonical origin wins (falls back to the request origin
-	// when no console URL is configured — single-origin behaviour unchanged).
+	// every consent regardless of the initiating origin. The binding cookie protects a flow only if
+	// the code comes back to that callback, so a redirectUri in the request is overwritten here.
 	cfg.RedirectURI = s.canonicalOrigin(r) + mcpOAuthCallbackPath
 
 	// Legacy backfill (m26.1b): a server registered before config persistence has no
 	// endpoints/clientId to recover. Re-run discovery/DCR from the stored URL — register's
 	// own path — to complete the config, then persist the annotations so it is a ONE-TIME
-	// recovery (subsequent connects read them). The SPA supplies the redirectURI (only the
-	// browser knows its origin); discovery needs it. A discovery failure is a
-	// connect-validation outcome (ADR 0027) → 422, not a 500.
+	// recovery (subsequent connects read them). Discovery is given the canonical callback
+	// above. A discovery failure is a connect-validation outcome (ADR 0027) → 422, not a 500.
 	if oauthConfigIncomplete(cfg) {
-		discovered, dErr := discoverMCPOAuthConfig(r.Context(), nil, serverURL, "", cfg.RedirectURI)
+		discovered, dErr := discoverMCPOAuthConfig(ctx, nil, serverURL, "", cfg.RedirectURI)
 		if dErr != nil {
-			writeError(w, http.StatusUnprocessableEntity,
-				"could not recover this server's OAuth config automatically: "+dErr.Error())
-			return
+			return grantConsentPlan{}, &createError{
+				status: http.StatusUnprocessableEntity,
+				msg:    "could not recover this server's OAuth config automatically: " + dErr.Error(),
+			}
 		}
 		cfg = fillEmptyOAuthConfig(cfg, discovered)
-		s.backfillMCPOAuthConfig(r.Context(), caller, ns, server, cfg) // best-effort
+		s.backfillMCPOAuthConfig(ctx, caller, ns, server, cfg) // best-effort
 	}
 
 	if vErr := cfg.validate(); vErr != nil {
-		writeError(w, vErr.status, vErr.msg)
-		return
+		return grantConsentPlan{}, vErr
 	}
 
-	// Resolve the caller's identity (caller-scoped) — the grant is keyed to THIS user.
-	username, uErr := callerUsername(r.Context(), caller)
+	username, uErr := callerUsername(ctx, caller)
 	if uErr != nil {
 		if status, msg, isRBAC := classifyReadError(uErr); isRBAC {
-			writeError(w, status, msg)
-			return
+			return grantConsentPlan{}, &createError{status: status, msg: msg}
 		}
 		s.log.Error(uErr, "resolve caller identity for MCP grant consent failed")
-		writeError(w, http.StatusInternalServerError, "failed to resolve caller identity")
-		return
+		return grantConsentPlan{}, &createError{status: http.StatusInternalServerError, msg: "failed to resolve caller identity"}
 	}
 
-	// Start the PKCE flow marked with the caller's HASHED identity + their token
-	// (the callback's grant-Secret write runs as this user). The redirect back
-	// carries no Authorization header, so the flow carries the identity that gates
-	// the write (ADR 0011).
 	// Scope the grant to the connecting agent's trust boundary (ADR 0033) when the consent is
 	// initiated from a specific agent's run — so it empowers that agent's registry, not every
 	// agent the user owns. No agent (e.g. a servers-page consent) ⇒ "" (a legacy unscoped grant).
 	boundary := ""
 	if a := strings.TrimSpace(req.Agent); a != "" {
-		boundary = agentBoundary(r.Context(), caller, ns, a)
+		boundary = agentBoundary(ctx, caller, ns, a)
 	}
 
-	authURL, state, sErr := s.startOAuthFlow(cfg, pendingOAuthFlow{
-		callerToken:   bearerToken(r),
-		serverName:    server,
-		namespace:     ns,
-		serverURL:     serverURL,
-		grantUserHash: userGrantHash(username),
-		boundary:      boundary,
-		// Where to relay the "connected" signal after the callback (ADR 0040) — the agent hostname
-		// that opened the popup, or "" (same-origin) when off-domain / no console configured.
-		openerOrigin: s.allowedOpenerOrigin(r),
-	})
-	if sErr != nil {
-		s.log.Error(sErr, "start MCP grant consent flow failed", "server", server)
-		writeError(w, http.StatusInternalServerError, "failed to start the consent flow")
-		return
-	}
-	setOAuthBindingCookie(w, r, state)
-
-	writeJSON(w, http.StatusAccepted, OAuthPendingResponse{
-		Status:           "authorization_required",
-		AuthorizationURL: authURL,
-		State:            state,
-		Server: MCPServerSummary{
-			Name:      server,
-			Namespace: ns,
-			URL:       serverURL,
-			AuthType:  oauthAuthType,
-		},
-	})
+	return grantConsentPlan{
+		cfg:       cfg,
+		server:    server,
+		namespace: ns,
+		serverURL: serverURL,
+		userHash:  userGrantHash(username),
+		boundary:  boundary,
+	}, nil
 }
 
 // completeGrantConsent stores the exchanged tokens as the consenting user's
