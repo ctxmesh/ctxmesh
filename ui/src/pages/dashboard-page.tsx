@@ -39,7 +39,11 @@ import {
   type TenantUsageItem,
 } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
-import { hasCompletedRun } from "@/lib/first-run";
+import {
+  firstRunPlaygroundLink,
+  hasCompletedRun,
+  type FirstRunAgent,
+} from "@/lib/first-run";
 import { useNamespace } from "@/lib/namespace";
 import { formatRelativeTime, formatUSD } from "@/lib/format";
 import { FIRST_RUN_CHECKLIST, RES_AGENTS } from "@/lib/nav";
@@ -1153,7 +1157,12 @@ export function DashboardPage() {
 
       {/* The guided path, while the install is not set up yet (§7 A11). */}
       {showChecklist && (
-        <FirstRun hasProvider={hasProvider} hasAgent={hasAgent} hasRun={hasRun} />
+        <FirstRun
+          hasProvider={hasProvider}
+          hasAgent={hasAgent}
+          hasRun={hasRun}
+          agents={fleetData?.items ?? []}
+        />
       )}
 
       {/* 3 + 4 ── What is waiting on a person · what it is spending. */}
@@ -1956,10 +1965,13 @@ function FirstRun({
   hasProvider,
   hasAgent,
   hasRun,
+  agents,
 }: {
   hasProvider: boolean;
   hasAgent: boolean;
   hasRun: boolean;
+  /** The fleet list, so "Run your agent" opens a chat with the agent just created. */
+  agents: FirstRunAgent[];
 }) {
   const done: Record<string, boolean> = {
     provider: hasProvider,
@@ -1968,7 +1980,7 @@ function FirstRun({
   };
   const steps = FIRST_RUN_CHECKLIST.map((s) => ({
     label: s.label,
-    to: s.to,
+    to: s.doneKey === "run" ? firstRunPlaygroundLink(agents, s.to) : s.to,
     blurb: s.blurb,
     done: done[s.doneKey],
   }));

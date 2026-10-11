@@ -47,3 +47,32 @@ export function hasCompletedRun(namespace: string): boolean {
     return false;
   }
 }
+
+/** An agent as the fleet list reports it — enough to find the newest. */
+export interface FirstRunAgent {
+  name: string;
+  namespace: string;
+  createdAt?: string;
+}
+
+/**
+ * Where the checklist's "Run your agent" step sends a person: the Playground with the agent they
+ * just created already picked, so the first thing they see is a chat with it rather than an empty
+ * form. "Just created" is the newest agent the fleet list carries. With no creation times to go by,
+ * a single agent is still unambiguous; otherwise the step opens the Playground's picker.
+ */
+export function firstRunPlaygroundLink(agents: FirstRunAgent[], playground: string): string {
+  let newest: FirstRunAgent | undefined;
+  let newestAt = -Infinity;
+  for (const a of agents) {
+    const at = a.createdAt ? Date.parse(a.createdAt) : NaN;
+    if (Number.isFinite(at) && at > newestAt) {
+      newest = a;
+      newestAt = at;
+    }
+  }
+  if (!newest && agents.length === 1) newest = agents[0];
+  if (!newest) return playground;
+  const q = new URLSearchParams({ agent: newest.name, ns: newest.namespace });
+  return `${playground}?${q.toString()}`;
+}

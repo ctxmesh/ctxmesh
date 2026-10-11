@@ -70,6 +70,8 @@ export interface AgentSummary {
   drift?: boolean;
   managedOutsideUI?: boolean;
   isDraft?: boolean;
+  /** metadata.creationTimestamp (RFC3339) — how Home finds the agent a person just created. */
+  createdAt?: string;
 }
 
 // CustomDetector / TracePolicyResponse mirror the redaction-editor DTO (m18.13):

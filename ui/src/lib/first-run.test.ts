@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { hasCompletedRun, markRunCompleted } from "./first-run";
+import { firstRunPlaygroundLink, hasCompletedRun, markRunCompleted } from "./first-run";
 
 describe("first-run latch", () => {
   beforeEach(() => {
@@ -44,5 +44,38 @@ describe("first-run latch", () => {
     });
     expect(() => markRunCompleted("team-a")).not.toThrow();
     expect(hasCompletedRun("team-a")).toBe(false);
+  });
+});
+
+describe("firstRunPlaygroundLink", () => {
+  it("picks the newest agent by creation time", () => {
+    expect(
+      firstRunPlaygroundLink(
+        [
+          { name: "a", namespace: "ns1", createdAt: "2026-10-01T00:00:00Z" },
+          { name: "b", namespace: "ns2", createdAt: "2026-10-02T00:00:00Z" },
+        ],
+        "/playground",
+      ),
+    ).toBe("/playground?agent=b&ns=ns2");
+  });
+
+  it("uses a lone agent even without a creation time", () => {
+    expect(firstRunPlaygroundLink([{ name: "solo", namespace: "default" }], "/playground")).toBe(
+      "/playground?agent=solo&ns=default",
+    );
+  });
+
+  it("falls back to the picker when it cannot tell which agent is new", () => {
+    expect(
+      firstRunPlaygroundLink(
+        [
+          { name: "a", namespace: "x" },
+          { name: "b", namespace: "x" },
+        ],
+        "/playground",
+      ),
+    ).toBe("/playground");
+    expect(firstRunPlaygroundLink([], "/playground")).toBe("/playground");
   });
 });

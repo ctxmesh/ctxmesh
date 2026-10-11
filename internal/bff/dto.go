@@ -97,6 +97,9 @@ type AgentSummary struct {
 	// until published via POST /api/agents/{ns}/{name}/publish. Omitted (false)
 	// on the wire for non-draft agents — backward-compatible.
 	IsDraft bool `json:"isDraft,omitempty"`
+	// CreatedAt is metadata.creationTimestamp (RFC3339), so the console can find the agent a person
+	// just created. Omitted when unset.
+	CreatedAt string `json:"createdAt,omitempty"`
 }
 
 // AgentListResponse is returned by GET /api/agents. It carries the list-contract
@@ -1351,6 +1354,10 @@ func newAgentSummary(ad *agentsv1alpha1.AgentDeployment) AgentSummary {
 			message = c.Message
 		}
 	}
+	createdAt := ""
+	if !ad.CreationTimestamp.IsZero() {
+		createdAt = ad.CreationTimestamp.UTC().Format(time.RFC3339)
+	}
 	return AgentSummary{
 		Name:      ad.Name,
 		Namespace: ad.Namespace,
@@ -1359,6 +1366,7 @@ func newAgentSummary(ad *agentsv1alpha1.AgentDeployment) AgentSummary {
 		Ready:     ready,
 		Reason:    reason,
 		Message:   message,
+		CreatedAt: createdAt,
 	}
 }
 

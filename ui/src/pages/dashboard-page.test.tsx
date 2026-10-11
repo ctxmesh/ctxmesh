@@ -780,6 +780,25 @@ describe("Home — the first-run path (the aha entry point)", () => {
     window.localStorage.clear();
   });
 
+  // m184.15: the run step lands where the person can talk to the agent they just made.
+  it("sends 'Run your agent' to the Playground with the newest agent already picked", async () => {
+    window.localStorage.clear();
+    routeFetch({
+      "/api/agents": agentsResponse([
+        agent({ name: "older-agent", namespace: "team-a", createdAt: "2026-10-01T09:00:00Z" }),
+        agent({ name: "just-made", namespace: "team-a", createdAt: "2026-10-11T09:00:00Z" }),
+        agent({ name: "no-timestamp", namespace: "team-a" }),
+      ]),
+      "/api/providers": providersConnected,
+      "/api/runs": { runs: [] },
+    });
+    renderHome();
+
+    const cta = await screen.findByTestId("first-run-cta");
+    expect(cta).toHaveTextContent(/Run your agent/);
+    expect(cta).toHaveAttribute("href", "/playground?agent=just-made&ns=team-a");
+  });
+
   it("renders the checklist when setup is incomplete (no providers)", async () => {
     routeFetch({ "/api/agents": agentsResponse(FLEET) });
     renderHome();

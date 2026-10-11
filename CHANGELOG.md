@@ -133,6 +133,10 @@ page, and Send waits while the agent's model route is still loading. A JSON requ
 away for an agent that takes structured input. Both keep the trace link and now show how long the
 run took. An agent picked under All workspaces runs in its own namespace, not in `default`.
 
+**Home's "Run your agent" step opens a chat with the agent you just created.** It used to open an
+empty Playground. It now opens the Playground with your newest agent picked; the agents list
+carries each agent's `createdAt` for this. A chat on the agent's own page also checks the step off.
+
 **Breaking:** with a state layer present (the default), the BFF refuses unbound capabilities.
 - **Older agents:** an agent built on an older base image has a launcher that cannot bind, so those
   calls fail until it is rebuilt. To run older agents meanwhile, set
