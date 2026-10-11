@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/replay"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
@@ -139,36 +140,51 @@ func (s *Server) traceRunSteps(ctx context.Context, rn *run.Run) *TraceRunSteps 
 	return out
 }
 
-// countRecordedSteps counts a terminal run's model and tool step frames (ADR 0071 §4). It reads until
-// the store closes the stream, which for a terminal run happens once the backlog is delivered. The
-// in-memory store closes early when a backlog overflows its buffer, so a very long run there can
-// under-count.
+// countRecordedSteps counts a terminal run's model and tool step frames (ADR 0071 §4).
 func (s *Server) countRecordedSteps(ctx context.Context, runID string) (model, tool int, err error) {
-	events, cancel, err := s.runStore.Subscribe(runID, 0)
+	steps, err := s.recordedSteps(ctx, runID)
 	if err != nil {
 		return 0, 0, err
 	}
+	for _, st := range steps {
+		if st.Kind == stepFrameKindModel {
+			model++
+		} else {
+			tool++
+		}
+	}
+	return model, tool, nil
+}
+
+// recordedSteps reads a terminal run's model and tool step frames in order (ADR 0071 §4), skipping the
+// plain-text labels EventStep also carries. It reads until the store closes the stream, which for a terminal
+// run happens once the backlog is delivered; cancelling the subscription first would stop the Postgres store
+// before it delivered anything. A live run's stream stays open, so callers pass only terminal runs. The
+// in-memory store closes early when a backlog overflows its buffer, so a very long run there can come back
+// short.
+func (s *Server) recordedSteps(ctx context.Context, runID string) ([]replay.StepDescriptor, error) {
+	events, cancel, err := s.runStore.Subscribe(runID, 0)
+	if err != nil {
+		return nil, err
+	}
 	defer cancel()
+	var out []replay.StepDescriptor
 	for {
 		select {
 		case <-ctx.Done():
-			return 0, 0, ctx.Err()
+			return nil, ctx.Err()
 		case ev, open := <-events:
 			if !open {
-				return model, tool, nil
+				return out, nil
 			}
 			if ev.Kind != run.EventStep {
 				continue
 			}
-			kind, _, ok := parseStepFrame(ev.Data)
+			kind, tool, ok := parseStepFrame(ev.Data)
 			if !ok {
 				continue
 			}
-			if kind == stepFrameKindModel {
-				model++
-			} else {
-				tool++
-			}
+			out = append(out, replay.StepDescriptor{Kind: kind, ToolName: tool})
 		}
 	}
 }

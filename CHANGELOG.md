@@ -89,6 +89,14 @@ are 403, or 401 for a token the API server rejects. Reading or pinning a dataset
 exist is a 404 and no longer creates it. The shipped viewer role can read datasets in the
 namespaces it is bound in, and the developer and operator roles can also change them.
 
+**Fixed: the replay stepper showed every step of a recorded run as a gap.** `GET
+/api/runs/{id}/fixture` stopped reading the run's events before the Postgres run store had
+delivered any, so on the production store a recorded run had no steps to join its recording to.
+And the trace page asks by trace id, while the step read and the fixture lookup used that id as a
+run id, so from a trace the stepper found neither the steps nor the recording. Both now read the
+finished run by its run id, until its events are delivered. A run still in progress shows its
+recording with no step timeline until it ends.
+
 **Fixed: the chat streamed raw event JSON and never showed an approval or consent prompt
 mid-run.** The run event stream (`GET /api/runs/{id}/events`) put each event in its `data:` line as
 a JSON envelope, while the console and the SDKs read that line as the payload itself. The chat

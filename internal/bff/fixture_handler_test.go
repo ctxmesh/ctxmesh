@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -76,55 +77,113 @@ func getFixture(t *testing.T, s *Server, runID string) (*httptest.ResponseRecord
 	return rec, dto
 }
 
-// TestGetRunFixture_RecordedRun: an owner reads a recorded run's fixture — the step timeline joins to
-// the recorded wire-exact I/O (model bytes incl. framing; a tool by name).
-func TestGetRunFixture_RecordedRun(t *testing.T) {
-	rs := run.NewMemStore()
-	seedOwnedRun(t, rs, "r1", "team", "assistant", "alice@example.com", "", "hi")
-	require.NoError(t, rs.AppendEvent("r1", run.EventStep, stepFrameJSON(t, "model", "")))
-	require.NoError(t, rs.AppendEvent("r1", run.EventStep, stepFrameJSON(t, "tool", "search")))
-	require.NoError(t, rs.AppendEvent("r1", run.EventStep, stepFrameJSON(t, "model", "")))
-	// A non-frame EventStep (a workflow plan-approval label) must be ignored by the descriptor parse.
-	require.NoError(t, rs.AppendEvent("r1", run.EventStep, "plan approved"))
+// seedFinishedRun stores a run that recorded a model step, a tool step and a model step (plus a plain-text
+// EventStep label, which is not a step) and then succeeded, the way a run worker leaves one. live leaves
+// it running instead.
+func seedFinishedRun(t *testing.T, rs run.Store, id, traceID string, live bool) {
+	t.Helper()
+	seedOwnedRun(t, rs, id, "team", "assistant", "alice@example.com", traceID, "hi")
+	_, err := rs.Update(id, func(x *run.Run) error { return x.Transition(run.StatusRunning, time.Now()) })
+	require.NoError(t, err)
+	require.NoError(t, rs.AppendEvent(id, run.EventStep, stepFrameJSON(t, "model", "")))
+	require.NoError(t, rs.AppendEvent(id, run.EventToken, "searching"))
+	require.NoError(t, rs.AppendEvent(id, run.EventStep, stepFrameJSON(t, "tool", "search")))
+	require.NoError(t, rs.AppendEvent(id, run.EventStep, stepFrameJSON(t, "model", "")))
+	require.NoError(t, rs.AppendEvent(id, run.EventStep, "plan approved"))
+	if live {
+		return
+	}
+	_, err = rs.Update(id, func(x *run.Run) error { return x.Transition(run.StatusSucceeded, time.Now()) })
+	require.NoError(t, err)
+}
 
-	docStore := objectstore.NewMemObjectStore()
+func putFixture(t *testing.T, docStore objectstore.ObjectStore, runID string) {
+	t.Helper()
 	fs, err := replay.NewFixtureStore(docStore)
 	require.NoError(t, err)
-	fx := replay.NewFixture("r1", "team/assistant")
+	fx := replay.NewFixture(runID, "team/assistant")
 	fx.AppendModel([]byte(`{"m":0}`), []byte("data: hello\n\n"), "text/event-stream", 200)
 	fx.AppendTool("c1", "search", []byte(`{"q":"x"}`), []byte(`{"hits":1}`), "application/json")
 	fx.AppendModel([]byte(`{"m":1}`), []byte(`{"answer":"done"}`), "application/json", 200)
 	_, err = fs.Put(context.Background(), fx)
 	require.NoError(t, err)
+}
 
-	s := fixtureRunServer(t, "alice@example.com", rs, docStore)
-	rec, dto := getFixture(t, s, "r1")
+// TestGetRunFixture_RecordedRun: an owner reads a recorded run's fixture by its run id and by its trace id
+// (the trace page's), and the step timeline joins to the recorded wire-exact I/O (model bytes incl.
+// framing; a tool by name). On both run stores: Postgres delivers a finished run's events from a goroutine,
+// so a reader that stops listening before it drains gets none.
+func TestGetRunFixture_RecordedRun(t *testing.T) {
+	for name, rs := range fenceStores(t) {
+		t.Run(name, func(t *testing.T) {
+			seedFinishedRun(t, rs, "r1", "tr-r1", false)
+			docStore := objectstore.NewMemObjectStore()
+			putFixture(t, docStore, "r1")
+			s := fixtureRunServer(t, "alice@example.com", rs, docStore)
 
-	require.Equal(t, http.StatusOK, rec.Code)
-	assert.True(t, dto.Recorded)
-	require.Len(t, dto.Steps, 3)
-	assert.True(t, dto.Steps[0].Recorded)
-	assert.Equal(t, "text/event-stream", dto.Steps[0].ContentType)
-	assert.Equal(t, "data: hello\n\n", dto.Steps[0].Response, "SSE framing byte-exact")
-	assert.Equal(t, "search", dto.Steps[1].ToolName)
-	assert.Equal(t, "c1", dto.Steps[1].CallID)
-	assert.Equal(t, `{"answer":"done"}`, dto.Steps[2].Response)
+			for _, key := range []string{"r1", "tr-r1"} {
+				t.Run(key, func(t *testing.T) {
+					rec, dto := getFixture(t, s, key)
+					require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+					assert.Equal(t, "r1", dto.RunID)
+					assert.True(t, dto.Recorded)
+					require.Len(t, dto.Steps, 3)
+					for i, kind := range []string{stepFrameKindModel, stepFrameKindTool, stepFrameKindModel} {
+						assert.Equal(t, kind, dto.Steps[i].Kind)
+						assert.True(t, dto.Steps[i].Recorded, "step %d is backed by the fixture", i)
+					}
+					assert.Equal(t, "text/event-stream", dto.Steps[0].ContentType)
+					assert.Equal(t, "data: hello\n\n", dto.Steps[0].Response, "SSE framing byte-exact")
+					assert.Equal(t, "search", dto.Steps[1].ToolName)
+					assert.Equal(t, "c1", dto.Steps[1].CallID)
+					assert.Equal(t, `{"answer":"done"}`, dto.Steps[2].Response)
+				})
+			}
+		})
+	}
 }
 
 // TestGetRunFixture_NotRecorded: a run with no fixture is an honest recorded:false (200) — the
 // timeline still renders (every step a gap), never a 5xx.
 func TestGetRunFixture_NotRecorded(t *testing.T) {
-	rs := run.NewMemStore()
-	seedOwnedRun(t, rs, "r2", "team", "assistant", "alice@example.com", "", "hi")
-	require.NoError(t, rs.AppendEvent("r2", run.EventStep, stepFrameJSON(t, "model", "")))
+	for name, rs := range fenceStores(t) {
+		t.Run(name, func(t *testing.T) {
+			seedFinishedRun(t, rs, "r2", "tr-r2", false)
+			s := fixtureRunServer(t, "alice@example.com", rs, objectstore.NewMemObjectStore())
+			for _, key := range []string{"r2", "tr-r2"} {
+				rec, dto := getFixture(t, s, key)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				assert.False(t, dto.Recorded)
+				require.Len(t, dto.Steps, 3)
+				for _, st := range dto.Steps {
+					assert.False(t, st.Recorded, "a not-recorded run shows its steps as gaps, not fabricated I/O")
+				}
+			}
+		})
+	}
+}
 
-	s := fixtureRunServer(t, "alice@example.com", rs, objectstore.NewMemObjectStore())
-	rec, dto := getFixture(t, s, "r2")
+// TestGetRunFixture_LiveRunHasNoTimelineYet: a run still in progress answers at once, with its recording
+// and no step timeline, rather than waiting for the run to end.
+func TestGetRunFixture_LiveRunHasNoTimelineYet(t *testing.T) {
+	for name, rs := range fenceStores(t) {
+		t.Run(name, func(t *testing.T) {
+			seedFinishedRun(t, rs, "r5", "tr-r5", true)
+			docStore := objectstore.NewMemObjectStore()
+			putFixture(t, docStore, "r5")
+			s := fixtureRunServer(t, "alice@example.com", rs, docStore)
 
-	require.Equal(t, http.StatusOK, rec.Code)
-	assert.False(t, dto.Recorded)
-	require.Len(t, dto.Steps, 1)
-	assert.False(t, dto.Steps[0].Recorded, "a not-recorded run shows the step as a gap, not fabricated I/O")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			rec := httptest.NewRecorder()
+			s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/runs/r5/fixture", nil))
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var dto RunFixtureDTO
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &dto))
+			assert.True(t, dto.Recorded)
+			assert.Empty(t, dto.Steps)
+		})
+	}
 }
 
 // TestGetRunFixture_NoObjectStore: no object store configured ⇒ honest 501 (the deploy needs

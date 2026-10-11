@@ -22,7 +22,6 @@ import (
 	"net/http"
 
 	"github.com/ctxmesh/ctxmesh/internal/replay"
-	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 // RunFixtureDTO is the GET /api/runs/{id}/fixture response — the O10a fixture stepper's data (ADR
@@ -38,11 +37,13 @@ type RunFixtureDTO struct {
 }
 
 // handleGetRunFixture serves GET /api/runs/{id}/fixture — the recorded fixture's per-step wire I/O for
-// the console stepper (O10a, ADR 0071 §5). CALLER-SCOPED (ADR 0011): a fixture holds full prompts +
-// tool results (sensitive-by-default, ADR 0071 C4), so authorizeRunAccess proves the caller can read
-// the run's backing through their OWN RBAC before any bytes are served — a run id is never a
-// cross-tenant read oracle. The join (step timeline ⋈ fixture channels) is the fail-honest resolver
-// (replay.ResolveSteps, m109.1): a step it cannot confidently back becomes a gap, never a mis-join.
+// the console stepper (O10a, ADR 0071 §5). The id is a run id or the run's trace id (the trace page
+// passes the latter); everything after authorization reads by the resolved run id. CALLER-SCOPED (ADR
+// 0011): a fixture holds full prompts + tool results (sensitive-by-default, ADR 0071 C4), so
+// authorizeRunAccess proves the caller can read the run's backing through their OWN RBAC before any bytes
+// are served — a run id is never a cross-tenant read oracle. The join (step timeline ⋈ fixture channels)
+// is the fail-honest resolver (replay.ResolveSteps, m109.1): a step it cannot confidently back becomes a
+// gap, never a mis-join. A run that has not finished has no step timeline yet (recordedSteps).
 func (s *Server) handleGetRunFixture(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.callerClient(w, r)
 	if !ok {
@@ -54,9 +55,6 @@ func (s *Server) handleGetRunFixture(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The step timeline comes from the run's persisted EventStep frames; the wire I/O from the fixture.
-	steps := s.runStepDescriptors(id)
-
 	// Load the recorded fixture. No object store configured ⇒ honest 501 (the export-handler
 	// docStore-nil pattern) — the feature needs OBJECT_STORE_* on the BFF (m109.3). A run with no
 	// fixture (not recorded / wrong id) is NOT an error — it is an honest "recorded: false" with the
@@ -65,19 +63,32 @@ func (s *Server) handleGetRunFixture(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "run fixtures are unavailable: no object store is configured")
 		return
 	}
+
+	// The step timeline comes from the run's persisted EventStep frames; the wire I/O from the fixture.
+	var steps []replay.StepDescriptor
+	if rn.Status.IsTerminal() {
+		var err error
+		steps, err = s.recordedSteps(r.Context(), rn.ID)
+		if err != nil {
+			s.log.Error(err, "run: could not read the run's step events", "run", rn.ID)
+			writeError(w, http.StatusInternalServerError, "could not read the run's steps")
+			return
+		}
+	}
+
 	fs, err := replay.NewFixtureStore(s.docStore)
 	if err != nil {
-		s.log.Error(err, "run: could not open the fixture store", "run", id)
+		s.log.Error(err, "run: could not open the fixture store", "run", rn.ID)
 		writeError(w, http.StatusInternalServerError, "could not open the fixture store")
 		return
 	}
-	fx, err := fs.GetRun(r.Context(), id)
+	fx, err := fs.GetRun(r.Context(), rn.ID)
 	recorded := true
 	if err != nil {
 		if errors.Is(err, replay.ErrNoFixture) {
 			fx, recorded = nil, false // honest empty result — the timeline still renders as gaps
 		} else {
-			s.log.Error(err, "run: could not read the run fixture", "run", id)
+			s.log.Error(err, "run: could not read the run fixture", "run", rn.ID)
 			writeError(w, http.StatusBadGateway, "could not read the run fixture")
 			return
 		}
@@ -89,31 +100,6 @@ func (s *Server) handleGetRunFixture(w http.ResponseWriter, r *http.Request) {
 		Recorded: recorded,
 		Steps:    replay.ResolveSteps(fx, steps),
 	})
-}
-
-// runStepDescriptors reads a run's persisted EventStep frames (in seq order) and projects them to the
-// ordered model/tool step descriptors the fixture-stepper join consumes. It drains the event BACKLOG
-// only (Subscribe from 0, cancel immediately) — the stepper is post-hoc over a completed run, so it
-// never waits for live events. EventStep is also used for workflow plan-approval labels (plain text,
-// not a step frame); those don't parse to a model/tool frame and are skipped.
-func (s *Server) runStepDescriptors(runID string) []replay.StepDescriptor {
-	ch, cancel, err := s.runStore.Subscribe(runID, 0)
-	if err != nil {
-		return nil
-	}
-	cancel() // drain the backlog, do not block on live events
-	var out []replay.StepDescriptor
-	for ev := range ch {
-		if ev.Kind != run.EventStep {
-			continue
-		}
-		kind, tool, ok := parseStepFrame(ev.Data)
-		if !ok {
-			continue
-		}
-		out = append(out, replay.StepDescriptor{Kind: kind, ToolName: tool})
-	}
-	return out
 }
 
 // parseStepFrame reads a model or tool step frame from an EventStep's data. ok is false for anything
