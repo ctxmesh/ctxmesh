@@ -146,6 +146,11 @@ everyone. The `developer` and `operator` roles now grant `get` and `list` on `po
 `pods/log`, in the namespaces they are bound in, as Kubernetes' own `view` and `edit` roles do. The
 `viewer` role does not.
 
+**Fixed: no shipped role could use skills.** `/api/skills` authorizes every call against the
+`skills` resource, and no shipped role granted it, so it answered 403 to every persona. The
+`viewer` role now grants `get`, `list` and `watch` on `skills`, and the `developer` and `operator`
+roles grant the same verbs they hold on `promptversions`, in the namespaces they are bound in.
+
 **Fixed: creating an agent on a connection that does not exist made an agent that could never
 answer.** A model-first create (`POST /api/agents` with `model.connection`) naming a connection the
 namespace does not have built a model route from the connection's name, with a provider guessed

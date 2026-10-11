@@ -336,6 +336,7 @@ rules:
   - mcptoolbindings
   - toolregistries
   - promptversions
+  - skills
   - agentregistries
   - agentteams
   - workflows
@@ -672,6 +673,7 @@ rules:
   - mcptoolbindings
   - toolregistries
   - promptversions
+  - skills
   - agentregistries
   - agentteams
   - workflows
@@ -780,6 +782,7 @@ rules:
   - mcptoolbindings
   - toolregistries
   - promptversions
+  - skills
   - agentregistries
   - agentteams
   - workflows

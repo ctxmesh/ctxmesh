@@ -36,6 +36,10 @@ rules:
   # promptversions IS the authz policy. Omitting it fail-closes every PromptVersion
   # API call — the same contract as toolregistries above.
   - promptversions
+  # skills is store-backed the same way (ADR 0137): /api/skills authorizes each read and write
+  # with a caller-scoped SelfSubjectAccessReview on this resource, so this grant IS the skills
+  # policy. Do NOT remove — without it /api/skills is 403 for the persona.
+  - skills
   - agentregistries
   - agentteams
   - workflows

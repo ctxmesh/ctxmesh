@@ -42,6 +42,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/skill"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 )
@@ -134,6 +135,7 @@ func TestEveryListForAPersonaBoundToOneNamespace(t *testing.T) {
 	alerts := alertstore.NewMemStore()
 	audit := auditlog.NewMemStore()
 	runs := run.NewMemStore()
+	skills := skill.NewMemStore()
 	now := time.Now().UTC()
 	for _, ns := range []string{mine, theirs, lonely} {
 		require.NoError(t, admin.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}))
@@ -158,10 +160,13 @@ func TestEveryListForAPersonaBoundToOneNamespace(t *testing.T) {
 			ResourceKind: "AgentDeployment", ResourceName: "agent", Namespace: ns,
 		}))
 		require.NoError(t, runs.Create(run.New("run-"+ns, ns, "agent", nil, "", now)))
+		require.NoError(t, skills.UpsertSkill(ctx, skill.Skill{Namespace: ns, Name: "summarise"}))
 	}
 
+	viewerRole := installPersona(t, admin, "ctxmesh_viewer_role.yaml")
 	developerRole := installPersona(t, admin, "ctxmesh_developer_role.yaml")
 	operatorRole := installPersona(t, admin, "ctxmesh_operator_role.yaml")
+	viewer := personaUser(t, admin, mine, "lists-viewer", viewerRole)
 	developer := personaUser(t, admin, mine, "lists-developer", developerRole)
 	operator := personaUser(t, admin, mine, "lists-operator", operatorRole)
 	alone := personaUser(t, admin, lonely, "lists-alone", developerRole)
@@ -176,7 +181,7 @@ func TestEveryListForAPersonaBoundToOneNamespace(t *testing.T) {
 	everywhere, err := client.New(everywhereUser.Config(), client.Options{Scheme: testScheme(t)})
 	require.NoError(t, err)
 
-	serve := func(c client.Client) func(path string) *httptest.ResponseRecorder {
+	send := func(c client.Client, method, path, body string) *httptest.ResponseRecorder {
 		s := NewServer(Options{
 			CallerClients:        newFakeFactory(c),
 			Scheme:               testScheme(t),
@@ -190,16 +195,18 @@ func TestEveryListForAPersonaBoundToOneNamespace(t *testing.T) {
 			AlertStore:           alerts,
 			AuditStore:           audit,
 			RunStore:             runs,
+			SkillStore:           skills,
 			Version:              "test",
 			Log:                  logr.Discard(),
 		})
-		return func(path string) *httptest.ResponseRecorder {
-			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodGet, path, nil)
-			req.Header.Set("Authorization", "Bearer persona-token")
-			s.Handler().ServeHTTP(rec, req)
-			return rec
-		}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer persona-token")
+		s.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	serve := func(c client.Client) func(path string) *httptest.ResponseRecorder {
+		return func(path string) *httptest.ResponseRecorder { return send(c, http.MethodGet, path, "") }
 	}
 	withNS := func(path, ns string) string {
 		if ns == "" {
@@ -217,6 +224,7 @@ func TestEveryListForAPersonaBoundToOneNamespace(t *testing.T) {
 		"/api/mcptoolbindings", "/api/agentscalingpolicies", "/api/evalsuites", "/api/knowledgebases",
 		"/api/guardrailpolicies", "/api/workflows", "/api/teams", "/api/providers", "/api/runs",
 		"/api/tools", "/api/mcpservers", "/api/toolregistries", "/api/promptversions", "/api/alerts",
+		"/api/skills",
 	}
 	operatorLists := []string{"/api/audit"}
 
@@ -280,6 +288,25 @@ func TestEveryListForAPersonaBoundToOneNamespace(t *testing.T) {
 			got := responseNamespaces(t, rec.Body.Bytes())
 			assert.Subset(t, got, []string{mine, theirs}, path)
 		}
+	})
+
+	t.Run("skills: a viewer reads them, a developer writes them, neither reaches another namespace", func(t *testing.T) {
+		check(t, serve(viewer), "/api/skills")
+		create := func(who client.Client, ns, name string) *httptest.ResponseRecorder {
+			return send(who, http.MethodPost, "/api/skills", `{"namespace":"`+ns+`","name":"`+name+`"}`)
+		}
+		rec := create(viewer, mine, "from-viewer")
+		assert.Equal(t, http.StatusForbidden, rec.Code, "a viewer only reads: %s", rec.Body.String())
+		rec = create(developer, mine, "from-developer")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		_, found, err := skills.GetSkill(ctx, mine, "from-developer")
+		require.NoError(t, err)
+		assert.True(t, found, "the developer's skill was stored")
+		rec = create(developer, theirs, "from-developer")
+		assert.Equal(t, http.StatusForbidden, rec.Code, "bound to %s, refused %s: %s", mine, theirs, rec.Body.String())
+		_, found, err = skills.GetSkill(ctx, theirs, "from-developer")
+		require.NoError(t, err)
+		assert.False(t, found)
 	})
 
 	t.Run("the approval queue needs a namespace and is refused another", func(t *testing.T) {
