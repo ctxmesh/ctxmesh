@@ -100,11 +100,11 @@ func main() {
 }
 
 // newInClusterClient builds the token-service's in-cluster client with the schemes it reads through:
-// core (grant Secrets, via credresolve) plus both agents API versions.
+// core (grant Secrets, via credresolve) plus the agents API.
 func newInClusterClient() (client.Client, error) {
 	scheme := runtime.NewScheme()
 	for _, add := range []func(*runtime.Scheme) error{
-		clientgoscheme.AddToScheme, agentsv1beta1.AddToScheme, agentsv1beta1.AddToScheme,
+		clientgoscheme.AddToScheme, agentsv1beta1.AddToScheme,
 	} {
 		if err := add(scheme); err != nil {
 			return nil, fmt.Errorf("build scheme: %w", err)

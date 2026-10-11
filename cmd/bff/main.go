@@ -225,11 +225,11 @@ func runPreflight(ctx context.Context) int {
 }
 
 // newPlatformScheme builds the scheme the caller-scoped client encodes/decodes the platform CRDs with
-// (core + both agents API versions).
+// (core + the agents API).
 func newPlatformScheme() (*runtime.Scheme, error) {
 	scheme := runtime.NewScheme()
 	for _, add := range []func(*runtime.Scheme) error{
-		clientgoscheme.AddToScheme, agentsv1beta1.AddToScheme, agentsv1beta1.AddToScheme,
+		clientgoscheme.AddToScheme, agentsv1beta1.AddToScheme,
 	} {
 		if err := add(scheme); err != nil {
 			return nil, fmt.Errorf("building the platform scheme: %w", err)
