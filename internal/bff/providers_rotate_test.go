@@ -386,6 +386,19 @@ func TestRotateProviderKey_WritesAnAuditRow(t *testing.T) {
 			},
 			wantCode: http.StatusForbidden, wantOutcome: auditOutcomeDenied, wantProvider: true,
 		},
+		"a later write fails after the key changed": {
+			funcs: interceptor.Funcs{
+				Update: func(ctx context.Context, w client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					uo := &client.UpdateOptions{}
+					uo.ApplyOptions(opts)
+					if _, isRoute := obj.(*agentsv1alpha1.ModelRoute); isRoute && len(uo.DryRun) == 0 {
+						return apierrors.NewInternalError(assert.AnError)
+					}
+					return w.Update(ctx, obj, opts...)
+				},
+			},
+			wantCode: http.StatusBadGateway, wantOutcome: auditOutcomeError, wantProvider: true,
+		},
 		"route read denied": {
 			funcs: interceptor.Funcs{
 				Get: func(ctx context.Context, w client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {

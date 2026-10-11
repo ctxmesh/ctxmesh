@@ -324,8 +324,6 @@ func TestRollback_NoEffectAfterTheWrite_Refused(t *testing.T) {
 			targetV := name + "-target"
 			mkVersionSpec(t, name, targetV, namespace, autoRollbackSpec(targetImg, auto))
 			time.Sleep(1100 * time.Millisecond) // creation-time order: the target is the prior version
-			servingV := name + "-serving"
-			mkVersionSpec(t, name, servingV, namespace, autoRollbackSpec(liveImg, auto))
 
 			deploy := &agentsv1alpha1.AgentDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
@@ -333,6 +331,7 @@ func TestRollback_NoEffectAfterTheWrite_Refused(t *testing.T) {
 			}
 			require.NoError(t, k8sClient.Create(testCtx, deploy))
 			t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+			servingV := mkServingVersion(t, deploy)
 			var live agentsv1alpha1.AgentDeployment
 			require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &live))
 

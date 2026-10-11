@@ -47,6 +47,8 @@ const (
 	auditOutcomeDenied = "denied"
 	// auditOutcomeSuccess is the outcome the store records when none is given.
 	auditOutcomeSuccess = "success"
+	// auditOutcomeError records an action that failed after it had already changed something.
+	auditOutcomeError = "error"
 	// auditPolicyActionBlock is the policy_action value for a guardrail block decision (m66.9).
 	// Defined here (alongside the other audit constants) so the ingest handler and its callers share
 	// the same string without triggering goconst.

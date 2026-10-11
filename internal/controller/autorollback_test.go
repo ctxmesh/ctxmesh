@@ -47,6 +47,28 @@ func setRegressionDetected(t *testing.T, name, namespace, serving string) {
 	require.NoError(t, k8sClient.Status().Update(testCtx, &d))
 }
 
+// mkServingVersion creates the AgentVersion the reconciler would have served for the deployment as
+// stored (after API-server defaulting): named <deployment>-<specHash>, snapshotting the versioned spec.
+// Auto-rollback judges only the version the stored spec hashes to (shouldAutoRollback), so a test's
+// serving version must be that one, created after its prior so priorVersionOf orders them.
+func mkServingVersion(t *testing.T, deploy *agentsv1alpha1.AgentDeployment) string {
+	t.Helper()
+	var stored agentsv1alpha1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &stored))
+	hash, err := specHash(stored.Spec)
+	require.NoError(t, err)
+	av := &agentsv1alpha1.AgentVersion{
+		ObjectMeta: metav1.ObjectMeta{Name: stored.Name + "-" + hash, Namespace: stored.Namespace},
+		Spec: agentsv1alpha1.AgentVersionSpec{
+			DeploymentName: stored.Name,
+			Snapshot:       versionedSpec(stored.Spec),
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, av))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, av) })
+	return av.Name
+}
+
 // autoRollbackSpec is a serving AgentDeployment spec with OPT-IN auto-rollback set to `enabled`.
 func autoRollbackSpec(image string, enabled bool) agentsv1alpha1.AgentDeploymentSpec {
 	return agentsv1alpha1.AgentDeploymentSpec{
@@ -65,7 +87,6 @@ func TestAutoRollback_HealthyPrior_RevertsAndFreezes(t *testing.T) {
 		name       = "ar-happy-agent"
 		namespace  = "default"
 		priorV     = "ar-happy-prior00000"
-		servingV   = "ar-happy-serving000"
 		priorImg   = "ghcr.io/ctxmesh/example-agent:v1"
 		servingImg = "ghcr.io/ctxmesh/example-agent:v2-regressed"
 	)
@@ -73,7 +94,6 @@ func TestAutoRollback_HealthyPrior_RevertsAndFreezes(t *testing.T) {
 	// The creation-time gap makes priorVersionOf resolve the prior deterministically.
 	mkVersionSnap(t, name, priorV, namespace, priorImg)
 	time.Sleep(1100 * time.Millisecond)
-	mkVersionSnap(t, name, servingV, namespace, servingImg)
 
 	deploy := &agentsv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
@@ -81,6 +101,7 @@ func TestAutoRollback_HealthyPrior_RevertsAndFreezes(t *testing.T) {
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	servingV := mkServingVersion(t, deploy)
 
 	setRegressionDetected(t, name, namespace, servingV)
 
@@ -215,7 +236,6 @@ func TestAutoRollback_GovernanceOnlyPrior_NoFreeze(t *testing.T) {
 		name      = "ar-govonly-agent"
 		namespace = "default"
 		priorV    = "ar-govonly-prior0000"
-		servingV  = "ar-govonly-serving00"
 		image     = "ghcr.io/ctxmesh/example-agent:v1"
 	)
 	withRule := func(rule string) agentsv1alpha1.AgentDeploymentSpec {
@@ -227,7 +247,6 @@ func TestAutoRollback_GovernanceOnlyPrior_NoFreeze(t *testing.T) {
 	}
 	mkVersionSpec(t, name, priorV, namespace, withRule("allow"))
 	time.Sleep(1100 * time.Millisecond)
-	mkVersionSpec(t, name, servingV, namespace, withRule("require-approval"))
 
 	deploy := &agentsv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
@@ -235,6 +254,7 @@ func TestAutoRollback_GovernanceOnlyPrior_NoFreeze(t *testing.T) {
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	servingV := mkServingVersion(t, deploy)
 	var live agentsv1alpha1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &live))
 
@@ -266,13 +286,11 @@ func TestAutoRollback_Frozen_NotEvaluated(t *testing.T) {
 		name       = "ar-frozen-agent"
 		namespace  = "default"
 		priorV     = "ar-frozen-prior0000"
-		servingV   = "ar-frozen-serving00"
 		priorImg   = "ghcr.io/ctxmesh/example-agent:v1"
 		servingImg = "ghcr.io/ctxmesh/example-agent:v2-regressed"
 	)
 	mkVersionSnap(t, name, priorV, namespace, priorImg)
 	time.Sleep(1100 * time.Millisecond)
-	mkVersionSnap(t, name, servingV, namespace, servingImg)
 
 	deploy := &agentsv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
@@ -280,6 +298,7 @@ func TestAutoRollback_Frozen_NotEvaluated(t *testing.T) {
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	servingV := mkServingVersion(t, deploy)
 
 	// Seed an outstanding freeze with the rollback that set it, AND the regression trigger.
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
@@ -321,13 +340,11 @@ func TestAutoRollback_OptOut_NoAction(t *testing.T) {
 		name       = "ar-optout-agent"
 		namespace  = "default"
 		priorV     = "ar-optout-prior0000"
-		servingV   = "ar-optout-serving00"
 		priorImg   = "ghcr.io/ctxmesh/example-agent:v1"
 		servingImg = "ghcr.io/ctxmesh/example-agent:v2-regressed"
 	)
 	mkVersionSnap(t, name, priorV, namespace, priorImg)
 	time.Sleep(1100 * time.Millisecond)
-	mkVersionSnap(t, name, servingV, namespace, servingImg)
 
 	// A deployment WITHOUT any autoRollback block — the pre-auto (detection-only) behavior.
 	deploy := &agentsv1alpha1.AgentDeployment{
@@ -336,6 +353,7 @@ func TestAutoRollback_OptOut_NoAction(t *testing.T) {
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	servingV := mkServingVersion(t, deploy)
 
 	setRegressionDetected(t, name, namespace, servingV)
 
@@ -357,13 +375,11 @@ func TestAutoRollback_OptOutDisabled_NoAction(t *testing.T) {
 		name       = "ar-disabled-agent"
 		namespace  = "default"
 		priorV     = "ar-disabled-prior00"
-		servingV   = "ar-disabled-serving"
 		priorImg   = "ghcr.io/ctxmesh/example-agent:v1"
 		servingImg = "ghcr.io/ctxmesh/example-agent:v2-regressed"
 	)
 	mkVersionSnap(t, name, priorV, namespace, priorImg)
 	time.Sleep(1100 * time.Millisecond)
-	mkVersionSnap(t, name, servingV, namespace, servingImg)
 
 	deploy := &agentsv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
@@ -371,6 +387,7 @@ func TestAutoRollback_OptOutDisabled_NoAction(t *testing.T) {
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	servingV := mkServingVersion(t, deploy)
 
 	setRegressionDetected(t, name, namespace, servingV)
 
@@ -392,7 +409,6 @@ func TestAutoRollback_UnhealthyPrior_Refused(t *testing.T) {
 		namespace  = "default"
 		baseV      = "ar-unhealthy-base000"
 		priorV     = "ar-unhealthy-prior00"
-		servingV   = "ar-unhealthy-serving"
 		priorImg   = "ghcr.io/ctxmesh/example-agent:v1-alsobad"
 		servingImg = "ghcr.io/ctxmesh/example-agent:v2-regressed"
 	)
@@ -404,7 +420,6 @@ func TestAutoRollback_UnhealthyPrior_Refused(t *testing.T) {
 	time.Sleep(1100 * time.Millisecond)
 	mkVersionSnap(t, name, priorV, namespace, priorImg)
 	time.Sleep(1100 * time.Millisecond)
-	mkVersionSnap(t, name, servingV, namespace, servingImg)
 
 	seedJudgeWindows(t, store, namespace, name, baseV, 200, []float64{0.90})
 	seedJudgeWindows(t, store, namespace, name, priorV, 100, []float64{0.70, 0.69, 0.71})
@@ -415,6 +430,7 @@ func TestAutoRollback_UnhealthyPrior_Refused(t *testing.T) {
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	servingV := mkServingVersion(t, deploy)
 
 	setRegressionDetected(t, name, namespace, servingV)
 
@@ -429,4 +445,8 @@ func TestAutoRollback_UnhealthyPrior_Refused(t *testing.T) {
 	require.NotNil(t, cond, "RolledBack condition must be set on refusal")
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, reasonRollbackUnhealthy, cond.Reason)
+
+	// A refused automatic rollback does not end the reconcile: the ordinary path still served the spec.
+	assert.Equal(t, servingV, got.Status.LatestVersion, "the ordinary reconcile ran after the refusal")
+	_ = getKsvc(t, name, namespace)
 }

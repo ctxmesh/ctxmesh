@@ -894,9 +894,14 @@ func (s *Server) handleRotateProviderKey(w http.ResponseWriter, r *http.Request)
 	spec.apiKey = req.APIKey
 	spec.models = models
 
-	if _, cErr := createProviderObjects(r.Context(), caller, spec); cErr != nil {
-		if cErr.status == http.StatusForbidden {
+	written, cErr := createProviderObjects(r.Context(), caller, spec)
+	if cErr != nil {
+		switch {
+		case cErr.status == http.StatusForbidden:
 			audit(spec.provider, auditOutcomeDenied)
+		case len(written) > 0:
+			// The pre-flight passed and a later write failed: the key may already have changed.
+			audit(spec.provider, auditOutcomeError)
 		}
 		writeError(w, cErr.status, cErr.msg)
 		return

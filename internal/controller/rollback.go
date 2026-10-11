@@ -189,6 +189,13 @@ func (r *AgentDeploymentReconciler) shouldAutoRollback(deploy *agentsv1alpha1.Ag
 	if rb := deploy.Status.Rollback; rb != nil && rb.FrozenUntilAck {
 		return false
 	}
+	// Judge only what is serving. RegressionDetected is keyed on status.latestVersion, which describes
+	// an older spec until the ordinary reconcile has served the stored one: right after an automatic
+	// revert (a cache read can predate the freeze) or after a person has replaced the regressed version.
+	// Acting then would revert a spec nobody has measured.
+	if hash, err := specHash(deploy.Spec); err != nil || deploy.Name+"-"+hash != deploy.Status.LatestVersion {
+		return false
+	}
 	c := apimeta.FindStatusCondition(deploy.Status.Conditions, conditionRegressionDetected)
 	return c != nil && c.Status == metav1.ConditionTrue
 }
@@ -275,8 +282,8 @@ func (r *AgentDeploymentReconciler) rollbackGuards(
 
 	// (d) Freeze-after-auto-action: a successful auto-rollback sets frozenUntilAck. The auto
 	// path is not evaluated while it is set (shouldAutoRollback), so this refuses a human
-	// rollback: the freeze means "a human must look" and clearing the freeze IS that human step
-	// (the console clears it on ack, m69.11).
+	// rollback: the freeze means "a human must look", and clearing it (a status patch on the
+	// AgentDeployment; there is no console control yet) is that human step.
 	if rb != nil && rb.FrozenUntilAck {
 		return reasonRollbackFrozen,
 			"deployment is frozen pending human acknowledgement of a prior automated action; clear status.rollback.frozenUntilAck to proceed",
@@ -495,6 +502,9 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 			"to that version's snapshot (a rollback keeps the live governance fields), so it serves as %q",
 			av.Name, fromVersion, served)
 	}
+	if freeze {
+		message += "; automatic rollback, so auto-rollback is frozen until status.rollback.frozenUntilAck is cleared"
+	}
 
 	// Record the rollback on status (a separate status subresource write). Re-fetch to avoid
 	// clobbering the just-updated object's resourceVersion, and layer the record as a MERGE
@@ -517,7 +527,7 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 	if freeze {
 		// Auto-rollback freezes further AUTO-actions until a human acks (clears this). Set it
 		// in the SAME status write as the history/condition so the freeze is atomic with the
-		// record — a subsequent auto-attempt is refused by the frozen guard until the ack.
+		// record; the auto path is not evaluated while it is set (shouldAutoRollback).
 		rb.FrozenUntilAck = true
 	}
 	// Prepend the event (most-recent-first) and bound the history.
