@@ -355,6 +355,29 @@ func TestAgentDependenciesSecretForbiddenIsUnknown(t *testing.T) {
 	require.Len(t, sb, 1)
 	assert.Equal(t, depUnknown, sb[0].State, "a denied Secret read is not a missing Secret")
 	assert.Equal(t, "SecretUnreadable", sb[0].Reason)
+	assert.Contains(t, sb[0].Message, "Your account can't read Secrets in "+detailNS)
+}
+
+// TestAgentDependenciesSecretReadFailedSaysSo proves a Secret read that fails for any reason but
+// RBAC is reported as a failed read, not blamed on the caller's account.
+func TestAgentDependenciesSecretReadFailedSaysSo(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(depsAgent(), servedRoute("openai-key"), boundSecretBinding()).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.Secret); ok {
+					return errors.New("etcd timeout")
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+
+	sb := depsByKind(t, detailDeps(t, c), depKindSecretBinding)
+	require.Len(t, sb, 1)
+	assert.Equal(t, depUnknown, sb[0].State)
+	assert.Equal(t, "SecretUnreadable", sb[0].Reason)
+	assert.Contains(t, sb[0].Message, "could not be read just now")
+	assert.NotContains(t, sb[0].Message, "Your account")
 }
 
 // TestAgentDependenciesSecretAbsentOrKeyless proves a Secret that does not exist, or exists without
@@ -451,4 +474,111 @@ func TestAgentDetailWithoutDependencies(t *testing.T) {
 
 	assert.NotEmpty(t, detailDeps(t, c))
 	assert.Positive(t, refReads, "the default still resolves every reference")
+}
+
+// TestAgentDependenciesStaleRouteConditionIsChecking proves the controller's ModelRouteReady stands in
+// for an unreadable route only once it describes the agent's current spec: before that it may be
+// about the route the agent named before an edit, so it is unknown ("Checking"), even a RouteNotFound.
+func TestAgentDependenciesStaleRouteConditionIsChecking(t *testing.T) {
+	for _, reason := range []string{"Served", "NotYetServed", "RouteNotFound"} {
+		t.Run(reason, func(t *testing.T) {
+			ad := depsAgent()
+			ad.Generation = 2
+			c := cond("ModelRouteReady", metav1.ConditionFalse, reason, "about the route before the edit")
+			c.ObservedGeneration = 1
+			ad.Status.Conditions = []metav1.Condition{c}
+
+			r := depsByKind(t, detailDeps(t, routeDeniedClient(t, ad)), depKindModelRoute)
+			require.Len(t, r, 1)
+			assert.Equal(t, depUnknown, r[0].State)
+			assert.Equal(t, "Checking", r[0].Reason)
+		})
+	}
+
+	ad := depsAgent()
+	ad.Generation = 2
+	c := cond("ModelRouteReady", metav1.ConditionFalse, "RouteNotFound", "no ModelRoute of that name")
+	c.ObservedGeneration = 2
+	ad.Status.Conditions = []metav1.Condition{c}
+	r := depsByKind(t, detailDeps(t, routeDeniedClient(t, ad)), depKindModelRoute)
+	require.Len(t, r, 1)
+	assert.Equal(t, depMissing, r[0].State, "a current condition still stands in")
+}
+
+// TestAgentDependenciesModelRouteFromValueFrom proves a MODEL_ROUTE read from a ConfigMap is listed
+// as a declared route with where it comes from, not dropped as "no route" and not looked up by name.
+func TestAgentDependenciesModelRouteFromValueFrom(t *testing.T) {
+	ad := depsAgent()
+	ad.Spec.Env = []corev1.EnvVar{{Name: "MODEL_ROUTE", ValueFrom: &corev1.EnvVarSource{
+		ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "llm"}, Key: "route",
+		},
+	}}}
+	routeReads := 0
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*agentsv1alpha1.ModelRoute); ok {
+					routeReads++
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+
+	got := detailDeps(t, c)
+	r := depsByKind(t, got, depKindModelRoute)
+	require.Len(t, r, 1)
+	assert.Equal(t, depDeclared, r[0].State)
+	assert.Equal(t, "ValueFrom", r[0].Reason)
+	assert.Equal(t, "from ConfigMap llm, key route", r[0].Detail)
+	assert.Contains(t, r[0].Message, "ConfigMap llm")
+	assert.Zero(t, routeReads)
+	assert.Empty(t, depsByKind(t, got, depKindSecretBinding))
+}
+
+// TestKnowledgeBaseStateIngestion proves what a knowledge base's ingestion phase means to the agent:
+// a Pending corpus nothing will ingest needs an ingest, one with a schedule is on its way, and a
+// corpus being re-ingested is still queryable.
+func TestKnowledgeBaseStateIngestion(t *testing.T) {
+	ingested := metav1.Now()
+	for _, tc := range []struct {
+		name      string
+		kb        agentsv1beta1.KnowledgeBase
+		state     string
+		reason    string
+		inMessage string
+	}{
+		{
+			name:  "pending, no schedule",
+			kb:    agentsv1beta1.KnowledgeBase{Status: agentsv1beta1.KnowledgeBaseStatus{Phase: "Pending"}},
+			state: depNotReady, reason: "NeedsIngest", inMessage: "no refresh schedule",
+		},
+		{
+			name: "pending, scheduled",
+			kb: agentsv1beta1.KnowledgeBase{
+				Spec:   agentsv1beta1.KnowledgeBaseSpec{RefreshInterval: &metav1.Duration{Duration: 3600e9}},
+				Status: agentsv1beta1.KnowledgeBaseStatus{Phase: "Pending"},
+			},
+			state: depNotReady, reason: "Pending", inMessage: "refresh schedule starts",
+		},
+		{
+			name:  "first ingestion",
+			kb:    agentsv1beta1.KnowledgeBase{Status: agentsv1beta1.KnowledgeBaseStatus{Phase: "Ingesting"}},
+			state: depNotReady, reason: "Ingesting", inMessage: "first ingestion",
+		},
+		{
+			name: "re-ingesting",
+			kb: agentsv1beta1.KnowledgeBase{
+				Status: agentsv1beta1.KnowledgeBaseStatus{Phase: "Ingesting", LastIngestedAt: &ingested},
+			},
+			state: depReady, reason: "Ingesting", inMessage: "Re-ingesting",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := knowledgeBaseState(AgentDependency{Kind: depKindKnowledgeBase, Name: "handbook"}, &tc.kb)
+			assert.Equal(t, tc.state, d.State)
+			assert.Equal(t, tc.reason, d.Reason)
+			assert.Contains(t, d.Message, tc.inMessage)
+		})
+	}
 }

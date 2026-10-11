@@ -141,25 +141,32 @@ type SecretBindingUpdateRequest struct {
 // the caller may see. SECURITY: it tests `Data[key]` for PRESENCE and discards it —
 // the value is never read into a variable, logged, or projected.
 func (s *Server) secretBindingReadiness(ctx context.Context, caller client.Client, sb *agentsv1alpha1.SecretBinding) (bool, string) {
+	ready, phase, _ := s.secretBindingProbe(ctx, caller, sb)
+	return ready, phase
+}
+
+// secretBindingProbe is secretBindingReadiness that also returns the failed read behind a Pending
+// phase. The error is nil for a Pending binding with nothing to read (another backend, no Secret).
+func (s *Server) secretBindingProbe(ctx context.Context, caller client.Client, sb *agentsv1alpha1.SecretBinding) (bool, string, error) {
 	backend := sb.Spec.Backend
 	if backend == "" {
 		backend = secretBackendKubernetes
 	}
 	// Only the kubernetes backend stores its material in a Secret we can probe.
 	if backend != secretBackendKubernetes || sb.Spec.SecretRef.Name == "" {
-		return false, phasePending
+		return false, phasePending, nil
 	}
 	var secret corev1.Secret
 	if err := caller.Get(ctx, client.ObjectKey{Namespace: sb.Namespace, Name: sb.Spec.SecretRef.Name}, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, phaseNotReady
+			return false, phaseNotReady, nil
 		}
-		return false, phasePending
+		return false, phasePending, err
 	}
 	if _, ok := secret.Data[sb.Spec.SecretRef.Key]; !ok {
-		return false, phaseNotReady
+		return false, phaseNotReady, nil
 	}
-	return true, phaseReady
+	return true, phaseReady, nil
 }
 
 // --- adapter helpers ---------------------------------------------------------

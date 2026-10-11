@@ -122,7 +122,7 @@ namespace that is not a platform namespace, or in All workspaces; a stored choic
 config builder's Apply created the agent in `default` whatever workspace was selected. It now
 applies into the selected workspace, and under All workspaces asks for one first.
 
-**New: an agent's page lists everything it references, and says which ones resolve.** A Bindings
+**New: an agent's page lists what it references, and says which ones resolve.** A Bindings
 panel shows the model route and the secret bindings it uses, the guardrail policy, tool bindings,
 knowledge bases, memory, the tool calls that wait for approval and who may approve them, and the
 feedback sources, each looked up as you. A reference that does not exist is shown as missing.

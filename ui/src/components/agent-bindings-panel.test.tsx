@@ -153,6 +153,109 @@ describe("AgentBindingsPanel", () => {
     expect(screen.queryByTestId("bindings-attention")).toBeNull();
   });
 
+  it("shows a knowledge base nothing will ingest as needing one, with the way to start it", () => {
+    renderPanel([
+      {
+        kind: "knowledgeBase",
+        name: "handbook",
+        namespace: "prod",
+        detail: "tool-only",
+        state: "notReady",
+        reason: "NeedsIngest",
+        message: "Nothing has been ingested yet, and no refresh schedule will start an ingestion.",
+      },
+    ]);
+    const tag = screen.getByTestId("dep-state-knowledgeBase-handbook");
+    expect(tag).toHaveTextContent("needs ingest");
+    expect(tag).toHaveClass("text-destructive");
+    expect(screen.getByTestId("dep-knowledgeBase-handbook")).toHaveTextContent("no refresh schedule");
+    expect(screen.getByTestId("dep-fix-knowledgeBase-handbook")).toHaveAttribute(
+      "href",
+      "/knowledgebases/prod/handbook",
+    );
+    expect(screen.getByTestId("bindings-attention")).toHaveTextContent("1");
+  });
+
+  it("keeps a pending knowledge base its schedule will ingest as converging", () => {
+    renderPanel([
+      {
+        kind: "knowledgeBase",
+        name: "handbook",
+        namespace: "prod",
+        state: "notReady",
+        reason: "Pending",
+        message: "Nothing has been ingested yet. Its refresh schedule starts the first ingestion.",
+      },
+    ]);
+    const tag = screen.getByTestId("dep-state-knowledgeBase-handbook");
+    expect(tag).toHaveTextContent("not ready yet");
+    expect(tag).not.toHaveClass("text-destructive");
+    expect(screen.queryByTestId("dep-fix-knowledgeBase-handbook")).toBeNull();
+    expect(screen.queryByTestId("bindings-attention")).toBeNull();
+  });
+
+  it("shows a knowledge base being re-ingested as ready, and says it is re-ingesting", () => {
+    renderPanel([
+      {
+        kind: "knowledgeBase",
+        name: "handbook",
+        namespace: "prod",
+        state: "ready",
+        reason: "Ingesting",
+        message: "Re-ingesting now. Queries use the last completed ingestion until it finishes.",
+      },
+    ]);
+    expect(screen.getByTestId("dep-state-knowledgeBase-handbook")).toHaveTextContent("ready");
+    expect(screen.getByTestId("dep-knowledgeBase-handbook")).toHaveTextContent("Re-ingesting now");
+  });
+
+  it("shows a route the controller has not checked since the agent changed as checking", () => {
+    renderPanel([
+      {
+        kind: "modelRoute",
+        name: "chat",
+        namespace: "prod",
+        state: "unknown",
+        reason: "Checking",
+        message: "The controller has not yet checked the route the agent's current spec names.",
+      },
+    ]);
+    const tag = screen.getByTestId("dep-state-modelRoute-chat");
+    expect(tag).toHaveTextContent("checking");
+    expect(tag).not.toHaveClass("text-destructive");
+    expect(screen.getByTestId("dep-modelRoute-chat")).toHaveTextContent("has not yet checked");
+    expect(screen.queryByTestId("bindings-attention")).toBeNull();
+  });
+
+  it("lists a route read from a ConfigMap as declared, says where it comes from, and links nowhere", () => {
+    renderPanel([
+      {
+        kind: "modelRoute",
+        name: "MODEL_ROUTE",
+        namespace: "prod",
+        detail: "from ConfigMap llm, key route",
+        state: "declared",
+        reason: "ValueFrom",
+        message: "MODEL_ROUTE is read from ConfigMap llm, key route when the agent starts.",
+      },
+    ]);
+    const row = screen.getByTestId("dep-modelRoute-MODEL_ROUTE");
+    expect(screen.getByTestId("dep-state-modelRoute-MODEL_ROUTE")).toHaveTextContent("declared");
+    expect(row).toHaveTextContent("from ConfigMap llm, key route");
+    expect(row).toHaveTextContent("when the agent starts");
+    expect(within(row).queryByRole("link")).toBeNull();
+    expect(screen.getByTestId("bindings-group-model")).not.toHaveTextContent("No model route");
+  });
+
+  it("claims neither that every reference is listed, nor that no route means no model", () => {
+    renderPanel([]);
+    const panel = screen.getByTestId("agent-bindings-panel");
+    expect(panel).not.toHaveTextContent(/\bEvery\b/);
+    const model = screen.getByTestId("bindings-group-model");
+    expect(model).toHaveTextContent("No model route");
+    expect(model).not.toHaveTextContent("no model to call");
+  });
+
   it("does not guess when the server sent no references", () => {
     renderPanel(undefined);
     expect(screen.getByTestId("agent-bindings-panel")).toHaveTextContent("aren't resolved on this server");

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -65,12 +66,22 @@ const (
 	conditionValidated       = "Validated"
 	reasonNotReconciled      = "NotReconciled"
 	reasonSecretResolved     = "Resolved"
-	toolRuleRequireApproval  = "require-approval"
+	reasonSecretUnreadable   = "SecretUnreadable"
+	reasonRouteNotFound      = "RouteNotFound"
+	// reasonChecking: the controller's word on the route predates the agent's current spec.
+	reasonChecking = "Checking"
+	// reasonValueFrom: MODEL_ROUTE is read from a ConfigMap, Secret or field when the pod starts.
+	reasonValueFrom = "ValueFrom"
+	// reasonNeedsIngest: a knowledge base nothing has ingested, with no schedule that will.
+	reasonNeedsIngest       = "NeedsIngest"
+	kbPhasePending          = "Pending"
+	toolRuleRequireApproval = "require-approval"
 )
 
 // AgentDependency is one thing an agent references, resolved as the caller (ADR 0011). A reference
-// that does not resolve is listed as missing, never dropped: the console's Bindings panel exists to
-// show what an agent depends on, and a dangling reference is the row a reader most needs.
+// that does not resolve is listed as missing, never dropped: a dangling reference is the row a
+// reader of the console's Bindings panel most needs. The kinds listed are those below; an agent's
+// other references (an eval suite, the embedding route of its long-term memory) are not resolved.
 type AgentDependency struct {
 	// Kind is one of modelRoute, secretBinding, guardrailPolicy, toolBinding, knowledgeBase,
 	// sessionMemory, longTermMemory, approvalRule, approver, feedbackSource.
@@ -144,13 +155,48 @@ func fromCondition(d AgentDependency, c *metav1.Condition, pendingReason, pendin
 	return d
 }
 
+// modelRouteEnv is the agent's MODEL_ROUTE variable, or nil when it sets none.
+func modelRouteEnv(ad *agentsv1alpha1.AgentDeployment) *corev1.EnvVar {
+	for i := range ad.Spec.Env {
+		if ad.Spec.Env[i].Name == envModelRoute {
+			return &ad.Spec.Env[i]
+		}
+	}
+	return nil
+}
+
+// valueFromDependency describes a MODEL_ROUTE read from elsewhere when the pod starts. The console
+// cannot tell which route that is without reading the source, so it says where the name comes from.
+func valueFromDependency(ad *agentsv1alpha1.AgentDeployment, src *corev1.EnvVarSource) AgentDependency {
+	from := "a field of the pod"
+	switch {
+	case src.ConfigMapKeyRef != nil:
+		from = fmt.Sprintf("ConfigMap %s, key %s", src.ConfigMapKeyRef.Name, src.ConfigMapKeyRef.Key)
+	case src.SecretKeyRef != nil:
+		from = fmt.Sprintf("Secret %s, key %s", src.SecretKeyRef.Name, src.SecretKeyRef.Key)
+	}
+	return AgentDependency{
+		Kind: depKindModelRoute, Name: envModelRoute, Namespace: ad.Namespace, Detail: "from " + from,
+		State: depDeclared, Reason: reasonValueFrom,
+		Message: fmt.Sprintf("MODEL_ROUTE is read from %s when the agent starts, so which route it names, "+
+			"and whether that route is served, is not shown here.", from),
+	}
+}
+
 // modelRouteDependencies resolves the agent's model route and the secret bindings its providers use.
 func (s *Server) modelRouteDependencies(
 	ctx context.Context,
 	caller client.Client,
 	ad *agentsv1alpha1.AgentDeployment,
 ) []AgentDependency {
-	name := strings.TrimSpace(agentModelRoute(ad))
+	env := modelRouteEnv(ad)
+	if env == nil {
+		return nil
+	}
+	if env.ValueFrom != nil {
+		return []AgentDependency{valueFromDependency(ad, env.ValueFrom)}
+	}
+	name := strings.TrimSpace(env.Value)
 	if name == "" {
 		return nil
 	}
@@ -159,21 +205,30 @@ func (s *Server) modelRouteDependencies(
 	err := caller.Get(ctx, client.ObjectKey{Namespace: ad.Namespace, Name: name}, &mr)
 	switch {
 	case apierrors.IsNotFound(err):
-		d.State, d.Reason = depMissing, "RouteNotFound"
+		d.State, d.Reason = depMissing, reasonRouteNotFound
 		d.Message = fmt.Sprintf("There is no ModelRoute named %q in %s, so the agent has no model to call.",
 			name, ad.Namespace)
 		return []AgentDependency{d}
 	case apierrors.IsForbidden(err):
 		// The controller reads the route with its own identity and mirrors it onto the agent
-		// (ADR 0151). Its word is better than none for a caller who may read only the agent.
-		if c := apimeta.FindStatusCondition(ad.Status.Conditions, conditionModelRouteReady); c != nil {
-			if c.Reason == "RouteNotFound" {
-				d.State, d.Reason, d.Message = depMissing, c.Reason, c.Message
-				return []AgentDependency{d}
-			}
+		// (ADR 0151). Its word is better than none for a caller who may read only the agent, but
+		// only once it is about the agent's current spec: before that it may describe the route the
+		// agent named before an edit.
+		c := apimeta.FindStatusCondition(ad.Status.Conditions, conditionModelRouteReady)
+		switch {
+		case c == nil:
+			return []AgentDependency{s.unreadable(err, d, "model route")}
+		case c.ObservedGeneration < ad.Generation:
+			d.State, d.Reason = depUnknown, reasonChecking
+			d.Message = "Your account can't read this route, and the controller has not yet checked the route " +
+				"the agent's current spec names."
+			return []AgentDependency{d}
+		case c.Reason == reasonRouteNotFound:
+			d.State, d.Reason, d.Message = depMissing, c.Reason, c.Message
+			return []AgentDependency{d}
+		default:
 			return []AgentDependency{fromCondition(d, c, "", "")}
 		}
-		return []AgentDependency{s.unreadable(err, d, "model route")}
 	case err != nil:
 		return []AgentDependency{s.unreadable(err, d, "model route")}
 	}
@@ -208,7 +263,7 @@ func (s *Server) secretBindingDependency(
 		}
 		return s.unreadable(err, d, "secret binding")
 	}
-	ready, phase := s.secretBindingReadiness(ctx, caller, &sb)
+	ready, phase, readErr := s.secretBindingProbe(ctx, caller, &sb)
 	switch {
 	case ready:
 		d.State, d.Reason = depReady, reasonSecretResolved
@@ -216,10 +271,28 @@ func (s *Server) secretBindingDependency(
 		d.State, d.Reason = depNotReady, "SecretUnresolved"
 		d.Message = fmt.Sprintf("Secret %q does not exist, or has no key %q.", sb.Spec.SecretRef.Name, sb.Spec.SecretRef.Key)
 	default:
-		d.State, d.Reason = depUnknown, "SecretUnreadable"
-		d.Message = "Whether the Secret behind this binding exists can't be checked with your account."
+		d.State, d.Reason = depUnknown, reasonSecretUnreadable
+		d.Message = s.secretUnreadableMessage(&sb, readErr)
 	}
 	return d
+}
+
+// secretUnreadableMessage says why a binding's Secret could not be checked: the caller's RBAC, or a
+// read that failed.
+func (s *Server) secretUnreadableMessage(sb *agentsv1alpha1.SecretBinding, readErr error) string {
+	switch {
+	case apierrors.IsForbidden(readErr) || apierrors.IsUnauthorized(readErr):
+		return fmt.Sprintf("Your account can't read Secrets in %s, so whether Secret %q holds key %q is not shown.",
+			sb.Namespace, sb.Spec.SecretRef.Name, sb.Spec.SecretRef.Key)
+	case readErr != nil:
+		s.log.Error(readErr, "agent detail: reading a secret binding's Secret failed",
+			"namespace", sb.Namespace, "secretBinding", sb.Name)
+		return fmt.Sprintf("Secret %q could not be read just now, so whether it holds key %q is not shown.",
+			sb.Spec.SecretRef.Name, sb.Spec.SecretRef.Key)
+	default:
+		// Only a kubernetes-backed binding naming a Secret can be probed; the API admits no other today.
+		return "This binding names no Secret the console can check."
+	}
 }
 
 // guardrailDependency resolves spec.guardrailPolicyRef. The controller refuses to serve an agent whose
@@ -340,13 +413,25 @@ func knowledgeBaseState(d AgentDependency, kb *agentsv1beta1.KnowledgeBase) Agen
 		d.State = depReady
 		d.Message = "Queryable, but some documents were flagged during ingestion."
 	case kbPhaseIngesting:
-		d.State, d.Message = depNotReady, "An ingestion run is in progress."
+		// A re-ingest replaces a corpus that is still there, so it answers from the last completed run.
+		if kb.Status.LastIngestedAt != nil {
+			d.State, d.Message = depReady, "Re-ingesting now. Queries use the last completed ingestion until it finishes."
+		} else {
+			d.State, d.Message = depNotReady, "The first ingestion run is in progress."
+		}
 	case kbPhaseFailed:
 		d.State, d.Message = depNotReady, "The last ingestion run failed."
 	case kbPhaseBudgetExceeded:
 		d.State, d.Message = depNotReady, "The last ingestion run was halted by the tenant budget."
-	case "Pending":
-		d.State, d.Message = depNotReady, "Nothing has been ingested yet, so retrieval returns nothing."
+	case kbPhasePending:
+		// A refresh schedule starts the first ingestion on its own; without one, someone has to.
+		if kb.Spec.RefreshInterval != nil {
+			d.State, d.Message = depNotReady, "Nothing has been ingested yet. Its refresh schedule starts the first ingestion."
+		} else {
+			d.State, d.Reason = depNotReady, reasonNeedsIngest
+			d.Message = "Nothing has been ingested yet, and no refresh schedule will start an ingestion, " +
+				"so retrieval returns nothing until one is run."
+		}
 	default:
 		d.State, d.Reason = depNotReady, reasonNotReconciled
 		d.Message = "The controller has not reconciled this knowledge base yet."

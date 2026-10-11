@@ -42,7 +42,8 @@ const GROUPS: Group[] = [
     id: "model",
     title: "Model",
     kinds: ["modelRoute", "secretBinding"],
-    empty: "No model route, so this agent has no model to call.",
+    // An image may call a provider itself, so no route is not the same as no model.
+    empty: "No model route. An agent whose image calls a provider directly does not need one.",
   },
   { id: "guardrails", title: "Guardrails", kinds: ["guardrailPolicy"], empty: "No guardrail policy." },
   { id: "tools", title: "Tools", kinds: ["toolBinding"], empty: "No tool is bound to this agent." },
@@ -94,10 +95,13 @@ function stateTag(d: AgentDependency): Tag {
     case "missing":
       return { variant: "crit", label: "missing" };
     case "unknown":
+      // The controller has not yet looked at the agent's current spec: no claim, only not yet.
+      if (d.reason === "Checking") return { variant: "open", label: "checking" };
       return { variant: "open", label: "unknown" };
     case "declared":
       return { variant: "muted", label: "declared" };
     default:
+      if (d.reason === "NeedsIngest") return { variant: "crit", label: "needs ingest" };
       if (d.reason === "NotYetServed") return { variant: "progressing", label: "model loading" };
       if (d.reason === "GatewayRolling") return { variant: "progressing", label: "rolling out" };
       if (d.reason && CONVERGING.has(d.reason)) return { variant: "progressing", label: "not ready yet" };
@@ -116,7 +120,9 @@ const linkClass = "border-b border-accent font-mono text-primary hover:border-pr
 function pageFor(d: AgentDependency): string | null {
   const ns = encodeURIComponent(d.namespace ?? "");
   const nm = encodeURIComponent(d.name);
-  if (d.state === "missing" || !d.name) return null;
+  // A declared row names a spec field, not an object (a route read from a ConfigMap is not a route
+  // called MODEL_ROUTE).
+  if (d.state === "missing" || d.state === "declared" || !d.name) return null;
   switch (d.kind) {
     case "modelRoute":
       return `/routes/${ns}/${nm}`;
@@ -131,8 +137,14 @@ function pageFor(d: AgentDependency): string | null {
   }
 }
 
-/** Where to go to make a missing reference exist. */
+/** Where to go to make a missing reference exist, or to ingest a knowledge base nothing will. */
 function fixFor(d: AgentDependency): { label: string; to: string } | null {
+  if (d.kind === "knowledgeBase" && d.reason === "NeedsIngest") {
+    return {
+      label: "Start the ingestion",
+      to: `/knowledgebases/${encodeURIComponent(d.namespace ?? "")}/${encodeURIComponent(d.name)}`,
+    };
+  }
   if (d.state !== "missing") return null;
   switch (d.kind) {
     case "modelRoute":
@@ -163,12 +175,14 @@ function DependencyRow({ d }: { d: AgentDependency }) {
   const fix = fixFor(d);
   const sub = subline(d);
   // The condition's own words matter whenever the row is not simply fine. A ready row's message
-  // ("the gateway serves this route") restates its tag, so it shows only when it is a caveat.
+  // ("the gateway serves this route") restates its tag, so it shows only when it is a caveat: a
+  // partial corpus, or one being re-ingested.
   const explain =
     d.state === "notReady" ||
     d.state === "missing" ||
     d.state === "unknown" ||
-    (!!d.message && (d.state === "declared" || d.reason === "PartiallyIngested"));
+    (!!d.message &&
+      (d.state === "declared" || d.reason === "PartiallyIngested" || d.reason === "Ingesting"));
   return (
     <li
       className="flex min-w-0 flex-col gap-1 border-b border-border-soft py-2.5 last:border-b-0"
@@ -226,8 +240,9 @@ export function AgentBindingsPanel({ detail }: { detail: AgentDetailResponse }) 
       />
       <CardContent>
         <p className="mb-4 max-w-[66ch] text-sm text-secondary-foreground">
-          Every policy, store and credential this agent refers to, each looked up
-          as you. A reference that does not resolve is listed as missing.
+          The model route and its credentials, guardrail policy, tools, knowledge
+          bases, memory, approvals and feedback this agent refers to. Each object
+          is looked up as you; one that does not resolve is listed as missing.
         </p>
 
         {!deps ? (
