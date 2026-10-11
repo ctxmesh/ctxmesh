@@ -1696,6 +1696,9 @@ export interface CatalogTool {
   // registry is the MCP server / ToolRegistry the tool belongs to (e.g.
   // "scalekit-mcp-server") — the grouping key for "group tools by MCP server".
   registry?: string;
+  // namespace is where that server is registered. A binding names its server in its own
+  // namespace, so only agents in this namespace can be bound to the tool.
+  namespace?: string;
   // source is the ORIGIN CLASS ("user-added" | "curated"), not the server name.
   source?: string;
   approvalStatus?: "approved" | "pending";

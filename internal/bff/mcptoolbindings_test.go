@@ -30,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	authnv1 "k8s.io/api/authentication/v1"
@@ -586,15 +587,29 @@ func TestCreateMCPToolBindingMissingAgentRefIs400(t *testing.T) {
 	assert.Contains(t, body, "agentRef")
 }
 
-// The bind wizard's request and the BFF's answers to it. The console's tool-catalog test writes
-// the request from what the wizard sends; this file's contract test writes the responses, which
-// that test then renders. Regenerate the responses with
+// The bind round trip, both ways. This file's contract test writes the catalog the wizard is
+// opened from (GET /api/tools) and the BFF's answers to the bind; the console's tool-catalog test
+// renders that catalog, drives the wizard, and writes the request it sends, which this test posts
+// to the real handler. Regenerate this side with
 //
 //	UPDATE_FIXTURES=1 go test ./internal/bff -run TestCreateMCPToolBinding_ConsoleRequest
 var (
+	bindCatalogFixture   = filepath.Join("..", "..", "ui", "src", "test", "contract", "bind-tool.catalog.json")
 	bindRequestFixture   = filepath.Join("..", "..", "ui", "src", "test", "contract", "bind-tool.request.json")
 	bindResponsesFixture = filepath.Join("..", "..", "ui", "src", "test", "contract", "bind-tool.responses.json")
 )
+
+// matchesFixture compares got with the committed fixture at path, rewriting it first under
+// UPDATE_FIXTURES=1.
+func matchesFixture(t *testing.T, path string, got []byte) {
+	t.Helper()
+	if os.Getenv("UPDATE_FIXTURES") == "1" {
+		require.NoError(t, os.WriteFile(path, got, 0o644))
+	}
+	want, err := os.ReadFile(path)
+	require.NoError(t, err, "the committed fixture is missing; regenerate it with UPDATE_FIXTURES=1")
+	assert.Equal(t, string(want), string(got), "%s changed; regenerate it (UPDATE_FIXTURES=1)", path)
+}
 
 const searchMCPURL = "http://search-mcp.default.svc.cluster.local/mcp"
 
@@ -603,7 +618,15 @@ const searchMCPURL = "http://search-mcp.default.svc.cluster.local/mcp"
 func bindServer(t *testing.T, username string, store toolregistry.Store) (*Server, client.WithWatch, *recordingAuthorizer) {
 	t.Helper()
 	c := identityClient(t, username)
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s := NewServer(Options{
+		CallerClients: &fakeCallerClientFactory{client: c},
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		MCPEnabled:    true,
+		ProviderHTTP:  &http.Client{},
+		Version:       "test",
+		Log:           logr.Discard(),
+	})
 	s.toolRegistryStore = store
 	auth := &recordingAuthorizer{}
 	s.authorizer = auth
@@ -631,6 +654,16 @@ func TestCreateMCPToolBinding_ConsoleRequest(t *testing.T) {
 	})
 	require.NoError(t, err)
 	s, c, auth := bindServer(t, aliceUser, store)
+
+	// The catalog the wizard is opened from, as the handler serves it for the workspace.
+	catalog := httptest.NewRecorder()
+	catalogReq := httptest.NewRequest(http.MethodGet, "/api/tools?namespace=default", nil)
+	catalogReq.Header.Set("Authorization", "Bearer caller-token")
+	s.Handler().ServeHTTP(catalog, catalogReq)
+	require.Equal(t, http.StatusOK, catalog.Code, catalog.Body.String())
+	var pretty bytes.Buffer
+	require.NoError(t, json.Indent(&pretty, catalog.Body.Bytes(), "", "  "))
+	matchesFixture(t, bindCatalogFixture, pretty.Bytes())
 
 	raw, err := os.ReadFile(bindRequestFixture)
 	require.NoError(t, err, "the console's bind request fixture is written by ui/src/pages/tool-catalog-page.test.tsx")
@@ -666,12 +699,7 @@ func TestCreateMCPToolBinding_ConsoleRequest(t *testing.T) {
 	out, err := json.MarshalIndent(responses, "", "  ")
 	require.NoError(t, err)
 	out = append(out, '\n')
-	if os.Getenv("UPDATE_FIXTURES") == "1" {
-		require.NoError(t, os.WriteFile(bindResponsesFixture, out, 0o644))
-	}
-	want, err := os.ReadFile(bindResponsesFixture)
-	require.NoError(t, err, "the committed fixture is missing; regenerate it with UPDATE_FIXTURES=1")
-	assert.Equal(t, string(want), string(out), "the bind responses changed; regenerate %s (UPDATE_FIXTURES=1)", bindResponsesFixture)
+	matchesFixture(t, bindResponsesFixture, out)
 }
 
 // TestCreateMCPToolBinding_OldConsoleRequestIsRefused pins the defect: the wizard used to send the

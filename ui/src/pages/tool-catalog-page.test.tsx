@@ -9,7 +9,7 @@ import { ToolCatalogPage } from "@/pages/tool-catalog-page";
 import { CapabilitiesProvider } from "@/lib/capabilities";
 import { NamespaceProvider } from "@/lib/namespace";
 import { ToastProvider } from "@/components/kit";
-import type { MCPToolBindingDetail } from "@/lib/api";
+import type { CatalogTool, MCPToolBindingDetail } from "@/lib/api";
 
 // ToolCatalogPage tests (m17.10):
 //   1. Renders all three tool state badges (curated / user-added / pending-approval).
@@ -56,6 +56,11 @@ const BIND_RESPONSES = JSON.parse(
 
 const PROPAGATED_DETAIL = BIND_RESPONSES.propagated;
 const PENDING_DETAIL = BIND_RESPONSES.created;
+
+// The catalog the wizard is opened from, as GET /api/tools serves it (written by the same Go test).
+const BIND_CATALOG = JSON.parse(
+  fs.readFileSync(path.resolve(__dirname, "../test/contract/bind-tool.catalog.json"), "utf8"),
+) as { tools: CatalogTool[] };
 
 // The bind wizard's request, as the console sends it (see the contract test below).
 const BIND_REQUEST_FIXTURE = path.resolve(__dirname, "../test/contract/bind-tool.request.json");
@@ -252,7 +257,10 @@ describe("ToolCatalogPage — bind wizard", () => {
   // to what the wizard sends fails here until the fixture is regenerated
   // (UPDATE_FIXTURES=1), and then fails there if the handler would refuse it.
   it("sends the bind request the BFF's handler is tested with", async () => {
-    const calls = installFetch({ caps: EDITOR_CAPS });
+    // The workspace selected is not the tool's: the agents offered, and the binding, are in the
+    // namespace the catalog says the tool's server is in.
+    localStorage.setItem("ctxmesh.namespace", "team-b");
+    const calls = installFetch({ caps: EDITOR_CAPS, tools: BIND_CATALOG.tools });
     render(
       <MemoryRouter>
         <ToastProvider>
@@ -285,6 +293,10 @@ describe("ToolCatalogPage — bind wizard", () => {
     await waitFor(() =>
       expect(calls.find((c) => c.url === "/api/mcptoolbindings" && c.method === "POST")).toBeDefined(),
     );
+    const agentLists = calls.filter((c) => c.url.split("?")[0] === "/api/agents" && c.method === "GET");
+    expect(agentLists.map((c) => new URL(c.url, "http://x").searchParams.get("namespace"))).toEqual([
+      BIND_CATALOG.tools[0].namespace,
+    ]);
     const sent = JSON.parse(
       calls.find((c) => c.url === "/api/mcptoolbindings" && c.method === "POST")!.body,
     ) as unknown;

@@ -197,7 +197,8 @@ agent's namespace, and `registryRef` is the MCP server the tool was picked from.
 MCP server that provides it, among the servers the caller may use, refusing a tool no such server
 provides with 400 and another user's personal server with 403. Before reading any server it checks
 that the caller may create bindings in the namespace (403 otherwise). The wizard no longer offers a binding namespace other than the agent's, which
-could only produce a binding to nothing.
+could only produce a binding to nothing, and offers only agents in the namespace where the tool's
+MCP server is registered, whichever workspace is selected.
 
 **Security: an agent could serve a page at its own address and finish a visitor's OAuth consent
 as its author.** The console's consent page trusts a page at an agent's hostname, and with the

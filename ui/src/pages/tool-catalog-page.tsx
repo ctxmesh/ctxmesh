@@ -599,6 +599,9 @@ function BindWizard({ tool, onClose }: BindWizardProps) {
   const { namespace: shellNs } = useNamespace();
   const { can, reprobe } = useCapabilities();
   const { toast } = useToast();
+  // A binding names its agent and its MCP server in one namespace, so only agents where the tool's
+  // server is registered can take it.
+  const agentNs = tool.namespace || shellNs;
 
   // Load agents for the select step
   React.useEffect(() => {
@@ -606,7 +609,7 @@ function BindWizard({ tool, onClose }: BindWizardProps) {
     setBindState({ kind: "loading-agents" });
     const controller = new AbortController();
     api
-      .listAgents({ namespace: shellNs || undefined }, controller.signal)
+      .listAgents({ namespace: agentNs || undefined }, controller.signal)
       .then((res) => {
         if (controller.signal.aborted) return;
         setAgents(res.items);
@@ -623,7 +626,7 @@ function BindWizard({ tool, onClose }: BindWizardProps) {
         setBindState({ kind: "agents-error", message: msg });
       });
     return () => controller.abort();
-  }, [step, shellNs]);
+  }, [step, agentNs]);
 
   // Auto-generate a binding name from agent + tool
   React.useEffect(() => {
@@ -752,6 +755,7 @@ function BindWizard({ tool, onClose }: BindWizardProps) {
       content: (
         <SelectAgentStep
           agents={agents}
+          serverNs={tool.namespace}
           loadState={bindState}
           selectedNs={selectedNs}
           selectedName={selectedName}
@@ -846,6 +850,8 @@ function BindWizard({ tool, onClose }: BindWizardProps) {
 
 interface SelectAgentStepProps {
   agents: AgentSummary[];
+  // serverNs is the namespace of the tool's MCP server, which the agents are listed from.
+  serverNs?: string;
   loadState: BindState;
   selectedNs: string;
   selectedName: string;
@@ -854,6 +860,7 @@ interface SelectAgentStepProps {
 
 function SelectAgentStep({
   agents,
+  serverNs,
   loadState,
   selectedNs,
   selectedName,
@@ -883,7 +890,11 @@ function SelectAgentStep({
     return (
       <EmptyState
         title="No agents found"
-        description="Create an agent first before binding a tool to it."
+        description={
+          serverNs
+            ? `This tool's MCP server is in ${serverNs}, and only an agent there can use it. Create one there first.`
+            : "Create an agent first before binding a tool to it."
+        }
       />
     );
   }
@@ -892,6 +903,12 @@ function SelectAgentStep({
     <div className="space-y-3">
       <p className="text-sm text-secondary-foreground">
         Select the agent you want to bind this tool to.
+        {serverNs && (
+          <>
+            {" "}Only agents in <span className="font-mono">{serverNs}</span>, where its MCP
+            server is, are listed.
+          </>
+        )}
       </p>
       <div className="max-h-64 divide-y divide-border-soft overflow-y-auto rounded-lg border border-border">
         {agents.map((a) => {
