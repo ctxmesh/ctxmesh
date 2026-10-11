@@ -303,6 +303,60 @@ func TestAllWorkspacesCursorResumesAndRejectsForgeries(t *testing.T) {
 	}
 }
 
+// A resumed page is refused exactly when the first page would be: a cursor never turns a denial
+// into an empty list, and never turns an allowed caller's empty tail into a denial.
+func TestAllWorkspacesResumedPageIsRefusedOnlyWhereTheFirstWouldBe(t *testing.T) {
+	cursor := func(ns string) string {
+		c, err := encodeWorkspaceCursor(workspaceCursor{Namespace: ns})
+		require.NoError(t, err)
+		return url.QueryEscape(c)
+	}
+
+	for name, setup := range map[string]func(*workspaceCluster){
+		"no workspace at all":        func(wc *workspaceCluster) { wc.members, wc.readable = map[string]bool{}, map[string]bool{} },
+		"workspaces that all refuse": func(wc *workspaceCluster) { wc.readable = map[string]bool{} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			wc := newWorkspaceCluster()
+			setup(wc)
+			s := newWorkspaceServer(t, wc, Options{})
+			rec := getAs(t, s, "/api/modelroutes?cursor="+cursor("a"))
+			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), `"items"`)
+		})
+	}
+
+	t.Run("allowed before the cursor", func(t *testing.T) {
+		wc := newWorkspaceCluster()
+		wc.readable = map[string]bool{"a": true}
+		s := newWorkspaceServer(t, wc, Options{})
+		rows, next := routePage(t, s, "cursor="+cursor("b"))
+		assert.Empty(t, rows, "b and c refuse; a, before the cursor, is not read again")
+		assert.Empty(t, next)
+	})
+
+	t.Run("allowed cluster-wide", func(t *testing.T) {
+		wc := newWorkspaceCluster()
+		wc.clusterWide = true
+		s := newWorkspaceServer(t, wc, Options{})
+		rows, _ := routePage(t, s, "cursor="+cursor("zz"))
+		assert.Empty(t, rows, "a cursor past every workspace is the end of the list")
+	})
+}
+
+// A cursor from "All workspaces" sent with one namespace is the caller's mistake, a 400; the API
+// server, which would be the one to reject it, answers in a way that surfaces as a 500.
+func TestWorkspaceCursorWithANamespaceIs400(t *testing.T) {
+	wc := newWorkspaceCluster()
+	s := newWorkspaceServer(t, wc, Options{})
+	c, err := encodeWorkspaceCursor(workspaceCursor{Namespace: "a", Continue: "1"})
+	require.NoError(t, err)
+
+	rec := getAs(t, s, "/api/modelroutes?namespace=a&cursor="+url.QueryEscape(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Zero(t, wc.count(&wc.lists, "v1beta1.ModelRouteList@a"), "the cursor never reaches the API server")
+}
+
 // One request discovers the caller's workspaces once, however many kinds it reads: topology
 // reads three.
 func TestWorkspaceDiscoveryRunsOncePerRequest(t *testing.T) {

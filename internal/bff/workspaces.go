@@ -268,14 +268,19 @@ func decodeWorkspaceCursor(s string) (workspaceCursor, error) {
 
 // List reads cluster-wide when the caller may. Refused, it reads each of the caller's workspaces in
 // name order, skipping any where the read is refused, and fills a page of opts' Limit across them;
-// the continue token it returns then names the namespace to resume in. The first page is refused
-// only when every workspace refused it.
+// the continue token it returns then names the namespace to resume in. Any page, first or resumed,
+// is refused only when the caller may read the kind neither cluster-wide nor in any workspace.
 func (c workspaceClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
 	lo := (&client.ListOptions{}).ApplyOptions(opts)
+	resuming := strings.HasPrefix(lo.Continue, workspaceCursorPrefix)
 	if lo.Namespace != "" {
+		// An "All workspaces" cursor means nothing inside one namespace; the API server would
+		// reject it as malformed, which would surface as a 500.
+		if resuming {
+			return errInvalidListCursor
+		}
 		return c.Client.List(ctx, list, opts...)
 	}
-	resuming := strings.HasPrefix(lo.Continue, workspaceCursorPrefix)
 	var denial error
 	if !resuming {
 		err := c.Client.List(ctx, list, opts...)
@@ -300,13 +305,38 @@ func (c workspaceClient) List(ctx context.Context, list client.ObjectList, opts 
 		}
 	}
 	allowed, err := c.listFrom(ctx, list, lo, names, from)
-	if err != nil {
+	if err != nil || allowed {
 		return err
 	}
-	if !allowed && !resuming {
+	if resuming {
+		// Every workspace from the cursor on refused. A denial must never read as an empty page,
+		// so the caller gets 200 only if they may read somewhere the walk did not reach.
+		before, _ := slices.BinarySearch(names, from.Namespace)
+		return c.refusedEverywhere(ctx, list, lo, names[:before])
+	}
+	return denial
+}
+
+// refusedEverywhere answers a resumed page that read nothing: the cluster-wide refusal the first
+// page would have returned, unless the caller may read the kind cluster-wide or in one of
+// unvisited. Each probe reads at most one item into a copy, so list is left as it is.
+func (c workspaceClient) refusedEverywhere(ctx context.Context, list client.ObjectList, lo *client.ListOptions, unvisited []string) error {
+	probe := func(ns string) error {
+		o := *lo
+		o.Namespace, o.Continue, o.Limit = ns, "", 1
+		_, _, err := c.listNamespace(ctx, list, &o)
+		return err
+	}
+	denial := probe("")
+	if !apierrors.IsForbidden(denial) {
 		return denial
 	}
-	return nil
+	for _, ns := range unvisited {
+		if err := probe(ns); !apierrors.IsForbidden(err) {
+			return err
+		}
+	}
+	return denial
 }
 
 // listFrom fills list from names, starting at from: at its namespace, or at the next one when it
