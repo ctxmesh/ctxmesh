@@ -412,8 +412,32 @@ jobs:
         # ADR 0006: locally provable — tier0 + tsc --noEmit + playwright --list +
         # shellcheck; the full Compose run is deferred like the other slices.
         run: make -C agent-brain/harness tier2 SLICE=m19-ui
+      # Every console spec skips when its slice lacks its environment, so every UI slice above can be
+      # green while a spec executes in none of them. The census reads each slice's JSON report and fails
+      # on such a spec unless harness/ui-e2e/census-allowlist.txt says where it runs instead. The slices
+      # it expects are the UI_E2E_OUTPUT_DIR values in this file, so a new UI slice is counted unasked.
+      - name: Console spec census (every spec executed in some UI slice, or is allowlisted)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          mkdir -p agent-brain/harness/ui-e2e/test-results
+          agent-brain/harness/scripts/uie2e-census.sh agent-brain/harness/ui-e2e/test-results \
+            --expect-from .github/workflows/nightly.yml \
+            | tee agent-brain/harness/ui-e2e/test-results/census.txt
+      # The census table and the reports it read, kept on every run: small, and the record of what ran.
+      - name: Keep the console spec census
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: uie2e-census
+          path: |
+            agent-brain/harness/ui-e2e/test-results/census.txt
+            agent-brain/harness/ui-e2e/test-results/*.json
+          if-no-files-found: warn
+          retention-days: 14
       # A red UI slice left nothing to look at. Each slice writes its screenshots and traces to its own
-      # directory (UI_E2E_OUTPUT_DIR), and they go up whenever the job did not pass.
+      # directory (UI_E2E_OUTPUT_DIR) and its JSON report beside it, and they go up whenever the job
+      # did not pass.
       - name: Keep the Playwright results of the UI slices
         if: ${{ !cancelled() && failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
