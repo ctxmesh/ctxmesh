@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -6,6 +9,7 @@ import { ToolCatalogPage } from "@/pages/tool-catalog-page";
 import { CapabilitiesProvider } from "@/lib/capabilities";
 import { NamespaceProvider } from "@/lib/namespace";
 import { ToastProvider } from "@/components/kit";
+import type { MCPToolBindingDetail } from "@/lib/api";
 
 // ToolCatalogPage tests (m17.10):
 //   1. Renders all three tool state badges (curated / user-added / pending-approval).
@@ -20,7 +24,7 @@ import { ToastProvider } from "@/components/kit";
 
 const CATALOG_TOOLS = [
   // curated — no source, approvalStatus absent
-  { name: "code-search", description: "Search code repositories" },
+  { name: "code-search", description: "Search code repositories", registry: "search-mcp", namespace: "default" },
   // user-added — has source, approvalStatus=approved
   {
     name: "slack-notify",
@@ -43,45 +47,18 @@ const AGENTS = [
   { name: "other-agent", namespace: "staging", image: "other:latest", phase: "Running", ready: true },
 ];
 
-// propagated binding detail (Ready=True)
-const PROPAGATED_DETAIL = {
-  name: "my-agent-code-search",
-  namespace: "default",
-  agentName: "my-agent",
-  agentNamespace: "default",
-  toolName: "code-search",
-  ready: true,
-  propagationStatus: "propagated",
-  conditions: [
-    {
-      type: "Ready",
-      status: "True",
-      reason: "Propagated",
-      message: "Tool is live on the agent",
-      lastTransitionTime: "2026-07-11T10:00:00Z",
-    },
-  ],
-};
+// The BFF's answers to the wizard's bind request, written by its handler
+// (TestCreateMCPToolBinding_ConsoleRequest): the create response, still pending, and the detail
+// once the controller reports Ready=True.
+const BIND_RESPONSES = JSON.parse(
+  fs.readFileSync(path.resolve(__dirname, "../test/contract/bind-tool.responses.json"), "utf8"),
+) as { created: MCPToolBindingDetail; propagated: MCPToolBindingDetail };
 
-// not-ready binding detail (Ready=False, reason=Pending)
-const PENDING_DETAIL = {
-  name: "my-agent-code-search",
-  namespace: "default",
-  agentName: "my-agent",
-  agentNamespace: "default",
-  toolName: "code-search",
-  ready: false,
-  propagationStatus: "Pending",
-  conditions: [
-    {
-      type: "Ready",
-      status: "False",
-      reason: "Pending",
-      message: "Controller has not yet reconciled",
-      lastTransitionTime: "2026-07-11T10:00:00Z",
-    },
-  ],
-};
+const PROPAGATED_DETAIL = BIND_RESPONSES.propagated;
+const PENDING_DETAIL = BIND_RESPONSES.created;
+
+// The bind wizard's request, as the console sends it (see the contract test below).
+const BIND_REQUEST_FIXTURE = path.resolve(__dirname, "../test/contract/bind-tool.request.json");
 
 // ---- fetch stub helpers -----------------------------------------------------
 
@@ -270,7 +247,11 @@ describe("ToolCatalogPage — bind wizard", () => {
     expect(screen.getByTestId("bind-tool-wizard")).toBeInTheDocument();
   });
 
-  it("submits createMcpToolBinding with agentRef + toolName", async () => {
+  // The request the wizard sends is the one the BFF's handler is tested with:
+  // TestCreateMCPToolBinding_ConsoleRequest posts this fixture to the real handler. A change
+  // to what the wizard sends fails here until the fixture is regenerated
+  // (UPDATE_FIXTURES=1), and then fails there if the handler would refuse it.
+  it("sends the bind request the BFF's handler is tested with", async () => {
     const calls = installFetch({ caps: EDITOR_CAPS });
     render(
       <MemoryRouter>
@@ -301,26 +282,32 @@ describe("ToolCatalogPage — bind wizard", () => {
     const finishBtn = screen.getByRole("button", { name: /next/i });
     fireEvent.click(finishBtn);
 
-    // The POST /api/mcptoolbindings should have been called with correct body
-    await waitFor(() => {
-      const bindCall = calls.find(
-        (c) => c.url === "/api/mcptoolbindings" && c.method === "POST",
-      );
-      expect(bindCall).toBeDefined();
-      const body = JSON.parse(bindCall!.body) as {
-        agentRef: { namespace: string; name: string };
-        toolName: string;
-      };
-      expect(body.agentRef.name).toBe("my-agent");
-      expect(body.agentRef.namespace).toBe("default");
-      expect(body.toolName).toBe("code-search");
+    await waitFor(() =>
+      expect(calls.find((c) => c.url === "/api/mcptoolbindings" && c.method === "POST")).toBeDefined(),
+    );
+    const sent = JSON.parse(
+      calls.find((c) => c.url === "/api/mcptoolbindings" && c.method === "POST")!.body,
+    ) as unknown;
+    if (process.env.UPDATE_FIXTURES === "1") {
+      fs.writeFileSync(BIND_REQUEST_FIXTURE, `${JSON.stringify(sent, null, 2)}\n`);
+    }
+    expect(sent).toEqual(JSON.parse(fs.readFileSync(BIND_REQUEST_FIXTURE, "utf8")));
+    // The spec's shape: the agent and the MCP server are named in the binding's namespace.
+    expect(sent).toEqual({
+      name: "my-agent-code-search",
+      namespace: "default",
+      agentRef: "my-agent",
+      registryRef: "search-mcp",
+      toolName: "code-search",
     });
   });
 
-  it("shows 'propagated' when the binding detail has ready=true", async () => {
+  it("shows 'propagated' once the controller reports the binding Ready", async () => {
+    // The create answers pending (the controller has not reconciled); the wizard's poll then
+    // reads the detail the controller has marked Ready.
     installFetch({
       caps: EDITOR_CAPS,
-      bindingDetail: PROPAGATED_DETAIL,
+      bindingDetail: PENDING_DETAIL,
       bindingDetailGet: PROPAGATED_DETAIL,
     });
     render(
@@ -343,11 +330,19 @@ describe("ToolCatalogPage — bind wizard", () => {
     fireEvent.click(screen.getByRole("button", { name: /next/i }));
 
     await screen.findByTestId("bind-tool-confirm");
+    // The poll waits between reads; advance past one wait instead of sleeping through it.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     fireEvent.click(screen.getByRole("button", { name: /next/i }));
+    await waitFor(() =>
+      expect(screen.getByTestId("binding-propagation-status")).toHaveAttribute("data-status", "propagating"),
+    );
+    await vi.advanceTimersByTimeAsync(2000);
 
     // The propagation status element should appear and show "propagated"
-    const statusEl = await screen.findByTestId("binding-propagation-status");
-    expect(statusEl).toHaveAttribute("data-status", "propagated");
+    await waitFor(() =>
+      expect(screen.getByTestId("binding-propagation-status")).toHaveAttribute("data-status", "propagated"),
+    );
+    const statusEl = screen.getByTestId("binding-propagation-status");
     expect(statusEl).toHaveTextContent(/propagated/i);
     expect(statusEl).toHaveTextContent(/hot-updated live/i);
   });
@@ -405,8 +400,8 @@ describe("ToolCatalogPage — bind wizard", () => {
     const statusEl = await screen.findByTestId("binding-propagation-status");
     // Should NOT be "propagated" data-status
     expect(statusEl).not.toHaveAttribute("data-status", "propagated");
-    // Should show the controller's reason
-    expect(statusEl).toHaveTextContent(/Pending/);
+    // Should show what the controller last reported: not yet reconciled.
+    expect(statusEl).toHaveTextContent(/pending/i);
     // NEVER claim hot-updated when not ready
     expect(statusEl).not.toHaveTextContent(/hot-updated live/i);
   });

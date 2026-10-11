@@ -474,6 +474,25 @@ func isToolBinding(d decodedObject) bool {
 // resolves deterministically (first wins). A nil store is errNoToolRegistryStore; a
 // list error is returned as is.
 func toolRegistryIndex(ctx context.Context, store toolregistry.Store, ns, callerOwner string) (map[string]toolLoc, error) {
+	regs, err := usableToolRegistries(ctx, store, ns, callerOwner)
+	if err != nil {
+		return nil, err
+	}
+	idx := make(map[string]toolLoc)
+	for i := range regs {
+		for _, t := range regs[i].Tools {
+			if _, seen := idx[t.Name]; !seen {
+				idx[t.Name] = toolLocIn(&regs[i], t)
+			}
+		}
+	}
+	return idx, nil
+}
+
+// usableToolRegistries lists the namespace's ToolRegistries the caller (callerOwner, their
+// userGrantHash) may use, sorted by name. A nil store is errNoToolRegistryStore; a list error
+// is returned wrapped.
+func usableToolRegistries(ctx context.Context, store toolregistry.Store, ns, callerOwner string) ([]toolregistry.ToolRegistry, error) {
 	if store == nil {
 		return nil, errNoToolRegistryStore
 	}
@@ -492,24 +511,24 @@ func toolRegistryIndex(ctx context.Context, store toolregistry.Store, ns, caller
 		}
 		token = page.NextPage
 	}
-	slices.SortFunc(regs, func(a, b toolregistry.ToolRegistry) int {
-		return strings.Compare(a.Name, b.Name)
-	})
-	idx := make(map[string]toolLoc)
+	usable := regs[:0]
 	for i := range regs {
-		if !mcpScopeVisibleTo(storeToolRegistryToCRD(&regs[i]), callerOwner) {
-			continue
-		}
-		for _, t := range regs[i].Tools {
-			if _, seen := idx[t.Name]; !seen {
-				idx[t.Name] = toolLoc{
-					registry: regs[i].Name, url: t.URL, image: t.Image,
-					scope: regs[i].Labels[labelMCPScope], owner: regs[i].Labels[labelMCPOwner],
-				}
-			}
+		if mcpScopeVisibleTo(storeToolRegistryToCRD(&regs[i]), callerOwner) {
+			usable = append(usable, regs[i])
 		}
 	}
-	return idx, nil
+	slices.SortFunc(usable, func(a, b toolregistry.ToolRegistry) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	return usable, nil
+}
+
+// toolLocIn is where tool t of registry reg lives.
+func toolLocIn(reg *toolregistry.ToolRegistry, t toolregistry.ToolEntry) toolLoc {
+	return toolLoc{
+		registry: reg.Name, url: t.URL, image: t.Image,
+		scope: reg.Labels[labelMCPScope], owner: reg.Labels[labelMCPOwner],
+	}
 }
 
 // checkBindingOwnership enforces the bind-time owner guard (ADR 0029 edge case): a binding

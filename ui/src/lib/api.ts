@@ -1993,43 +1993,37 @@ export interface AgentScalingPolicyUpdateRequest {
 // one AgentDeployment. The controller reconciles it and sets a Ready condition
 // whose status reflects actual propagation — "propagated" (hot-updated live) or
 // the reason it hasn't propagated yet. The SPA NEVER fakes the propagation
-// state: it reads the controller's Ready condition truthfully.
+// state: it reads the controller's Ready condition truthfully. These mirror the
+// BFF's DTOs (internal/bff/mcptoolbindings.go), which mirror MCPToolBindingSpec.
 
-// MCPToolBindingCondition mirrors one status.Condition from the controller.
-export interface MCPToolBindingCondition {
-  type: string;
-  // "True" | "False" | "Unknown"
-  status: string;
-  reason: string;
-  message: string;
-  lastTransitionTime: string;
+export type MCPToolMode = "remote" | "sidecar";
+
+// MCPToolServer locates the tool server: url for remote mode, image for sidecar.
+export interface MCPToolServer {
+  url?: string;
+  image?: string;
 }
 
-// MCPToolBindingSummary is one binding in a list response (minimal projection).
+// MCPToolBindingSummary is one binding in a list response.
 export interface MCPToolBindingSummary {
   name: string;
   namespace: string;
-  agentName: string;
-  agentNamespace: string;
+  // agentRef names the bound AgentDeployment, in the binding's namespace.
+  agentRef: string;
+  // registryRef names the MCP server (ToolRegistry) that provides the tool.
+  registryRef: string;
   toolName: string;
+  mode: MCPToolMode;
+  // propagationStatus is "propagated" when Ready is True, "pending" before the
+  // controller has reconciled, otherwise the Ready condition's reason.
+  propagationStatus: string;
+  phase: string;
   ready: boolean;
 }
 
-// MCPToolBindingDetail is the full binding projection including the controller's
-// Ready condition. `propagationStatus` is the BFF's flat projection of the Ready
-// condition: "propagated" (Ready: True) or the reason string (not yet ready,
-// e.g. "Pending", "ToolNotFound"). NEVER faked — it reflects the controller.
-export interface MCPToolBindingDetail {
-  name: string;
-  namespace: string;
-  agentName: string;
-  agentNamespace: string;
-  toolName: string;
-  ready: boolean;
-  // propagationStatus is "propagated" when Ready is True; otherwise the reason
-  // (e.g. "Pending", "ToolApprovalRequired", or the actual failure reason).
-  propagationStatus: string;
-  conditions: MCPToolBindingCondition[];
+// MCPToolBindingDetail is one binding's full projection, including its server.
+export interface MCPToolBindingDetail extends MCPToolBindingSummary {
+  server: MCPToolServer;
 }
 
 export interface MCPToolBindingListResponse {
@@ -2037,25 +2031,26 @@ export interface MCPToolBindingListResponse {
   nextCursor: string;
 }
 
-// MCPToolBindingCreateRequest is the POST /api/mcptoolbindings body. The binding
-// attaches `toolName` (from the merged catalog) to `agentRef` (namespace/name).
-// A pending-approval tool is REJECTED by the controller (m17.4 gate) — the UI
-// must disable binding for pending-approval tools before ever calling this.
+// MCPToolBindingCreateRequest is the POST /api/mcptoolbindings body, shaped like
+// MCPToolBindingSpec: the agent and the MCP server are in the binding's namespace.
+// registryRef, mode and server may be left out; the BFF then reads them from the
+// tool's entry in the MCP server that provides it. A pending-approval tool is
+// REJECTED by the controller (m17.4 gate) — the UI must disable binding for
+// pending-approval tools before ever calling this.
 export interface MCPToolBindingCreateRequest {
-  name?: string;
-  namespace?: string;
-  agentRef: {
-    namespace: string;
-    name: string;
-  };
+  name: string;
+  namespace: string;
+  agentRef: string;
+  registryRef?: string;
   toolName: string;
+  mode?: MCPToolMode;
+  server?: MCPToolServer;
 }
 
 // MCPToolBindingListParams are the list-contract query params for bindings.
 export interface MCPToolBindingListParams {
   limit?: number;
   cursor?: string;
-  agentName?: string;
   namespace?: string;
 }
 
@@ -4783,7 +4778,7 @@ export const api = {
 
   // --- MCPToolBinding CRUD (m17.5 / m17.10) -----------------------------------
   // listMcpToolBindings reads one page window of MCPToolBindings through the
-  // list contract. Pass agentName/namespace to scope to a single agent.
+  // list contract. Pass namespace to scope to one namespace.
   // A 403 surfaces as a typed ApiError (isForbidden).
   listMcpToolBindings: (
     params?: MCPToolBindingListParams,
@@ -4793,7 +4788,6 @@ export const api = {
     if (params?.limit && params.limit > 0)
       qs.set("limit", String(params.limit));
     if (params?.cursor) qs.set("cursor", params.cursor);
-    if (params?.agentName) qs.set("agentName", params.agentName);
     if (params?.namespace) qs.set("namespace", params.namespace);
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
     return getJSON<MCPToolBindingListResponse>(

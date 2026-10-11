@@ -593,7 +593,6 @@ function BindWizard({ tool, onClose }: BindWizardProps) {
   const [selectedNs, setSelectedNs] = React.useState("");
   const [selectedName, setSelectedName] = React.useState("");
   const [bindName, setBindName] = React.useState("");
-  const [bindNs, setBindNs] = React.useState("");
   const [bindState, setBindState] = React.useState<BindState>({ kind: "idle" });
   const { namespace: shellNs } = useNamespace();
   const { can, reprobe } = useCapabilities();
@@ -636,10 +635,6 @@ function BindWizard({ tool, onClose }: BindWizardProps) {
     }
   }, [selectedName, tool.name]);
 
-  React.useEffect(() => {
-    if (selectedNs) setBindNs(selectedNs);
-  }, [selectedNs]);
-
   // When we reach the result step, create the binding and start polling
   React.useEffect(() => {
     if (step !== STEP_RESULT) return;
@@ -653,9 +648,11 @@ function BindWizard({ tool, onClose }: BindWizardProps) {
       try {
         detail = await api.createMcpToolBinding(
           {
-            name: bindName || undefined,
-            namespace: bindNs || undefined,
-            agentRef: { namespace: selectedNs, name: selectedName },
+            name: bindName.trim(),
+            // A binding names its agent and its MCP server in its own namespace.
+            namespace: selectedNs,
+            agentRef: selectedName,
+            ...(tool.registry ? { registryRef: tool.registry } : {}),
             toolName: tool.name,
           },
           controller.signal,
@@ -739,7 +736,7 @@ function BindWizard({ tool, onClose }: BindWizardProps) {
     step === STEP_SELECT_AGENT
       ? !!selectedNs && !!selectedName
       : step === STEP_CONFIRM
-      ? true
+      ? bindName.trim() !== ""
       : false; // STEP_RESULT has no "next"
 
   const busy =
@@ -773,9 +770,7 @@ function BindWizard({ tool, onClose }: BindWizardProps) {
           agentNs={selectedNs}
           agentName={selectedName}
           bindName={bindName}
-          bindNs={bindNs}
           onBindNameChange={setBindName}
-          onBindNsChange={setBindNs}
         />
       ),
     },
@@ -946,9 +941,7 @@ interface ConfirmStepProps {
   agentNs: string;
   agentName: string;
   bindName: string;
-  bindNs: string;
   onBindNameChange: (v: string) => void;
-  onBindNsChange: (v: string) => void;
 }
 
 function ConfirmStep({
@@ -956,9 +949,7 @@ function ConfirmStep({
   agentNs,
   agentName,
   bindName,
-  bindNs,
   onBindNameChange,
-  onBindNsChange,
 }: ConfirmStepProps) {
   return (
     <div className="space-y-4" data-testid="bind-tool-confirm">
@@ -980,19 +971,6 @@ function ConfirmStep({
       </div>
       <div className="space-y-3">
         <div className="space-y-1.5">
-          <Label htmlFor="bind-ns" className="text-sm">
-            Binding namespace{" "}
-            <span className="text-faint">(defaults to agent namespace)</span>
-          </Label>
-          <Input
-            id="bind-ns"
-            value={bindNs}
-            onChange={(e) => onBindNsChange(e.target.value)}
-            placeholder={agentNs}
-            data-testid="bind-ns-input"
-          />
-        </div>
-        <div className="space-y-1.5">
           <Label htmlFor="bind-name" className="text-sm">
             Binding name <span className="text-faint">(auto-generated)</span>
           </Label>
@@ -1006,8 +984,10 @@ function ConfirmStep({
         </div>
       </div>
       <p className="text-xs text-faint">
-        The controller will create an MCPToolBinding and hot-update the agent's
-        tool list. You'll see the propagation status on the next step.
+        The binding is created in the agent&rsquo;s namespace,{" "}
+        <span className="font-mono">{agentNs}</span>, and the controller
+        hot-updates the agent&rsquo;s tool list. You&rsquo;ll see the propagation
+        status on the next step.
       </p>
     </div>
   );

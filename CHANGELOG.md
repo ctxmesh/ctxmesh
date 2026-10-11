@@ -148,6 +148,18 @@ agent's own pause, saying which sub-agent asked. Connect resumes the sub-agent's
 follows the supervisor on to its answer, and the hold links to the sub-agent's run. If the stream
 ends while the supervisor waits, the pause is found from the supervisor's run.
 
+**Fixed: binding a tool from the catalog always failed.** The bind wizard sent the agent as an
+object (`agentRef: {namespace, name}`) and no MCP server, mode or server location, while
+`POST /api/mcptoolbindings` takes the binding spec, so every bind returned `400 invalid JSON
+body`. The wizard now sends the spec's shape: `agentRef` is the agent's name, the binding is in the
+agent's namespace, and `registryRef` is the MCP server the tool was picked from. `registryRef`,
+`mode` and `server` may now be left out of a create: the BFF reads them from the tool's entry in the
+MCP server that provides it, among the servers the caller may use, refusing a tool no such server
+provides with 400 and another user's personal server with 403. Before reading any server it checks
+that the caller may create bindings in the namespace (403 otherwise). A create that gives all
+three is unchanged. The wizard no longer offers a binding namespace other than the agent's, which
+could only produce a binding to nothing.
+
 **Security: an agent could serve a page at its own address and finish a visitor's OAuth consent
 as its author.** The console's consent page trusts a page at an agent's hostname, and with the
 edge's `extAuth.enabled: false`, `/invoke` at every agent hostname reaches the agent's own

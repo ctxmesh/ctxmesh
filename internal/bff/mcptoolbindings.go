@@ -19,6 +19,7 @@ package bff
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -29,11 +30,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
 
 // mcpToolBindingKind is the CRD kind name for an MCPToolBinding (used in error
 // messages and the rename guard so they match the API server's kind strings).
 const mcpToolBindingKind = "MCPToolBinding"
+
+// resourceMCPToolBindings is the binding's resource, which a bind authorizes on.
+const resourceMCPToolBindings = "mcptoolbindings"
+
+// The two MCPToolBinding modes (MCPToolBindingSpec.Mode).
+const (
+	toolModeRemote  = "remote"
+	toolModeSidecar = "sidecar"
+)
 
 // Hot-update propagation states. The MCPToolBinding detail surfaces the
 // propagation status HONESTLY, derived from the controller-observed Ready condition:
@@ -123,24 +135,30 @@ type MCPToolBindingListResponse struct {
 	NextCursor string                  `json:"nextCursor"`
 }
 
-// MCPToolBindingCreateRequest is the POST /api/mcptoolbindings body. The caller
-// submits the binding spec (agentRef, registryRef, toolName, mode, server). The
-// CRD's CEL validation enforces mode-specific server fields at admission.
+// MCPToolBindingCreateRequest is the POST /api/mcptoolbindings body: the binding spec,
+// shaped like MCPToolBindingSpec. registryRef, mode and server may be left out, and are
+// then read from the tool's entry in the MCP server that provides it, among the servers
+// the caller may use (the console's bind wizard sends only the agent, the tool and the
+// server it picked the tool from). The CRD's CEL validation enforces mode-specific
+// server fields at admission.
 type MCPToolBindingCreateRequest struct {
 	// Name is the object's metadata.name. Required.
 	Name string `json:"name"`
-	// Namespace scopes the created object; empty → default namespace.
+	// Namespace scopes the created object, and the agent and the MCP server it names;
+	// empty → default namespace.
 	Namespace string `json:"namespace"`
 	// AgentRef names the AgentDeployment (same namespace). Required.
 	AgentRef string `json:"agentRef"`
-	// RegistryRef names the ToolRegistry (same namespace). Required.
-	RegistryRef string `json:"registryRef"`
+	// RegistryRef names the ToolRegistry (same namespace). Empty → the first MCP server,
+	// by name, that provides the tool.
+	RegistryRef string `json:"registryRef,omitempty"`
 	// ToolName is the catalog key in the referenced ToolRegistry. Required.
 	ToolName string `json:"toolName"`
-	// Mode is "sidecar" or "remote". Required.
-	Mode string `json:"mode"`
-	// Server locates the tool server for the selected mode. Required.
-	Server ToolServerDTO `json:"server"`
+	// Mode is "sidecar" or "remote". Empty → "remote" when the server pins the tool to a
+	// URL, "sidecar" when it pins an image.
+	Mode string `json:"mode,omitempty"`
+	// Server locates the tool server for the selected mode. Empty → the server's pin.
+	Server ToolServerDTO `json:"server,omitzero"`
 }
 
 // MCPToolBindingUpdateRequest is the PUT /api/mcptoolbindings/{ns}/{name} body.
@@ -396,22 +414,26 @@ func (s *Server) handleCreateMCPToolBinding(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "agentRef is required")
 		return
 	}
-	if strings.TrimSpace(req.RegistryRef) == "" {
-		writeError(w, http.StatusBadRequest, "registryRef is required")
-		return
-	}
 	if strings.TrimSpace(req.ToolName) == "" {
 		writeError(w, http.StatusBadRequest, "toolName is required")
 		return
 	}
-	if strings.TrimSpace(req.Mode) == "" {
-		writeError(w, http.StatusBadRequest, "mode is required")
-		return
-	}
 
-	ns := req.Namespace
+	ns := strings.TrimSpace(req.Namespace)
 	if ns == "" {
 		ns = defaultCreateNamespace
+	}
+	req.RegistryRef = strings.TrimSpace(req.RegistryRef)
+	req.ToolName = strings.TrimSpace(req.ToolName)
+	req.Mode = strings.TrimSpace(req.Mode)
+	if req.RegistryRef == "" || req.Mode == "" || (req.Server.URL == "" && req.Server.Image == "") {
+		if cErr := s.completeBindingFromRegistry(r.Context(), caller, ns, &req); cErr != nil {
+			if cErr.status >= http.StatusInternalServerError {
+				s.log.Error(cErr.logged(), "bind tool: resolving its MCP server failed", "namespace", ns, "tool", req.ToolName)
+			}
+			writeError(w, cErr.status, cErr.msg)
+			return
+		}
 	}
 
 	binding := &agentsv1beta1.MCPToolBinding{
@@ -421,9 +443,9 @@ func (s *Server) handleCreateMCPToolBinding(w http.ResponseWriter, r *http.Reque
 		},
 		Spec: agentsv1beta1.MCPToolBindingSpec{
 			AgentRef:    strings.TrimSpace(req.AgentRef),
-			RegistryRef: strings.TrimSpace(req.RegistryRef),
-			ToolName:    strings.TrimSpace(req.ToolName),
-			Mode:        strings.TrimSpace(req.Mode),
+			RegistryRef: req.RegistryRef,
+			ToolName:    req.ToolName,
+			Mode:        req.Mode,
 			Server: agentsv1beta1.ToolServer{
 				Image: req.Server.Image,
 				URL:   req.Server.URL,
@@ -446,6 +468,84 @@ func (s *Server) handleCreateMCPToolBinding(w http.ResponseWriter, r *http.Reque
 	}
 
 	writeJSON(w, http.StatusCreated, newMCPToolBindingDetail(binding))
+}
+
+// completeBindingFromRegistry fills in what a create left out from the tool's entry in
+// the MCP server that provides it: registryRef, mode, and the server the entry pins. Only
+// servers the caller may use are searched, and a personal server binds only for its owner
+// (ADR 0029). The caller's permission to create bindings in ns is checked first, so a
+// caller who may not bind learns nothing about the namespace's servers.
+func (s *Server) completeBindingFromRegistry(ctx context.Context, caller client.Client, ns string, req *MCPToolBindingCreateRequest) *createError {
+	if cErr := s.authzRefusal(
+		s.authorizeStore(ctx, caller, authz.VerbCreate, resourceMCPToolBindings, ns, ""),
+		"bind tools in namespace "+ns); cErr != nil {
+		return cErr
+	}
+	username, err := callerUsername(ctx, caller)
+	if err != nil {
+		if apierrors.IsUnauthorized(err) {
+			return &createError{status: http.StatusUnauthorized, msg: msgTokenRejected}
+		}
+		return &createError{status: http.StatusInternalServerError, msg: "failed to resolve the caller's identity", cause: err}
+	}
+	callerOwner := userGrantHash(username)
+	regs, err := usableToolRegistries(ctx, s.toolRegistryStore, ns, callerOwner)
+	switch {
+	case errors.Is(err, errNoToolRegistryStore):
+		return &createError{status: http.StatusNotImplemented, msg: msgToolRegistryStoreRequired}
+	case err != nil:
+		return &createError{
+			status: http.StatusInternalServerError,
+			msg:    fmt.Sprintf("failed to read the MCP servers in namespace %q", ns), cause: err,
+		}
+	}
+
+	loc, found := findRegistryTool(regs, req.RegistryRef, req.ToolName)
+	switch {
+	case !found && req.RegistryRef != "":
+		return &createError{status: http.StatusBadRequest, msg: fmt.Sprintf(
+			"tool %q is not provided by an MCP server %q you can use in namespace %q", req.ToolName, req.RegistryRef, ns)}
+	case !found:
+		return &createError{status: http.StatusBadRequest, msg: fmt.Sprintf(
+			"tool %q is not provided by any MCP server you can use in namespace %q — add the MCP server that provides it first",
+			req.ToolName, ns)}
+	case loc.scope == scopePersonal && (callerOwner == "" || loc.owner != callerOwner):
+		return &createError{status: http.StatusForbidden, msg: fmt.Sprintf(
+			"tool %q is on a personal MCP server you do not own — only its owner can bind it", req.ToolName)}
+	}
+
+	req.RegistryRef = loc.registry
+	if req.Mode == "" {
+		switch {
+		case loc.url != "":
+			req.Mode = toolModeRemote
+		case loc.image != "":
+			req.Mode = toolModeSidecar
+		default:
+			return &createError{status: http.StatusBadRequest, msg: fmt.Sprintf(
+				"MCP server %q does not say where tool %q runs: give mode and server", loc.registry, req.ToolName)}
+		}
+	}
+	if req.Server.URL == "" && req.Server.Image == "" {
+		req.Server = ToolServerDTO{URL: loc.url, Image: loc.image}
+	}
+	return nil
+}
+
+// findRegistryTool finds tool in the named registry, or in the first registry (regs is
+// sorted by name) that provides it when registry is empty.
+func findRegistryTool(regs []toolregistry.ToolRegistry, registry, tool string) (toolLoc, bool) {
+	for i := range regs {
+		if registry != "" && regs[i].Name != registry {
+			continue
+		}
+		for _, t := range regs[i].Tools {
+			if t.Name == tool {
+				return toolLocIn(&regs[i], t), true
+			}
+		}
+	}
+	return toolLoc{}, false
 }
 
 // --- PUT /api/mcptoolbindings/{ns}/{name} -----------------------------------

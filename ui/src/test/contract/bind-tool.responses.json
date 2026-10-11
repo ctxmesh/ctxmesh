@@ -1,0 +1,30 @@
+{
+  "created": {
+    "name": "my-agent-code-search",
+    "namespace": "default",
+    "agentRef": "my-agent",
+    "registryRef": "search-mcp",
+    "toolName": "code-search",
+    "mode": "remote",
+    "server": {
+      "url": "http://search-mcp.default.svc.cluster.local/mcp"
+    },
+    "propagationStatus": "pending",
+    "phase": "Pending",
+    "ready": false
+  },
+  "propagated": {
+    "name": "my-agent-code-search",
+    "namespace": "default",
+    "agentRef": "my-agent",
+    "registryRef": "search-mcp",
+    "toolName": "code-search",
+    "mode": "remote",
+    "server": {
+      "url": "http://search-mcp.default.svc.cluster.local/mcp"
+    },
+    "propagationStatus": "propagated",
+    "phase": "Ready",
+    "ready": true
+  }
+}

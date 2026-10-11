@@ -70,6 +70,7 @@ import type {
   McpServerReferencesResponse,
   MCPToolBindingDetail,
   MCPToolBindingListResponse,
+  MCPToolBindingSummary,
   ModelRouteDetail,
   ModelRouteListResponse,
   MySharesItem,
@@ -1551,17 +1552,42 @@ const SCALING_POLICIES: AgentScalingPolicyListResponse = {
   nextCursor: "",
 };
 
+// `GET /api/mcptoolbindings` — internal/bff/mcptoolbindings.go, `MCPToolBindingSummary`. A binding
+// names its agent and its MCP server in its own namespace (MCPToolBindingSpec), so there is no
+// agent namespace to differ from the binding's.
+function toolBinding(
+  name: string,
+  namespace: string,
+  agentRef: string,
+  registryRef: string,
+  toolName: string,
+  propagationStatus = "propagated",
+): MCPToolBindingSummary {
+  const ready = propagationStatus === "propagated";
+  return {
+    name,
+    namespace,
+    agentRef,
+    registryRef,
+    toolName,
+    mode: "remote",
+    propagationStatus,
+    phase: ready ? "Ready" : "NotReady",
+    ready,
+  };
+}
+
 const MCP_TOOL_BINDINGS: MCPToolBindingListResponse = {
   items: [
-    { name: "acme-crm-search", namespace: NS_DEFAULT, agentName: "demo-assistant", agentNamespace: NS_DEFAULT, toolName: "search_customers", ready: true },
-    { name: "acme-crm-read", namespace: NS_DEFAULT, agentName: "demo-assistant", agentNamespace: NS_DEFAULT, toolName: "get_customer", ready: true },
-    { name: "acme-crm-refund", namespace: NS_DEFAULT, agentName: "demo-assistant", agentNamespace: NS_DEFAULT, toolName: "create_refund", ready: false },
-    { name: "docs-search", namespace: NS_DEFAULT, agentName: "demo-assistant", agentNamespace: NS_DEFAULT, toolName: "search_documents", ready: true },
-    { name: "github-issues", namespace: NS_A, agentName: "demo-researcher", agentNamespace: NS_A, toolName: "list_issues", ready: true },
-    { name: "slack-post", namespace: NS_D, agentName: "support-triage", agentNamespace: NS_D, toolName: "post_message", ready: true },
-    { name: "jira-create", namespace: NS_D, agentName: "support-triage", agentNamespace: NS_D, toolName: "create_ticket", ready: false },
-    { name: "eu-document-verification", namespace: NS_DEEP, agentName: NAME_63, agentNamespace: NS_D, toolName: "verify_identity_document", ready: true },
-    { name: "billing-readonly-query", namespace: NS_B, agentName: "billing-agent", agentNamespace: NS_B, toolName: "run_readonly_query", ready: false },
+    toolBinding("acme-crm-search", NS_DEFAULT, "demo-assistant", "acme-crm", "search_customers"),
+    toolBinding("acme-crm-read", NS_DEFAULT, "demo-assistant", "acme-crm", "get_customer"),
+    toolBinding("acme-crm-refund", NS_DEFAULT, "demo-assistant", "acme-crm", "create_refund", "ToolApprovalRequired"),
+    toolBinding("docs-search", NS_DEFAULT, "demo-assistant", "docs-mcp", "search_documents"),
+    toolBinding("github-issues", NS_A, "demo-researcher", "github-mcp", "list_issues"),
+    toolBinding("slack-post", NS_D, "support-triage", "slack-mcp", "post_message"),
+    toolBinding("jira-create", NS_D, "support-triage", "jira-mcp", "create_ticket", "RegistryMismatch"),
+    toolBinding("eu-document-verification", NS_DEEP, NAME_63, "id-verify-mcp", "verify_identity_document"),
+    toolBinding("billing-readonly-query", NS_B, "billing-agent", "billing-db-mcp", "run_readonly_query", "UnregisteredTool"),
   ],
   nextCursor: "",
 };
@@ -1569,29 +1595,8 @@ const MCP_TOOL_BINDINGS: MCPToolBindingListResponse = {
 function mcpToolBindingDetail(ctx: FixtureContext): MCPToolBindingDetail {
   const name = param(ctx, 1, "acme-crm-refund");
   return {
-    name,
-    namespace: param(ctx, 0, NS_DEFAULT),
-    agentName: "demo-assistant",
-    agentNamespace: NS_DEFAULT,
-    toolName: "create_refund",
-    ready: false,
-    propagationStatus: "ToolApprovalRequired",
-    conditions: [
-      {
-        type: "Ready",
-        status: "False",
-        reason: "ToolApprovalRequired",
-        message: "create_refund is queued for operator approval on acme-crm.",
-        lastTransitionTime: "2026-08-30T17:04:02Z",
-      },
-      {
-        type: "Resolved",
-        status: "True",
-        reason: "ToolFound",
-        message: "Tool create_refund resolved on registry acme-crm.",
-        lastTransitionTime: "2026-08-30T17:03:58Z",
-      },
-    ],
+    ...toolBinding(name, param(ctx, 0, NS_DEFAULT), "demo-assistant", "acme-crm", "create_refund", "ToolApprovalRequired"),
+    server: { url: "https://mcp.acme-crm.example.com/mcp" },
   };
 }
 
