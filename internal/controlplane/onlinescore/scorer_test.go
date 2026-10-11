@@ -112,6 +112,31 @@ func TestDefaultOperationalScorer_ToolFailSpans(t *testing.T) {
 	}
 }
 
+// TestDefaultOperationalScorer_ToolFailCountsTOOLObservations: Langfuse records the platform's
+// tool call as a TOOL observation, so a failed one is a tool failure; a SPAN still counts for
+// traces recorded before that, and a failed model call does not.
+func TestDefaultOperationalScorer_ToolFailCountsTOOLObservations(t *testing.T) {
+	t.Parallel()
+	runs := []*run.Run{makeRun("r1", run.StatusSucceeded, 100)}
+	spans := map[string][]onlinescore.TraceSpan{
+		"r1": {
+			{Type: "TOOL", Level: "ERROR"},
+			{Type: "TOOL", Level: "ERROR"},
+			{Type: "TOOL", Level: "DEFAULT"},
+			{Type: "SPAN", Level: "ERROR"},
+			{Type: "GENERATION", Level: "ERROR"},
+			{Type: "EVENT", Level: "ERROR"},
+		},
+	}
+	stats, err := onlinescore.DefaultOperationalScorer{}.Score(context.Background(), runs, spans)
+	if err != nil {
+		t.Fatalf("score: %v", err)
+	}
+	if stats.ToolFailCount != 3 {
+		t.Errorf("ToolFailCount: got %d, want 3 (two TOOL + one legacy SPAN)", stats.ToolFailCount)
+	}
+}
+
 func TestDefaultOperationalScorer_LatencyP95(t *testing.T) {
 	t.Parallel()
 	scorer := onlinescore.DefaultOperationalScorer{}

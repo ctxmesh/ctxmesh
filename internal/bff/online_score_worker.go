@@ -450,8 +450,8 @@ func spansToTraceSpans(spans []SpanSummary) []onlinescore.TraceSpan {
 // computeOperational builds OperationalStats from the window's RunSummary list + the DETAIL-FETCHED span
 // subset. Total + LatencyP95Ms are computed over the FULL run list (RunSummary carries LatencyMs, so no
 // per-trace fetch is needed). ErrorCount + ToolFailCount are derived from the fetched trace-detail spans:
-// a trace is an error if it has any ERROR-level span; ToolFailCount counts ERROR-level SPAN observations
-// (mirroring onlinescore.DefaultOperationalScorer's tool-failure rule). When the window exceeds the
+// a trace is an error if it has any ERROR-level span; ToolFailCount counts the failed tool calls
+// (onlinescore.IsToolFailure, the rule onlinescore.DefaultOperationalScorer uses). When the window exceeds the
 // detail-fetch cap, these are over the sampled-detail subset — honest, never scaled up to fabricate the
 // full total (the operator reads Total for the true run count and ErrorCount for the observed-error count).
 func computeOperational(runs []RunSummary, details map[string][]onlinescore.TraceSpan) onlinescore.OperationalStats {
@@ -468,9 +468,9 @@ func computeOperational(runs []RunSummary, details map[string][]onlinescore.Trac
 		for _, sp := range spans {
 			if sp.Level == spanLevelError {
 				hasError = true
-				if sp.Type == spanTypeSpan {
-					stats.ToolFailCount++
-				}
+			}
+			if onlinescore.IsToolFailure(sp) {
+				stats.ToolFailCount++
 			}
 		}
 		if hasError {
@@ -482,13 +482,8 @@ func computeOperational(runs []RunSummary, details map[string][]onlinescore.Trac
 	return stats
 }
 
-// spanTypeSpan / spanLevelError mirror onlinescore's span classification (the tool-failure discriminator:
-// an ERROR-level SPAN observation). Kept in this file so computeOperational does not reach across packages
-// for the two literals; they are the SAME values onlinescore.DefaultOperationalScorer uses.
-const (
-	spanTypeSpan   = "SPAN"
-	spanLevelError = "ERROR"
-)
+// spanLevelError is the Langfuse level that marks a failed observation.
+const spanLevelError = "ERROR"
 
 // p95 is the 95th-percentile (nearest-rank: index = ceil(0.95*n)-1) of xs in ms; 0 for an empty slice.
 // Matches onlinescore.DefaultOperationalScorer's p95 so the worker's operational component is consistent

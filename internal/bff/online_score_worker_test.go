@@ -614,3 +614,18 @@ func TestOnlineScorer_CreateScoreErrorSwallowed(t *testing.T) {
 	assert.InDelta(t, aggOK.Judge.SumVal, aggErr.Judge.SumVal, 1e-9,
 		"Judge.SumVal must be identical regardless of CreateScore error")
 }
+
+// TestComputeOperational_CountsFailedTOOLObservations: the worker's operational component
+// counts a failed TOOL observation — how Langfuse records the platform's tool call — as a tool
+// failure, as well as a legacy SPAN; a failed model call is an error but not a tool failure.
+func TestComputeOperational_CountsFailedTOOLObservations(t *testing.T) {
+	t.Parallel()
+	stats := computeOperational(runsFor("v1", 3, 90), map[string][]onlinescore.TraceSpan{
+		"t1": {{Type: "TOOL", Level: "ERROR"}, {Type: "GENERATION", Level: "DEFAULT"}},
+		"t2": {{Type: "SPAN", Level: "ERROR"}},
+		"t3": {{Type: "GENERATION", Level: "ERROR"}, {Type: "TOOL", Level: "DEFAULT"}},
+	})
+	assert.Equal(t, 3, stats.Total)
+	assert.Equal(t, 3, stats.ErrorCount, "every trace has an ERROR-level observation")
+	assert.Equal(t, 2, stats.ToolFailCount, "the failed TOOL and the legacy SPAN")
+}

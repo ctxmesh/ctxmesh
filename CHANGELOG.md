@@ -69,6 +69,10 @@ registration whose user the cluster cannot identify is refused before anything i
 Servers registered through OAuth before this release still have no owner; register them again
 under a new name.
 
+**Fixed: per-version online scores never counted a failed tool call.** The tool-failure count read
+only `SPAN` observations, and Langfuse records the platform's tool calls as `TOOL`. A failed `TOOL`
+observation now counts. A `SPAN` still counts, for traces recorded before Langfuse typed tool calls.
+
 **Fixed: every agent run was cut off at five minutes.** Knative's default request timeout is 300
 seconds, and the platform never set one, while a run may take 600. A run that sends nothing until
 it is done also hit Knative's separate time-to-first-byte limit at the same 300 seconds. Every

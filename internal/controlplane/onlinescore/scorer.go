@@ -24,8 +24,12 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
-// spanTypeSpan is the observation type for a tool-call span.
-const spanTypeSpan = "SPAN"
+// The observation types a tool call arrives as: Langfuse types the platform's tool call
+// TOOL; traces recorded before that carry it as a plain SPAN.
+const (
+	spanTypeTool = "TOOL"
+	spanTypeSpan = "SPAN"
+)
 
 // spanLevelError is the Langfuse level that marks a tool failure.
 const spanLevelError = "ERROR"
@@ -36,6 +40,12 @@ const spanLevelError = "ERROR"
 type TraceSpan struct {
 	Type  string
 	Level string
+}
+
+// IsToolFailure reports whether an observation is a failed tool call: a TOOL (or, in a trace
+// recorded before Langfuse typed tool calls, a SPAN) at ERROR level.
+func IsToolFailure(s TraceSpan) bool {
+	return s.Level == spanLevelError && (s.Type == spanTypeTool || s.Type == spanTypeSpan)
 }
 
 // OperationalScorer computes an OperationalStats from a set of runs and their trace spans.
@@ -50,7 +60,7 @@ type DefaultOperationalScorer struct{}
 //
 //   - Total: count of terminal runs (failed, succeeded, cancelled, expired).
 //   - ErrorCount: runs with status == failed OR expired.
-//   - ToolFailCount: spans where Type=="SPAN" AND Level=="ERROR" across all runs.
+//   - ToolFailCount: spans IsToolFailure reports, across all runs.
 //   - LatencyP95Ms: 95th-percentile of (UpdatedAt - CreatedAt) in milliseconds for terminal runs;
 //     0 when there are no terminal runs.
 //
@@ -77,7 +87,7 @@ func (DefaultOperationalScorer) Score(_ context.Context, runs []*run.Run, spans 
 	// Count tool-failure spans.
 	for _, spanList := range spans {
 		for _, s := range spanList {
-			if s.Type == spanTypeSpan && s.Level == spanLevelError {
+			if IsToolFailure(s) {
 				stats.ToolFailCount++
 			}
 		}
