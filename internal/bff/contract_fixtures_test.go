@@ -140,7 +140,7 @@ func buildContractFixtures() map[string]any {
 				{Kind: depKindModelRoute, Name: "anthropic", Namespace: "default", State: depReady, Reason: "Served"},
 				{
 					Kind: depKindSecretBinding, Name: "anthropic", Namespace: "default", Via: "anthropic",
-					State: depReady, Reason: "Resolved",
+					State: depReady, Reason: reasonSecretResolved,
 				},
 				{
 					Kind: depKindGuardrailPolicy, Name: "pii-and-jailbreak", Namespace: "default", State: depMissing,

@@ -64,6 +64,7 @@ const (
 	conditionKnowledgeReady  = "KnowledgeReady"
 	conditionValidated       = "Validated"
 	reasonNotReconciled      = "NotReconciled"
+	reasonSecretResolved     = "Resolved"
 	toolRuleRequireApproval  = "require-approval"
 )
 
@@ -210,7 +211,7 @@ func (s *Server) secretBindingDependency(
 	ready, phase := s.secretBindingReadiness(ctx, caller, &sb)
 	switch {
 	case ready:
-		d.State, d.Reason = depReady, "Resolved"
+		d.State, d.Reason = depReady, reasonSecretResolved
 	case phase == phaseNotReady:
 		d.State, d.Reason = depNotReady, "SecretUnresolved"
 		d.Message = fmt.Sprintf("Secret %q does not exist, or has no key %q.", sb.Spec.SecretRef.Name, sb.Spec.SecretRef.Key)
