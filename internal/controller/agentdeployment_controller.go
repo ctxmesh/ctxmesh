@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -621,14 +622,15 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 	// serving. Only `promoted`/`warned` proceed to the ksvc CreateOrUpdate. This is
 	// the scorer-agnostic mechanism: block-then-promote never overbuilds Knative
 	// traffic-splitting — a held candidate is simply never written.
-	candidateRev, err := r.candidateRevisionName(ctx, deploy, hash)
+	cand, err := r.candidateRevisionName(ctx, deploy, hash)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	candidateRev := cand.name
 
 	// A rollback returns to a version that has served: it takes all traffic at once, without a
 	// canary, an approval or a re-run of the gate (ADR 0062, 2026-10-11 amendment).
-	if rollbackBypass(deploy.Status, versionName, candidateRev) {
+	if rollbackBypass(deploy.Status, versionName, cand) {
 		return r.serveRollbackTarget(ctx, deploy, hash, versionName, candidateRev)
 	}
 
@@ -641,16 +643,20 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 		return ctrl.Result{}, err
 	}
 	oldRev := oldServingRevision(live, candidateRev)
+	if cand.renamedFrom(oldRev) {
+		oldRev = "" // the same pod under an older contract's name is not a second arm
+	}
 	// Whether the controller routes this service by revision name, and whether the candidate
-	// is the revision that routing treats as stable: a promoted or auto-promoted canary, or
-	// a spec reverted — after an abort, or mid-split — to the revision that was serving.
+	// is the revision that routing treats as stable: a promoted or auto-promoted canary, a
+	// spec reverted — after an abort, or mid-split — to the revision that was serving, or that
+	// revision renamed by a pod contract change.
 	var stableRev string
 	if live != nil {
 		stableRev = stableArm(live.Spec.Traffic)
 	}
-	candidateIsStable := stableRev != "" && stableRev == candidateRev
+	candidateIsStable := cand.names(stableRev)
 
-	outcome, err := r.evaluateGate(ctx, deploy, candidateRev)
+	outcome, err := r.evaluateGate(ctx, deploy, cand)
 	if err != nil {
 		// A missing/invalid EvalSuite is USER input (surfaced from evaluateGate as an
 		// evalGateError): report Ready=False and STOP cleanly (the old revision keeps
@@ -671,7 +677,7 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 	// path (hold at 0% until promoted, or promote-all — unchanged).
 	if outcome != nil && outcome.status.Decision == eval.DecisionPromoted &&
 		canaryConfigured(deploy, execModelServing) && oldRev != "" && oldRev != candidateRev {
-		return r.reconcileCanary(ctx, deploy, hash, versionName, candidateRev, oldRev, outcome)
+		return r.reconcileCanary(ctx, deploy, hash, versionName, cand, oldRev, outcome)
 	}
 	// A passing candidate that is already the stable revision has nothing to wait for: the
 	// spec matches what serves. Holding it for approval would report a serving agent as
@@ -740,6 +746,25 @@ func (r *AgentDeploymentReconciler) deleteNonServingWorkloads(
 	return r.deleteNamedWorkload(ctx, deploy, &corev1.Service{}, eventingServiceName(deploy.Name))
 }
 
+// candidateRevision is the Knative revision a reconcile would serve, and the names controllers on the
+// superseded pod contracts gave the same pod.
+type candidateRevision struct {
+	name       string
+	superseded []string
+}
+
+// names reports whether rev is this candidate's pod, under the current pod contract or a superseded one.
+// Only the contract differs between those names: a different spec, prompt, binding, skill or platform
+// image gives a different name under every contract, so an approval of one of them never carries.
+func (c candidateRevision) names(rev string) bool {
+	return rev != "" && (rev == c.name || slices.Contains(c.superseded, rev))
+}
+
+// renamedFrom reports whether rev is this candidate's pod under a superseded contract's name.
+func (c candidateRevision) renamedFrom(rev string) bool {
+	return rev != c.name && c.names(rev)
+}
+
 // candidateRevisionName computes the Knative revision name the candidate WOULD
 // serve — "<name>-<specHash>" plus, when a binding/membership/prompt resolves,
 // "-h<digest8>". It builds the pod template (idempotent — the same call
@@ -749,16 +774,24 @@ func (r *AgentDeploymentReconciler) candidateRevisionName(
 	ctx context.Context,
 	deploy *agentsv1beta1.AgentDeployment,
 	hash string,
-) (string, error) {
+) (candidateRevision, error) {
 	pod, err := r.buildPodTemplate(ctx, deploy)
 	if err != nil {
-		return "", fmt.Errorf("building pod template for candidate revision: %w", err)
+		return candidateRevision{}, fmt.Errorf("building pod template for candidate revision: %w", err)
 	}
-	revName := deploy.Name + "-" + hash
-	if pod.digest != "" {
-		revName = revName + "-h" + pod.digest
+	cand := candidateRevision{name: revisionName(deploy.Name, hash, pod.digest)}
+	for _, d := range pod.supersededDigests {
+		cand.superseded = append(cand.superseded, revisionName(deploy.Name, hash, d))
 	}
-	return revName, nil
+	return cand, nil
+}
+
+// revisionName is the Knative revision a spec hash and pod digest are served as.
+func revisionName(deployName, hash, digest string) string {
+	if digest == "" {
+		return agentVersionName(deployName, hash)
+	}
+	return agentVersionName(deployName, hash) + "-h" + digest
 }
 
 // liveKnativeService returns the agent's Knative Service as it stands, or nil when none
@@ -1001,6 +1034,8 @@ type podTemplate struct {
 	// digest is the combined structural digest ("" when no binding/membership
 	// resolves), used as the "-h<digest>" revision/name suffix.
 	digest string
+	// supersededDigests is digest as each of supersededPodContracts computed it, in that order.
+	supersededDigests []string
 	// resolvedSkills is what spec.skillRefs resolved to — "<name>@sha256:…", always digests.
 	// Carried out so the reconciler can record it in status and in the AgentVersion snapshot:
 	// an alias may move, and the snapshot must describe content that cannot.
@@ -2023,7 +2058,19 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// worth paying exactly once: the alternative is a security control that appears in the spec,
 	// reports success, and protects nothing — the failure mode this whole arc exists to kill.
 	combinedDigest = hardeningFold(combinedDigest, deploy.Spec.Unconfined)
+	// Everything folded in after the pod contract is folded into the superseded contracts' digests too,
+	// so each names this same pod as an older controller did (supersededPodContracts).
+	supersededDigests := make([]string, len(supersededPodContracts))
+	for i, contract := range supersededPodContracts {
+		supersededDigests[i] = contractFoldAt(combinedDigest, contract, traceExporting)
+	}
 	combinedDigest = traceExportFold(combinedDigest, traceExporting)
+	foldAfterContract := func(part string) {
+		combinedDigest = foldDigest(combinedDigest, part)
+		for i := range supersededDigests {
+			supersededDigests[i] = foldDigest(supersededDigests[i], part)
+		}
+	}
 
 	// Attached skills fold in AFTER the combined digest rather than as an eleventh component, the
 	// same shape the launcher image uses below. An agent with NO skills is left byte-identical,
@@ -2035,8 +2082,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// different agents — so an alias move rolls a revision, and a re-resolution to the same
 	// digests does not.
 	if d := skillDigest(resolvedSkills); d != "" {
-		sum := sha256.Sum256([]byte(combinedDigest + "|skills:" + d))
-		combinedDigest = fmt.Sprintf("%x", sum[:])[:8]
+		foldAfterContract("|skills:" + d)
 	}
 
 	// C8 launcher injection (ADR 0079): when LAUNCHER_IMAGE is configured, inject the launcher-inject
@@ -2047,8 +2093,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	var initContainers []corev1.Container
 	if r.launcherInjectionReady(ctx) { // C8c: only inject when LAUNCHER_IMAGE is set AND the Knative flags are on
 		initContainers, containers, volumes = injectPlatformLauncher(containers, volumes, r.LauncherImage)
-		sum := sha256.Sum256([]byte(combinedDigest + "|launcher:" + r.LauncherImage))
-		combinedDigest = fmt.Sprintf("%x", sum[:])[:8]
+		foldAfterContract("|launcher:" + r.LauncherImage)
 	}
 
 	// The L4 egress redirect (M142.4, ADR 0123) — only for a pod that HAS an egress sidecar, since the
@@ -2060,8 +2105,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		return r.knativeFlagsEnabled(ctx, flags, "M142.4 egress redirect")
 	}) {
 		initContainers = append(initContainers, egressRedirectInitContainer(r.EgressRedirect))
-		sum := sha256.Sum256([]byte(combinedDigest + "|egress-redirect:" + r.EgressRedirect.Image))
-		combinedDigest = fmt.Sprintf("%x", sum[:])[:8]
+		foldAfterContract("|egress-redirect:" + r.EgressRedirect.Image)
 	}
 
 	return podTemplate{
@@ -2070,6 +2114,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		volumes:            volumes,
 		labels:             templateLabels,
 		digest:             combinedDigest,
+		supersededDigests:  supersededDigests,
 		membership:         membership,
 		port:               port,
 		serviceAccountName: saName,
@@ -2147,6 +2192,13 @@ func langfuseSecretRequests(ctx context.Context, c client.Reader, obj client.Obj
 //   - v5: every agent carries AGENT_VERSION, the version its online scores are keyed by.
 const podContractVersion = "v5"
 
+// supersededPodContracts are the contracts whose revision names may still be serving, approved or recorded
+// when this controller starts: the one podContractVersion replaced, and "" for releases up to
+// v0.1.0-beta.8, which folded no contract. A revision whose name differs from the candidate's only by one
+// of these is the same pod, so its approval carries to the candidate (candidateRevision.names). Update the
+// list with every bump; a contract left off it re-gates every gated agent on upgrade.
+var supersededPodContracts = []string{"", "v4"}
+
 // traceExportFold folds the pod contract into the revision digest. Whether export is on
 // is part of it so that creating, completing or deleting a namespace's langfuse-otlp Secret reaches
 // running agents: their collectors loaded the old config at start, and the feedback hook's env
@@ -2160,7 +2212,20 @@ func traceExportFold(digest string, exporting bool) string {
 // podContractFold is traceExportFold at a given contract version, so a test can name the revision an
 // older controller produced. It never returns "", so every revision name carries the -h suffix.
 func podContractFold(digest, contract string, exporting bool) string {
-	sum := sha256.Sum256([]byte(digest + "|pod-contract:" + contract + ":" + strconv.FormatBool(exporting)))
+	return foldDigest(digest, "|pod-contract:"+contract+":"+strconv.FormatBool(exporting))
+}
+
+// contractFoldAt folds a superseded contract into digest; "" is a release that folded none.
+func contractFoldAt(digest, contract string, exporting bool) string {
+	if contract == "" {
+		return digest
+	}
+	return podContractFold(digest, contract, exporting)
+}
+
+// foldDigest folds one more input into a revision digest.
+func foldDigest(digest, part string) string {
+	sum := sha256.Sum256([]byte(digest + part))
 	return fmt.Sprintf("%x", sum[:])[:8]
 }
 
@@ -2512,10 +2577,7 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 		return nil, nil, err
 	}
 
-	revName := deploy.Name + "-" + hash
-	if pod.digest != "" {
-		revName = revName + "-h" + pod.digest
-	}
+	revName := revisionName(deploy.Name, hash, pod.digest)
 
 	annotations, err := r.autoscalingAnnotations(ctx, deploy)
 	if err != nil {

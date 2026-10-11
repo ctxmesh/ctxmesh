@@ -23,8 +23,8 @@ any other bound route. Every bound route's gateway variable is renamed, so the g
 **Behaviour change:** an agent exports traces only if its own namespace holds a complete
 `langfuse-otlp` Secret, with keys `otlp-endpoint`, `public-key` and `secret-key`. The new
 `TraceExport` condition on each AgentDeployment says whether it is exporting and, if not, why.
-Every agent rolls one new revision on upgrade, so an agent behind an approval gate waits for
-promotion.
+Every agent rolls one new revision on upgrade. A revision approved before the upgrade stays
+approved under its new name.
 
 **Security: a copied run capability can no longer be spent.** The platform's proof-of-possession
 design had never taken effect: nothing bound capabilities, and the BFF accepted bearer tokens. Now
@@ -154,10 +154,13 @@ recorded under no version. Regression detection compares the serving version's s
 previous version's, so it never reached a verdict; automatic rollback could not fire on
 live data; a canary's two arms were not scored apart; and the console's per-version windows were
 empty. Every agent's pod now carries the version it serves, the name in `status.latestVersion`.
-Every agent rolls one new revision on upgrade, so an agent behind an approval gate waits for
-promotion. A revision created before the upgrade, such as the old arm of a canary in progress,
-still records no version until it is replaced. An `AGENT_VERSION` set in `spec.env` still wins, and
-leaves that agent out of per-version scoring.
+Every agent rolls one new revision on upgrade, and an approval carries over to it: a gated agent
+that was promoted stays promoted, an agent with a canary moves all its traffic to the new revision
+at once, and an agent serving the version a rollback restored keeps serving it. An approval
+carries only when the platform alone renamed the revision; a change to the spec, the prompt, a
+binding or a skill still waits for its own. A revision created before the upgrade, such as the old
+arm of a canary in progress, still records no version until it is replaced. An `AGENT_VERSION` set
+in `spec.env` still wins, and leaves that agent out of per-version scoring.
 
 **Fixed: an aborted canary reopened when its candidate's revision was renamed.** An abort held only
 while the candidate kept its revision name, which also changes on a platform upgrade such as this

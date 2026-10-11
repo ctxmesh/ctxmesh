@@ -190,15 +190,18 @@ func namedFullTraffic(rev string) []servingv1.TrafficTarget {
 // the desired revision/traffic differ from the live object, so a steady-state
 // canary does not thrash.
 //
-// candidateRev is the deterministic revision name the candidate would create (the
-// same value the gate scored + pinned). oldRev is the currently-serving revision.
+// cand is the deterministic revision the candidate would create (the same value the
+// gate scored + pinned). oldRev is the currently-serving revision.
 func (r *AgentDeploymentReconciler) reconcileCanary(
 	ctx context.Context,
 	deploy *agentsv1beta1.AgentDeployment,
-	hash, versionName, candidateRev, oldRev string,
+	hash, versionName string,
+	cand candidateRevision,
+	oldRev string,
 	outcome *gateOutcome,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	candidateRev := cand.name
 
 	// The scored value/threshold from the offline gate outcome — recorded on the
 	// canary gate status so the split/completion carries the score that earned it.
@@ -217,7 +220,7 @@ func (r *AgentDeploymentReconciler) reconcileCanary(
 	// not — a pod-contract bump, a launcher image, any other pod digest input — and
 	// each such move would reopen the split to a candidate a person rejected.
 	if g := deploy.Status.Gate; g != nil && g.Phase == eval.PhaseAborted &&
-		deploy.Status.LatestVersion == versionName && !r.promotionApproved(deploy, candidateRev) {
+		deploy.Status.LatestVersion == versionName && !r.promotionApproved(deploy, cand) {
 		if err := r.setCanaryTraffic(ctx, deploy, hash, namedFullTraffic(oldRev)); err != nil {
 			return ctrl.Result{}, fmt.Errorf("canary sticky-abort: setting full-old traffic: %w", err)
 		}
@@ -228,7 +231,7 @@ func (r *AgentDeploymentReconciler) reconcileCanary(
 	}
 
 	// ── Completion: human promote of THIS candidate → 100% candidate ──────────
-	if r.promotionApproved(deploy, candidateRev) {
+	if r.promotionApproved(deploy, cand) {
 		log.Info("Canary promoted by human", "candidate", candidateRev)
 		if err := r.setCanaryTraffic(ctx, deploy, hash, namedFullTraffic(candidateRev)); err != nil {
 			return ctrl.Result{}, fmt.Errorf("canary promote: setting full-candidate traffic: %w", err)

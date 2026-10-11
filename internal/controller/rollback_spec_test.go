@@ -241,7 +241,7 @@ func TestRollbackTargetPending(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, rollbackTargetPending(tc.status, tc.version))
-			assert.Equal(t, tc.want, rollbackBypass(tc.status, tc.version, "a-v1-h1"), "nothing has served it yet")
+			assert.Equal(t, tc.want, rollbackBypass(tc.status, tc.version, candidateRevision{name: "a-v1-h1"}), "nothing has served it yet")
 		})
 	}
 }
@@ -275,7 +275,7 @@ func TestRollbackBypass_WhileTargetServes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, rollbackBypass(tc.status, tc.version, "a-v1-h1"))
+			assert.Equal(t, tc.want, rollbackBypass(tc.status, tc.version, candidateRevision{name: "a-v1-h1"}))
 		})
 	}
 }

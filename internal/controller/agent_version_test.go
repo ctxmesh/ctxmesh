@@ -130,3 +130,58 @@ func TestTheAgentVersionContractRollsEveryAgentOnce(t *testing.T) {
 	// An unconfined agent skips the hardening fold, so the contract fold is all that moves it.
 	assert.NotEqual(t, podContractFold(hardeningFold("", true), "v4", false), traceExportFold(hardeningFold("", true), false))
 }
+
+// A candidate's superseded-contract names differ from its name by the contract alone: every fold made
+// after the contract (the launcher here) is made to each. A fold missing from one of them would make
+// every approval of that contract's revisions fail to carry.
+func TestACandidateIsNamedUnderEachSupersededContract(t *testing.T) {
+	t.Parallel()
+
+	const launcher = "ghcr.io/ctxmesh/launcher@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	features := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: knativeServingNamespace, Name: knativeFeaturesConfigMap}}
+	features.Data = map[string]string{}
+	for _, f := range launcherRequiredKnativeFlags {
+		features.Data[f] = "enabled"
+	}
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team-a"}}
+	r := &AgentDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(podTemplateScheme(t)).WithObjects(ns, features).Build(),
+		Scheme:        podTemplateScheme(t),
+		LauncherImage: launcher,
+	}
+	deploy := func(port int32) *agentsv1beta1.AgentDeployment {
+		return &agentsv1beta1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "renamed", Namespace: "team-a"},
+			Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest", Port: port},
+		}
+	}
+	d := deploy(8080)
+	hash, err := specHash(d.Spec)
+	require.NoError(t, err)
+	cand, err := r.candidateRevisionName(context.Background(), d, hash)
+	require.NoError(t, err)
+
+	pre := hardeningFold(combinedBindingDigest("", "", "", "", "", "", universalIdentitySADigest(false), "", "", ""), false)
+	named := func(digest string) string {
+		return agentVersionName(d.Name, hash) + "-h" + foldDigest(digest, "|launcher:"+launcher)
+	}
+	require.Equal(t, named(traceExportFold(pre, false)), cand.name,
+		"the test's digest inputs must be the controller's, or the names below are not what older controllers wrote")
+	v4, release := named(podContractFold(pre, "v4", false)), named(pre)
+	assert.ElementsMatch(t, []string{v4, release}, cand.superseded)
+
+	for _, rev := range []string{cand.name, v4, release} {
+		assert.True(t, cand.names(rev), "%q is the candidate's pod", rev)
+	}
+	assert.False(t, cand.renamedFrom(cand.name))
+	assert.True(t, cand.renamedFrom(v4))
+	assert.False(t, cand.names(""))
+
+	other, err := specHash(deploy(8090).Spec)
+	require.NoError(t, err)
+	otherCand, err := r.candidateRevisionName(context.Background(), deploy(8090), other)
+	require.NoError(t, err)
+	for _, rev := range append([]string{otherCand.name}, otherCand.superseded...) {
+		assert.False(t, cand.names(rev), "another spec's revision %q is not this pod under any contract", rev)
+	}
+}

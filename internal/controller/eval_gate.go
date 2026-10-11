@@ -115,20 +115,21 @@ func (r *AgentDeploymentReconciler) scorerFor(scorerType, name string) (eval.Sco
 // policy + the human-approval signal, emits the eval.gate span, and returns the
 // gateOutcome (whether to promote + the status to record).
 //
-// candidateRev is the revision name the candidate would serve — it pins the gate
-// decision to an exact candidate so a spec/prompt change re-scores rather than
-// reusing a stale decision, and so a human approval targets the reviewed
-// candidate. Returns (nil, nil) when the agent has no evalSuiteRef (no gate — the
-// deploy proceeds unchanged). A missing EvalSuite is user input → an
-// evalGateError (Ready=False, old revision keeps serving), not a hard error.
+// cand is the revision the candidate would serve — it pins the gate decision to an
+// exact candidate so a spec/prompt change re-scores rather than reusing a stale
+// decision, and so a human approval targets the reviewed candidate. Returns (nil,
+// nil) when the agent has no evalSuiteRef (no gate — the deploy proceeds
+// unchanged). A missing EvalSuite is user input → an evalGateError (Ready=False,
+// old revision keeps serving), not a hard error.
 func (r *AgentDeploymentReconciler) evaluateGate(
 	ctx context.Context,
 	deploy *agentsv1beta1.AgentDeployment,
-	candidateRev string,
+	cand candidateRevision,
 ) (*gateOutcome, error) {
 	if deploy.Spec.EvalSuiteRef == "" {
 		return nil, nil // no gate — unchanged deploy
 	}
+	candidateRev := cand.name
 
 	var suite agentsv1beta1.EvalSuite
 	err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: deploy.Spec.EvalSuiteRef}, &suite)
@@ -186,7 +187,7 @@ func (r *AgentDeploymentReconciler) evaluateGate(
 	case passes:
 		// Passing score is human-gated: promote ONLY when the approval signal is set
 		// for this candidate; otherwise rest at awaiting-promotion (candidate held).
-		if r.promotionApproved(deploy, candidateRev) {
+		if r.promotionApproved(deploy, cand) {
 			out := &gateOutcome{
 				promote:  true,
 				terminal: true,
@@ -291,12 +292,10 @@ func (r *AgentDeploymentReconciler) gateUnscored(
 // exactly that candidate; a LATER candidate (a new revision) does NOT match and re-gates,
 // so one approval can no longer permanently auto-promote every future passing revision. A
 // legacy bare "true" (or any non-matching value) matches nothing → fails safe (never
-// auto-promotes).
-func (r *AgentDeploymentReconciler) promotionApproved(deploy *agentsv1beta1.AgentDeployment, candidateRev string) bool {
-	if candidateRev == "" {
-		return false
-	}
-	return strings.TrimSpace(deploy.Annotations[promoteAnnotation]) == candidateRev
+// auto-promotes). An approval of the candidate's pod under a superseded pod contract's name
+// still matches: a platform upgrade renames the revision without changing what runs.
+func (r *AgentDeploymentReconciler) promotionApproved(deploy *agentsv1beta1.AgentDeployment, cand candidateRevision) bool {
+	return cand.names(strings.TrimSpace(deploy.Annotations[promoteAnnotation]))
 }
 
 // emitGateSpan emits the eval.gate span carrying eval.score / eval.threshold /

@@ -563,16 +563,17 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 
 // rollbackBypass reports whether serveRollbackTarget serves this spec: it is the version the last
 // rollback reverted to and has not served yet, or it serves under the gate status serveRollbackTarget
-// wrote and neither its version nor its revision has changed since. The gate stays un-run for the
-// target while it serves: re-scoring it, a blocked or unscored verdict would report "previous revision
-// keeps serving" over the revision serving every request.
-func rollbackBypass(st agentsv1beta1.AgentDeploymentStatus, versionName, candidateRev string) bool {
+// wrote and neither its version nor its pod has changed since (a pod contract change renames the
+// revision, not the pod). The gate stays un-run for the target while it serves: re-scoring it, a
+// blocked or unscored verdict would report "previous revision keeps serving" over the revision serving
+// every request.
+func rollbackBypass(st agentsv1beta1.AgentDeploymentStatus, versionName string, cand candidateRevision) bool {
 	if rollbackTargetPending(st, versionName) {
 		return true
 	}
 	rb, g := st.Rollback, st.Gate
 	return rb != nil && rb.RolledBackTo == versionName && st.LatestVersion == versionName &&
-		g != nil && g.Reason == reasonRollbackTarget && g.ScoredRevision == candidateRev
+		g != nil && g.Reason == reasonRollbackTarget && cand.names(g.ScoredRevision)
 }
 
 // rollbackTargetPending reports whether versionName is the version the last rollback reverted to and
