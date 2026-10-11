@@ -50,9 +50,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/ctxmesh/internal/objectstore"
@@ -454,11 +456,11 @@ func postIngest(t *testing.T, s *Server, kbName, ns string) (int, []byte) {
 func newIngestEndpointServer(t *testing.T, kb *agentsv1beta1.KnowledgeBase) (*Server, *objectstore.MemObjectStore) {
 	t.Helper()
 	sc := testScheme(t)
-	builder := fake.NewClientBuilder().WithScheme(sc)
+	var objs []client.Object
 	if kb != nil {
-		builder = builder.WithObjects(kb)
+		objs = append(objs, kb)
 	}
-	fc := builder.Build()
+	fc := identityClient(t, kbIngester, objs...)
 	docStore := objectstore.NewMemObjectStore()
 	s := NewServer(Options{
 		CallerClients:  newFakeFactory(fc),
@@ -468,8 +470,81 @@ func newIngestEndpointServer(t *testing.T, kb *agentsv1beta1.KnowledgeBase) (*Se
 		DocStore:       docStore,
 		KnowledgeStore: knowledge.NewMemStore(),
 		Embedder:       newMockEmbedder(),
+		// The run routes (an ingestion's status and cancel) are served only with an invoke adapter.
+		Adapters: Adapters{Invoke: &fakeInvokeAdapter{}},
 	})
 	return s, docStore
+}
+
+// kbIngester is the identity newIngestEndpointServer's caller resolves to.
+const kbIngester = "kb-builder@example.com"
+
+// runRequest sends method to /api/runs/{id}{suffix} as the server's caller.
+func runRequest(t *testing.T, s *Server, method, id, suffix string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(method, "/api/runs/"+id+suffix, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestIngestKB_RunBelongsToItsCreator: the person who starts an ingestion reads and cancels its run.
+// Anyone else needs update on that KnowledgeBase: reading an agent that happens to share the
+// KnowledgeBase's name, which the run's Agent field carries, is not enough.
+func TestIngestKB_RunBelongsToItsCreator(t *testing.T) {
+	kb := mockKnowledgeBase("my-kb", kbNS)
+	kb.Spec.EmbeddingRoute = "embed-v1"
+	start := func(t *testing.T) (*Server, string) {
+		t.Helper()
+		s, docStore := newIngestEndpointServer(t, kb.DeepCopy())
+		key := objectstore.KnowledgeKey(kbNS, "my-kb", "guide.md")
+		require.NoError(t, docStore.Put(context.Background(), key, bytes.NewReader([]byte("some text to embed")), -1, "text/markdown"))
+		code, body := postIngest(t, s, "my-kb", kbNS)
+		require.Equal(t, http.StatusAccepted, code, string(body))
+		var resp IngestResponse
+		require.NoError(t, json.Unmarshal(body, &resp))
+		rn, err := s.runStore.Get(resp.RunID)
+		require.NoError(t, err)
+		require.Equal(t, kbIngester, rn.CallerUsername, "the run records who started it")
+		return s, resp.RunID
+	}
+	sameNamedAgent := &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "my-kb", Namespace: kbNS}}
+
+	t.Run("the creator reads and cancels it", func(t *testing.T) {
+		s, id := start(t)
+		rec := runRequest(t, s, http.MethodGet, id, "")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		rec = runRequest(t, s, http.MethodPost, id, "/cancel")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		rn, err := s.runStore.Get(id)
+		require.NoError(t, err)
+		assert.Equal(t, run.StatusCancelled, rn.Status)
+	})
+
+	t.Run("a reader of a same-named agent can neither read nor cancel it", func(t *testing.T) {
+		s, id := start(t)
+		s.callerClients = newFakeFactory(identityClient(t, "mallory@example.com", sameNamedAgent))
+		auth := &recordingAuthorizer{err: authz.ErrForbidden}
+		s.authorizer = auth
+		for _, req := range []struct{ method, suffix string }{{http.MethodGet, ""}, {http.MethodPost, "/cancel"}} {
+			rec := runRequest(t, s, req.method, id, req.suffix)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s %s: %s", req.method, req.suffix, rec.Body.String())
+		}
+		rn, err := s.runStore.Get(id)
+		require.NoError(t, err)
+		assert.Equal(t, run.StatusQueued, rn.Status, "the refused cancel changed nothing")
+		assert.Equal(t, authz.Action{Verb: authz.VerbUpdate, Group: agentsAPIGroup, Resource: resKnowledgeBases, Namespace: kbNS, Name: "my-kb"},
+			auth.last, "a non-creator is authorized on the KnowledgeBase itself")
+	})
+
+	t.Run("anyone who may update the KnowledgeBase reads it", func(t *testing.T) {
+		s, id := start(t)
+		s.callerClients = newFakeFactory(identityClient(t, "operator@example.com"))
+		s.authorizer = &recordingAuthorizer{}
+		rec := runRequest(t, s, http.MethodGet, id, "")
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
 }
 
 func TestIngestKB_HappyPath_CreatesRun(t *testing.T) {

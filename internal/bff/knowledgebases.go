@@ -392,7 +392,7 @@ type IngestResponse struct {
 // Honest errors (ADR 0027):
 //   - 400 — missing KB name
 //   - 404 — KB not found in the caller's namespace
-//   - 403/401 — RBAC denial / token rejected
+//   - 403/401 — RBAC denial / token rejected, or an identity the API server will not name
 //   - 501 — knowledge store / embedder / object store not configured (ingestion is unwired)
 //   - 422 — the source cannot be resolved (bad source.type / empty prefix / no documents)
 func (s *Server) handleIngestKB(w http.ResponseWriter, r *http.Request) {
@@ -443,6 +443,18 @@ func (s *Server) handleIngestKB(w http.ResponseWriter, r *http.Request) {
 			s.log.Error(err, "get KnowledgeBase failed", "ns", ns, "name", kbName)
 			writeError(w, http.StatusInternalServerError, "failed to look up KnowledgeBase")
 		}
+		return
+	}
+
+	// The run belongs to whoever starts it: they read and cancel it by ownership (authorizeResolvedRun).
+	username, err := callerUsername(r.Context(), caller)
+	if err != nil {
+		if apierrors.IsUnauthorized(err) {
+			writeError(w, http.StatusUnauthorized, msgTokenRejected)
+			return
+		}
+		s.log.Error(err, "ingest: resolving the caller's identity failed", "ns", ns, "kb", kbName)
+		writeError(w, http.StatusUnauthorized, "could not resolve the caller's identity")
 		return
 	}
 
@@ -535,6 +547,7 @@ func (s *Server) handleIngestKB(w http.ResponseWriter, r *http.Request) {
 	// Create the ingestion Run. Its Agent is the KB name (the audit/display label — an ingestion run has no
 	// agent; the executor drives it off IngestionSpec, never off Agent). No conversation, no OBO-to-a-model.
 	rn := run.New(runID, ns, kbName, nil, "", time.Now())
+	rn.CallerUsername = username
 	rn.IngestionRef = kbName
 	rn.IngestionSpec = string(specJSON)
 	if err := s.runStore.Create(rn); err != nil {

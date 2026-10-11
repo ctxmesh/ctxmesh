@@ -98,6 +98,12 @@ if its creator could open it on the trace page: they made that run, or the run b
 being exported. A trace shared through a workflow or a handoff belongs to the run that started it,
 so it is withheld, and the export's result counts what it withheld.
 
+**Security: anyone who could read an agent named like a knowledge base could read or cancel its
+ingestion.** An ingestion run was created without a creator, so the person who started one got a
+404 reading it, and access to the run was decided by an AgentDeployment of the knowledge base's
+name. The run now records whoever started it, who reads and cancels it by ownership; anyone else,
+and any scheduled re-ingest, needs `update` on that KnowledgeBase.
+
 **Fixed: the replay stepper showed every step of a recorded run as a gap.** `GET
 /api/runs/{id}/fixture` stopped reading the run's events before the Postgres run store had
 delivered any, so on the production store a recorded run had no steps to join its recording to.

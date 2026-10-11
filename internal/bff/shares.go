@@ -258,9 +258,10 @@ func (s *Server) authorizeResolvedRun(w http.ResponseWriter, r *http.Request, ca
 
 // callerCanReadRunBacking authorizes a NON-creator caller to read a run through their OWN RBAC on the run's
 // backing resource (ADR 0011): the Workflow CR for a workflow instance, the datasets of its namespace for a
-// dataset export (whose Agent field is only the dataset's name), otherwise the run's AgentDeployment. An
-// inline (CR-less) workflow run has no backing CR, so a non-creator is denied (404 — no oracle, uniform
-// with a missing run). It writes the error response and returns false on denial/absence.
+// dataset export and the KnowledgeBase for an ingestion (whose Agent field is only the dataset's or the
+// KnowledgeBase's name), otherwise the run's AgentDeployment. An inline (CR-less) workflow run has no
+// backing CR, so a non-creator is denied (404 — no oracle, uniform with a missing run). It writes the error
+// response and returns false on denial/absence.
 func (s *Server) callerCanReadRunBacking(w http.ResponseWriter, r *http.Request, caller client.Client, rn *run.Run) bool {
 	var (
 		obj  client.Object
@@ -271,6 +272,17 @@ func (s *Server) callerCanReadRunBacking(w http.ResponseWriter, r *http.Request,
 		// The permission that starts an export (datasets.go) also reads and cancels one.
 		if cErr := s.authzRefusal(
 			s.authorizeStore(r.Context(), caller, authz.VerbUpdate, resEvalSuites, rn.Namespace, ""),
+			"access this run",
+		); cErr != nil {
+			writeError(w, cErr.status, cErr.msg)
+			return false
+		}
+		return true
+	case rn.IsIngestionJob():
+		// Another person's ingestion, or a scheduled one, is the corpus's: following or cancelling it
+		// takes update on that KnowledgeBase.
+		if cErr := s.authzRefusal(
+			s.authorizeStore(r.Context(), caller, authz.VerbUpdate, resKnowledgeBases, rn.Namespace, rn.IngestionRef),
 			"access this run",
 		); cErr != nil {
 			writeError(w, cErr.status, cErr.msg)
