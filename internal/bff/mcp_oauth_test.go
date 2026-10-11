@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -31,6 +32,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	authnv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -176,6 +178,29 @@ func oauthRegisterBody(t *testing.T, name, serverURL string, auth *MCPAuthReques
 	return b
 }
 
+// oauthRegistrant is who the OAuth tests register as: the identity the register captures
+// as the owner of the private server the callback creates.
+const oauthRegistrant = "developer@example.com"
+
+// registrantClient is a fake client whose SelfSubjectReview answers as oauthRegistrant;
+// every other create goes through funcs (or the store), so a create-flag or a forbidden
+// interceptor sees only the real writes.
+func registrantClient(t *testing.T, funcs interceptor.Funcs) client.WithWatch {
+	t.Helper()
+	inner := funcs.Create
+	funcs.Create = func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		if ssr, ok := obj.(*authnv1.SelfSubjectReview); ok {
+			ssr.Status.UserInfo = authnv1.UserInfo{Username: oauthRegistrant}
+			return nil
+		}
+		if inner != nil {
+			return inner(ctx, c, obj, opts...)
+		}
+		return c.Create(ctx, obj, opts...)
+	}
+	return fake.NewClientBuilder().WithScheme(testScheme(t)).WithInterceptorFuncs(funcs).Build()
+}
+
 // register posts an OAuth register and returns the decoded pending response.
 func registerOAuth(t *testing.T, s *Server, name, serverURL string, auth *MCPAuthRequest) (*httptest.ResponseRecorder, OAuthPendingResponse) {
 	t.Helper()
@@ -209,7 +234,7 @@ func authFor(o *fakeOAuthServer) *MCPAuthRequest {
 func TestMCPOAuthAutoDiscoverRegister(t *testing.T) {
 	disco, dcrHit := oauthDiscoveryStub(t, false, false)
 
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	c := registrantClient(t, interceptor.Funcs{})
 	s, _, _ := newMCPServer(t, c, false)
 
 	rec, pending := registerOAuth(t, s, "Auto OAuth MCP", disco.URL+"/mcp", &MCPAuthRequest{
@@ -232,7 +257,7 @@ func TestMCPOAuthAutoDiscoverRegister(t *testing.T) {
 // URL (the CIMD invariant) and which is a public PKCE client (no secret). It is
 // unauthenticated — the authorization server, not the caller, dereferences it.
 func TestMCPOAuthClientMetadataDoc(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	c := registrantClient(t, interceptor.Funcs{})
 	s, _, _ := newMCPServer(t, c, false)
 
 	rec := httptest.NewRecorder()
@@ -263,7 +288,7 @@ func TestMCPOAuthFullFlow(t *testing.T) {
 	// callback probes tools/list with the FRESH exchanged token (server-side).
 	mcp := fakeMCPServerRequiringToken(t, theOAuthAccessToken)
 
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	c := registrantClient(t, interceptor.Funcs{})
 	s, factory, lb := newMCPServer(t, c, false)
 	store := wireTRStore(t, s, nil) // ToolRegistry is retired (ADR 0044): register writes the store
 
@@ -343,6 +368,79 @@ func TestMCPOAuthFullFlow(t *testing.T) {
 	assert.NotContains(t, lb.String(), oauth.gotVerifier, "no code_verifier in any log line")
 }
 
+// TestMCPOAuthRegisteredServerBelongsToTheRegistrant: the server an OAuth registration
+// creates is private to the registrant. It used to be stored private with NO owner (the
+// callback read the owner from grantUserHash, which only grant consent sets), so nobody —
+// the registrant included — could see or bind it.
+func TestMCPOAuthRegisteredServerBelongsToTheRegistrant(t *testing.T) {
+	oauth := newFakeOAuthServer(t)
+	mcp := fakeMCPServer(t, false)
+	c := registrantClient(t, interceptor.Funcs{})
+	s, factory, _ := newMCPServer(t, c, false)
+	store := wireTRStore(t, s, nil)
+
+	_, pending := registerOAuth(t, s, "Owned OAuth MCP", mcp.URL, authFor(oauth))
+	require.NotEmpty(t, pending.State)
+	assertCallbackRedirect(t, callback(t, s, oauth.validCode, pending.State), "/tools/catalog")
+
+	tr, err := store.Get(context.Background(), "prod", "owned-oauth-mcp")
+	require.NoError(t, err)
+	assert.Equal(t, userGrantHash(oauthRegistrant), tr.Labels[labelMCPOwner])
+	assert.Equal(t, visibilityPrivate, tr.Labels[labelMCPVisibility])
+
+	listAs := func(user string) []MCPServerSummary {
+		t.Helper()
+		factory.client = identityClient(t, user)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/mcpservers?namespace=prod", nil)
+		req.Header.Set("Authorization", "Bearer some-token")
+		s.Handler().ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		var resp MCPServerListResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp.Servers
+	}
+	names := func(servers []MCPServerSummary) []string {
+		out := make([]string, 0, len(servers))
+		for _, sv := range servers {
+			out = append(out, sv.Name)
+		}
+		return out
+	}
+	assert.Contains(t, names(listAs(oauthRegistrant)), "owned-oauth-mcp", "the registrant sees her server")
+	assert.NotContains(t, names(listAs("someone-else@example.com")), "owned-oauth-mcp", "another user does not")
+
+	// The registrant can bind its tools; another user's create cannot reach them.
+	agent := "name: %s\nruntime: managed\nsystemPrompt: hi\ntools:\n  - get_weather\n"
+	owner := identityClient(t, oauthRegistrant)
+	rec := createAgentAs(t, owner, store, fmt.Sprintf(agent, "owner-agent"))
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	var b agentsv1beta1.MCPToolBinding
+	require.NoError(t, owner.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: "owner-agent-get-weather"}, &b))
+	assert.Equal(t, "owned-oauth-mcp", b.Spec.RegistryRef)
+
+	rec = createAgentAs(t, identityClient(t, "someone-else@example.com"), store, fmt.Sprintf(agent, "other-agent"))
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestMCPOAuthRegisterWithoutIdentityIsRefused: a registrant the API server cannot name
+// would get a private server nobody can see, so the register is refused before discovery
+// contacts anything.
+func TestMCPOAuthRegisterWithoutIdentityIsRefused(t *testing.T) {
+	disco, _ := oauthDiscoveryStub(t, false, false)
+	srv, hits := countingServer(t, disco.Config.Handler)
+	// A plain fake client answers a SelfSubjectReview with no username.
+	s, _, _ := newMCPServer(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), false)
+
+	rec, pending := registerOAuth(t, s, "anon-oauth", srv.URL+"/mcp", &MCPAuthRequest{
+		Type: "oauth", AutoDiscover: true, RedirectURI: "https://console.example/api/mcp/oauth/callback",
+	})
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "body: %s", rec.Body.String())
+	assert.Empty(t, pending.State, "no flow is started")
+	assert.Zero(t, hits.Load(), "discovery contacts nothing")
+}
+
 // callback drives GET /api/mcp/oauth/callback with a code + state (the browser
 // redirect leg, simulated). It carries NO Authorization header — the callback
 // authenticates via the state handle, not a bearer.
@@ -385,7 +483,7 @@ func assertNoOAuthSecretsInBody(t *testing.T, body string) {
 // endpoint is never hit).
 func TestMCPOAuthCallbackUnknownStateIs4xxNoExchange(t *testing.T) {
 	oauth := newFakeOAuthServer(t)
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	c := registrantClient(t, interceptor.Funcs{})
 	s, _, _ := newMCPServer(t, c, false)
 
 	// No register happened → no pending flow exists for this state.
@@ -401,7 +499,7 @@ func TestMCPOAuthCallbackUnknownStateIs4xxNoExchange(t *testing.T) {
 func TestMCPOAuthCallbackMismatchedStateIs4xx(t *testing.T) {
 	oauth := newFakeOAuthServer(t)
 	mcp := fakeMCPServer(t, false)
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	c := registrantClient(t, interceptor.Funcs{})
 	s, _, _ := newMCPServer(t, c, false)
 
 	_, pending := registerOAuth(t, s, "csrf-mcp", mcp.URL, authFor(oauth))
@@ -418,7 +516,7 @@ func TestMCPOAuthCallbackMismatchedStateIs4xx(t *testing.T) {
 func TestMCPOAuthCallbackExpiredStateIs4xx(t *testing.T) {
 	oauth := newFakeOAuthServer(t)
 	mcp := fakeMCPServer(t, false)
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	c := registrantClient(t, interceptor.Funcs{})
 	s, _, _ := newMCPServer(t, c, false)
 
 	base := time.Now()
@@ -438,7 +536,7 @@ func TestMCPOAuthCallbackExpiredStateIs4xx(t *testing.T) {
 func TestMCPOAuthCallbackReplayIsRejected(t *testing.T) {
 	oauth := newFakeOAuthServer(t)
 	mcp := fakeMCPServerRequiringToken(t, theOAuthAccessToken)
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	c := registrantClient(t, interceptor.Funcs{})
 	s, _, _ := newMCPServer(t, c, false)
 	wireTRStore(t, s, nil) // register writes the ToolRegistry to the store (retired, ADR 0044)
 
@@ -456,7 +554,7 @@ func TestMCPOAuthCallbackReplayIsRejected(t *testing.T) {
 func TestMCPOAuthCallbackErrorRedirectIs4xx(t *testing.T) {
 	oauth := newFakeOAuthServer(t)
 	mcp := fakeMCPServer(t, false)
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	c := registrantClient(t, interceptor.Funcs{})
 	s, _, _ := newMCPServer(t, c, false)
 
 	_, pending := registerOAuth(t, s, "denied-mcp", mcp.URL, authFor(oauth))
@@ -482,10 +580,7 @@ func TestMCPOAuthWrongVerifierIsHonestError(t *testing.T) {
 	oauth := newFakeOAuthServer(t)
 	mcp := fakeMCPServer(t, false)
 	createCalled := false
-	c := fake.NewClientBuilder().
-		WithScheme(testScheme(t)).
-		WithInterceptorFuncs(interceptorCreateFlag(&createCalled)).
-		Build()
+	c := registrantClient(t, interceptorCreateFlag(&createCalled))
 	s, _, _ := newMCPServer(t, c, false)
 
 	_, pending := registerOAuth(t, s, "pkce-mcp", mcp.URL, authFor(oauth))
@@ -505,10 +600,7 @@ func TestMCPOAuthBadCodeIsHonestError(t *testing.T) {
 	oauth := newFakeOAuthServer(t)
 	mcp := fakeMCPServer(t, false)
 	createCalled := false
-	c := fake.NewClientBuilder().
-		WithScheme(testScheme(t)).
-		WithInterceptorFuncs(interceptorCreateFlag(&createCalled)).
-		Build()
+	c := registrantClient(t, interceptorCreateFlag(&createCalled))
 	s, _, _ := newMCPServer(t, c, false)
 
 	_, pending := registerOAuth(t, s, "badcode-mcp", mcp.URL, authFor(oauth))
@@ -609,15 +701,12 @@ func TestMCPOAuthRefreshNoRefreshTokenSignals(t *testing.T) {
 func TestMCPOAuthCallbackViewerForbiddenSurfacesError(t *testing.T) {
 	oauth := newFakeOAuthServer(t)
 	mcp := fakeMCPServerRequiringToken(t, theOAuthAccessToken)
-	c := fake.NewClientBuilder().
-		WithScheme(testScheme(t)).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
-				return apierrors.NewForbidden(
-					schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "toolregistries"}, "viewer-oauth", assert.AnError)
-			},
-		}).
-		Build()
+	c := registrantClient(t, interceptor.Funcs{
+		Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+			return apierrors.NewForbidden(
+				schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "toolregistries"}, "viewer-oauth", assert.AnError)
+		},
+	})
 	s, _, _ := newMCPServer(t, c, false)
 
 	// Register with a VIEWER token so the flow captures it; the callback's create
@@ -638,7 +727,7 @@ func TestMCPOAuthCallbackViewerForbiddenSurfacesError(t *testing.T) {
 // TestMCPOAuthRegisterMissingFieldsAre400 proves an OAuth register missing a
 // required OAuth field is a 400 before any flow starts.
 func TestMCPOAuthRegisterMissingFieldsAre400(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	c := registrantClient(t, interceptor.Funcs{})
 	s, _, _ := newMCPServer(t, c, false)
 	for _, tc := range []struct {
 		name string
@@ -660,7 +749,7 @@ func TestMCPOAuthRegisterMissingFieldsAre400(t *testing.T) {
 // TestMCPOAuthCallbackKillSwitchOffIs404 proves the callback route is absent (404)
 // when the MCP kill-switch is off.
 func TestMCPOAuthCallbackKillSwitchOffIs404(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	c := registrantClient(t, interceptor.Funcs{})
 	s := NewServer(Options{
 		CallerClients: newFakeFactory(c),
 		Scheme:        testScheme(t),
@@ -680,7 +769,7 @@ func TestMCPOAuthCallbackKillSwitchOffIs404(t *testing.T) {
 // state redirects the browser back to add-MCP with an error (before any store lookup /
 // exchange) rather than dumping a JSON 400 into the tab.
 func TestMCPOAuthMissingCodeOrStateRedirectsWithError(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	c := registrantClient(t, interceptor.Funcs{})
 	s, _, _ := newMCPServer(t, c, false)
 	for _, tc := range []struct{ name, target string }{
 		{"no-state", "/api/mcp/oauth/callback?code=x"},

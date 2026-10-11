@@ -93,7 +93,21 @@ func oauthCallbackConnected(w http.ResponseWriter, r *http.Request, serverName, 
 // Caller-scoping (ADR 0011): the caller's bearer token is captured into the
 // pending flow here so the callback's Secret/CRD writes run as the SAME user. A
 // token-less caller is already rejected at callerClient (401) before this runs.
-func (s *Server) beginMCPOAuthRegistration(w http.ResponseWriter, r *http.Request, req RegisterMCPServerRequest, name, ns string) {
+func (s *Server) beginMCPOAuthRegistration(w http.ResponseWriter, r *http.Request, caller client.Client, req RegisterMCPServerRequest, name, ns string) {
+	// The server this flow registers is private to the registrant (ADR 0067 §2), so the
+	// registrant's identity is its owner. Resolved now, while the caller is on the request:
+	// a private server stored without an owner is visible to nobody, the registrant included.
+	username, uErr := callerUsername(r.Context(), caller)
+	if uErr != nil {
+		if status, msg, isRBAC := classifyReadError(uErr); isRBAC {
+			writeError(w, status, msg)
+			return
+		}
+		s.log.Error(uErr, "resolve caller identity for MCP OAuth registration failed")
+		writeError(w, http.StatusInternalServerError, "failed to resolve caller identity")
+		return
+	}
+
 	var cfg mcpOAuthConfig
 	if req.Auth.AutoDiscover {
 		// Zero-config OAuth (ADR 0028, m24.7): discover the authorize/token/
@@ -133,11 +147,12 @@ func (s *Server) beginMCPOAuthRegistration(w http.ResponseWriter, r *http.Reques
 	callerToken := bearerToken(r)
 
 	authURL, state, err := s.startOAuthFlow(cfg, pendingOAuthFlow{
-		callerToken: callerToken,
-		serverName:  name,
-		namespace:   ns,
-		serverURL:   strings.TrimSpace(req.URL),
-		status:      s.mcpApprovalStatus(),
+		callerToken:    callerToken,
+		registrantHash: userGrantHash(username),
+		serverName:     name,
+		namespace:      ns,
+		serverURL:      strings.TrimSpace(req.URL),
+		status:         s.mcpApprovalStatus(),
 	})
 	if err != nil {
 		// A crypto/rand failure or an unparseable endpoint (already validated) is a
@@ -348,12 +363,12 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 		// Persist the OAuth client config (non-secret) so a per-user grant can later be
 		// begun from just {server, ns} (ADR 0031). Token material stays in oauthSecretData.
 		oauthConfig: flow.oauth,
-		// An OAuth server is personal to the consenting registrant (ADR 0029 §1/§3); the
-		// owner is the caller's HMAC'd identity, already captured on the flow at consent-begin.
+		// An OAuth server is personal to the registrant (ADR 0029 §1/§3); the owner is the
+		// registrant's HMAC'd identity, captured on the flow at register.
 		// ADR 0067 §2: also stamp the two new axes (private, byo-oauth) alongside the legacy
 		// scope=personal for rollback aid — consistent with the bearer-key register path.
 		scope:            scopePersonal,
-		owner:            flow.grantUserHash,
+		owner:            flow.registrantHash,
 		visibility:       visibilityPrivate,
 		credentialSource: credSourceByoOAuth,
 	}); crErr != nil {

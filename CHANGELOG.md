@@ -62,6 +62,13 @@ add the MCP server that provides it first. Without the control-plane store an ag
 refused with 501. `ctxmesh expand` is unchanged, and forking still creates the agent and flags
 the tool for rebinding.
 
+**Fixed: an MCP server registered through OAuth was visible to nobody.** The server is private to
+the person who registered it, but it was stored without an owner, so no one could list it, bind
+its tools or delete it, including that person. It now belongs to whoever registered it, and a
+registration whose user the cluster cannot identify is refused before anything is contacted.
+Servers registered through OAuth before this release still have no owner; register them again
+under a new name.
+
 **Fixed: every agent run was cut off at five minutes.** Knative's default request timeout is 300
 seconds, and the platform never set one, while a run may take 600. A run that sends nothing until
 it is done also hit Knative's separate time-to-first-byte limit at the same 300 seconds. Every

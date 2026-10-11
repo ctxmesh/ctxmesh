@@ -185,6 +185,10 @@ type pendingOAuthFlow struct {
 	// egress). It is the hash of the consenting caller's username (never the raw
 	// username), captured at consent-begin. Empty → the m17.2 register flow.
 	grantUserHash string
+	// registrantHash is the hashed identity of the user who began a server REGISTRATION
+	// (grantUserHash empty), captured at register: the owner of the private server the
+	// callback creates. Empty on a grant-consent flow.
+	registrantHash string
 	// boundary is the trust boundary (ADR 0033) the grant is stored under: the connecting
 	// agent's registry, or the agent itself when the consent is initiated from a specific
 	// agent's run. Empty ⇒ a legacy unscoped grant (connect-for-all — e.g. a servers-page

@@ -207,7 +207,7 @@ func (s *Server) handleRegisterMCPServer(w http.ResponseWriter, r *http.Request)
 	// consent → GET /api/mcp/oauth/callback completes the registration (token
 	// exchange + Secret + probe). No token/verifier is ever in this branch's output.
 	if req.Auth != nil && strings.EqualFold(strings.TrimSpace(req.Auth.Type), oauthAuthType) {
-		s.beginMCPOAuthRegistration(w, r, req, name, ns)
+		s.beginMCPOAuthRegistration(w, r, caller, req, name, ns)
 		return
 	}
 
