@@ -1234,7 +1234,8 @@ function ConfigureFlow({
   const [done, setDone] = React.useState(false);
 
   // Compose from existing resources (m18.6): the model-route + prompt-version
-  // pickers pull the real lists so the user SELECTS instead of typing a ref.
+  // pickers pull the real lists so the user SELECTS instead of typing a ref. A ref
+  // names a resource in the agent's own namespace, so the lists read that one.
   const [routes, setRoutes] = React.useState<string[]>([]);
   const [prompts, setPrompts] = React.useState<string[]>([]);
   // m21: the intent-first model picker — a flat list of the connected providers'
@@ -1250,7 +1251,7 @@ function ConfigureFlow({
   React.useEffect(() => {
     const c = new AbortController();
     api
-      .listModelRoutes({ limit: 100 }, c.signal)
+      .listModelRoutes({ limit: 100, namespace: workingNamespace }, c.signal)
       .then((r) => {
         if (!c.signal.aborted) setRoutes(r.items.map((x) => x.name));
       })
@@ -1293,7 +1294,7 @@ function ConfigureFlow({
         /* soft miss: no model picker, the Advanced route picker still works */
       });
     api
-      .listPromptVersions({ limit: 100 }, c.signal)
+      .listPromptVersions({ limit: 100, namespace: workingNamespace }, c.signal)
       .then((r) => {
         if (!c.signal.aborted) setPrompts(r.items.map((x) => x.name));
       })
@@ -1947,13 +1948,13 @@ function SharedReview({
 }) {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { namespace, list } = useNamespace();
+  const { namespace, workingNamespace, list } = useNamespace();
   // Target namespace = a populated dropdown of the caller's ACCESSIBLE namespaces
-  // (M22/Theme 2), defaulting to the shell scope (or "default" when scope is
-  // "all"). No more silently creating in "default" with no picker (U-namespace).
+  // (M22/Theme 2), defaulting to the shell scope, or under "All workspaces" to the
+  // working namespace. No more silently creating in "default" with no picker (U-namespace).
   const nsOptions =
     list.kind === "ready" ? list.namespaces.map((n) => n.name) : [];
-  const [targetNs, setTargetNs] = React.useState(namespace || "default");
+  const [targetNs, setTargetNs] = React.useState(namespace || workingNamespace || "default");
   // When the accessible list loads and doesn't include the current target, snap
   // to the first namespace the caller CAN use (access-scoped, not a dead default).
   React.useEffect(() => {

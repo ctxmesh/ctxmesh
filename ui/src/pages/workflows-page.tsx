@@ -32,6 +32,7 @@ import {
   type StatusTone,
 } from "@/components/kit";
 import { api, ApiError, type WorkflowSummary } from "@/lib/api";
+import { useNamespace } from "@/lib/namespace";
 
 // WorkflowsPage — the Workflow CR list (m67.9/m67.15, ADR 0060), rebuilt on
 // archetype A1 (M151 spec §6.1: PageHeader → FilterChipRow → DataTable →
@@ -308,6 +309,7 @@ export function WorkflowsPage() {
   const [invokeTarget, setInvokeTarget] = useState<WorkflowSummary | null>(null);
   const [invokeInput, setInvokeInput] = useState("{}");
   const [invokeState, setInvokeState] = useState<InvokeState>({ kind: "idle" });
+  const { namespace } = useNamespace();
 
   const load = useCallback(() => {
     abortRef.current?.abort();
@@ -315,7 +317,7 @@ export function WorkflowsPage() {
     abortRef.current = controller;
     setLoadState({ kind: "loading" });
     api
-      .listWorkflows(controller.signal)
+      .listWorkflows(namespace, controller.signal)
       .then((res) => {
         if (controller.signal.aborted) return;
         setLoadState({ kind: "ready", workflows: res.items });
@@ -328,7 +330,7 @@ export function WorkflowsPage() {
           forbidden: err instanceof ApiError && err.isForbidden,
         });
       });
-  }, []);
+  }, [namespace]);
 
   useEffect(() => {
     load();

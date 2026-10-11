@@ -854,7 +854,7 @@ export function DashboardPage() {
         });
 
       api
-        .runs(controller.signal)
+        .runs(namespace, controller.signal)
         .then((res) => {
           if (live()) setRuns({ kind: "ready", data: res.runs.length });
         })

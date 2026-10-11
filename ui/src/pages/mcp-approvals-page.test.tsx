@@ -62,7 +62,7 @@ function installFetch(opts: FetchSetup = {}) {
         return j({ namespaces: [] });
       if (url.startsWith("/api/capabilities"))
         return j({ namespace: "", allowed: opts.caps ?? OPERATOR_CAPS });
-      if (url === "/api/mcp/approvals" && method === "GET") {
+      if (url.split("?")[0] === "/api/mcp/approvals" && method === "GET") {
         const status = opts.approvalsStatus ?? 200;
         const ok = status < 400;
         return Promise.resolve({

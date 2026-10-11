@@ -22,6 +22,7 @@ import {
   type StatusTone,
 } from "@/components/kit";
 import { api, ApiError, type AgentTeamSummary } from "@/lib/api";
+import { useNamespace } from "@/lib/namespace";
 
 // TeamsPage — the AgentTeam index (M151 §6.1 archetype A1, §4.4 "Teams index"
 // budget). A team is a supervisor plus the roster of sub-agents it may summon,
@@ -165,6 +166,7 @@ export function TeamsPage() {
   const [query, setQuery] = useState("");
   const [state, setState] = useState<Load>({ kind: "loading" });
   const abortRef = useRef<AbortController | null>(null);
+  const { namespace } = useNamespace();
 
   const load = useCallback(() => {
     abortRef.current?.abort();
@@ -172,7 +174,7 @@ export function TeamsPage() {
     abortRef.current = controller;
     setState({ kind: "loading" });
     api
-      .listTeams(controller.signal)
+      .listTeams(namespace, controller.signal)
       .then((res) => {
         if (controller.signal.aborted) return;
         setState({ kind: "ready", teams: res.items });
@@ -185,7 +187,7 @@ export function TeamsPage() {
           forbidden: err instanceof ApiError && err.isForbidden,
         });
       });
-  }, []);
+  }, [namespace]);
 
   useEffect(() => {
     load();

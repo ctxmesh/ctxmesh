@@ -30,6 +30,7 @@ import {
   type StatusTone,
 } from "@/components/kit";
 import { useCapabilities } from "@/lib/capabilities";
+import { useNamespace } from "@/lib/namespace";
 import { RES_REGISTRIES } from "@/lib/nav";
 import { cn } from "@/lib/utils";
 import {
@@ -178,10 +179,12 @@ export function McpServersPage() {
     return () => clearTimeout(t);
   }, [highlightKey]);
 
+  // The shell's selection; "" ("All workspaces") lists every namespace the caller works in.
+  const { namespace } = useNamespace();
   const load = React.useCallback((signal?: AbortSignal) => {
     setPage({ kind: "loading" });
     api
-      .listMcpServers(signal)
+      .listMcpServers(namespace, signal)
       .then((res) => {
         if (signal?.aborted) return;
         setPage({ kind: "ready", servers: res.items ?? res.servers ?? [] });
@@ -197,7 +200,7 @@ export function McpServersPage() {
           message: err instanceof Error ? err.message : "request failed",
         });
       });
-  }, []);
+  }, [namespace]);
 
   React.useEffect(() => {
     const c = new AbortController();

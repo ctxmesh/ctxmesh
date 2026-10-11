@@ -39,6 +39,7 @@ import {
   type TemplateEntry,
 } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
+import { useNamespace } from "@/lib/namespace";
 import { RES_AGENTS } from "@/lib/nav";
 
 // TemplateGalleryPage — archetype A9, the gallery (M151 spec §6.1/§6.2). Two
@@ -437,6 +438,8 @@ function TemplatesTab() {
   const { can } = useCapabilities();
   // U10: display-gate the Fork button for viewers lacking agent-create rights.
   const canFork = can(RES_AGENTS, "create");
+  // The gallery is what the working namespace can see, and a fork lands there.
+  const { workingNamespace } = useNamespace();
   const [state, setState] = React.useState<TemplateState>({ kind: "loading" });
   const [view, setView] = React.useState<TemplateView>("all");
   // U12: forkingEntry tracks the unique key of the entry currently in flight for per-entry spinner.
@@ -450,7 +453,7 @@ function TemplatesTab() {
   const load = React.useCallback((signal?: AbortSignal) => {
     setState({ kind: "loading" });
     api
-      .getTemplates(undefined, signal)
+      .getTemplates(workingNamespace || undefined, signal)
       .then((entries) => {
         if (signal?.aborted) return;
         setState({ kind: "ready", entries });
@@ -466,7 +469,7 @@ function TemplatesTab() {
           message: err instanceof Error ? err.message : "request failed",
         });
       });
-  }, []);
+  }, [workingNamespace]);
 
   React.useEffect(() => {
     const c = new AbortController();
@@ -495,6 +498,7 @@ function TemplatesTab() {
         prov.originNamespace,
         prov.originName ?? entry.name,
         localName,
+        workingNamespace || undefined,
       );
 
       // Navigate to the FORK's own coordinates, not the origin's.
@@ -759,14 +763,16 @@ function McpCatalogTab() {
   const [view, setView] = React.useState<CatalogView>("all");
   // T12 catalog search filter
   const [search, setSearch] = React.useState("");
+  // The catalog is what the working namespace can discover, and a connect lands there.
+  const { workingNamespace } = useNamespace();
 
   const load = React.useCallback((signal?: AbortSignal) => {
     setState({ kind: "loading" });
 
     // T10: fetch catalog AND owned servers in parallel; cross-check by name+ns.
     Promise.all([
-      api.getCatalog(undefined, signal),
-      api.listMcpServers(signal),
+      api.getCatalog(workingNamespace || undefined, signal),
+      api.listMcpServers(workingNamespace, signal),
     ])
       .then(([catalogRes, ownedRes]) => {
         if (signal?.aborted) return;
@@ -786,7 +792,7 @@ function McpCatalogTab() {
           message: err instanceof Error ? err.message : "request failed",
         });
       });
-  }, []);
+  }, [workingNamespace]);
 
   React.useEffect(() => {
     const c = new AbortController();
@@ -798,7 +804,12 @@ function McpCatalogTab() {
     const key = `${entry.namespace}/${entry.name}`;
     setConnectingEntry(key);
     try {
-      const res = await api.connectMcpServer(entry.namespace, entry.name);
+      const res = await api.connectMcpServer(
+        entry.namespace,
+        entry.name,
+        undefined,
+        workingNamespace || undefined,
+      );
       if (res.status === "already-connected") {
         toast({
           variant: "info",

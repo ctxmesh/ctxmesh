@@ -1593,6 +1593,8 @@ export interface ConnectMcpRequest {
   originNamespace: string;
   originName: string;
   name?: string;
+  /** The caller's namespace the copy lands in. */
+  namespace?: string;
 }
 
 // ConnectMcpResponse is the 200 body from POST /api/mcp/connect.
@@ -3202,6 +3204,12 @@ function agentsQuery(params: AgentListParams = {}): string {
 
 // listQuery is the general list-contract query builder for the three new resource
 // endpoints (modelroutes, secretbindings, agentregistries). Matches agentsQuery.
+// namespaceQuery scopes a list to one namespace; "" ("All workspaces") sends none, and the BFF then
+// reads every namespace the caller works in.
+function namespaceQuery(namespace: string): string {
+  return namespace ? `?namespace=${encodeURIComponent(namespace)}` : "";
+}
+
 function listQuery(params: AgentListParams = {}): string {
   const qs = new URLSearchParams();
   if (params.limit && params.limit > 0) qs.set("limit", String(params.limit));
@@ -3319,7 +3327,9 @@ export const api = {
       `/api/cost?tenant=${encodeURIComponent(tenant)}`,
       signal,
     ),
-  runs: (signal?: AbortSignal) => getJSON<RunListResponse>("/api/runs", signal),
+  // namespace "" is "All workspaces": every namespace the caller works in.
+  runs: (namespace: string, signal?: AbortSignal) =>
+    getJSON<RunListResponse>(`/api/runs${namespaceQuery(namespace)}`, signal),
 
   // runsFiltered reads one paginated window of runs from the global /api/runs
   // endpoint (m16.3) with server-side agent/from/to filters + client-side q
@@ -3804,8 +3814,9 @@ export const api = {
 
   // listMcpServers lists the registered BYO-MCP servers (GET /api/mcpservers) for
   // the MCP Servers page. Read-open (a viewer sees the list); an empty list is normal.
-  listMcpServers: (signal?: AbortSignal) =>
-    getJSON<McpServerListResponse>("/api/mcpservers", signal),
+  // namespace "" is "All workspaces": every namespace the caller works in.
+  listMcpServers: (namespace: string, signal?: AbortSignal) =>
+    getJSON<McpServerListResponse>(`/api/mcpservers${namespaceQuery(namespace)}`, signal),
 
   // getCatalog fetches the cross-namespace MCP server catalog (GET /api/catalog,
   // m73). Returns servers discoverable by this caller — their org-in-tenant +
@@ -3835,14 +3846,17 @@ export const api = {
   // connectMcpServer materializes a discovered catalog server into the caller's
   // namespace (POST /api/mcp/connect, m73). Returns the new summary or
   // { status: "already-connected" } if already present. A 404 = not discoverable.
+  // namespace is where the copy lands; omitted, the BFF uses "default".
   connectMcpServer: async (
     originNamespace: string,
     originName: string,
     name?: string,
+    namespace?: string,
     signal?: AbortSignal,
   ): Promise<ConnectMcpResponse> => {
     const body: ConnectMcpRequest = { originNamespace, originName };
     if (name) body.name = name;
+    if (namespace) body.namespace = namespace;
     const res = await apiFetch("/api/mcp/connect", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3899,8 +3913,9 @@ export const api = {
   // mcpApprovals lists the pending MCP servers awaiting operator approval
   // (GET /api/mcp/approvals). An empty list is normal ([] on wire). A 403 = the
   // caller can't list approvals (non-operator); a 501 = approval queue not enabled.
-  mcpApprovals: (signal?: AbortSignal) =>
-    getJSON<McpApprovalsResponse>("/api/mcp/approvals", signal),
+  // namespace "" is "All workspaces": every namespace the caller works in.
+  mcpApprovals: (namespace: string, signal?: AbortSignal) =>
+    getJSON<McpApprovalsResponse>(`/api/mcp/approvals${namespaceQuery(namespace)}`, signal),
 
   // approveMcp approves a pending MCP server (POST /api/mcp/approvals/{ns}/{name}).
   // Operator-only: a non-operator gets a real 403 from the API (display gating is
@@ -4420,8 +4435,9 @@ export const api = {
 
   // listTeams reads the AgentTeams (M64) — orchestration rosters (caller-scoped). A 403 surfaces
   // as a typed ApiError (isForbidden) so the page shows an honest forbidden state.
-  listTeams: (signal?: AbortSignal) =>
-    getJSON<AgentTeamListResponse>("/api/teams", signal),
+  // namespace "" is "All workspaces": every namespace the caller works in.
+  listTeams: (namespace: string, signal?: AbortSignal) =>
+    getJSON<AgentTeamListResponse>(`/api/teams${namespaceQuery(namespace)}`, signal),
 
   // generateTeam composes an AgentTeam YAML from existing registry members via a
   // server-side LLM call (ADR 0065 D4). Like generateAgent, a 422 with
@@ -4470,22 +4486,24 @@ export const api = {
 
   // listGuardrailPolicies reads the GuardrailPolicies (m66.10, ADR 0059) — content-governance
   // policies (caller-scoped). A 403 surfaces as a typed ApiError (isForbidden).
-  listGuardrailPolicies: (signal?: AbortSignal) =>
-    getJSON<GuardrailPolicyListResponse>("/api/guardrailpolicies", signal),
+  // namespace "" is "All workspaces": every namespace the caller works in.
+  listGuardrailPolicies: (namespace: string, signal?: AbortSignal) =>
+    getJSON<GuardrailPolicyListResponse>(
+      `/api/guardrailpolicies${namespaceQuery(namespace)}`,
+      signal,
+    ),
 
   // listWorkflows reads the Workflow CRs (m67.9, ADR 0060) — declarative agent graphs (caller-scoped).
   // A 403 surfaces as a typed ApiError (isForbidden).
-  listWorkflows: (signal?: AbortSignal) =>
-    getJSON<WorkflowListResponse>("/api/workflows", signal),
+  // namespace "" is "All workspaces": every namespace the caller works in.
+  listWorkflows: (namespace: string, signal?: AbortSignal) =>
+    getJSON<WorkflowListResponse>(`/api/workflows${namespaceQuery(namespace)}`, signal),
 
   // listKnowledgeBases reads the KnowledgeBase CRs (m68.13, ADR 0061) — managed RAG corpora
   // (caller-scoped). A 403 surfaces as a typed ApiError (isForbidden).
-  listKnowledgeBases: (signal?: AbortSignal, namespace?: string) => {
-    const path = namespace
-      ? `/api/knowledgebases?namespace=${encodeURIComponent(namespace)}`
-      : "/api/knowledgebases";
-    return getJSON<KBListResponse>(path, signal);
-  },
+  // namespace "" is "All workspaces": every namespace the caller works in.
+  listKnowledgeBases: (namespace: string, signal?: AbortSignal) =>
+    getJSON<KBListResponse>(`/api/knowledgebases${namespaceQuery(namespace)}`, signal),
 
   // getKnowledgeBase reads one KnowledgeBase's full detail (spec + status + conditions)
   // (m68.13, ADR 0061). A 403 → isForbidden; a 404 → isNotFound.
@@ -5335,14 +5353,17 @@ export const api = {
   // (POST /api/agents/{ns}/{name}/fork, m74.6). Returns the fork outcome:
   // needsRebinding lists dangling refs (model routes, tools) the caller must
   // rebind. A 404 = not discoverable; 409 = name collision with a different origin.
+  // namespace is where the fork lands; omitted, the BFF uses "default".
   forkAgent: async (
     originNamespace: string,
     originName: string,
     name?: string,
+    namespace?: string,
     signal?: AbortSignal,
   ): Promise<ForkAgentResponse> => {
-    const body: { name?: string } = {};
+    const body: { name?: string; namespace?: string } = {};
     if (name) body.name = name;
+    if (namespace) body.namespace = namespace;
     const res = await apiFetch(
       `/api/agents/${encodeURIComponent(originNamespace)}/${encodeURIComponent(originName)}/fork`,
       {

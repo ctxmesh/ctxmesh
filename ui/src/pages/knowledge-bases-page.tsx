@@ -41,6 +41,7 @@ import {
   type KBSearchHit,
 } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
+import { useNamespace } from "@/lib/namespace";
 import { RES_KNOWLEDGEBASES } from "@/lib/nav";
 
 // KnowledgeBasesPage — the KnowledgeBase CR list surface (m68.13, ADR 0061;
@@ -146,6 +147,8 @@ export function KnowledgeBasesPage() {
   const [view, setView] = useState<KBView>("all");
   const [loadState, setLoadState] = useState<ListLoadState>({ kind: "loading" });
   const abortRef = useRef<AbortController | null>(null);
+  // The shell's selection; "" ("All workspaces") lists every namespace the caller works in.
+  const { namespace } = useNamespace();
 
   const load = useCallback(() => {
     abortRef.current?.abort();
@@ -153,7 +156,7 @@ export function KnowledgeBasesPage() {
     abortRef.current = controller;
     setLoadState({ kind: "loading" });
     api
-      .listKnowledgeBases(controller.signal)
+      .listKnowledgeBases(namespace, controller.signal)
       .then((res) => {
         if (controller.signal.aborted) return;
         setLoadState({ kind: "ready", items: res.items });
@@ -166,7 +169,7 @@ export function KnowledgeBasesPage() {
           forbidden: err instanceof ApiError && err.isForbidden,
         });
       });
-  }, []);
+  }, [namespace]);
 
   useEffect(() => {
     load();

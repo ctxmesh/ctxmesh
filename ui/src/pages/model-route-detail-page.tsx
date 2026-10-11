@@ -595,19 +595,22 @@ function providerToForm(p: ModelRouteProviderDTO): ProviderForm {
 // DROPDOWN of each provider's known models (via a <datalist>) instead of free-text —
 // the user picks "claude-sonnet-5" rather than typing a model id. It degrades to
 // free-text: a failed load (or a custom/unlisted model) still types through. Shared
-// by the edit wizard and the new-route form so both get the dropdown.
-function useConnectedModels(): {
+// by the edit wizard and the new-route form so both get the dropdown. A route names
+// providers and bindings in its own namespace, so both lists read `namespace`, or the
+// working namespace for a route that has none yet.
+function useConnectedModels(namespace?: string): {
   providerNames: string[];
   modelsForProvider: (provider: string) => string[];
   secretBindingNames: string[];
 } {
   const { workingNamespace } = useNamespace();
+  const ns = namespace || workingNamespace;
   const [connected, setConnected] = React.useState<ProviderSummary[]>([]);
   const [bindingNames, setBindingNames] = React.useState<string[]>([]);
   React.useEffect(() => {
     const ctrl = new AbortController();
     api
-      .listProviders(workingNamespace, ctrl.signal)
+      .listProviders(ns, ctrl.signal)
       .then((r) => setConnected(r.items ?? []))
       .catch(() => {
         // No providers / no permission → the fields stay free-text (no dropdown).
@@ -615,13 +618,13 @@ function useConnectedModels(): {
     // The SecretBindings the caller can see → a dropdown for secretBindingRef
     // instead of free-text (M22/U2). Degrades to Custom… on failure.
     api
-      .listSecretBindings({ limit: 100 }, ctrl.signal)
+      .listSecretBindings({ limit: 100, namespace: ns }, ctrl.signal)
       .then((r) => setBindingNames((r.items ?? []).map((b) => b.name)))
       .catch(() => {
         /* no bindings / no permission → secretBindingRef stays type-able. */
       });
     return () => ctrl.abort();
-  }, [workingNamespace]);
+  }, [ns]);
 
   const modelsByProvider = React.useMemo(() => {
     const m = new Map<string, string[]>();
@@ -653,7 +656,7 @@ function RouteEditWizard({
   const { toast } = useToast();
   const { reprobe } = useCapabilities();
   const { providerNames, modelsForProvider, secretBindingNames } =
-    useConnectedModels();
+    useConnectedModels(detail.namespace);
   const [providers, setProviders] = React.useState<ProviderForm[]>(
     detail.providers.length > 0
       ? detail.providers.map(providerToForm)

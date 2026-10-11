@@ -532,13 +532,13 @@ export function TeamDetailPage() {
   const [runShowAll, setRunShowAll] = React.useState<Set<string>>(new Set());
 
   // ── The team itself. There is no GET /api/teams/{ns}/{name}; the list is the
-  // only read, so the page narrows it. A name that is not in the caller's list
-  // is a 404 for this page, not an empty detail.
+  // only read, so the page narrows it to the team's namespace. A name that is not
+  // in the caller's list is a 404 for this page, not an empty detail.
   const loadTeam = React.useCallback(() => {
     const controller = new AbortController();
     setTeamState({ kind: "loading" });
     api
-      .listTeams(controller.signal)
+      .listTeams(ns, controller.signal)
       .then((res) => {
         if (controller.signal.aborted) return;
         const found = res.items.find((t) => t.namespace === ns && t.name === name);

@@ -198,6 +198,15 @@ A namespace where someone may list other kinds but not agents is not part of "Al
 selecting it still reads it. `GET /api/skills` with no namespace now lists the skills of every
 namespace the caller may read; it listed none.
 
+**Fixed: some console pages ignored the selected workspace.** The Knowledge Bases, MCP servers, MCP
+approvals, Teams, Guardrails and Workflows pages, and the dashboard's run count, sent no namespace,
+so they read "All workspaces" whatever was selected. They now send the selection. A team's page
+reads its own namespace. The model-route editor offers the providers and bindings of the route's
+namespace, and the create flows offer the routes, prompts and registries of the namespace they
+create in. The template gallery and MCP catalog read the working namespace, and Fork and Connect
+create there; before, all four used `default`, which a person bound to another namespace may not
+read.
+
 **Security: a tool binding could name a server its author may not use.** A
 `POST /api/mcptoolbindings` that gave `registryRef`, `mode` and `server`, and every
 `PUT /api/mcptoolbindings/{ns}/{name}`, were written as sent, so a binding could name another

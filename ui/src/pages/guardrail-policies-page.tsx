@@ -23,6 +23,7 @@ import {
 } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
 import { api, ApiError, type GuardrailPolicySummary } from "@/lib/api";
+import { useNamespace } from "@/lib/namespace";
 
 // GuardrailPoliciesPage — archetype A1 (index/table), resource-list column
 // budget (M151 spec §6.1/§4.4). The GuardrailPolicy content-governance policies
@@ -146,6 +147,7 @@ export function GuardrailPoliciesPage() {
   const [open, setOpen] = useState<GuardrailPolicySummary | null>(null);
   const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
   const abortRef = useRef<AbortController | null>(null);
+  const { namespace } = useNamespace();
 
   const load = useCallback(() => {
     abortRef.current?.abort();
@@ -153,7 +155,7 @@ export function GuardrailPoliciesPage() {
     abortRef.current = controller;
     setLoadState({ kind: "loading" });
     api
-      .listGuardrailPolicies(controller.signal)
+      .listGuardrailPolicies(namespace, controller.signal)
       .then((res) => {
         if (controller.signal.aborted) return;
         setLoadState({ kind: "ready", policies: res.items });
@@ -166,7 +168,7 @@ export function GuardrailPoliciesPage() {
           forbidden: err instanceof ApiError && err.isForbidden,
         });
       });
-  }, []);
+  }, [namespace]);
 
   useEffect(() => {
     load();

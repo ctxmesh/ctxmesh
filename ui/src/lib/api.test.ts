@@ -182,6 +182,43 @@ describe("api client", () => {
     expect(fetchMock.mock.calls[1][0]).toBe("/api/tools");
   });
 
+  it("every workspace list sends the namespace it is given, and none for All workspaces", async () => {
+    const fetchMock = mockFetch({ items: [], runs: [], servers: [] });
+    vi.stubGlobal("fetch", fetchMock);
+    const lists: [string, (ns: string) => Promise<unknown>][] = [
+      ["/api/knowledgebases", (ns) => api.listKnowledgeBases(ns)],
+      ["/api/mcpservers", (ns) => api.listMcpServers(ns)],
+      ["/api/mcp/approvals", (ns) => api.mcpApprovals(ns)],
+      ["/api/teams", (ns) => api.listTeams(ns)],
+      ["/api/guardrailpolicies", (ns) => api.listGuardrailPolicies(ns)],
+      ["/api/workflows", (ns) => api.listWorkflows(ns)],
+      ["/api/runs", (ns) => api.runs(ns)],
+    ];
+    for (const [path, list] of lists) {
+      fetchMock.mockClear();
+      await list("team-a");
+      expect(fetchMock.mock.calls[0][0]).toBe(`${path}?namespace=team-a`);
+      await list("");
+      expect(fetchMock.mock.calls[1][0]).toBe(path);
+    }
+  });
+
+  it("fork and connect send the namespace the copy lands in", async () => {
+    const fetchMock = mockFetch({});
+    vi.stubGlobal("fetch", fetchMock);
+    await api.forkAgent("origin", "agent", "mine", "team-a");
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({
+      name: "mine",
+      namespace: "team-a",
+    });
+    await api.connectMcpServer("origin", "server", undefined, "team-a");
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body as string)).toEqual({
+      originNamespace: "origin",
+      originName: "server",
+      namespace: "team-a",
+    });
+  });
+
   it("generateAgent returns the valid config on 200", async () => {
     vi.stubGlobal(
       "fetch",

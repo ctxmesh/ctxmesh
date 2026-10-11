@@ -24,6 +24,7 @@ import {
   type Quantity,
 } from "@/components/kit";
 import { useCapabilities } from "@/lib/capabilities";
+import { useNamespace } from "@/lib/namespace";
 import { RES_REGISTRIES } from "@/lib/nav";
 import { api, ApiError, type McpApproval } from "@/lib/api";
 import { formatDateTime, formatRelativeTime } from "@/lib/format";
@@ -179,6 +180,8 @@ export function McpApprovalsPage() {
   const canApprove = can(RES_REGISTRIES, "update");
 
   const { toast } = useToast();
+  // The shell's selection; "" ("All workspaces") reads every namespace the caller works in.
+  const { namespace } = useNamespace();
 
   // `silent` refreshes the rows IN PLACE: no skeleton over already-visible rows,
   // and a failed silent refresh keeps what the operator is looking at. A queue
@@ -190,7 +193,7 @@ export function McpApprovalsPage() {
     abortRef.current = controller;
     if (!silent) setPage({ kind: "loading" });
     api
-      .mcpApprovals(controller.signal)
+      .mcpApprovals(namespace, controller.signal)
       .then((res) => {
         if (controller.signal.aborted) return;
         // The BFF returns the pending servers under `items` (list-contract key);
@@ -218,7 +221,7 @@ export function McpApprovalsPage() {
       .finally(() => {
         if (silent) setRefreshing(false);
       });
-  }, []);
+  }, [namespace]);
 
   React.useEffect(() => {
     load();
