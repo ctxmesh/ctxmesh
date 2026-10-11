@@ -154,6 +154,16 @@ agent's own pause, saying which sub-agent asked. Connect resumes the sub-agent's
 follows the supervisor on to its answer, and the hold links to the sub-agent's run. If the stream
 ends while the supervisor waits, the pause is found from the supervisor's run.
 
+**Security: a tool binding could name a server its author may not use.** A
+`POST /api/mcptoolbindings` that gave `registryRef`, `mode` and `server`, and every
+`PUT /api/mcptoolbindings/{ns}/{name}`, were written as sent, so a binding could name another
+user's private MCP server, or bind a personal server's tool for someone other than its owner. Every
+create and update now checks the named server the way a create that leaves them out does: it must
+be one the caller may use and must provide the tool (400 otherwise, the same response whether or
+not the server exists), and a personal server binds only for its owner (403). This needs the
+control-plane store (501 without it), and the caller's permission is checked before any server is
+read.
+
 **Fixed: binding a tool from the catalog always failed.** The bind wizard sent the agent as an
 object (`agentRef: {namespace, name}`) and no MCP server, mode or server location, while
 `POST /api/mcptoolbindings` takes the binding spec, so every bind returned `400 invalid JSON
@@ -162,8 +172,7 @@ agent's namespace, and `registryRef` is the MCP server the tool was picked from.
 `mode` and `server` may now be left out of a create: the BFF reads them from the tool's entry in the
 MCP server that provides it, among the servers the caller may use, refusing a tool no such server
 provides with 400 and another user's personal server with 403. Before reading any server it checks
-that the caller may create bindings in the namespace (403 otherwise). A create that gives all
-three is unchanged. The wizard no longer offers a binding namespace other than the agent's, which
+that the caller may create bindings in the namespace (403 otherwise). The wizard no longer offers a binding namespace other than the agent's, which
 could only produce a binding to nothing.
 
 **Security: an agent could serve a page at its own address and finish a visitor's OAuth consent

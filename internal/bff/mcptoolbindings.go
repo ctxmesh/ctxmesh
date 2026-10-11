@@ -136,10 +136,11 @@ type MCPToolBindingListResponse struct {
 }
 
 // MCPToolBindingCreateRequest is the POST /api/mcptoolbindings body: the binding spec,
-// shaped like MCPToolBindingSpec. registryRef, mode and server may be left out, and are
-// then read from the tool's entry in the MCP server that provides it, among the servers
-// the caller may use (the console's bind wizard sends only the agent, the tool and the
-// server it picked the tool from). The CRD's CEL validation enforces mode-specific
+// shaped like MCPToolBindingSpec. The server it names, or the one that provides the tool
+// when registryRef is left out, must be one the caller may use. registryRef, mode and
+// server may be left out, and are then read from the tool's entry on that server (the
+// console's bind wizard sends only the agent, the tool and the server it picked the tool
+// from). The CRD's CEL validation enforces mode-specific
 // server fields at admission.
 type MCPToolBindingCreateRequest struct {
 	// Name is the object's metadata.name. Required.
@@ -426,14 +427,16 @@ func (s *Server) handleCreateMCPToolBinding(w http.ResponseWriter, r *http.Reque
 	req.RegistryRef = strings.TrimSpace(req.RegistryRef)
 	req.ToolName = strings.TrimSpace(req.ToolName)
 	req.Mode = strings.TrimSpace(req.Mode)
-	if req.RegistryRef == "" || req.Mode == "" || (req.Server.URL == "" && req.Server.Image == "") {
-		if cErr := s.completeBindingFromRegistry(r.Context(), caller, ns, &req); cErr != nil {
-			if cErr.status >= http.StatusInternalServerError {
-				s.log.Error(cErr.logged(), "bind tool: resolving its MCP server failed", "namespace", ns, "tool", req.ToolName)
-			}
-			writeError(w, cErr.status, cErr.msg)
-			return
+	loc, cErr := s.usableBindingServer(r.Context(), caller, authz.VerbCreate, ns, req.RegistryRef, req.ToolName)
+	if cErr == nil {
+		cErr = fillBindingFromServer(loc, &req)
+	}
+	if cErr != nil {
+		if cErr.status >= http.StatusInternalServerError {
+			s.log.Error(cErr.logged(), "bind tool: resolving its MCP server failed", "namespace", ns, "tool", req.ToolName)
 		}
+		writeError(w, cErr.status, cErr.msg)
+		return
 	}
 
 	binding := &agentsv1beta1.MCPToolBinding{
@@ -470,50 +473,58 @@ func (s *Server) handleCreateMCPToolBinding(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusCreated, newMCPToolBindingDetail(binding))
 }
 
-// completeBindingFromRegistry fills in what a create left out from the tool's entry in
-// the MCP server that provides it: registryRef, mode, and the server the entry pins. Only
-// servers the caller may use are searched, and a personal server binds only for its owner
-// (ADR 0029). The caller's permission to create bindings in ns is checked first, so a
-// caller who may not bind learns nothing about the namespace's servers.
-func (s *Server) completeBindingFromRegistry(ctx context.Context, caller client.Client, ns string, req *MCPToolBindingCreateRequest) *createError {
+// usableBindingServer finds tool on the MCP server registryRef names, or on the first server by
+// name that provides it when registryRef is empty, among the servers the caller may use, and
+// enforces the bind-time owner guard: a personal server binds only for its owner (ADR 0029). Every
+// create and update of a binding passes through it, so a binding can only ever name a server its
+// author may use. The caller's permission for verb on bindings in ns is checked first, so a caller
+// who may not bind learns nothing about the namespace's servers.
+func (s *Server) usableBindingServer(ctx context.Context, caller client.Client, verb, ns, registryRef, tool string) (toolLoc, *createError) {
 	if cErr := s.authzRefusal(
-		s.authorizeStore(ctx, caller, authz.VerbCreate, resourceMCPToolBindings, ns, ""),
+		s.authorizeStore(ctx, caller, verb, resourceMCPToolBindings, ns, ""),
 		"bind tools in namespace "+ns); cErr != nil {
-		return cErr
+		return toolLoc{}, cErr
 	}
 	username, err := callerUsername(ctx, caller)
 	if err != nil {
 		if apierrors.IsUnauthorized(err) {
-			return &createError{status: http.StatusUnauthorized, msg: msgTokenRejected}
+			return toolLoc{}, &createError{status: http.StatusUnauthorized, msg: msgTokenRejected}
 		}
-		return &createError{status: http.StatusInternalServerError, msg: "failed to resolve the caller's identity", cause: err}
+		return toolLoc{}, &createError{status: http.StatusInternalServerError, msg: "failed to resolve the caller's identity", cause: err}
 	}
 	callerOwner := userGrantHash(username)
 	regs, err := usableToolRegistries(ctx, s.toolRegistryStore, ns, callerOwner)
 	switch {
 	case errors.Is(err, errNoToolRegistryStore):
-		return &createError{status: http.StatusNotImplemented, msg: msgToolRegistryStoreRequired}
+		return toolLoc{}, &createError{status: http.StatusNotImplemented, msg: msgToolRegistryStoreRequired}
 	case err != nil:
-		return &createError{
+		return toolLoc{}, &createError{
 			status: http.StatusInternalServerError,
 			msg:    fmt.Sprintf("failed to read the MCP servers in namespace %q", ns), cause: err,
 		}
 	}
 
-	loc, found := findRegistryTool(regs, req.RegistryRef, req.ToolName)
+	// Another user's private server is not among regs, so naming it is refused exactly like naming a
+	// server that does not exist: the refusal does not say whether it does.
+	loc, found := findRegistryTool(regs, registryRef, tool)
 	switch {
-	case !found && req.RegistryRef != "":
-		return &createError{status: http.StatusBadRequest, msg: fmt.Sprintf(
-			"tool %q is not provided by an MCP server %q you can use in namespace %q", req.ToolName, req.RegistryRef, ns)}
+	case !found && registryRef != "":
+		return toolLoc{}, &createError{status: http.StatusBadRequest, msg: fmt.Sprintf(
+			"tool %q is not provided by an MCP server %q you can use in namespace %q", tool, registryRef, ns)}
 	case !found:
-		return &createError{status: http.StatusBadRequest, msg: fmt.Sprintf(
+		return toolLoc{}, &createError{status: http.StatusBadRequest, msg: fmt.Sprintf(
 			"tool %q is not provided by any MCP server you can use in namespace %q — add the MCP server that provides it first",
-			req.ToolName, ns)}
-	case loc.scope == scopePersonal && (callerOwner == "" || loc.owner != callerOwner):
-		return &createError{status: http.StatusForbidden, msg: fmt.Sprintf(
-			"tool %q is on a personal MCP server you do not own — only its owner can bind it", req.ToolName)}
+			tool, ns)}
+	case loc.scope == scopePersonal && loc.owner != callerOwner:
+		return toolLoc{}, &createError{status: http.StatusForbidden, msg: fmt.Sprintf(
+			"tool %q is on a personal MCP server you do not own — only its owner can bind it", tool)}
 	}
+	return loc, nil
+}
 
+// fillBindingFromServer completes what a create left out from the tool's entry on its server:
+// registryRef, mode, and the server the entry pins.
+func fillBindingFromServer(loc toolLoc, req *MCPToolBindingCreateRequest) *createError {
 	req.RegistryRef = loc.registry
 	if req.Mode == "" {
 		switch {
@@ -604,6 +615,14 @@ func (s *Server) handleUpdateMCPToolBinding(w http.ResponseWriter, r *http.Reque
 	}
 	if strings.TrimSpace(req.Mode) == "" {
 		writeError(w, http.StatusBadRequest, "mode is required")
+		return
+	}
+	if _, cErr := s.usableBindingServer(r.Context(), caller, authz.VerbUpdate, ns,
+		strings.TrimSpace(req.RegistryRef), strings.TrimSpace(req.ToolName)); cErr != nil {
+		if cErr.status >= http.StatusInternalServerError {
+			s.log.Error(cErr.logged(), "update tool binding: resolving its MCP server failed", "namespace", ns, "name", name)
+		}
+		writeError(w, cErr.status, cErr.msg)
 		return
 	}
 
