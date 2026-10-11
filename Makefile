@@ -444,7 +444,7 @@ helm-generate: manifests kustomize ## Regenerate the Helm chart templates from c
 	KUSTOMIZE="$(KUSTOMIZE)" ./hack/gen-helm-chart.sh
 
 .PHONY: crd-version-parity
-crd-version-parity: manifests ## Guard: multi-version CRDs keep matching top-level CEL validations (conversion is None; audit FUNC-8).
+crd-version-parity: manifests ## Guard: every CRD serves exactly one version, its storage version, the same for all (ADR 0100).
 	./hack/check-crd-version-parity.sh config/crd/bases
 
 .PHONY: crd-frozen

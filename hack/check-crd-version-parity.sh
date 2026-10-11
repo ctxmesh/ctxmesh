@@ -1,46 +1,59 @@
 #!/usr/bin/env bash
-# CRD version-parity guard (audit FUNC-8).
+# CRD served-version guard (ADR 0100 amendment, m184.18; audit FUNC-8).
 #
-# The CRDs graduate v1alpha1 -> v1beta1 as "field-identical" copies with conversion
-# strategy None (no webhook). That is only safe while the schemas' validation stays in
-# lock-step: a value admitted via one version but rejected by the other wedges reconcile
-# (e.g. a 45+-char name admitted via v1beta1 that v1alpha1's CEL rule would have rejected,
-# then failing at the Knative revision-name webhook).
+# Every CRD serves exactly one version, that version is its storage version, and every CRD in the
+# directory serves the same one. Until GA there is one served API version (v1beta1), so no kind can
+# admit through one version what another would reject: with conversion strategy None, two served
+# versions are only safe while their validation is identical, which is the drift this gate first
+# existed to catch (a 45+-char AgentDeployment name admitted via one version, wedging reconcile).
 #
-# This fails CI when a multi-version CRD's TOP-LEVEL metadata validations
-# (x-kubernetes-validations, e.g. the size(self.metadata.name) <= 44 guard) differ across
-# its served versions. Run after `make manifests`.
+# Serving a second version is a decision, not a regeneration side effect: it needs an ADR, a
+# conversion story, and a change to this gate. Run after `make manifests`.
 set -euo pipefail
 
 CRD_DIR="${1:-config/crd/bases}"
 
 python3 - "$CRD_DIR" <<'PY'
-import sys, glob, yaml
+import glob
+import sys
+
+import yaml
 
 crd_dir = sys.argv[1]
-fail = False
+failures = []
+served_by_crd = {}
 for f in sorted(glob.glob(f"{crd_dir}/*.yaml")):
-    for d in yaml.safe_load_all(open(f)):
+    with open(f) as fh:
+        docs = list(yaml.safe_load_all(fh))
+    for d in docs:
         if not d or d.get("kind") != "CustomResourceDefinition":
             continue
+        name = d["metadata"]["name"]
         versions = d["spec"]["versions"]
-        if len(versions) < 2:
-            continue
-        rulesets = {}
-        for v in versions:
-            schema = v["schema"]["openAPIV3Schema"]
-            rulesets[v["name"]] = sorted(
-                x["rule"] for x in schema.get("x-kubernetes-validations", [])
-            )
-        distinct = {tuple(r) for r in rulesets.values()}
-        if len(distinct) > 1:
-            fail = True
-            print(f"DRIFT: {d['metadata']['name']} top-level CEL rules differ across versions:")
-            for name, rules in rulesets.items():
-                print(f"  {name}: {rules}")
+        served = [v["name"] for v in versions if v.get("served")]
+        stored = [v["name"] for v in versions if v.get("storage")]
+        if len(served) != 1:
+            failures.append(f"{name} serves {len(served)} versions {served}; it must serve exactly one")
+        if len(stored) != 1:
+            failures.append(f"{name} has {len(stored)} storage versions {stored}; it must have exactly one")
+        if len(served) == 1 and stored != served:
+            failures.append(f"{name} serves {served[0]} but stores {stored}; the served version must be the storage version")
+        served_by_crd[name] = tuple(served)
 
-if fail:
-    print("CRD version-parity FAILED (audit FUNC-8) — align top-level validations across versions.")
+if not served_by_crd:
+    print(f"FAIL: no CustomResourceDefinition found in {crd_dir}; the gate checked nothing")
     sys.exit(1)
-print("CRD version-parity OK: every multi-version CRD has matching top-level CEL rules.")
+
+distinct = sorted({s for s in served_by_crd.values()})
+if len(distinct) > 1:
+    failures.append("the CRDs do not serve the same version:")
+    for name, served in sorted(served_by_crd.items()):
+        failures.append(f"  {name}: {list(served)}")
+
+if failures:
+    for line in failures:
+        print(f"FAIL: {line}")
+    print("CRD served-version gate FAILED: one served version per CRD, the same for all (ADR 0100).")
+    sys.exit(1)
+print(f"CRD served-version OK: {len(served_by_crd)} CRDs each serve and store only {distinct[0][0]}.")
 PY
