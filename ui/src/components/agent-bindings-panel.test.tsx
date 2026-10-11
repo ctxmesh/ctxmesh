@@ -6,7 +6,7 @@ import { AgentBindingsPanel } from "@/components/agent-bindings-panel";
 import type { AgentDependency, AgentDetailResponse } from "@/lib/api";
 import fixtures from "@/test/contract-fixtures.json";
 
-// The Bindings panel (m184.15): every reference the agent makes, as the BFF resolved it. The base
+// The Bindings panel (m184.16): every reference the agent makes, as the BFF resolved it. The base
 // detail comes from the contract fixtures so the shape is the one the BFF actually sends.
 
 const base = fixtures.AgentDetailResponse as unknown as AgentDetailResponse;

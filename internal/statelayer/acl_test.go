@@ -27,7 +27,7 @@ func aclKeyPrefixes(t *testing.T, path string) []string {
 
 // Every key this package writes must be admitted by the ACL. A key space missing from the ACL fails
 // NOPERM on a real cluster while every unit test (on miniredis or a map) passes: spawn (M119), agent
-// (M122), and run/ns/fleet/user/conv (m184.9) each shipped that way.
+// (M122), and run/ns/fleet/user/conv (m184.5) each shipped that way.
 func TestStateLayerACLAdmitsEveryKeyThisPackageWrites(t *testing.T) {
 	keys := append(scopeKeys(ControlScope{Namespace: "ns", Agent: "a", Tenant: "t", RunID: "r"}),
 		dedupKey("ns", "m"),

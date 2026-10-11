@@ -549,7 +549,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	onlineResolver := bff.NewDBOnlineConfigResolver(onlineStore)
 
 	bindStore := runcapBindStore(log)
-	// Pod identity for the guardrail audit edge (m184.37): TokenReview needs the BFF's
+	// Pod identity for the guardrail audit edge (m184.7): TokenReview needs the BFF's
 	// system:auth-delegator binding. A clientset that cannot be built leaves that path off.
 	var podAuth statelayer.PodAuthenticator
 	if cs, csErr := kubernetes.NewForConfig(cfg); csErr == nil {

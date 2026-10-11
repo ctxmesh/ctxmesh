@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package oauthpending is the control-plane store for the short-lived, single-use records an MCP
-// OAuth consent passes through (ADR 0040 amendment, m184.42): a pending authorization keyed by its
+// OAuth consent passes through (ADR 0040 amendment, m184.25): a pending authorization keyed by its
 // OAuth state, and a consent ticket a chatbox hands to the console. They live in Postgres rather than
 // one BFF pod's memory because the callback or the redeem may reach any replica.
 //

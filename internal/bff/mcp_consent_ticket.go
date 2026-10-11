@@ -33,7 +33,7 @@ import (
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
-// Consent tickets (ADR 0040 amendment, m184.42). The binding cookie must land on the console
+// Consent tickets (ADR 0040 amendment, m184.25). The binding cookie must land on the console
 // origin, where the one registered callback runs, but a chatbox on an agent's own hostname
 // cannot set it there. So the chatbox mints a ticket on its own origin, hands it by postMessage
 // to the console's /connect page, and that page redeems it on the console origin, where the flow

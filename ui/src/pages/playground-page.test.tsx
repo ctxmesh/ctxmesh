@@ -233,7 +233,7 @@ function fillNamespace(name: string) {
 
 // PlaygroundPage uses <Link> (react-router-dom); wrap in MemoryRouter so tests
 // don't need the full app router (the pattern mirrors agents-page.test.tsx).
-// The page opens in plain-text chat (m184.15); the workbench tests below exercise the
+// The page opens in plain-text chat (m184.16); the workbench tests below exercise the
 // JSON-request mode, so they open it directly with ?mode=json.
 function renderPage(initialEntry = "/playground?mode=json") {
   return render(
@@ -902,10 +902,10 @@ describe("PlaygroundPage — RBAC-gated Run/Apply", () => {
   });
 });
 
-// ── m184.15: the first run speaks plain text ────────────────────────────────
+// ── m184.16: the first run speaks plain text ────────────────────────────────
 // The page opens in chat: pick an agent, type a sentence, read the answer. The JSON request
 // stays one click away for an agent whose input is structured.
-describe("PlaygroundPage — plain-text chat by default (m184.15)", () => {
+describe("PlaygroundPage — plain-text chat by default (m184.16)", () => {
   const readyDetail = (ns: string, name: string, conditions: unknown[] = []) => ({
     name,
     namespace: ns,

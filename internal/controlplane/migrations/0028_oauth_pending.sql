@@ -1,4 +1,4 @@
--- 0028 — short-lived MCP OAuth consent records (ADR 0040 amendment, m184.42).
+-- 0028 — short-lived MCP OAuth consent records (ADR 0040 amendment, m184.25).
 --
 -- Two record kinds pass through here: a pending authorization (keyed by its OAuth state, consumed by
 -- the callback) and a consent ticket (minted by a chatbox on an agent hostname, redeemed by the console).

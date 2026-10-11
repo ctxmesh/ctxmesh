@@ -2624,8 +2624,8 @@ describe("AgentDetailPage — lifecycle stage (M151 §5.20)", () => {
   });
 });
 
-// ── m184.15: the Bindings panel on Overview ─────────────────────────────────
-describe("AgentDetailPage — the Bindings panel (m184.15)", () => {
+// ── m184.16: the Bindings panel on Overview ─────────────────────────────────
+describe("AgentDetailPage — the Bindings panel (m184.16)", () => {
   it("lists what the agent references on Overview, missing ones included", async () => {
     installFetch({
       detail: {
@@ -2655,7 +2655,7 @@ describe("AgentDetailPage — the Bindings panel (m184.15)", () => {
 
 // An agent that has not settled is re-read every four seconds. The re-reads used to stack when the
 // BFF was slow, and never stopped for an agent that never settled.
-describe("AgentDetailPage — watching an unsettled agent (m184.15)", () => {
+describe("AgentDetailPage — watching an unsettled agent (m184.16)", () => {
   const starting = { ...DEFAULT_DETAIL, ready: false, phase: "Pending" };
   const advance = (ms: number) =>
     act(async () => {

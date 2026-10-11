@@ -10,7 +10,7 @@ import type {
   AgentDetailResponse,
 } from "@/lib/api";
 
-// AgentBindingsPanel — everything one agent references, each resolved (m184.15).
+// AgentBindingsPanel — everything one agent references, each resolved (m184.16).
 //
 // The rail names a few references and the reach panel covers the tools, but an
 // agent depends on more than either shows: the secret binding behind its model

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CRD served-version guard (ADR 0100 amendment, m184.18; audit FUNC-8).
+# CRD served-version guard (ADR 0100 amendment, m184.22; audit FUNC-8).
 #
 # Every CRD serves exactly one version, that version is its storage version, and every CRD in the
 # directory serves the same one. Until GA there is one served API version (v1beta1), so no kind can

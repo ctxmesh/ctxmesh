@@ -327,7 +327,7 @@ func relayedCap(t *testing.T) string {
 }
 
 // An AMP callee cannot prove its caller's capability, so it presents its own pod token alongside it; the
-// BFF then authenticates the pod (m184.37).
+// BFF then authenticates the pod (m184.7).
 func TestGuardrailAudit_RelayedCapabilityCarriesThePodToken(t *testing.T) {
 	headers := make(chan http.Header, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

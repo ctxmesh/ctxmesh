@@ -1,5 +1,5 @@
 # Regression sweep: every shipped milestone's acceptance, re-run against a fresh full-stack cluster,
-# nightly (m184.6). It used to be close gate (c), run by hand on a laptop at every close: hours of
+# nightly (m184.19). It used to be close gate (c), run by hand on a laptop at every close: hours of
 # load, 0 of the 12 defects found in M177-M179, and 4 false reds at the M183 close from that load
 # alone. It runs here instead, on its own clock; a close reads its latest run and triages any red.
 #

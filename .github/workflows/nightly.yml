@@ -50,7 +50,7 @@ jobs:
       BRAIN_CHECKOUT_TOKEN: ${{ secrets.BRAIN_CHECKOUT_TOKEN }}
 
   # Upgrade from the newest published release to this tree, on a cluster carrying real data: the
-  # upgrade every user makes next (m184.16). Red until a published release installs (beta.8's
+  # upgrade every user makes next (m184.17). Red until a published release installs (beta.8's
   # bundled MinIO image can no longer be pulled), which is the truth about that upgrade path.
   upgrade:
     name: nightly-upgrade

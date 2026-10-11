@@ -56,7 +56,7 @@ import {
 // PlaygroundPage — define on the left, run and its story on the right (M151
 // §6.1 archetype A8, the workbench). Route: /playground
 //
-// ── PLAIN TEXT FIRST (m184.15) ──────────────────────────────────────────────
+// ── PLAIN TEXT FIRST (m184.16) ──────────────────────────────────────────────
 // A first run is a sentence, not a JSON document. By default the right column
 // is the console ChatPanel for the picked agent: type, press Enter, read the
 // answer. It sends {"input": "<text>"}, exactly as the agent page's chat does,

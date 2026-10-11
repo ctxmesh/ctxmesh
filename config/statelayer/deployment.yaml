@@ -65,7 +65,7 @@ spec:
             # agent-spend write 502s and is swallowed → cost_rollups stays empty → the Cost surface
             # shows $0. Added M122 (the cost pipeline was never live-exercised on this ACL).
             - "~agent:*"
-            # Found missing together in m184.9, each failing NOPERM on a live cluster:
+            # Found missing together in m184.5, each failing NOPERM on a live cluster:
             #   runcap:*  run-capability binding and the cross-replica proof replay set (ADR 0124);
             #   run:* ns:* fleet:*  the run-control and kill-switch markers (M146), so cancel and the
             #             kill switch's fast path never fired;

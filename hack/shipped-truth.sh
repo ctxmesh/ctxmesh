@@ -354,9 +354,9 @@ row m165 has site:src/content/docs/reference/compatibility.md "no independent se
 
 # Per-version scoring: every agent pod carries the version it serves, and the contract bump that put it
 # there rolls existing agents rather than being dropped under an unchanged revision name.
-row m184.40 has internal/controller/agentdeployment_controller.go 'Name: envAgentVersion, Value: agentVersionName(deploy.Name, hash)' "the controller sets AGENT_VERSION on every agent pod"
-row m184.40 test internal/controller/agent_version_integration_test.go TestAnAgentRevisionedBeforeAgentVersionRollsOnce "an agent revisioned before AGENT_VERSION rolls to a new revision name"
-row m184.40 test internal/controller/agent_version_integration_test.go TestTheDetectorFindsTheVersionsThePodsCarry "the regression detector finds the versions the pods carry"
+row m184.23 has internal/controller/agentdeployment_controller.go 'Name: envAgentVersion, Value: agentVersionName(deploy.Name, hash)' "the controller sets AGENT_VERSION on every agent pod"
+row m184.23 test internal/controller/agent_version_integration_test.go TestAnAgentRevisionedBeforeAgentVersionRollsOnce "an agent revisioned before AGENT_VERSION rolls to a new revision name"
+row m184.23 test internal/controller/agent_version_integration_test.go TestTheDetectorFindsTheVersionsThePodsCarry "the regression detector finds the versions the pods carry"
 
 # ── verdict ───────────────────────────────────────────────────────────────────
 if [ "$total" -eq 0 ]; then

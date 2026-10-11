@@ -201,7 +201,7 @@ const (
 	// (defaultPodTokenPath) and the proxy (STATELAYER_POD_AUDIENCE) respectively.
 	envStatelayerProxyURL  = "STATELAYER_PROXY_URL"
 	envStatelayerTokenPath = "STATELAYER_TOKEN_PATH"
-	// A guarded agent's own identity toward the BFF (m184.37): a projected token with the BFF's audience,
+	// A guarded agent's own identity toward the BFF (m184.7): a projected token with the BFF's audience,
 	// so the guardrail audit edge can authenticate the pod that enforced a block when the run capability
 	// it holds was relayed over AMP and is bound to another agent's key.
 	envBFFPodTokenPath         = "BFF_POD_TOKEN_PATH"

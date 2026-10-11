@@ -1,4 +1,4 @@
-# TokenReview for the guardrail audit edge (m184.37, ADR 0124 amendment): a guarded agent called over
+# TokenReview for the guardrail audit edge (m184.7, ADR 0124 amendment): a guarded agent called over
 # AMP holds its caller's capability, bound to the caller's key, and proves its OWN identity with a
 # projected token for the BFF audience. TokenReview is cluster-scoped, so this is a ClusterRole, and it
 # grants exactly that one verb. Narrower than system:auth-delegator, which would also grant

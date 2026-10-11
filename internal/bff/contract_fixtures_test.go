@@ -135,7 +135,7 @@ func buildContractFixtures() map[string]any {
 			// m66.10: guardrailPolicyRef is included in the fixture so the UI
 			// mock-drift guard covers agents that reference a GuardrailPolicy.
 			GuardrailPolicyRef: "pii-and-jailbreak",
-			// m184.15: the resolved references the Bindings panel renders.
+			// m184.16: the resolved references the Bindings panel renders.
 			Dependencies: []AgentDependency{
 				{Kind: depKindModelRoute, Name: "anthropic", Namespace: "default", State: depReady, Reason: "Served"},
 				{

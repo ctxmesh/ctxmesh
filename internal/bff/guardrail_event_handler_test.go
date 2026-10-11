@@ -314,7 +314,7 @@ func TestGuardrailEvent_RealPostgresRoundTrip(t *testing.T) {
 	}
 }
 
-// ── a guarded AMP callee (m184.37) ─────────────────────────────────────────────
+// ── a guarded AMP callee (m184.7) ─────────────────────────────────────────────
 
 type fakePodAuth struct {
 	id  statelayer.PodIdentity

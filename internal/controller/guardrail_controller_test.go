@@ -431,7 +431,7 @@ func TestReconcile_GuardedSupervisorGetsBFFURLOnce(t *testing.T) {
 //
 // This replaces TestReconcile_UnguardedAgentNoBFFURL, which asserted the opposite. That test guarded
 // m66.15's scope (only guarded agents gained the variable), not a security property. Since ADR 0124's
-// amendment (m184.9) every launcher binds its run capability at the BFF before the agent sees it, and a
+// amendment (m184.5) every launcher binds its run capability at the BFF before the agent sees it, and a
 // launcher without the BFF's address hands its agent a bearer capability anyone could bind first. The
 // property worth guarding is now the inverse: every agent has it, exactly once, and a user's own value
 // wins.
@@ -515,7 +515,7 @@ func TestGuardrailPolicyController_ValidatesAndHashes(t *testing.T) {
 	assert.Equal(t, reasonGuardrailInvalidPattern, badCond.Reason)
 }
 
-// A guarded agent carries its own identity toward the BFF (m184.37): a projected token with the BFF's
+// A guarded agent carries its own identity toward the BFF (m184.7): a projected token with the BFF's
 // audience, mounted read-only into the agent container, its path in BFF_POD_TOKEN_PATH. An unguarded
 // agent has none.
 func TestReconcile_GuardedAgentGetsABFFPodToken(t *testing.T) {
