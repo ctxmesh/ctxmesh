@@ -252,7 +252,11 @@ func (s *Server) closeToolRefs(r *http.Request, caller client.Client, tools []st
 	if username, uErr := callerUsername(ctx, caller); uErr == nil {
 		callerOwner = userGrantHash(username)
 	}
-	localIdx := toolRegistryIndex(ctx, s.toolRegistryStore, callerNS, callerOwner)
+	localIdx, idxErr := toolRegistryIndex(ctx, s.toolRegistryStore, callerNS, callerOwner)
+	if idxErr != nil && !errors.Is(idxErr, errNoToolRegistryStore) {
+		s.log.Error(idxErr, "fork ref-closure: reading the local MCP servers failed; every tool goes through the published catalog",
+			"namespace", callerNS)
+	}
 
 	// The published-catalog origin index (tool name → the published server that offers it),
 	// scoped to what THIS caller may discover. Built once (one catalog read) for all tools.

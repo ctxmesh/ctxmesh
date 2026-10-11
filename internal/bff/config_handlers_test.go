@@ -304,8 +304,26 @@ tools:
   - echo_tool
 `
 
+// toolStoreWith is a ToolRegistry store holding one team-visible MCP server in ns that
+// offers tools — what a managed agent's tools must resolve to for its create to succeed.
+func toolStoreWith(t *testing.T, ns string, tools ...string) toolregistry.Store {
+	t.Helper()
+	entries := make([]toolregistry.ToolEntry, 0, len(tools))
+	for _, name := range tools {
+		entries = append(entries, toolregistry.ToolEntry{Name: name, URL: "https://tools.example/mcp"})
+	}
+	store := toolregistry.NewMemStore()
+	_, err := store.Upsert(context.Background(), toolregistry.ToolRegistry{Namespace: ns, Name: "team-tools", Tools: entries})
+	require.NoError(t, err)
+	return store
+}
+
+// postAgent creates idemAgentYAML in "prod", where a registered server offers echo_tool.
 func postAgent(t *testing.T, s *Server) *httptest.ResponseRecorder {
 	t.Helper()
+	if s.toolRegistryStore == nil {
+		s.toolRegistryStore = toolStoreWith(t, "prod", "echo_tool")
+	}
 	reqBody, _ := json.Marshal(CreateAgentRequest{AgentYAML: idemAgentYAML, Namespace: "prod"})
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(reqBody)))
@@ -564,7 +582,8 @@ func TestBindingRegistryResolution(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	idx := toolRegistryIndex(context.Background(), store, "default", "")
+	idx, err := toolRegistryIndex(context.Background(), store, "default", "")
+	require.NoError(t, err)
 	assert.Equal(t, "scalekit-mcp-server", idx["create_organization"].registry)
 	assert.Equal(t, "https://mcp.scalekit.com/", idx["create_organization"].url)
 	assert.Equal(t, "acme-mcp", idx["search"].registry)

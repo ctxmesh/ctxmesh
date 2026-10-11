@@ -170,6 +170,10 @@ type createAgentOptions struct {
 	// draft, when true, stamps the agents.ctxmesh.ai/stage=draft label on the
 	// primary AgentDeployment before it is created, so the agent is born as a draft.
 	draft bool
+	// allowUnresolvedTools keeps a tool no usable MCP server provides, bound to expand's
+	// default registry, instead of refusing the create. Only the fork sets it: its
+	// ref-closure pass resolves or flags those tools after the agent exists.
+	allowUnresolvedTools bool
 }
 
 // stampDraftLabel sets the agents.ctxmesh.ai/stage=draft label on the primary

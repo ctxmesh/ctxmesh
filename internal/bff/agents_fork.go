@@ -293,7 +293,8 @@ func (s *Server) forkFromSourceSpec(r *http.Request, caller client.Client, sourc
 		callerOwner = userGrantHash(username)
 	}
 
-	created, cErr := createAgentFromYAML(ctx, caller, caller, s.promptStore, s.toolRegistryStore, s.scheme, renamed, callerNS, callerOwner)
+	created, cErr := createAgentFromYAML(ctx, caller, caller, s.promptStore, s.toolRegistryStore, s.scheme, renamed, callerNS, callerOwner,
+		createAgentOptions{allowUnresolvedTools: true})
 	if cErr != nil {
 		var ce *createError
 		if isCreateError(cErr, &ce) {

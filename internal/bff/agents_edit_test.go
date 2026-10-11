@@ -439,6 +439,7 @@ func TestEditFieldOnlySucceeds(t *testing.T) {
 	ad := consoleAgent(t, "echo", src, agentsv1beta1.AgentDeploymentSpec{Image: "img:1"})
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s.toolRegistryStore = toolStoreWith(t, detailNS, "search")
 
 	img := "img:2"
 	body, err := json.Marshal(UpdateAgentRequest{Image: &img})

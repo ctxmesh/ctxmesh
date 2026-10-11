@@ -378,12 +378,10 @@ func applyEditedSpec(ctx context.Context, applier AgentApplier, promptStore prom
 	// Point regenerated MCPToolBindings at the registry their tool actually lives in
 	// (m25 S18) — same fix as create: expand's hardcoded default registry doesn't
 	// exist for BYO-MCP tools, so the binding would be RegistryNotFound forever.
-	idx := toolRegistryIndex(ctx, regStore, ns, callerOwner)
-	rewriteBindingRegistries(objs, idx)
-	// The create path's bind-time owner guard applies to an edit too: an edit re-applies
-	// every binding, so it is a bind.
-	if gErr := checkBindingOwnership(objs, idx, callerOwner); gErr != nil {
-		return gErr
+	// An edit re-applies every binding, so it binds exactly as a create does: to a server
+	// the editor may use, refusing a tool none provides, under the owner guard.
+	if bErr := bindAgentTools(ctx, regStore, objs, ns, callerOwner, false); bErr != nil {
+		return bErr
 	}
 
 	// Re-stamp the NEW source-spec on the AgentDeployment so the next edit

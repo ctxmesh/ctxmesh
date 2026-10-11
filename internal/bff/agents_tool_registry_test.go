@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -33,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
 
@@ -99,11 +101,12 @@ func managedEchoAgent(name string) string {
 	return fmt.Sprintf("name: %s\nruntime: managed\nsystemPrompt: be helpful\ntools:\n  - echo\n", name)
 }
 
-func createAgentAs(t *testing.T, c client.Client, store toolregistry.Store, agentYAML, ns string) *httptest.ResponseRecorder {
+// createAgentAs creates agentYAML in "prod" through POST /api/agents.
+func createAgentAs(t *testing.T, c client.Client, store toolregistry.Store, agentYAML string) *httptest.ResponseRecorder {
 	t.Helper()
 	s := newConfigServer(t, c)
 	s.toolRegistryStore = store
-	body, err := json.Marshal(CreateAgentRequest{AgentYAML: agentYAML, Namespace: ns})
+	body, err := json.Marshal(CreateAgentRequest{AgentYAML: agentYAML, Namespace: "prod"})
 	require.NoError(t, err)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(body))
@@ -126,14 +129,14 @@ func TestCreateAgentBindsTheServerTheCallerCanUse(t *testing.T) {
 	store := echoRegistries(t, "prod")
 
 	c := identityClient(t, operatorUser)
-	rec := createAgentAs(t, c, store, managedEchoAgent("ops-agent"), "prod")
+	rec := createAgentAs(t, c, store, managedEchoAgent("ops-agent"))
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	b := echoBinding(t, c, "prod", "ops-agent")
 	assert.Equal(t, teamEchoRegistry, b.Spec.RegistryRef)
 	assert.Equal(t, teamEchoURL, b.Spec.Server.URL)
 
 	c = identityClient(t, aliceUser)
-	rec = createAgentAs(t, c, store, managedEchoAgent("alice-agent"), "prod")
+	rec = createAgentAs(t, c, store, managedEchoAgent("alice-agent"))
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	b = echoBinding(t, c, "prod", "alice-agent")
 	assert.Equal(t, alicePrivateRegistry, b.Spec.RegistryRef, "the owner may bind her own private server")
@@ -155,4 +158,101 @@ func TestEditAgentBindsTheServerTheEditorCanUse(t *testing.T) {
 	b := echoBinding(t, c, detailNS, "echo")
 	assert.Equal(t, teamEchoRegistry, b.Spec.RegistryRef)
 	assert.Equal(t, teamEchoURL, b.Spec.Server.URL)
+}
+
+// failingListStore is a ToolRegistry store whose List always fails.
+type failingListStore struct{ toolregistry.Store }
+
+func (failingListStore) List(context.Context, controlplane.ListOptions) (controlplane.Page[toolregistry.ToolRegistry], error) {
+	return controlplane.Page[toolregistry.ToolRegistry]{}, errors.New("connection refused")
+}
+
+// TestCreateAgentRefusesAToolNoServerProvides: a managed agent's tool that no server the
+// caller may use provides used to be bound to expand's default registry, which nothing
+// provisions, and the agent ran without it. The create is now refused with 400 naming the
+// tool, and nothing is created — including when the only server offering it is another
+// user's private one.
+func TestCreateAgentRefusesAToolNoServerProvides(t *testing.T) {
+	cases := []struct {
+		name, agent, missing string
+	}{
+		{"unregistered tool", "name: a1\nruntime: managed\nsystemPrompt: hi\ntools:\n  - echo\n  - nope\n", "nope"},
+		{"only on another user's private server", "name: a2\nruntime: managed\nsystemPrompt: hi\ntools:\n  - echo\n", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := echoRegistries(t, "prod")
+			missing := tc.missing
+			if missing == "" {
+				// Only Alice's private server offers echo here.
+				require.NoError(t, store.Delete(context.Background(), "prod", teamEchoRegistry))
+				missing = "echo"
+			}
+			c := identityClient(t, operatorUser)
+			rec := createAgentAs(t, c, store, tc.agent)
+
+			require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+			assert.Contains(t, rec.Body.String(), fmt.Sprintf(`tool \"%s\"`, missing))
+			assert.Contains(t, rec.Body.String(), "add the MCP server that provides it first")
+			assertNothingCreated(t, c, "prod")
+		})
+	}
+}
+
+// TestCreateAgentWithToolsNeedsTheStore: without the control-plane store no server can be
+// registered or resolved, so a managed agent with tools is refused (501) rather than created
+// with bindings that can never resolve; a store read failure is a 500, never a guess.
+func TestCreateAgentWithToolsNeedsTheStore(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		store  toolregistry.Store
+		status int
+	}{
+		{"no store", nil, http.StatusNotImplemented},
+		{"store read fails", failingListStore{}, http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := identityClient(t, operatorUser)
+			rec := createAgentAs(t, c, tc.store, managedEchoAgent("no-store"))
+			require.Equal(t, tc.status, rec.Code, "body: %s", rec.Body.String())
+			assertNothingCreated(t, c, "prod")
+		})
+	}
+
+	// An agent with no tools never needs the store.
+	c := identityClient(t, operatorUser)
+	rec := createAgentAs(t, c, nil, "name: plain\nruntime: managed\nsystemPrompt: hi\n")
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestEditAgentRefusesAToolNoServerProvides: the edit path shares the create's binding, so an
+// edit adding an unprovided tool is refused and the live agent is left as it was.
+func TestEditAgentRefusesAToolNoServerProvides(t *testing.T) {
+	src := managedEchoAgent("echo")
+	ad := consoleAgent(t, "echo", src, agentsv1beta1.AgentDeploymentSpec{Image: "img:1"})
+	c := identityClient(t, operatorUser, ad)
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s.toolRegistryStore = echoRegistries(t, detailNS)
+
+	rec := putAgent(t, s, "echo", src+"  - nope\nimage: img:2\n")
+
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `tool \"nope\"`)
+	assert.Contains(t, rec.Body.String(), "add the MCP server that provides it first")
+	var live agentsv1beta1.AgentDeployment
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: detailNS, Name: "echo"}, &live))
+	assert.Equal(t, "img:1", live.Spec.Image, "a refused edit changes nothing")
+	var bindings agentsv1beta1.MCPToolBindingList
+	require.NoError(t, c.List(context.Background(), &bindings, client.InNamespace(detailNS)))
+	assert.Empty(t, bindings.Items)
+}
+
+func assertNothingCreated(t *testing.T, c client.Client, ns string) {
+	t.Helper()
+	var agents agentsv1beta1.AgentDeploymentList
+	require.NoError(t, c.List(context.Background(), &agents, client.InNamespace(ns)))
+	assert.Empty(t, agents.Items, "no agent is created")
+	var bindings agentsv1beta1.MCPToolBindingList
+	require.NoError(t, c.List(context.Background(), &bindings, client.InNamespace(ns)))
+	assert.Empty(t, bindings.Items, "no binding is created")
 }

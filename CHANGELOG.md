@@ -54,6 +54,14 @@ MCP server you do not own" even though a shared server offered the same tool; an
 re-pointed the tool at the private server. Create, edit and fork now consider only the servers
 you can use, and an edit applies the same owner check as a create.
 
+**Fixed: an agent could be created with a tool that does not exist.** A managed agent's tool that
+no registered MCP server provides was bound to a default registry that nothing creates, so the
+agent ran without the tool and only the binding's `RegistryNotFound` condition said so. Creating
+or editing such an agent in the console or the API is now refused with HTTP 400 naming the tool:
+add the MCP server that provides it first. Without the control-plane store an agent with tools is
+refused with 501. `ctxmesh expand` is unchanged, and forking still creates the agent and flags
+the tool for rebinding.
+
 **Fixed: every agent run was cut off at five minutes.** Knative's default request timeout is 300
 seconds, and the platform never set one, while a run may take 600. A run that sends nothing until
 it is done also hit Knative's separate time-to-first-byte limit at the same 300 seconds. Every
