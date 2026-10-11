@@ -108,7 +108,9 @@ checked before it is read; the `developer` and `operator` roles have it.
 ingestion.** An ingestion run was created without a creator, so the person who started one got a
 404 reading it, and access to the run was decided by an AgentDeployment of the knowledge base's
 name. The run now records whoever started it, who reads and cancels it by ownership; anyone else,
-and any scheduled re-ingest, needs `update` on that KnowledgeBase.
+and any scheduled re-ingest, needs `update` on that KnowledgeBase. Nor do an ingestion's runs, or a dataset
+export's, appear any longer in the Runs list of an agent named like the knowledge base or the
+dataset.
 
 **Fixed: the replay stepper showed every step of a recorded run as a gap.** `GET
 /api/runs/{id}/fixture` stopped reading the run's events before the Postgres run store had

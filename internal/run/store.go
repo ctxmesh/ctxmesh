@@ -255,8 +255,10 @@ type Store interface {
 
 	// ListRoots returns ROOT runs (no parent) of the given agents, newest first: the console's Runs list
 	// when no trace store is wired. f.Agents is the isolation boundary, filled by the BFF from the
-	// caller's own RBAC; an empty set returns nothing (fail closed, never a list-all). Paging is keyset on
-	// (CreatedAt, ID) through f.Before. Read-only; a query/scan error is returned.
+	// caller's own RBAC; an empty set returns nothing (fail closed, never a list-all). Knowledge-base
+	// ingestions and dataset exports are not agent runs and never appear, though their Agent field holds
+	// the knowledge base's or the dataset's name. Paging is keyset on (CreatedAt, ID) through f.Before.
+	// Read-only; a query/scan error is returned.
 	ListRoots(ctx context.Context, f RootListFilter) ([]RootRun, error)
 }
 
@@ -886,7 +888,8 @@ func (m *memStore) ListRoots(_ context.Context, f RootListFilter) ([]RootRun, er
 	var out []RootRun
 	for _, e := range m.entries {
 		r := e.run
-		if r.ParentRunID != "" || !allow[AgentKey{Namespace: r.Namespace, Name: r.Agent}] {
+		if r.ParentRunID != "" || r.IsIngestionJob() || r.IsDatasetExportJob() ||
+			!allow[AgentKey{Namespace: r.Namespace, Name: r.Agent}] {
 			continue
 		}
 		if (!f.From.IsZero() && r.CreatedAt.Before(f.From)) || (!f.To.IsZero() && r.CreatedAt.After(f.To)) {

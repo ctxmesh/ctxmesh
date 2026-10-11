@@ -1266,13 +1266,14 @@ func (p *pgStore) ListRoots(ctx context.Context, f RootListFilter) ([]RootRun, e
 		namespaces[i], agents[i] = a.Namespace, a.Name
 	}
 	q := `SELECT id, namespace, agent, trace_id, status, created_at, updated_at FROM runs
-		WHERE parent_run_id = '' AND (namespace, agent) IN (SELECT * FROM unnest($1::text[], $2::text[]))`
+		WHERE parent_run_id = '' AND ingestion_ref = '' AND export_ref = ''
+		  AND (namespace, agent) IN (SELECT * FROM unnest($1::text[], $2::text[]))`
 	args := []any{namespaces, agents}
 	if len(f.Agents) == 1 {
 		// One agent (its page, ?agent=, a team's supervisor): equality lets Postgres walk the index in
 		// order and stop at the LIMIT, where the unnest form sorts every run the agent has.
 		q = `SELECT id, namespace, agent, trace_id, status, created_at, updated_at FROM runs
-			WHERE parent_run_id = '' AND namespace = $1 AND agent = $2`
+			WHERE parent_run_id = '' AND ingestion_ref = '' AND export_ref = '' AND namespace = $1 AND agent = $2`
 		args = []any{f.Agents[0].Namespace, f.Agents[0].Name}
 	}
 	if !f.From.IsZero() {

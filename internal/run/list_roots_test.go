@@ -31,6 +31,15 @@ func listRootsContract(t *testing.T, s Store) {
 	mk("c1", "rival", "worker", at(5), "") // same agent name, another namespace
 	mk("a3-child", "team", "worker", at(6), "a3")
 	mk("a4", "team", "worker", at(3), "") // ties a3 on created_at; id breaks the tie
+	// A knowledge base's ingestion and a dataset's export carry the knowledge base's or the dataset's
+	// name where an agent run carries its agent, so a resource named like the agent must not put its
+	// jobs in the agent's list.
+	ingest := New("kb-ingest", "team", "worker", nil, "", at(7))
+	ingest.IngestionRef, ingest.IngestionSpec = "worker", "{}"
+	require.NoError(t, s.Create(ingest))
+	export := New("ds-export", "team", "worker", nil, "", at(8))
+	export.ExportRef, export.ExportSpec = "worker", "{}"
+	require.NoError(t, s.Create(export))
 
 	ids := func(rows []RootRun) []string {
 		out := make([]string, 0, len(rows))
@@ -48,7 +57,7 @@ func listRootsContract(t *testing.T, s Store) {
 	all, err := s.ListRoots(ctx, RootListFilter{Agents: worker})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"a4", "a3", "a2", "a1"}, ids(all),
-		"newest first, ties by id; another namespace's agent of the same name and child runs are excluded")
+		"newest first, ties by id; another namespace's agent of the same name, child runs, and ingestion and export jobs are excluded")
 	assert.Equal(t, "trace-a4", all[0].TraceID)
 	assert.Equal(t, "team", all[0].Namespace)
 	assert.Equal(t, StatusQueued, all[0].Status)
