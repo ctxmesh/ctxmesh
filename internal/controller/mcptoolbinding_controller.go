@@ -35,7 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 	"github.com/ctxmesh/ctxmesh/internal/toolpush"
 )
@@ -131,7 +131,7 @@ func (r *MCPToolBindingReconciler) pusher() *toolpush.Pusher {
 //   - NotFound → the finalizer flow already converged the agent before the
 //     object vanished; nothing to key on.
 func (r *MCPToolBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var binding agentsv1alpha1.MCPToolBinding
+	var binding agentsv1beta1.MCPToolBinding
 	if err := r.Get(ctx, req.NamespacedName, &binding); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
@@ -183,7 +183,7 @@ func (r *MCPToolBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 // (nothing to own them); those are cleaned up out of band.
 func (r *MCPToolBindingReconciler) ensureOwnedByAgent(
 	ctx context.Context,
-	binding *agentsv1alpha1.MCPToolBinding,
+	binding *agentsv1beta1.MCPToolBinding,
 ) error {
 	for i := range binding.OwnerReferences {
 		o := &binding.OwnerReferences[i]
@@ -192,7 +192,7 @@ func (r *MCPToolBindingReconciler) ensureOwnedByAgent(
 		}
 	}
 
-	var agent agentsv1alpha1.AgentDeployment
+	var agent agentsv1beta1.AgentDeployment
 	if err := r.Get(ctx, client.ObjectKey{Namespace: binding.Namespace, Name: binding.Spec.AgentRef}, &agent); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil // agent not present yet — adopt on a later reconcile
@@ -234,7 +234,7 @@ func (r *MCPToolBindingReconciler) syncAgent(
 	// manifest exists; the binding reconciler only reflects that reality. OBO/remote bindings pass
 	// through verbatim (wire-enforced at the sidecar, m82.2).
 	var tp resolvedToolPolicy
-	var agent agentsv1alpha1.AgentDeployment
+	var agent agentsv1beta1.AgentDeployment
 	if getErr := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: agentName}, &agent); getErr == nil {
 		if tp, err = resolveToolPolicy(&agent); err != nil {
 			return ctrl.Result{}, fmt.Errorf("resolving tool policy for agent %s/%s: %w", namespace, agentName, err)
@@ -339,7 +339,7 @@ func (r *MCPToolBindingReconciler) syncToolsConfigMap(
 	namespace, agentName string,
 	manifest toolmanifest.Manifest,
 ) error {
-	var agent agentsv1alpha1.AgentDeployment
+	var agent agentsv1beta1.AgentDeployment
 	if getErr := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: agentName}, &agent); getErr != nil {
 		if !apierrors.IsNotFound(getErr) {
 			return fmt.Errorf("getting AgentDeployment %s for CM ownership: %w", agentName, getErr)
@@ -455,7 +455,7 @@ func (r *MCPToolBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			if regName == "" {
 				return nil
 			}
-			var list agentsv1alpha1.MCPToolBindingList
+			var list agentsv1beta1.MCPToolBindingList
 			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(regNS)); err != nil {
 				return nil
 			}
@@ -475,11 +475,11 @@ func (r *MCPToolBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// now be written with its owner ref; delete: the CM must be removed).
 	mapAgentToBindings := handler.EnqueueRequestsFromMapFunc(
 		func(ctx context.Context, obj client.Object) []reconcile.Request {
-			agent, ok := obj.(*agentsv1alpha1.AgentDeployment)
+			agent, ok := obj.(*agentsv1beta1.AgentDeployment)
 			if !ok {
 				return nil
 			}
-			var list agentsv1alpha1.MCPToolBindingList
+			var list agentsv1beta1.MCPToolBindingList
 			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(agent.Namespace)); err != nil {
 				return nil
 			}
@@ -496,8 +496,8 @@ func (r *MCPToolBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	)
 
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&agentsv1alpha1.MCPToolBinding{}).
-		Watches(&agentsv1alpha1.AgentDeployment{}, mapAgentToBindings).
+		For(&agentsv1beta1.MCPToolBinding{}).
+		Watches(&agentsv1beta1.AgentDeployment{}, mapAgentToBindings).
 		Named("mcptoolbinding")
 
 	// ToolRegistry change trigger: the leader-elected Postgres poll source

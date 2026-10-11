@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
@@ -60,7 +60,7 @@ func (a *resourceActionAuthorizer) Authorize(_ context.Context, _ client.Client,
 
 // newPublishServer builds a Server+store wired for the publish handler tests.
 // The authorizer controls which (verb, resource) pairs pass.
-func newPublishServer(t *testing.T, auth authz.Authorizer, regs ...*agentsv1alpha1.ToolRegistry) (*Server, toolregistry.Store) {
+func newPublishServer(t *testing.T, auth authz.Authorizer, regs ...*agentsv1beta1.ToolRegistry) (*Server, toolregistry.Store) {
 	t.Helper()
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _, _ := newMCPServer(t, c, false)
@@ -86,8 +86,8 @@ func publishReq(ns, name, visibility string) MCPPublishRequest {
 }
 
 // newPrivateServer returns a private (personal) ToolRegistry for the given name+ns.
-func newPrivateServer(name, ns string) *agentsv1alpha1.ToolRegistry {
-	return &agentsv1alpha1.ToolRegistry{
+func newPrivateServer(name, ns string) *agentsv1beta1.ToolRegistry {
+	return &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
@@ -98,13 +98,13 @@ func newPrivateServer(name, ns string) *agentsv1alpha1.ToolRegistry {
 				labelMCPScope:            scopePersonal,
 			},
 		},
-		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: name + "-tool"}}},
+		Spec: agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{{Name: name + "-tool"}}},
 	}
 }
 
 // newOrgVisServer returns an org-visible ToolRegistry (already widened past team).
-func newOrgVisServer(name, ns string) *agentsv1alpha1.ToolRegistry {
-	return &agentsv1alpha1.ToolRegistry{
+func newOrgVisServer(name, ns string) *agentsv1beta1.ToolRegistry {
+	return &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
@@ -115,13 +115,13 @@ func newOrgVisServer(name, ns string) *agentsv1alpha1.ToolRegistry {
 				labelMCPScope:            scopeOrg,
 			},
 		},
-		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: name + "-tool"}}},
+		Spec: agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{{Name: name + "-tool"}}},
 	}
 }
 
 // newSharedCredServer returns a team-visible server with a shared credential.
-func newSharedCredServer(name, ns string) *agentsv1alpha1.ToolRegistry {
-	return &agentsv1alpha1.ToolRegistry{
+func newSharedCredServer(name, ns string) *agentsv1beta1.ToolRegistry {
+	return &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
@@ -132,7 +132,7 @@ func newSharedCredServer(name, ns string) *agentsv1alpha1.ToolRegistry {
 				labelMCPScope:            scopeOrg,
 			},
 		},
-		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: name + "-tool"}}},
+		Spec: agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{{Name: name + "-tool"}}},
 	}
 }
 

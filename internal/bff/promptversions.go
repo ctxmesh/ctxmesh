@@ -26,7 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
@@ -216,17 +216,17 @@ func newPromptVersionDetailFromStore(pv *promptversion.PromptVersion) PromptVers
 }
 
 // buildPromptVersionGit validates and converts a GitPromptSourceDTO to a GitPromptSource.
-func buildPromptVersionGit(dto GitPromptSourceDTO) (agentsv1alpha1.GitPromptSource, error) {
+func buildPromptVersionGit(dto GitPromptSourceDTO) (agentsv1beta1.GitPromptSource, error) {
 	if strings.TrimSpace(dto.Repo) == "" {
-		return agentsv1alpha1.GitPromptSource{}, fmt.Errorf("git.repo is required")
+		return agentsv1beta1.GitPromptSource{}, fmt.Errorf("git.repo is required")
 	}
 	if strings.TrimSpace(dto.Ref) == "" {
-		return agentsv1alpha1.GitPromptSource{}, fmt.Errorf("git.ref is required")
+		return agentsv1beta1.GitPromptSource{}, fmt.Errorf("git.ref is required")
 	}
 	if strings.TrimSpace(dto.Path) == "" {
-		return agentsv1alpha1.GitPromptSource{}, fmt.Errorf("git.path is required")
+		return agentsv1beta1.GitPromptSource{}, fmt.Errorf("git.path is required")
 	}
-	return agentsv1alpha1.GitPromptSource{
+	return agentsv1beta1.GitPromptSource{
 		Repo: strings.TrimSpace(dto.Repo),
 		Ref:  strings.TrimSpace(dto.Ref),
 		Path: strings.TrimSpace(dto.Path),
@@ -515,26 +515,26 @@ func (s *Server) handleDeletePromptVersion(w http.ResponseWriter, r *http.Reques
 // "from"/"to" for the message.
 func (s *Server) promptGitForDiff(
 	w http.ResponseWriter, r *http.Request, caller client.Client, ns, name, label string,
-) (agentsv1alpha1.GitPromptSource, bool) {
+) (agentsv1beta1.GitPromptSource, bool) {
 	if s.promptStore == nil {
 		writeError(w, http.StatusNotImplemented, msgPromptStoreRequired)
-		return agentsv1alpha1.GitPromptSource{}, false
+		return agentsv1beta1.GitPromptSource{}, false
 	}
 	if err := s.authorizeStore(r.Context(), caller, authz.VerbGet, resourcePromptVersions, ns, name); err != nil {
 		s.writeAuthzError(w, err, fmt.Sprintf("get %s prompt version %q", label, name))
-		return agentsv1alpha1.GitPromptSource{}, false
+		return agentsv1beta1.GitPromptSource{}, false
 	}
 	pv, err := s.promptStore.Get(r.Context(), ns, name)
 	if err != nil {
 		if errors.Is(err, controlplane.ErrNotFound) {
 			writeError(w, http.StatusNotFound, fmt.Sprintf("%s prompt version %q not found", label, name))
-			return agentsv1alpha1.GitPromptSource{}, false
+			return agentsv1beta1.GitPromptSource{}, false
 		}
 		s.log.Error(err, "get PromptVersion from store failed", "namespace", ns, "name", name)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get %s prompt version", label))
-		return agentsv1alpha1.GitPromptSource{}, false
+		return agentsv1beta1.GitPromptSource{}, false
 	}
-	return agentsv1alpha1.GitPromptSource{Repo: pv.Repo, Ref: pv.Ref, Path: pv.Path}, true
+	return agentsv1beta1.GitPromptSource{Repo: pv.Repo, Ref: pv.Ref, Path: pv.Path}, true
 }
 
 // --- GET /api/promptversions/{ns}/{name}/diff --------------------------------

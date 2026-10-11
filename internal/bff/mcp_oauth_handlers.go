@@ -26,7 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // Console SPA routes the OAuth callback (a BROWSER redirect target, not an API call)
@@ -450,6 +450,6 @@ func (s *Server) refreshMCPOAuthToken(ctx context.Context, c client.Client, ns, 
 // mcpServerSummaryAuthType reads the non-secret auth-type annotation off a
 // register-managed ToolRegistry ("" when absent — a key/open server). Kept beside
 // the summary projection so the list surfaces the tier without touching a Secret.
-func mcpServerSummaryAuthType(tr *agentsv1alpha1.ToolRegistry) string {
+func mcpServerSummaryAuthType(tr *agentsv1beta1.ToolRegistry) string {
 	return tr.Annotations[annMCPAuthType]
 }

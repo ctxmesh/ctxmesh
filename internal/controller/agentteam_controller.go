@@ -31,7 +31,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
@@ -70,7 +69,7 @@ func (r *AgentTeamReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// ── the referenced registry (the trust boundary) must exist ────────────────
-	var registry agentsv1alpha1.AgentRegistry
+	var registry agentsv1beta1.AgentRegistry
 	if err := r.Get(ctx, client.ObjectKey{Namespace: team.Namespace, Name: team.Spec.RegistryRef}, &registry); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, r.setStatus(ctx, &team, nil, metav1.ConditionFalse, reasonTeamRegistryNotFound,
@@ -97,7 +96,7 @@ func (r *AgentTeamReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	members := make([]string, 0, len(want))
 	ready := 0
 	for _, name := range want {
-		var agent agentsv1alpha1.AgentDeployment
+		var agent agentsv1beta1.AgentDeployment
 		if err := r.Get(ctx, client.ObjectKey{Namespace: team.Namespace, Name: name}, &agent); err != nil {
 			if apierrors.IsNotFound(err) {
 				return ctrl.Result{}, r.setStatus(ctx, &team, nil, metav1.ConditionFalse, reasonMemberNotFound,
@@ -176,8 +175,8 @@ func (r *AgentTeamReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	)
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1beta1.AgentTeam{}).
-		Watches(&agentsv1alpha1.AgentDeployment{}, mapToTeams).
-		Watches(&agentsv1alpha1.AgentRegistry{}, mapToTeams).
+		Watches(&agentsv1beta1.AgentDeployment{}, mapToTeams).
+		Watches(&agentsv1beta1.AgentRegistry{}, mapToTeams).
 		Named("agentteam").
 		Complete(r)
 }

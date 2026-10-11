@@ -15,7 +15,7 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 )
 
@@ -46,11 +46,11 @@ func createLangfuseSecret(t *testing.T, namespace string) {
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, sec) })
 }
 
-func reconcileTraceExportAgent(t *testing.T, name, namespace string) (servingv1.Service, agentsv1alpha1.AgentDeployment) {
+func reconcileTraceExportAgent(t *testing.T, name, namespace string) (servingv1.Service, agentsv1beta1.AgentDeployment) {
 	t.Helper()
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: "serving",
 			Port:           8080,
@@ -63,7 +63,7 @@ func reconcileTraceExportAgent(t *testing.T, name, namespace string) (servingv1.
 
 	var ksvc servingv1.Service
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &ksvc))
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &got))
 	return ksvc, got
 }

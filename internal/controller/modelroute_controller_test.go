@@ -33,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/gateway"
 )
 
@@ -115,13 +115,13 @@ func TestModelRoute_MockRouteRendered(t *testing.T) {
 	t.Cleanup(cleanupDeploy)
 
 	const routeName = "mr-test-mock"
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      routeName,
 			Namespace: gwNS,
 		},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{
 				{Provider: "mock", Model: "mock-default", Priority: 1},
 			},
 		},
@@ -163,7 +163,7 @@ func TestModelRoute_MockRouteRendered(t *testing.T) {
 	assertRouteCondition(t, gwNS, routeName, metav1.ConditionTrue, "Served")
 
 	// ── Assert ModelRoute Ready=True ───────────────────────────────────────────
-	var updated agentsv1alpha1.ModelRoute
+	var updated agentsv1beta1.ModelRoute
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: routeName, Namespace: gwNS}, &updated))
 
@@ -207,11 +207,11 @@ func TestModelRoute_RealProviderRendered(t *testing.T) {
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, secret) })
 
 	// Create SecretBinding referencing the Secret.
-	binding := &agentsv1alpha1.SecretBinding{
+	binding := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: bindingName, Namespace: gwNS},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend: "kubernetes",
-			SecretRef: agentsv1alpha1.SecretKeyRef{
+			SecretRef: agentsv1beta1.SecretKeyRef{
 				Name: secretName,
 				Key:  "api-key",
 			},
@@ -221,10 +221,10 @@ func TestModelRoute_RealProviderRendered(t *testing.T) {
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, binding) })
 
 	// Create ModelRoute with the real provider.
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: routeName, Namespace: gwNS},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{
 				{
 					Provider:         "anthropic",
 					Model:            "claude-sonnet-4-6",
@@ -278,7 +278,7 @@ func TestModelRoute_RealProviderRendered(t *testing.T) {
 	assertRouteCondition(t, gwNS, routeName, metav1.ConditionTrue, "Served")
 
 	// ── Assert ModelRoute Ready=True ───────────────────────────────────────────
-	var updated agentsv1alpha1.ModelRoute
+	var updated agentsv1beta1.ModelRoute
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: routeName, Namespace: gwNS}, &updated))
 
@@ -316,20 +316,20 @@ func TestModelRoute_GatewaySecretSync(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, secret))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, secret) })
 
-	binding := &agentsv1alpha1.SecretBinding{
+	binding := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: bindingName, Namespace: srcNS},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend:   "kubernetes",
-			SecretRef: agentsv1alpha1.SecretKeyRef{Name: secretName, Key: "api-key"},
+			SecretRef: agentsv1beta1.SecretKeyRef{Name: secretName, Key: "api-key"},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, binding))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, binding) })
 
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: routeName, Namespace: srcNS},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{
 				Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 1, SecretBindingRef: bindingName,
 			}},
 		},
@@ -377,11 +377,11 @@ func TestModelRoute_MissingSecret_RouteExcluded(t *testing.T) {
 	)
 
 	// Create the SecretBinding — but deliberately do NOT create the Secret it references.
-	binding := &agentsv1alpha1.SecretBinding{
+	binding := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: bindingName, Namespace: gwNS},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend: "kubernetes",
-			SecretRef: agentsv1alpha1.SecretKeyRef{
+			SecretRef: agentsv1beta1.SecretKeyRef{
 				Name: "secret-that-does-not-exist",
 				Key:  "api-key",
 			},
@@ -390,10 +390,10 @@ func TestModelRoute_MissingSecret_RouteExcluded(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, binding))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, binding) })
 
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: routeName, Namespace: gwNS},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{
 				{
 					Provider:         "openai",
 					Model:            "gpt-4o",
@@ -419,7 +419,7 @@ func TestModelRoute_MissingSecret_RouteExcluded(t *testing.T) {
 		"excluded route must NOT appear in the gateway config")
 
 	// ── Assert ModelRoute Ready=False with SecretUnresolved ────────────────────
-	var updated agentsv1alpha1.ModelRoute
+	var updated agentsv1beta1.ModelRoute
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: routeName, Namespace: gwNS}, &updated))
 
@@ -459,11 +459,11 @@ func TestModelRoute_SecretRotation_HashChanges(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, secret))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, secret) })
 
-	binding := &agentsv1alpha1.SecretBinding{
+	binding := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: bindingName, Namespace: gwNS},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend: "kubernetes",
-			SecretRef: agentsv1alpha1.SecretKeyRef{
+			SecretRef: agentsv1beta1.SecretKeyRef{
 				Name: secretName,
 				Key:  "api-key",
 			},
@@ -472,10 +472,10 @@ func TestModelRoute_SecretRotation_HashChanges(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, binding))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, binding) })
 
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: routeName, Namespace: gwNS},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{
 				{
 					Provider:         "anthropic",
 					Model:            "claude-sonnet-4-6",
@@ -536,10 +536,10 @@ func TestModelRoute_GatewayAbsent(t *testing.T) {
 	// Deliberately do NOT create the gateway Deployment.
 
 	const routeName = "mr-test-no-gateway"
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: routeName, Namespace: gwNS},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{
 				{Provider: "mock", Model: "mock-default", Priority: 1},
 			},
 		},
@@ -579,7 +579,7 @@ func completeGatewayRollout(t *testing.T) {
 
 func assertRouteCondition(t *testing.T, ns, name string, status metav1.ConditionStatus, reason string) {
 	t.Helper()
-	var mr agentsv1alpha1.ModelRoute
+	var mr agentsv1beta1.ModelRoute
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &mr))
 	c := apimeta.FindStatusCondition(mr.Status.Conditions, conditionReady)
 	require.NotNil(t, c, "ModelRoute %s/%s has no Ready condition", ns, name)
@@ -593,9 +593,9 @@ func TestModelRoute_ServedRouteStaysReadyWhileAnotherRolls(t *testing.T) {
 	ensureNS(t, gwNS)
 	t.Cleanup(createGatewayDeployment(t))
 	mk := func(name string) {
-		route := &agentsv1alpha1.ModelRoute{
+		route := &agentsv1beta1.ModelRoute{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gwNS},
-			Spec: agentsv1alpha1.ModelRouteSpec{Providers: []agentsv1alpha1.ProviderRef{
+			Spec: agentsv1beta1.ModelRouteSpec{Providers: []agentsv1beta1.ProviderRef{
 				{Provider: "mock", Model: "mock-default", Priority: 1},
 			}},
 		}
@@ -620,9 +620,9 @@ func TestModelRoute_ServedRouteStaysReadyWhileAnotherRolls(t *testing.T) {
 func TestModelRoute_EditedServedRouteIsRollingNotNew(t *testing.T) {
 	ensureNS(t, gwNS)
 	t.Cleanup(createGatewayDeployment(t))
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "mr-edited", Namespace: gwNS},
-		Spec: agentsv1alpha1.ModelRouteSpec{Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{Providers: []agentsv1beta1.ProviderRef{
 			{Provider: "mock", Model: "mock-default", Priority: 1},
 		}},
 	}

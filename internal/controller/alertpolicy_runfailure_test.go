@@ -38,7 +38,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -75,10 +74,10 @@ func mkRunFailureAP(threshold, window string) *agentsv1beta1.AlertPolicy {
 	}
 }
 
-func agentsNamed(names ...string) []agentsv1alpha1.AgentDeployment {
-	out := make([]agentsv1alpha1.AgentDeployment, 0, len(names))
+func agentsNamed(names ...string) []agentsv1beta1.AgentDeployment {
+	out := make([]agentsv1beta1.AgentDeployment, 0, len(names))
 	for _, n := range names {
-		out = append(out, agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: n}})
+		out = append(out, agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: n}})
 	}
 	return out
 }

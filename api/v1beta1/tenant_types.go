@@ -19,10 +19,250 @@ package v1beta1
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/conversion"
-
-	v1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 )
+
+// TenantLabel is the AUTHORITATIVE label the Tenant controller stamps on every
+// member namespace (and every resource a Tenant owns) carrying the owning
+// Tenant's name. It is the single source of truth for namespace → tenant
+// resolution: the controller injects TENANT_ID from it (internal/controller
+// resolveTenantForNamespace) and the state-layer proxy scopes quota from it
+// (ADR 0050 §3 + Amendment 2) — both MUST read this exact key so their tenant id
+// agrees. Exported here so those packages share one constant, not duplicated
+// string literals of a security-critical key.
+const TenantLabel = "agents.ctxmesh.ai/tenant"
+
+// TenantComputeQuota is the compute ceiling reconciled onto every member namespace
+// as a Kubernetes ResourceQuota (ADR 0046 §3, M47). Empty fields are omitted, so a
+// Tenant can cap only what it cares about. It caps scheduler-guaranteed REQUESTS
+// (not limits) — a limits.* quota would force every pod to declare limits, which the
+// controller's requests-only agent pods (and Knative's queue-proxy) don't, rejecting
+// them all (audit FUNC-2). Also capping/defaulting limits via a per-namespace
+// LimitRange is a follow-on (m52.F-LimitRange).
+type TenantComputeQuota struct {
+	// cpu caps the tenant's total REQUESTED CPU across member namespaces (a Kubernetes
+	// quantity, e.g. "20" or "20000m"). Applied as requests.cpu on each member
+	// namespace's ResourceQuota.
+	// Validated as a quantity at admission (OTH-5): an invalid value used to parse-fail in
+	// computeHard and be SILENTLY dropped → the quota went unenforced with no signal. Now it is
+	// rejected up front. Empty is allowed (means "no CPU cap").
+	// +kubebuilder:validation:XValidation:rule="self == '' || isQuantity(self)",message="cpu must be a valid Kubernetes quantity (e.g. \"20\" or \"20000m\")"
+	// +optional
+	CPU string `json:"cpu,omitempty"`
+
+	// memory caps the tenant's total REQUESTED memory (a Kubernetes quantity, e.g.
+	// "40Gi"). Applied as requests.memory on each member namespace's ResourceQuota.
+	// Validated as a quantity at admission (OTH-5) — see cpu. Empty is allowed.
+	// +kubebuilder:validation:XValidation:rule="self == '' || isQuantity(self)",message="memory must be a valid Kubernetes quantity (e.g. \"40Gi\")"
+	// +optional
+	Memory string `json:"memory,omitempty"`
+
+	// pods caps the number of pods per member namespace.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Pods int64 `json:"pods,omitempty"`
+}
+
+// TenantModelQuota is the model-usage ceiling ENFORCED IN OUR OWN LAYER (ADR 0046
+// §3): the controller injects these into member-namespace agent pods (m47.3) and
+// the launcher gateway proxy enforces them against a shared Valkey tenant
+// accumulator (m47.4) — NOT via a LiteLLM team key (which would couple tenancy to
+// the gateway's runtime API). budgetUSD is aggregate spend; rpm/maxConcurrent are
+// the cross-pod fair-share caps.
+type TenantModelQuota struct {
+	// budgetUSD is the tenant-aggregate model-spend ceiling in USD (a decimal
+	// string for exact money, e.g. "100.00"). Exceeding it fails the next model
+	// call closed with a typed budget_exceeded (HTTP 402, dimension "tenant").
+	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]{1,4})?$`
+	// +optional
+	BudgetUSD string `json:"budgetUSD,omitempty"`
+
+	// rpm caps the tenant-aggregate model requests per minute across every agent
+	// and replica in the tenant (a shared Valkey token bucket). Over the cap the
+	// launcher returns HTTP 429. 0 ⇒ no rate cap.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	RPM int32 `json:"rpm,omitempty"`
+
+	// maxConcurrent caps the tenant-aggregate in-flight model requests (a shared
+	// Valkey semaphore) — the streaming-concurrency guard that RPM does not cover.
+	// 0 ⇒ no concurrency cap.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxConcurrent int32 `json:"maxConcurrent,omitempty"`
+}
+
+// TenantStorageQuota is the corpus storage quota for a tenant (ADR 0061 governance #7). It reports
+// the total KnowledgeBase corpus bytes across all member namespaces and supports two INDEPENDENT
+// caps, the standard soft-warn / hard-block pair. corpusBytesSoftCap (M68) is SOFT: exceeding it
+// WARNS via a StorageSoftCapExceeded condition (+ event + metric) but NEVER blocks — an operator
+// alerts on it. corpusBytesHardCap (m80.3, m52 Theme M) is HARD: at/over it the controller sets a
+// StorageHardCapExceeded condition AND enforcement BLOCKS new corpus growth — an upload to an at-cap
+// tenant is rejected (HTTP 413 + typed storage_quota_exceeded) and an ingestion run fails fast (typed
+// storage_quota_exceeded → phase Failed) before it fetches any documents.
+//
+// The two caps are DISTINCT — the hard cap is not an overload of the soft cap. Either may be set
+// independently; unset ⇒ that cap is not enforced (backward-compatible: an existing Tenant with only
+// a soft cap is byte-for-byte unchanged).
+type TenantStorageQuota struct {
+	// corpusBytesSoftCap is the tenant-aggregate soft cap on total KnowledgeBase corpus bytes
+	// (the sum of KnowledgeBase.status.sizeBytes across all member namespaces). It is a
+	// Kubernetes quantity string (e.g. "10Gi", "50Gi"). When the aggregate exceeds this value
+	// the controller sets a StorageSoftCapExceeded condition on the Tenant and emits a Warning
+	// event. It NEVER blocks ingestion — that is corpusBytesHardCap's job.
+	// Empty means no soft cap is tracked.
+	// +kubebuilder:validation:XValidation:rule="self == '' || isQuantity(self)",message="corpusBytesSoftCap must be a valid Kubernetes quantity (e.g. \"10Gi\")"
+	// +optional
+	CorpusBytesSoftCap string `json:"corpusBytesSoftCap,omitempty"`
+
+	// corpusBytesHardCap is the tenant-aggregate HARD cap on total KnowledgeBase corpus bytes
+	// (m80.3, ADR 0061 governance #7 hard-enforcement). It is a Kubernetes quantity string
+	// (e.g. "20Gi"). When totalCorpusBytes >= this value the controller sets a
+	// StorageHardCapExceeded condition AND enforcement blocks new corpus growth: an upload to an
+	// at-cap tenant returns HTTP 413 (typed storage_quota_exceeded) and an ingestion run fails
+	// fast (typed storage_quota_exceeded → phase Failed) before fetching documents.
+	// Enforcement reads the controller's PROJECTED at-cap state (ADR 0011 — no cross-namespace
+	// read at the enforcement point), so it is bounded-eventually-consistent: a burst between
+	// reconciles can overshoot by at most (burst × the 25 MiB per-upload cap). This is a storage
+	// governance guardrail, not a security boundary.
+	// Empty means no hard cap is enforced (backward-compatible default).
+	// +kubebuilder:validation:XValidation:rule="self == '' || isQuantity(self)",message="corpusBytesHardCap must be a valid Kubernetes quantity (e.g. \"20Gi\")"
+	// +optional
+	CorpusBytesHardCap string `json:"corpusBytesHardCap,omitempty"`
+}
+
+// TenantSpec defines the desired state of a Tenant (ADR 0046). A Tenant groups
+// namespaces (the tenancy unit — 1 namespace ∈ ≤1 tenant) and caps their compute
+// + model usage. Tenant identity is DERIVED from namespace everywhere downstream
+// (no separate tenant key dimension).
+type TenantSpec struct {
+	// namespaces are the member namespaces this tenant owns. A namespace must
+	// belong to at most one tenant; the controller skips (and status-warns on) a
+	// namespace already claimed by another tenant — fail-safe, never double-stamp.
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +optional
+	Namespaces []string `json:"namespaces,omitempty"`
+
+	// quota is the compute ceiling reconciled onto each member namespace as a
+	// ResourceQuota + LimitRange. Omitted ⇒ no compute quota is stamped.
+	// +optional
+	Quota *TenantComputeQuota `json:"quota,omitempty"`
+
+	// model is the model-usage ceiling (budget + rate + concurrency) enforced in
+	// the launcher gateway proxy. Omitted ⇒ no model quota is injected.
+	// +optional
+	Model *TenantModelQuota `json:"model,omitempty"`
+
+	// storage is the corpus storage quota (ADR 0061 governance #7). It carries two independent caps:
+	// corpusBytesSoftCap (M68 — WARNS via StorageSoftCapExceeded, never blocks) and corpusBytesHardCap
+	// (m80.3 — sets StorageHardCapExceeded AND blocks new corpus growth: 413 on upload + a fast typed
+	// ingestion failure at/over the cap). Either may be set independently.
+	// Omitted ⇒ no storage cap is tracked or enforced.
+	// +optional
+	Storage *TenantStorageQuota `json:"storage,omitempty"`
+
+	// networkIsolation, when true, stamps a cross-tenant-deny NetworkPolicy on every member namespace
+	// (defense-in-depth above the mesh boundary, ADR 0046): pods may reach same-tenant namespaces + the
+	// platform (knative/kourier/gateway/valkey/langfuse/DNS) + any tenant listed in peerTenants, but NOT
+	// other tenants. **SECURE BY DEFAULT (ADR 0073): a nil/absent field is served as TRUE** — a new tenant
+	// isolates from birth; an explicit `false` is a deliberate, condition-flagged opt-out. Existing tenants
+	// at the upgrade are grandfathered to explicit `false` by the ordered backfill (no upgrade incident).
+	// A pointer (not a bare bool) so "absent" is distinguishable at the API layer for the migration.
+	// +optional
+	// +kubebuilder:default=true
+	NetworkIsolation *bool `json:"networkIsolation,omitempty"`
+
+	// peerTenants is an allowlist of OTHER tenant names whose member namespaces may exchange east-west
+	// traffic with this tenant's namespaces under isolation (ADR 0073). Without it the secure-default flip
+	// is all-or-nothing; with it a tenant opens specific legitimate cross-tenant paths. Empty ⇒ strict
+	// isolation (same-tenant + platform only).
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=253
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	PeerTenants []string `json:"peerTenants,omitempty"`
+
+	// endUserIdentity, when enabled, configures a DISTINCT end-user OIDC IdP for this tenant's agents'
+	// standalone /chat runtime (M137/EU1b, ADR 0106): a non-console end-user logs in with THEIR OWN
+	// identity (a generic OIDC issuer the tenant runs), the BFF verifies that ID token and mints a
+	// run-capability scoped to the end-user's real (iss,sub) — security-grade per-user isolation of runs
+	// + OBO. The issuer MUST be DISTINCT from the console OIDC issuer (else an end-user token could gain
+	// K8s trust); the platform refuses an issuer equal to the console / service-account issuer. Omitted
+	// or disabled ⇒ /chat stays console-authenticated (the pre-M137 model).
+	// +optional
+	EndUserIdentity *TenantEndUserIdentity `json:"endUserIdentity,omitempty"`
+}
+
+// TenantEndUserIdentity configures a tenant's end-user OIDC IdP (M137/EU1b, ADR 0106). Generic OIDC —
+// any compliant issuer (Okta/Entra/Google/a self-run dex); the BFF verifies the end-user ID token
+// against the issuer's discovery/JWKS and mints a run-capability with the end-user's (iss,sub).
+type TenantEndUserIdentity struct {
+	// enabled turns on end-user OIDC login for this tenant's agent /chat origins. Default off.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// issuer is the OIDC issuer URL (the `iss` claim + the OIDC Discovery base). MUST be https (a
+	// loopback host is allowed for dev) and MUST NOT equal the console OIDC issuer or the cluster
+	// service-account issuer — an end-user token must never gain K8s trust (ADR 0106 §3).
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^https?://.+`
+	// +optional
+	Issuer string `json:"issuer,omitempty"`
+
+	// clientId is the OIDC client (audience) the end-user SPA authenticates as (Auth-Code + PKCE, a
+	// public client). The verified ID token's `aud` MUST contain this value.
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	ClientID string `json:"clientId,omitempty"`
+
+	// scopes are extra OIDC scopes the SPA requests beyond `openid` (e.g. `email`, `profile`,
+	// `offline_access` for refresh-token rotation). `openid` is always requested.
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=128
+	// +optional
+	Scopes []string `json:"scopes,omitempty"`
+
+	// allowedHosts are the agent origins (`<agent>.<ns>.<domain>`) enabled for end-user login under this
+	// tenant — the exact redirect-URI hosts the tenant registers with its IdP (RFC 9700 exact match, no
+	// wildcards). Informational + surfaced to the operator; empty ⇒ any of the tenant's agent origins.
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MaxLength=253
+	// +optional
+	AllowedHosts []string `json:"allowedHosts,omitempty"`
+}
+
+// TenantStatus defines the observed state of a Tenant.
+type TenantStatus struct {
+	// observedGeneration is the .metadata.generation this status reflects — set by the
+	// controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// memberNamespaces is the count of namespaces actually reconciled for this
+	// tenant (contested namespaces are excluded).
+	// +optional
+	MemberNamespaces int32 `json:"memberNamespaces,omitempty"`
+
+	// totalCorpusBytes is the sum of KnowledgeBase.status.sizeBytes across all member
+	// namespaces, updated on every reconcile when EITHER storage.corpusBytesSoftCap or
+	// storage.corpusBytesHardCap is set. Reported for observability and the hard-cap check.
+	// +optional
+	TotalCorpusBytes int64 `json:"totalCorpusBytes,omitempty"`
+
+	// conditions surface the tenant's health. Ready=true when every member
+	// namespace was reconciled; a "NamespaceConflict" warning condition lists any
+	// namespaces skipped because another tenant already claims them;
+	// "StorageSoftCapExceeded" warns when the corpus bytes exceed the soft cap;
+	// "StorageHardCapExceeded" fires when the corpus bytes reach the hard cap (which
+	// also blocks new uploads/ingestion — m80.3).
+	// +listType=map
+	// +listMapKey=type
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
 
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
@@ -31,14 +271,13 @@ import (
 // +kubebuilder:printcolumn:name="Namespaces",type="integer",JSONPath=".status.memberNamespaces"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 
-// Tenant is the v1beta1 schema — a field-identical graduation of the v1alpha1 Tenant (GA Gate D, M127,
-// audit C4 P0-1). The tenancy ROOT graduates to beta so a GA'd multi-tenant platform's governance object
-// no longer carries alpha "may be removed at any time" semantics while everything it governs already
-// stores at v1beta1. It reuses the v1alpha1 spec/status so conversion is a direct copy (None strategy,
-// hub-spoke, ADR 0037), CRD-parity CI-guarded (hack/check-crd-version-parity.sh). Cluster-scoped; the
-// agents.ctxmesh.ai/tenant label authority + the tenant-label ValidatingWebhook (which validates the
-// `namespaces` resource, not Tenant objects) + the finalizer-based GC all key on the OBJECT, not the
-// version string, so the graduation does not disturb them.
+// Tenant groups a set of namespaces into a governance unit (PRD §19, ADR 0046).
+// The controller reconciles a ResourceQuota + LimitRange (compute) and a
+// cross-tenant-deny NetworkPolicy (isolation) onto each member namespace, and
+// injects the tenant id + model caps into member-namespace agent pods (m47.3).
+// Cluster-scoped: a Tenant spans namespaces, so it cannot ownerRef-GC its
+// namespaced output — it labels stamped resources with agents.ctxmesh.ai/tenant
+// and prunes them via a finalizer.
 type Tenant struct {
 	metav1.TypeMeta `json:",inline"`
 
@@ -48,29 +287,11 @@ type Tenant struct {
 
 	// spec defines the desired tenant state.
 	// +required
-	Spec v1alpha1.TenantSpec `json:"spec"`
+	Spec TenantSpec `json:"spec"`
 
 	// status defines the observed state of this tenant.
 	// +optional
-	Status v1alpha1.TenantStatus `json:"status,omitzero"`
-}
-
-// ConvertTo converts this v1beta1 Tenant to the v1alpha1 hub.
-func (src *Tenant) ConvertTo(dstRaw conversion.Hub) error {
-	dst := dstRaw.(*v1alpha1.Tenant)
-	dst.ObjectMeta = src.ObjectMeta
-	dst.Spec = src.Spec
-	dst.Status = src.Status
-	return nil
-}
-
-// ConvertFrom populates this v1beta1 Tenant from the v1alpha1 hub.
-func (dst *Tenant) ConvertFrom(srcRaw conversion.Hub) error {
-	src := srcRaw.(*v1alpha1.Tenant)
-	dst.ObjectMeta = src.ObjectMeta
-	dst.Spec = src.Spec
-	dst.Status = src.Status
-	return nil
+	Status TenantStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
@@ -78,7 +299,7 @@ func (dst *Tenant) ConvertFrom(srcRaw conversion.Hub) error {
 // TenantList contains a list of Tenant.
 type TenantList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty"`
+	metav1.ListMeta `json:"metadata,omitzero"`
 	Items           []Tenant `json:"items"`
 }
 

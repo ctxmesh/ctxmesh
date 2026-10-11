@@ -25,7 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // agentDeploymentGVK is the GroupVersionKind string used for ownerReference Kind
@@ -67,7 +67,7 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	// from the K8s API — never pre-empted by the BFF). Owned children are
 	// garbage-collected by Kubernetes; independent references are left as orphans
 	// (ADR 0017, orphan pruning deferred).
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
 	}
 	if err := caller.Delete(r.Context(), ad); err != nil {
@@ -135,7 +135,7 @@ func (s *Server) handleAgentReferences(w http.ResponseWriter, r *http.Request) {
 
 	// Verify the agent exists first — a 404 on the agent is the caller's first
 	// signal that nothing references it (and the delete would be a no-op).
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &ad); err != nil {
 		s.writeGetError(w, err, "agent")
 		return
@@ -258,8 +258,8 @@ func hasOwnerRef(refs []metav1.OwnerReference, kind, name string) bool {
 
 // listAgentScalingPolicies lists AgentScalingPolicies via the reader
 // (delete-impact references).
-func listAgentScalingPolicies(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1alpha1.AgentScalingPolicyList, error) {
-	var out agentsv1alpha1.AgentScalingPolicyList
+func listAgentScalingPolicies(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1beta1.AgentScalingPolicyList, error) {
+	var out agentsv1beta1.AgentScalingPolicyList
 	if err := r.List(ctx, &out, opts...); err != nil {
 		return nil, err
 	}

@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/kedatypes"
 )
 
@@ -104,7 +104,7 @@ func (r *AgentScalingPolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	log := logf.FromContext(ctx)
 
 	// ── Fetch ────────────────────────────────────────────────────────────────
-	var policy agentsv1alpha1.AgentScalingPolicy
+	var policy agentsv1beta1.AgentScalingPolicy
 	if err := r.Get(ctx, req.NamespacedName, &policy); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Deleted — KEDA ScaledObject (if any) is GC'd via owner-ref.
@@ -114,7 +114,7 @@ func (r *AgentScalingPolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	// ── Verify the target AgentDeployment exists ─────────────────────────────
-	var agent agentsv1alpha1.AgentDeployment
+	var agent agentsv1beta1.AgentDeployment
 	agentKey := client.ObjectKey{Name: policy.Spec.AgentRef, Namespace: policy.Namespace}
 	if err := r.Get(ctx, agentKey, &agent); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -166,8 +166,8 @@ func (r *AgentScalingPolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 // concern addressed in m7.8.
 func (r *AgentScalingPolicyReconciler) reconcileQueueDepth(
 	ctx context.Context,
-	policy *agentsv1alpha1.AgentScalingPolicy,
-	agent *agentsv1alpha1.AgentDeployment,
+	policy *agentsv1beta1.AgentScalingPolicy,
+	agent *agentsv1beta1.AgentDeployment,
 ) error {
 	log := logf.FromContext(ctx)
 
@@ -235,7 +235,7 @@ func (r *AgentScalingPolicyReconciler) reconcileQueueDepth(
 // convention is <policyName> (same namespace, unambiguous via owner-ref).
 // Using the policy name (rather than the agent name) allows multiple policies
 // to target the same agent without name collision.
-func scaledObjectName(policy *agentsv1alpha1.AgentScalingPolicy) string {
+func scaledObjectName(policy *agentsv1beta1.AgentScalingPolicy) string {
 	return policy.Name
 }
 
@@ -247,7 +247,7 @@ func scaledObjectName(policy *agentsv1alpha1.AgentScalingPolicy) string {
 // per registry"). This keeps the controller layer generic; the concrete
 // Prometheus exporter or HTTP metrics endpoint is wired by the cluster operator
 // (m7.8 e2e).
-func buildMetricsAPITrigger(policy *agentsv1alpha1.AgentScalingPolicy) kedatypes.ScaleTriggers {
+func buildMetricsAPITrigger(policy *agentsv1beta1.AgentScalingPolicy) kedatypes.ScaleTriggers {
 	// Metric source: prefer explicit queueRef, else default to the eventing
 	// agent's own Service (<agentRef>-eventing) — a RESOLVABLE placeholder. The
 	// Knative in-memory channel exposes no queue-depth/backlog metric (m7.8 e2e
@@ -311,7 +311,7 @@ func parseCooldownSeconds(cooldown string) (int32, error) {
 // setBackendAndReady writes status.backend and the Ready condition atomically.
 func (r *AgentScalingPolicyReconciler) setBackendAndReady(
 	ctx context.Context,
-	policy *agentsv1alpha1.AgentScalingPolicy,
+	policy *agentsv1beta1.AgentScalingPolicy,
 	backend string,
 	condStatus metav1.ConditionStatus,
 	reason, message string,
@@ -345,7 +345,7 @@ func (r *AgentScalingPolicyReconciler) setBackendAndReady(
 // or the agent is missing.
 func (r *AgentScalingPolicyReconciler) setReadyFalse(
 	ctx context.Context,
-	policy *agentsv1alpha1.AgentScalingPolicy,
+	policy *agentsv1beta1.AgentScalingPolicy,
 	reason, message string,
 ) error {
 	return r.setBackendAndReady(ctx, policy, policy.Status.Backend, metav1.ConditionFalse, reason, message)
@@ -359,7 +359,7 @@ func (r *AgentScalingPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	// manager, but it stops THIS controller reconciling anything at all — which looks healthy and
 	// is not.
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&agentsv1alpha1.AgentScalingPolicy{})
+		For(&agentsv1beta1.AgentScalingPolicy{})
 	if r.KEDAAvailable {
 		b = b.Owns(&kedatypes.ScaledObject{})
 	}

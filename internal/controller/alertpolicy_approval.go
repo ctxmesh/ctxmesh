@@ -43,7 +43,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/alertstore"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
@@ -60,7 +59,7 @@ func (r *AlertPolicyReconciler) evaluateApprovalWaiting(
 	ctx context.Context,
 	ap *agentsv1beta1.AlertPolicy,
 	cond agentsv1beta1.AlertCondition,
-	agents []agentsv1alpha1.AgentDeployment,
+	agents []agentsv1beta1.AgentDeployment,
 	now metav1.Time,
 ) {
 	log := logf.FromContext(ctx)

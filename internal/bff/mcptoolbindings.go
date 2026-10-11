@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // mcpToolBindingKind is the CRD kind name for an MCPToolBinding (used in error
@@ -201,8 +201,8 @@ func propagationStatusFromConditions(conds []metav1.Condition) string {
 // listMCPToolBindingsForCRUD lists MCPToolBindings via the caller-scoped client
 // (CRUD surface — distinct from the topology helper listMCPToolBindings in
 // adapters.go, which accepts the AgentReader interface).
-func listMCPToolBindingsForCRUD(ctx context.Context, r client.Client, opts ...client.ListOption) (*agentsv1alpha1.MCPToolBindingList, error) {
-	var out agentsv1alpha1.MCPToolBindingList
+func listMCPToolBindingsForCRUD(ctx context.Context, r client.Client, opts ...client.ListOption) (*agentsv1beta1.MCPToolBindingList, error) {
+	var out agentsv1beta1.MCPToolBindingList
 	if err := r.List(ctx, &out, opts...); err != nil {
 		return nil, err
 	}
@@ -213,7 +213,7 @@ func listMCPToolBindingsForCRUD(ctx context.Context, r client.Client, opts ...cl
 
 // newMCPToolBindingSummary projects an MCPToolBinding onto the compact list DTO,
 // including the HONEST propagation status from the controller's Ready condition.
-func newMCPToolBindingSummary(b *agentsv1alpha1.MCPToolBinding) MCPToolBindingSummary {
+func newMCPToolBindingSummary(b *agentsv1beta1.MCPToolBinding) MCPToolBindingSummary {
 	ready, phase := phaseFromConditions(b.Status.Conditions)
 	return MCPToolBindingSummary{
 		Name:              b.Name,
@@ -233,7 +233,7 @@ func newMCPToolBindingSummary(b *agentsv1alpha1.MCPToolBinding) MCPToolBindingSu
 // The propagation status is the key novel field: it is derived from the
 // controller-observed Ready condition and is NEVER fabricated ("applied" /
 // "propagated" only when Ready=True; failure reason or "pending" otherwise).
-func newMCPToolBindingDetail(b *agentsv1alpha1.MCPToolBinding) MCPToolBindingDetail {
+func newMCPToolBindingDetail(b *agentsv1beta1.MCPToolBinding) MCPToolBindingDetail {
 	ready, phase := phaseFromConditions(b.Status.Conditions)
 	return MCPToolBindingDetail{
 		Name:        b.Name,
@@ -348,7 +348,7 @@ func (s *Server) handleGetMCPToolBinding(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	var b agentsv1alpha1.MCPToolBinding
+	var b agentsv1beta1.MCPToolBinding
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &b); err != nil {
 		s.writeGetError(w, err, "MCP tool binding")
 		return
@@ -414,17 +414,17 @@ func (s *Server) handleCreateMCPToolBinding(w http.ResponseWriter, r *http.Reque
 		ns = defaultCreateNamespace
 	}
 
-	binding := &agentsv1alpha1.MCPToolBinding{
+	binding := &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      strings.TrimSpace(req.Name),
 			Namespace: ns,
 		},
-		Spec: agentsv1alpha1.MCPToolBindingSpec{
+		Spec: agentsv1beta1.MCPToolBindingSpec{
 			AgentRef:    strings.TrimSpace(req.AgentRef),
 			RegistryRef: strings.TrimSpace(req.RegistryRef),
 			ToolName:    strings.TrimSpace(req.ToolName),
 			Mode:        strings.TrimSpace(req.Mode),
-			Server: agentsv1alpha1.ToolServer{
+			Server: agentsv1beta1.ToolServer{
 				Image: req.Server.Image,
 				URL:   req.Server.URL,
 			},
@@ -511,17 +511,17 @@ func (s *Server) handleUpdateMCPToolBinding(w http.ResponseWriter, r *http.Reque
 	// SSA co-ownership means the console owns exactly the spec fields it sends;
 	// the controller retains ownership of status (the Ready condition / propagation
 	// state). The propagation status is NEVER clobbered here.
-	apply := &agentsv1alpha1.MCPToolBinding{
+	apply := &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
 		},
-		Spec: agentsv1alpha1.MCPToolBindingSpec{
+		Spec: agentsv1beta1.MCPToolBindingSpec{
 			AgentRef:    strings.TrimSpace(req.AgentRef),
 			RegistryRef: strings.TrimSpace(req.RegistryRef),
 			ToolName:    strings.TrimSpace(req.ToolName),
 			Mode:        strings.TrimSpace(req.Mode),
-			Server: agentsv1alpha1.ToolServer{
+			Server: agentsv1beta1.ToolServer{
 				Image: req.Server.Image,
 				URL:   req.Server.URL,
 			},
@@ -546,7 +546,7 @@ func (s *Server) handleUpdateMCPToolBinding(w http.ResponseWriter, r *http.Reque
 
 	// Re-read the live object so the response reflects what the API server persisted
 	// (including the current controller-observed propagation status).
-	var live agentsv1alpha1.MCPToolBinding
+	var live agentsv1beta1.MCPToolBinding
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &live); err != nil {
 		s.log.Error(err, "re-read MCPToolBinding after apply failed", "name", name, "namespace", ns)
 		writeError(w, http.StatusInternalServerError, "MCP tool binding updated but could not be re-read")
@@ -579,7 +579,7 @@ func (s *Server) handleDeleteMCPToolBinding(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	b := &agentsv1alpha1.MCPToolBinding{
+	b := &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
 	}
 	if err := caller.Delete(r.Context(), b); err != nil {

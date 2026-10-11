@@ -33,7 +33,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // Agent lifecycle phases the BFF projects onto the UI DTO, derived from the
@@ -1333,7 +1333,7 @@ type SubmitFeedbackRequest struct {
 // and Phase are derived from the standard "Ready" condition (which mirrors the
 // underlying Knative Service, per the CRD status contract). agents is never nil
 // on the wire — the list endpoint returns [] for "no agents".
-func newAgentSummary(ad *agentsv1alpha1.AgentDeployment) AgentSummary {
+func newAgentSummary(ad *agentsv1beta1.AgentDeployment) AgentSummary {
 	ready := false
 	phase := phasePending
 	var reason, message string
@@ -1414,9 +1414,9 @@ type AgentGateDetail struct {
 // already read caller-scoped; this helper only projects (no I/O), so it stays
 // unit-testable in isolation. Every slice is non-nil on the wire.
 func newAgentDetail(
-	ad *agentsv1alpha1.AgentDeployment,
-	toolBindings []agentsv1alpha1.MCPToolBinding,
-	versions []agentsv1alpha1.AgentVersion,
+	ad *agentsv1beta1.AgentDeployment,
+	toolBindings []agentsv1beta1.MCPToolBinding,
+	versions []agentsv1beta1.AgentVersion,
 	managedOutsideUI bool,
 	drift bool,
 ) AgentDetailResponse {
@@ -1537,7 +1537,7 @@ func newAgentDetail(
 
 // newAgentGateDetail projects a *GateStatus onto the detail DTO. Returns nil
 // when gate is nil (no EvalSuite wired — the JSON field is omitted entirely).
-func newAgentGateDetail(gate *agentsv1alpha1.GateStatus) *AgentGateDetail {
+func newAgentGateDetail(gate *agentsv1beta1.GateStatus) *AgentGateDetail {
 	if gate == nil {
 		return nil
 	}
@@ -1549,7 +1549,7 @@ func newAgentGateDetail(gate *agentsv1alpha1.GateStatus) *AgentGateDetail {
 
 // newAgentRuntimeDetail projects a *RuntimeSpec onto the detail DTO. Returns nil
 // when rt is nil so the JSON field is omitted entirely — the UI renders nothing new.
-func newAgentRuntimeDetail(rt *agentsv1alpha1.RuntimeSpec) *AgentRuntimeDetail {
+func newAgentRuntimeDetail(rt *agentsv1beta1.RuntimeSpec) *AgentRuntimeDetail {
 	if rt == nil {
 		return nil
 	}

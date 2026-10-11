@@ -29,7 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // modelRouteKind is the CRD kind name for a ModelRoute (used in error messages
@@ -122,8 +122,8 @@ type ModelRouteUpdateRequest struct {
 // --- adapter helpers --------------------------------------------------------
 
 // listModelRoutes lists ModelRoutes via the reader (caller-scoped).
-func listModelRoutes(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1alpha1.ModelRouteList, error) {
-	var out agentsv1alpha1.ModelRouteList
+func listModelRoutes(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1beta1.ModelRouteList, error) {
+	var out agentsv1beta1.ModelRouteList
 	if err := r.List(ctx, &out, opts...); err != nil {
 		return nil, err
 	}
@@ -133,7 +133,7 @@ func listModelRoutes(ctx context.Context, r AgentReader, opts ...client.ListOpti
 // --- DTO projection helpers -------------------------------------------------
 
 // newModelRouteSummary projects a ModelRoute onto the compact list DTO.
-func newModelRouteSummary(mr *agentsv1alpha1.ModelRoute) ModelRouteSummary {
+func newModelRouteSummary(mr *agentsv1beta1.ModelRoute) ModelRouteSummary {
 	ready, phase := phaseFromConditions(mr.Status.Conditions)
 	providers := make([]ModelRouteProviderDTO, 0, len(mr.Spec.Providers))
 	for _, p := range mr.Spec.Providers {
@@ -156,7 +156,7 @@ func newModelRouteSummary(mr *agentsv1alpha1.ModelRoute) ModelRouteSummary {
 
 // newModelRouteDetail projects a ModelRoute onto the full detail DTO (used for
 // GET detail and POST/PUT success).
-func newModelRouteDetail(mr *agentsv1alpha1.ModelRoute) ModelRouteDetail {
+func newModelRouteDetail(mr *agentsv1beta1.ModelRoute) ModelRouteDetail {
 	ready, phase := phaseFromConditions(mr.Status.Conditions)
 	providers := make([]ModelRouteProviderDTO, 0, len(mr.Spec.Providers))
 	for _, p := range mr.Spec.Providers {
@@ -193,12 +193,12 @@ func readModelRouteBody(r *http.Request) ([]byte, error) {
 // buildModelRouteSpec converts a providers+rateLimit DTO slice to a
 // ModelRouteSpec, validating that Providers is non-empty (the CRD also enforces
 // this, but we give a cleaner 400 before hitting the API server).
-func buildModelRouteSpec(providers []ModelRouteProviderDTO, rl *ModelRouteRateLimitDTO) (agentsv1alpha1.ModelRouteSpec, error) {
+func buildModelRouteSpec(providers []ModelRouteProviderDTO, rl *ModelRouteRateLimitDTO) (agentsv1beta1.ModelRouteSpec, error) {
 	if len(providers) == 0 {
-		return agentsv1alpha1.ModelRouteSpec{}, errors.New("providers must have at least one entry")
+		return agentsv1beta1.ModelRouteSpec{}, errors.New("providers must have at least one entry")
 	}
-	spec := agentsv1alpha1.ModelRouteSpec{
-		Providers: make([]agentsv1alpha1.ProviderRef, 0, len(providers)),
+	spec := agentsv1beta1.ModelRouteSpec{
+		Providers: make([]agentsv1beta1.ProviderRef, 0, len(providers)),
 	}
 	for _, p := range providers {
 		if p.Provider == "" {
@@ -210,7 +210,7 @@ func buildModelRouteSpec(providers []ModelRouteProviderDTO, rl *ModelRouteRateLi
 		if p.Priority < 1 {
 			return spec, fmt.Errorf("provider priority must be ≥1 (got %d)", p.Priority)
 		}
-		spec.Providers = append(spec.Providers, agentsv1alpha1.ProviderRef{
+		spec.Providers = append(spec.Providers, agentsv1beta1.ProviderRef{
 			Provider:         p.Provider,
 			Model:            p.Model,
 			Priority:         p.Priority,
@@ -219,7 +219,7 @@ func buildModelRouteSpec(providers []ModelRouteProviderDTO, rl *ModelRouteRateLi
 		})
 	}
 	if rl != nil {
-		spec.RateLimit = &agentsv1alpha1.RateLimit{TenantRPM: rl.TenantRPM}
+		spec.RateLimit = &agentsv1beta1.RateLimit{TenantRPM: rl.TenantRPM}
 	}
 	return spec, nil
 }
@@ -328,7 +328,7 @@ func (s *Server) handleGetModelRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var mr agentsv1alpha1.ModelRoute
+	var mr agentsv1beta1.ModelRoute
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &mr); err != nil {
 		s.writeGetError(w, err, "model route")
 		return
@@ -380,7 +380,7 @@ func (s *Server) handleCreateModelRoute(w http.ResponseWriter, r *http.Request) 
 		ns = defaultCreateNamespace
 	}
 
-	mr := &agentsv1alpha1.ModelRoute{
+	mr := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      strings.TrimSpace(req.Name),
 			Namespace: ns,
@@ -461,7 +461,7 @@ func (s *Server) handleUpdateModelRoute(w http.ResponseWriter, r *http.Request) 
 	// Build a minimal apply object carrying only the identity + the desired spec.
 	// SSA co-ownership means the console owns exactly the fields it sends; the
 	// controller retains ownership of status / derived fields it manages.
-	apply := &agentsv1alpha1.ModelRoute{
+	apply := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
@@ -491,7 +491,7 @@ func (s *Server) handleUpdateModelRoute(w http.ResponseWriter, r *http.Request) 
 	// Re-read the live object so the response reflects what the API server
 	// persisted (SSA may normalise or reject fields). A not-found here is
 	// unexpected (we just applied), so treat it as a server fault.
-	var live agentsv1alpha1.ModelRoute
+	var live agentsv1beta1.ModelRoute
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &live); err != nil {
 		s.log.Error(err, "re-read ModelRoute after apply failed", "name", name, "namespace", ns)
 		writeError(w, http.StatusInternalServerError, "model route updated but could not be re-read")
@@ -526,7 +526,7 @@ func (s *Server) handleDeleteModelRoute(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	mr := &agentsv1alpha1.ModelRoute{
+	mr := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
 	}
 	if err := caller.Delete(r.Context(), mr); err != nil {

@@ -33,7 +33,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 )
@@ -75,10 +74,10 @@ func newWorkflowHandlerServer(t *testing.T, cl client.Client) *Server {
 // readyWorkflowAgent builds a ready AgentDeployment (a resolvable status.URL) for a workflow node, so the
 // create-time caller-scoped node-endpoint resolution (m67.13) finds an endpoint to pin. The URL mirrors the
 // in-cluster service form; extraLabels carry the registry's member selector when needed.
-func readyWorkflowAgent(name, namespace string, extraLabels map[string]string) *agentsv1alpha1.AgentDeployment {
-	return &agentsv1alpha1.AgentDeployment{
+func readyWorkflowAgent(name, namespace string, extraLabels map[string]string) *agentsv1beta1.AgentDeployment {
+	return &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: extraLabels},
-		Status:     agentsv1alpha1.AgentDeploymentStatus{URL: "http://" + name + "." + namespace + ".svc"},
+		Status:     agentsv1beta1.AgentDeploymentStatus{URL: "http://" + name + "." + namespace + ".svc"},
 	}
 }
 
@@ -308,9 +307,9 @@ func registryWithMembers(t *testing.T, agentNames ...string) []client.Object {
 	)
 	label := map[string]string{"registry": registryName}
 	objs := make([]client.Object, 0, 1+len(agentNames))
-	objs = append(objs, &agentsv1alpha1.AgentRegistry{
+	objs = append(objs, &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: registryName, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentRegistrySpec{
+		Spec: agentsv1beta1.AgentRegistrySpec{
 			RegistryId:     registryName,
 			MemberSelector: metav1.LabelSelector{MatchLabels: label},
 		},
@@ -449,7 +448,7 @@ func TestCreateInlineWorkflowRun_InvalidSpec_ReferencedWithoutOutputSchema(t *te
 func TestCreateInlineWorkflowRun_NonMemberAgent(t *testing.T) {
 	// Registry "reg" has member agent-a; a non-member "rogue" also exists but carries no member label.
 	objs := registryWithMembers(t, "agent-a")
-	objs = append(objs, &agentsv1alpha1.AgentDeployment{
+	objs = append(objs, &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "rogue", Namespace: "prod"}, // no registry label → not a member
 	})
 	cl := newAgentFakeClient(t, objs...)
@@ -472,7 +471,7 @@ func TestCreateInlineWorkflowRun_NonMemberAgent(t *testing.T) {
 func TestCreateInlineWorkflowRun_MissingRegistry(t *testing.T) {
 	// agent-a exists but there is NO registry "reg".
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(
-		&agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "agent-a", Namespace: "prod"}},
+		&agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "agent-a", Namespace: "prod"}},
 	).Build()
 	s := newWorkflowHandlerServer(t, cl)
 
@@ -761,15 +760,15 @@ func TestCreateInlineWorkflowRun_MissingNodeAgent_FailsAtCreate(t *testing.T) {
 // NO endpoint yet (status.URL empty ⇒ not Ready) fails create with 4xx and stores no run.
 func TestCreateInlineWorkflowRun_NotReadyNodeAgent_FailsAtCreate(t *testing.T) {
 	label := map[string]string{"registry": "reg"}
-	registry := &agentsv1alpha1.AgentRegistry{
+	registry := &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "reg", Namespace: "prod"},
-		Spec: agentsv1alpha1.AgentRegistrySpec{
+		Spec: agentsv1beta1.AgentRegistrySpec{
 			RegistryId:     "reg",
 			MemberSelector: metav1.LabelSelector{MatchLabels: label},
 		},
 	}
 	// A member with the selector label but NO status.URL → passes membership, fails endpoint resolution.
-	notReady := &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "not-ready-agent", Namespace: "prod", Labels: label}}
+	notReady := &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "not-ready-agent", Namespace: "prod", Labels: label}}
 	cl := newAgentFakeClient(t, registry, notReady)
 	s := newWorkflowHandlerServer(t, cl)
 

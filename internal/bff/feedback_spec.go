@@ -24,7 +24,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
@@ -72,7 +72,7 @@ func (s *Server) handleSubmitFeedback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "cannot read the feedback declaration governing this agent")
 		return
 	}
-	if spec != nil && spec.Mode != agentsv1alpha1.FeedbackMonitor {
+	if spec != nil && spec.Mode != agentsv1beta1.FeedbackMonitor {
 		if _, declared := feedbackSourceByName(spec)[name]; !declared {
 			writeError(w, http.StatusUnprocessableEntity,
 				"score name \""+name+"\" is not declared by the agent's spec.feedback (mode Enforce)")
@@ -91,8 +91,8 @@ func (s *Server) handleSubmitFeedback(w http.ResponseWriter, r *http.Request) {
 // agentFeedbackSpec returns the agent's spec.feedback, read caller-scoped (ADR 0011). (nil, nil) when
 // the agent is gone or declares nothing: the open relay. Any other read error is returned so the WRITE
 // path can fail closed; the READ path treats it as best-effort (no attribution).
-func (s *Server) agentFeedbackSpec(r *http.Request, caller client.Client, ns, agentName string) (*agentsv1alpha1.FeedbackSpec, error) {
-	var agent agentsv1alpha1.AgentDeployment
+func (s *Server) agentFeedbackSpec(r *http.Request, caller client.Client, ns, agentName string) (*agentsv1beta1.FeedbackSpec, error) {
+	var agent agentsv1beta1.AgentDeployment
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: agentName}, &agent); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
@@ -105,7 +105,7 @@ func (s *Server) agentFeedbackSpec(r *http.Request, caller client.Client, ns, ag
 // feedbackSourceByName maps each declared score name to its source label ("human" or
 // "external:<channel>"). The CRD's CEL rules keep names unique across sources, so the map is
 // unambiguous.
-func feedbackSourceByName(spec *agentsv1alpha1.FeedbackSpec) map[string]string {
+func feedbackSourceByName(spec *agentsv1beta1.FeedbackSpec) map[string]string {
 	m := map[string]string{}
 	if spec == nil {
 		return m

@@ -30,19 +30,19 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
 )
 
 // mkVersionSnap creates an AgentVersion for `deployment` named `name` whose snapshot carries
 // the given image (so a rollback that reverts spec is observable as a specific image change).
-func mkVersionSnap(t *testing.T, deployment, name, namespace, image string) *agentsv1alpha1.AgentVersion {
+func mkVersionSnap(t *testing.T, deployment, name, namespace, image string) *agentsv1beta1.AgentVersion {
 	t.Helper()
-	av := &agentsv1alpha1.AgentVersion{
+	av := &agentsv1beta1.AgentVersion{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentVersionSpec{
+		Spec: agentsv1beta1.AgentVersionSpec{
 			DeploymentName: deployment,
-			Snapshot:       agentsv1alpha1.AgentDeploymentSpec{Image: image},
+			Snapshot:       agentsv1beta1.AgentDeploymentSpec{Image: image},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, av))
@@ -54,7 +54,7 @@ func mkVersionSnap(t *testing.T, deployment, name, namespace, image string) *age
 // `kubectl annotate agentdeployment <name> agents.ctxmesh.ai/rollback=<version>`).
 func annotateRollback(t *testing.T, name, namespace, target string) {
 	t.Helper()
-	var d agentsv1alpha1.AgentDeployment
+	var d agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &d))
 	if d.Annotations == nil {
 		d.Annotations = map[string]string{}
@@ -65,7 +65,7 @@ func annotateRollback(t *testing.T, name, namespace, target string) {
 
 func rolledBackCond(t *testing.T, name, namespace string) *metav1.Condition {
 	t.Helper()
-	var d agentsv1alpha1.AgentDeployment
+	var d agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &d))
 	return apimeta.FindStatusCondition(d.Status.Conditions, conditionRolledBack)
 }
@@ -93,9 +93,9 @@ func TestRollback_HealthyTarget_RevertsSpec(t *testing.T) {
 	target := mkVersionSnap(t, name, targetV, namespace, targetImg)
 
 	// The deployment currently serves the BAD image.
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: currentImg},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: currentImg},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
@@ -105,7 +105,7 @@ func TestRollback_HealthyTarget_RevertsSpec(t *testing.T) {
 	// A single reconcile should intercept the rollback and revert the spec.
 	reconcileNN(t, rollbackReconciler(onlinescore.NewMemStore()), name, namespace)
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
 
 	assert.Equal(t, target.Spec.Snapshot.Image, got.Spec.Image,
@@ -134,33 +134,33 @@ func TestRollback_KeepsLiveGovernance(t *testing.T) {
 		namespace = "default"
 		targetV   = "rb-governance-agent-target0"
 	)
-	weak := &agentsv1alpha1.ToolPolicySpec{
+	weak := &agentsv1beta1.ToolPolicySpec{
 		Default:   "allow",
-		Overrides: []agentsv1alpha1.ToolPolicyOverride{{Name: "db.delete", Rule: "require-approval"}},
-		Approvers: []agentsv1alpha1.Approver{{Kind: "User", Name: "mallory@example.com"}},
+		Overrides: []agentsv1beta1.ToolPolicyOverride{{Name: "db.delete", Rule: "require-approval"}},
+		Approvers: []agentsv1beta1.Approver{{Kind: "User", Name: "mallory@example.com"}},
 	}
-	strict := &agentsv1alpha1.ToolPolicySpec{
+	strict := &agentsv1beta1.ToolPolicySpec{
 		Default: "allow",
-		Overrides: []agentsv1alpha1.ToolPolicyOverride{
+		Overrides: []agentsv1beta1.ToolPolicyOverride{
 			{Name: "db.delete", Rule: "require-approval"},
 			{Name: "send_email", Rule: "require-approval"},
 		},
-		Approvers: []agentsv1alpha1.Approver{{Kind: "Group", Name: "dba"}},
+		Approvers: []agentsv1beta1.Approver{{Kind: "Group", Name: "dba"}},
 	}
-	feedback := func(score string) *agentsv1alpha1.FeedbackSpec {
-		return &agentsv1alpha1.FeedbackSpec{Human: &agentsv1alpha1.HumanSource{
-			Scores: []agentsv1alpha1.ScoreDecl{{Name: score, DataType: agentsv1alpha1.ScoreBoolean}},
+	feedback := func(score string) *agentsv1beta1.FeedbackSpec {
+		return &agentsv1beta1.FeedbackSpec{Human: &agentsv1beta1.HumanSource{
+			Scores: []agentsv1beta1.ScoreDecl{{Name: score, DataType: agentsv1beta1.ScoreBoolean}},
 		}}
 	}
 
-	target := &agentsv1alpha1.AgentVersion{
+	target := &agentsv1beta1.AgentVersion{
 		ObjectMeta: metav1.ObjectMeta{Name: targetV, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentVersionSpec{
+		Spec: agentsv1beta1.AgentVersionSpec{
 			DeploymentName: name,
-			Snapshot: agentsv1alpha1.AgentDeploymentSpec{
+			Snapshot: agentsv1beta1.AgentDeploymentSpec{
 				Image:     "ghcr.io/ctxmesh/example-agent:v1",
 				PromptRef: "support-prompt-v1",
-				Runtime:   &agentsv1alpha1.RuntimeSpec{ToolPolicy: weak},
+				Runtime:   &agentsv1beta1.RuntimeSpec{ToolPolicy: weak},
 				Feedback:  feedback("thumbs-old"),
 			},
 		},
@@ -168,24 +168,24 @@ func TestRollback_KeepsLiveGovernance(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, target))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, target) })
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:     "ghcr.io/ctxmesh/example-agent:v2-bad",
 			PromptRef: "support-prompt-v2",
-			Runtime:   &agentsv1alpha1.RuntimeSpec{ToolPolicy: strict},
+			Runtime:   &agentsv1beta1.RuntimeSpec{ToolPolicy: strict},
 			Feedback:  feedback("thumbs"),
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
-	var live agentsv1alpha1.AgentDeployment
+	var live agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &live))
 
 	annotateRollback(t, name, namespace, targetV)
 	reconcileNN(t, rollbackReconciler(onlinescore.NewMemStore()), name, namespace)
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
 	require.NotNil(t, rolledBackCond(t, name, namespace))
 	assert.Equal(t, metav1.ConditionTrue, rolledBackCond(t, name, namespace).Status, "the rollback acted")
@@ -213,11 +213,11 @@ func TestRollback_KeepsLiveGovernance(t *testing.T) {
 }
 
 // mkVersionSpec creates an AgentVersion of deployment with the given snapshot.
-func mkVersionSpec(t *testing.T, deployment, name, namespace string, snapshot agentsv1alpha1.AgentDeploymentSpec) {
+func mkVersionSpec(t *testing.T, deployment, name, namespace string, snapshot agentsv1beta1.AgentDeploymentSpec) {
 	t.Helper()
-	av := &agentsv1alpha1.AgentVersion{
+	av := &agentsv1beta1.AgentVersion{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       agentsv1alpha1.AgentVersionSpec{DeploymentName: deployment, Snapshot: snapshot},
+		Spec:       agentsv1beta1.AgentVersionSpec{DeploymentName: deployment, Snapshot: snapshot},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, av))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, av) })
@@ -235,37 +235,37 @@ func TestRollback_NoEffect_Refused(t *testing.T) {
 		sameV     = "rb-noeffect-agent-same"
 		image     = "ghcr.io/ctxmesh/example-agent:v1"
 	)
-	policy := func(rule, approver string) *agentsv1alpha1.ToolPolicySpec {
-		return &agentsv1alpha1.ToolPolicySpec{
+	policy := func(rule, approver string) *agentsv1beta1.ToolPolicySpec {
+		return &agentsv1beta1.ToolPolicySpec{
 			Default:   "allow",
-			Overrides: []agentsv1alpha1.ToolPolicyOverride{{Name: "db.delete", Rule: rule}},
-			Approvers: []agentsv1alpha1.Approver{{Kind: "User", Name: approver}},
+			Overrides: []agentsv1beta1.ToolPolicyOverride{{Name: "db.delete", Rule: rule}},
+			Approvers: []agentsv1beta1.Approver{{Kind: "User", Name: approver}},
 		}
 	}
-	feedback := func(score string) *agentsv1alpha1.FeedbackSpec {
-		return &agentsv1alpha1.FeedbackSpec{Human: &agentsv1alpha1.HumanSource{
-			Scores: []agentsv1alpha1.ScoreDecl{{Name: score, DataType: agentsv1alpha1.ScoreBoolean}},
+	feedback := func(score string) *agentsv1beta1.FeedbackSpec {
+		return &agentsv1beta1.FeedbackSpec{Human: &agentsv1beta1.HumanSource{
+			Scores: []agentsv1beta1.ScoreDecl{{Name: score, DataType: agentsv1beta1.ScoreBoolean}},
 		}}
 	}
-	liveSpec := agentsv1alpha1.AgentDeploymentSpec{
+	liveSpec := agentsv1beta1.AgentDeploymentSpec{
 		Image:    image,
-		Runtime:  &agentsv1alpha1.RuntimeSpec{ToolPolicy: policy("require-approval", "dba@example.com")},
+		Runtime:  &agentsv1beta1.RuntimeSpec{ToolPolicy: policy("require-approval", "dba@example.com")},
 		Feedback: feedback("thumbs"),
 	}
-	mkVersionSpec(t, name, govOnlyV, namespace, agentsv1alpha1.AgentDeploymentSpec{
+	mkVersionSpec(t, name, govOnlyV, namespace, agentsv1beta1.AgentDeploymentSpec{
 		Image:    image,
-		Runtime:  &agentsv1alpha1.RuntimeSpec{ToolPolicy: policy("allow", "mallory@example.com")},
+		Runtime:  &agentsv1beta1.RuntimeSpec{ToolPolicy: policy("allow", "mallory@example.com")},
 		Feedback: feedback("thumbs-old"),
 	})
 	mkVersionSpec(t, name, sameV, namespace, versionedSpec(liveSpec))
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec:       liveSpec,
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
-	var live agentsv1alpha1.AgentDeployment
+	var live agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &live))
 
 	for _, tc := range []struct{ target, says string }{
@@ -276,7 +276,7 @@ func TestRollback_NoEffect_Refused(t *testing.T) {
 		annotateRollback(t, name, namespace, tc.target)
 		reconcileNN(t, rollbackReconciler(onlinescore.NewMemStore()), name, namespace)
 
-		var got agentsv1alpha1.AgentDeployment
+		var got agentsv1beta1.AgentDeployment
 		require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
 		assert.Equal(t, live.Spec, got.Spec, "%s: the spec is unchanged", tc.target)
 		assert.NotContains(t, got.Annotations, rollbackAnnotation, "%s: the annotation is cleared", tc.target)
@@ -299,7 +299,7 @@ type imagePinningClient struct {
 }
 
 func (c *imagePinningClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
-	if d, ok := obj.(*agentsv1alpha1.AgentDeployment); ok {
+	if d, ok := obj.(*agentsv1beta1.AgentDeployment); ok {
 		d.Spec.Image = c.pinned
 	}
 	return c.Client.Update(ctx, obj, opts...)
@@ -325,14 +325,14 @@ func TestRollback_NoEffectAfterTheWrite_Refused(t *testing.T) {
 			mkVersionSpec(t, name, targetV, namespace, autoRollbackSpec(targetImg, auto))
 			time.Sleep(1100 * time.Millisecond) // creation-time order: the target is the prior version
 
-			deploy := &agentsv1alpha1.AgentDeployment{
+			deploy := &agentsv1beta1.AgentDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 				Spec:       autoRollbackSpec(liveImg, auto),
 			}
 			require.NoError(t, k8sClient.Create(testCtx, deploy))
 			t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
 			servingV := mkServingVersion(t, deploy)
-			var live agentsv1alpha1.AgentDeployment
+			var live agentsv1beta1.AgentDeployment
 			require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &live))
 
 			if auto {
@@ -344,7 +344,7 @@ func TestRollback_NoEffectAfterTheWrite_Refused(t *testing.T) {
 			r.Client = &imagePinningClient{Client: k8sClient, pinned: liveImg}
 			reconcileNN(t, r, name, namespace)
 
-			var got agentsv1alpha1.AgentDeployment
+			var got agentsv1beta1.AgentDeployment
 			require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
 			assert.Equal(t, live.Spec, got.Spec, "admission kept the live spec")
 			assert.NotContains(t, got.Annotations, rollbackAnnotation)
@@ -386,9 +386,9 @@ func TestRollback_UnhealthyTarget_Refused(t *testing.T) {
 	seedJudgeWindows(t, store, namespace, name, baseV, 200, []float64{0.90})
 	seedJudgeWindows(t, store, namespace, name, targetV, 100, []float64{0.70, 0.69, 0.71})
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: currentImg},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: currentImg},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
@@ -396,7 +396,7 @@ func TestRollback_UnhealthyTarget_Refused(t *testing.T) {
 	annotateRollback(t, name, namespace, targetV)
 	reconcileNN(t, rollbackReconciler(store), name, namespace)
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
 
 	assert.Equal(t, currentImg, got.Spec.Image, "spec must be UNCHANGED on a refused rollback")
@@ -419,9 +419,9 @@ func TestRollback_UnhealthyTarget_ServingRegressionCondition(t *testing.T) {
 	)
 	mkVersionSnap(t, name, targetV, namespace, "ghcr.io/ctxmesh/example-agent:v1")
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:v2"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:v2"},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
@@ -457,9 +457,9 @@ func TestRollback_Cooldown_Refused(t *testing.T) {
 	)
 	mkVersionSnap(t, name, targetV, namespace, "ghcr.io/ctxmesh/example-agent:v1")
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: currentImg},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: currentImg},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
@@ -467,7 +467,7 @@ func TestRollback_Cooldown_Refused(t *testing.T) {
 	// Seed a recent successful rollback so the cooldown is active.
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
 	now := metav1.Now()
-	deploy.Status.Rollback = &agentsv1alpha1.RollbackStatus{
+	deploy.Status.Rollback = &agentsv1beta1.RollbackStatus{
 		RolledBackTo:   "some-earlier-version",
 		LastRollbackAt: &now,
 	}
@@ -476,7 +476,7 @@ func TestRollback_Cooldown_Refused(t *testing.T) {
 	annotateRollback(t, name, namespace, targetV)
 	reconcileNN(t, rollbackReconciler(onlinescore.NewMemStore()), name, namespace)
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
 	assert.Equal(t, currentImg, got.Spec.Image, "cooldown must block the spec revert")
 
@@ -497,9 +497,9 @@ func TestRollback_Flap_Refused(t *testing.T) {
 	)
 	mkVersionSnap(t, name, targetV, namespace, "ghcr.io/ctxmesh/example-agent:v1")
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: currentImg},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: currentImg},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
@@ -509,10 +509,10 @@ func TestRollback_Flap_Refused(t *testing.T) {
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
 	long := metav1.NewTime(time.Now().Add(-2 * rollbackCooldown))
 	recent := metav1.NewTime(time.Now().Add(-1 * time.Minute))
-	deploy.Status.Rollback = &agentsv1alpha1.RollbackStatus{
+	deploy.Status.Rollback = &agentsv1beta1.RollbackStatus{
 		RolledBackTo:   "some-other-version",
 		LastRollbackAt: &long,
-		History: []agentsv1alpha1.RollbackEvent{
+		History: []agentsv1beta1.RollbackEvent{
 			{ToVersion: "some-other-version", FromVersion: targetV, At: recent},
 		},
 	}
@@ -521,7 +521,7 @@ func TestRollback_Flap_Refused(t *testing.T) {
 	annotateRollback(t, name, namespace, targetV)
 	reconcileNN(t, rollbackReconciler(onlinescore.NewMemStore()), name, namespace)
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
 	assert.Equal(t, currentImg, got.Spec.Image, "flap guard must block the spec revert")
 
@@ -539,9 +539,9 @@ func TestRollback_TargetNotFound_HonestCondition(t *testing.T) {
 		namespace  = "default"
 		currentImg = "ghcr.io/ctxmesh/example-agent:v2"
 	)
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: currentImg},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: currentImg},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
@@ -549,7 +549,7 @@ func TestRollback_TargetNotFound_HonestCondition(t *testing.T) {
 	annotateRollback(t, name, namespace, "no-such-version-000")
 	reconcileNN(t, rollbackReconciler(onlinescore.NewMemStore()), name, namespace)
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
 	assert.Equal(t, currentImg, got.Spec.Image, "a missing target must not change spec")
 	assert.NotContains(t, got.Annotations, rollbackAnnotation,
@@ -574,21 +574,21 @@ func TestRollback_Frozen_Refused(t *testing.T) {
 	)
 	mkVersionSnap(t, name, targetV, namespace, "ghcr.io/ctxmesh/example-agent:v1")
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: currentImg},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: currentImg},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
 
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
-	deploy.Status.Rollback = &agentsv1alpha1.RollbackStatus{FrozenUntilAck: true}
+	deploy.Status.Rollback = &agentsv1beta1.RollbackStatus{FrozenUntilAck: true}
 	require.NoError(t, k8sClient.Status().Update(testCtx, deploy))
 
 	annotateRollback(t, name, namespace, targetV)
 	reconcileNN(t, rollbackReconciler(onlinescore.NewMemStore()), name, namespace)
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
 	assert.Equal(t, currentImg, got.Spec.Image, "a frozen deployment must not roll back")
 

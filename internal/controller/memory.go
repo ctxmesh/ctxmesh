@@ -17,7 +17,7 @@ limitations under the License.
 package controller
 
 import (
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 const (
@@ -32,7 +32,7 @@ const (
 // CRD was retired pre-GA (M127, ADR 0101) — its capability was a strict subset of
 // sessionMemory — so session memory is now authored ONLY via the spec field. Returns
 // the resolved backend addr + scope, and whether the agent has session memory at all.
-func resolveMemory(deploy *agentsv1alpha1.AgentDeployment) (addr, scope string, hasMemory bool) {
+func resolveMemory(deploy *agentsv1beta1.AgentDeployment) (addr, scope string, hasMemory bool) {
 	sm := deploy.Spec.SessionMemory
 	if sm == nil {
 		return "", "", false

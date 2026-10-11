@@ -16,10 +16,6 @@ limitations under the License.
 
 package v1beta1
 
-// Workflow is a NEW type (M67, ADR 0060) with no v1alpha1 history, so it is born directly in the storage
-// version (v1beta1) as a SINGLE-version CRD — no deprecated spoke, no conversion (the AgentTeam/GuardrailPolicy
-// precedent). The CRD-version-parity guard (hack/check-crd-version-parity.sh) skips single-version CRDs.
-
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"

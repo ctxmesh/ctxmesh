@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/costrollup"
 )
 
@@ -275,10 +275,10 @@ const costTestTenant = "acme"
 
 // costTestTenantObject returns the default Tenant CR the cost handler tests seed
 // into the fake caller client so the ADR 0077 breakdown filter resolves.
-func costTestTenantObject() *agentsv1alpha1.Tenant {
-	return &agentsv1alpha1.Tenant{
+func costTestTenantObject() *agentsv1beta1.Tenant {
+	return &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: costTestTenant},
-		Spec:       agentsv1alpha1.TenantSpec{Namespaces: []string{"default", "other", "ns"}},
+		Spec:       agentsv1beta1.TenantSpec{Namespaces: []string{"default", "other", "ns"}},
 	}
 }
 
@@ -465,17 +465,17 @@ func TestHandlerCostBreakdownData200(t *testing.T) {
 // never cluster-wide, never another tenant's.
 
 // tenantCR is a small Tenant-fixture builder for the isolation tests.
-func tenantCR(name string, namespaces ...string) *agentsv1alpha1.Tenant {
-	return &agentsv1alpha1.Tenant{
+func tenantCR(name string, namespaces ...string) *agentsv1beta1.Tenant {
+	return &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       agentsv1alpha1.TenantSpec{Namespaces: namespaces},
+		Spec:       agentsv1beta1.TenantSpec{Namespaces: namespaces},
 	}
 }
 
 // newIsolationCostServer builds a permissive (always-allow SSAR) cost server
 // seeded with the given Tenant CRs and rollup store, wired with the given
 // adapters — the fixture backbone for the tenant-isolation proofs.
-func newIsolationCostServer(t *testing.T, a Adapters, store costrollup.Store, tenants ...*agentsv1alpha1.Tenant) *Server {
+func newIsolationCostServer(t *testing.T, a Adapters, store costrollup.Store, tenants ...*agentsv1beta1.Tenant) *Server {
 	t.Helper()
 	objs := make([]client.Object, 0, len(tenants))
 	for _, tnt := range tenants {

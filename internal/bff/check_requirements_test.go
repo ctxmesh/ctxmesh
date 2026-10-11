@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // checkNS is the namespace used in check-requirements tests.
@@ -37,7 +37,7 @@ const checkNS = "default"
 // newCheckReqServer builds a Server with a fake caller client and a
 // ToolRegistry memstore (ToolRegistry is retired as a CRD — ADR 0044).
 // ModelRoutes are seeded via client objects (they are still CRDs).
-func newCheckReqServer(t *testing.T, routes []*agentsv1alpha1.ModelRoute, regs []*agentsv1alpha1.ToolRegistry) *Server {
+func newCheckReqServer(t *testing.T, routes []*agentsv1beta1.ModelRoute, regs []*agentsv1beta1.ToolRegistry) *Server {
 	t.Helper()
 	builder := fake.NewClientBuilder().WithScheme(testScheme(t))
 	for _, r := range routes {
@@ -76,29 +76,29 @@ func postCheckRequirements(t *testing.T, s *Server, agentYAML string) CheckRequi
 }
 
 // anthropicRoute builds a connect-managed anthropic ModelRoute in checkNS.
-func anthropicRoute() *agentsv1alpha1.ModelRoute {
-	return &agentsv1alpha1.ModelRoute{
+func anthropicRoute() *agentsv1beta1.ModelRoute {
+	return &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "anthropic",
 			Namespace: checkNS,
 			Labels:    map[string]string{labelManagedBy: managedByConnect, labelProvider: "anthropic"},
 		},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 1}},
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 1}},
 		},
 	}
 }
 
 // namedRoute builds a connect-managed ModelRoute with a custom name in checkNS.
-func namedRoute(name string) *agentsv1alpha1.ModelRoute {
-	return &agentsv1alpha1.ModelRoute{
+func namedRoute(name string) *agentsv1beta1.ModelRoute {
+	return &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: checkNS,
 			Labels:    map[string]string{labelManagedBy: managedByConnect, labelProvider: "anthropic"},
 		},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 1}},
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 1}},
 		},
 	}
 }
@@ -106,17 +106,17 @@ func namedRoute(name string) *agentsv1alpha1.ModelRoute {
 // TestCheckRequirements_AllReady verifies that a spec with a connected model and a
 // ready (approved) tool returns all-green.
 func TestCheckRequirements_AllReady(t *testing.T) {
-	registry := &agentsv1alpha1.ToolRegistry{
+	registry := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-tools", Namespace: checkNS},
-		Spec: agentsv1alpha1.ToolRegistrySpec{
-			Tools: []agentsv1alpha1.ToolEntry{
-				{Name: "get_order", ApprovalStatus: agentsv1alpha1.ApprovalApproved},
+		Spec: agentsv1beta1.ToolRegistrySpec{
+			Tools: []agentsv1beta1.ToolEntry{
+				{Name: "get_order", ApprovalStatus: agentsv1beta1.ApprovalApproved},
 			},
 		},
 	}
 
 	// Use namedRoute to verify that a spec with an exact route name is matched correctly.
-	s := newCheckReqServer(t, []*agentsv1alpha1.ModelRoute{namedRoute("anthropic")}, []*agentsv1alpha1.ToolRegistry{registry})
+	s := newCheckReqServer(t, []*agentsv1beta1.ModelRoute{namedRoute("anthropic")}, []*agentsv1beta1.ToolRegistry{registry})
 
 	yaml := "name: my-agent\nruntime: managed\nmodel:\n  route: anthropic\ntools:\n  - get_order\n"
 	resp := postCheckRequirements(t, s, yaml)
@@ -151,7 +151,7 @@ func TestCheckRequirements_UnconnectedModel(t *testing.T) {
 // is returned with status "not-found".
 func TestCheckRequirements_ToolNotFound(t *testing.T) {
 	// A connected route so the model check is green; an empty registry (tool absent).
-	s := newCheckReqServer(t, []*agentsv1alpha1.ModelRoute{anthropicRoute()}, nil)
+	s := newCheckReqServer(t, []*agentsv1beta1.ModelRoute{anthropicRoute()}, nil)
 
 	yaml := "name: my-agent\nruntime: managed\ntools:\n  - unknown_tool\n"
 	resp := postCheckRequirements(t, s, yaml)
@@ -167,16 +167,16 @@ func TestCheckRequirements_ToolNotFound(t *testing.T) {
 // TestCheckRequirements_PendingTool verifies that a tool with pending approval
 // is returned with status "needs-approval".
 func TestCheckRequirements_PendingTool(t *testing.T) {
-	registry := &agentsv1alpha1.ToolRegistry{
+	registry := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "byo-tools", Namespace: checkNS},
-		Spec: agentsv1alpha1.ToolRegistrySpec{
-			Tools: []agentsv1alpha1.ToolEntry{
-				{Name: "risky_tool", ApprovalStatus: agentsv1alpha1.ApprovalPending},
+		Spec: agentsv1beta1.ToolRegistrySpec{
+			Tools: []agentsv1beta1.ToolEntry{
+				{Name: "risky_tool", ApprovalStatus: agentsv1beta1.ApprovalPending},
 			},
 		},
 	}
 
-	s := newCheckReqServer(t, []*agentsv1alpha1.ModelRoute{anthropicRoute()}, []*agentsv1alpha1.ToolRegistry{registry})
+	s := newCheckReqServer(t, []*agentsv1beta1.ModelRoute{anthropicRoute()}, []*agentsv1beta1.ToolRegistry{registry})
 
 	yaml := "name: my-agent\nruntime: managed\ntools:\n  - risky_tool\n"
 	resp := postCheckRequirements(t, s, yaml)
@@ -189,7 +189,7 @@ func TestCheckRequirements_PendingTool(t *testing.T) {
 // endpoint annotation is returned with status "needs-consent".
 func TestCheckRequirements_OAuthTool(t *testing.T) {
 	// A registry whose server requires OAuth (has the authorization endpoint annotation).
-	registry := &agentsv1alpha1.ToolRegistry{
+	registry := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "oauth-server",
 			Namespace: checkNS,
@@ -197,14 +197,14 @@ func TestCheckRequirements_OAuthTool(t *testing.T) {
 				annMCPOAuthAuthEndpoint: "https://example.com/oauth/authorize",
 			},
 		},
-		Spec: agentsv1alpha1.ToolRegistrySpec{
-			Tools: []agentsv1alpha1.ToolEntry{
-				{Name: "oauth_tool", ApprovalStatus: agentsv1alpha1.ApprovalApproved},
+		Spec: agentsv1beta1.ToolRegistrySpec{
+			Tools: []agentsv1beta1.ToolEntry{
+				{Name: "oauth_tool", ApprovalStatus: agentsv1beta1.ApprovalApproved},
 			},
 		},
 	}
 
-	s := newCheckReqServer(t, []*agentsv1alpha1.ModelRoute{anthropicRoute()}, []*agentsv1alpha1.ToolRegistry{registry})
+	s := newCheckReqServer(t, []*agentsv1beta1.ModelRoute{anthropicRoute()}, []*agentsv1beta1.ToolRegistry{registry})
 
 	yaml := "name: my-agent\nruntime: managed\ntools:\n  - oauth_tool\n"
 	resp := postCheckRequirements(t, s, yaml)
@@ -216,7 +216,7 @@ func TestCheckRequirements_OAuthTool(t *testing.T) {
 // TestCheckRequirements_EmptySpec verifies that an agent with no model.route and
 // no tools, but a connected provider, returns model.connected=true with empty tools.
 func TestCheckRequirements_EmptySpec(t *testing.T) {
-	s := newCheckReqServer(t, []*agentsv1alpha1.ModelRoute{anthropicRoute()}, nil)
+	s := newCheckReqServer(t, []*agentsv1beta1.ModelRoute{anthropicRoute()}, nil)
 
 	yaml := "name: my-agent\nruntime: managed\n"
 	resp := postCheckRequirements(t, s, yaml)

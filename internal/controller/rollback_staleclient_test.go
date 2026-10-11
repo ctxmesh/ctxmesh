@@ -28,7 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
 )
 
@@ -65,7 +65,7 @@ func (s *staleCacheClient) Get(
 	}
 	// Pin the resourceVersion of an AgentDeployment to its cached (stale) value once a first
 	// Update has frozen the cache view; leave everything else (spec/status/annotations) current.
-	if dep, ok := obj.(*agentsv1alpha1.AgentDeployment); ok {
+	if dep, ok := obj.(*agentsv1beta1.AgentDeployment); ok {
 		if rv, pinned := s.staleRV[key]; pinned {
 			dep.ResourceVersion = rv
 		}
@@ -79,7 +79,7 @@ func (s *staleCacheClient) Update(
 	// On the FIRST Update of an AgentDeployment, freeze the cache view to the resourceVersion the
 	// object carried going IN (the value the "cache" still holds) before the apiserver advances
 	// it. This reproduces the informer cache lagging one write behind the annotation-clear Update.
-	if dep, ok := obj.(*agentsv1alpha1.AgentDeployment); ok {
+	if dep, ok := obj.(*agentsv1beta1.AgentDeployment); ok {
 		key := client.ObjectKeyFromObject(obj)
 		if _, already := s.staleRV[key]; !already {
 			s.staleRV[key] = dep.ResourceVersion
@@ -115,9 +115,9 @@ func TestRollback_Refused_ReasonPersists_UnderCacheLag(t *testing.T) {
 	)
 	mkVersionSnap(t, name, targetV, namespace, "ghcr.io/ctxmesh/example-agent:v1")
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: currentImg},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: currentImg},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
@@ -125,7 +125,7 @@ func TestRollback_Refused_ReasonPersists_UnderCacheLag(t *testing.T) {
 	// Seed a recent successful rollback so the cooldown guard REFUSES this attempt.
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
 	now := metav1.Now()
-	deploy.Status.Rollback = &agentsv1alpha1.RollbackStatus{
+	deploy.Status.Rollback = &agentsv1beta1.RollbackStatus{
 		RolledBackTo:   "some-earlier-version",
 		LastRollbackAt: &now,
 	}
@@ -139,7 +139,7 @@ func TestRollback_Refused_ReasonPersists_UnderCacheLag(t *testing.T) {
 	reconcileNN(t, staleCacheReconciler(onlinescore.NewMemStore()), name, namespace)
 
 	// Read the GROUND TRUTH from the direct apiserver client (not the lagged one).
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
 
 	assert.Equal(t, currentImg, got.Spec.Image, "a refused rollback must leave spec unchanged")

@@ -20,7 +20,7 @@ import (
 	"context"
 	"errors"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -50,8 +50,8 @@ type AgentWriter interface {
 
 // listAgentDeployments lists AgentDeployments via the reader. It is the single
 // place the CRD list happens; the handler maps the result to the UI DTO.
-func listAgentDeployments(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1alpha1.AgentDeploymentList, error) {
-	var out agentsv1alpha1.AgentDeploymentList
+func listAgentDeployments(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1beta1.AgentDeploymentList, error) {
+	var out agentsv1beta1.AgentDeploymentList
 	if err := r.List(ctx, &out, opts...); err != nil {
 		return nil, err
 	}
@@ -59,8 +59,8 @@ func listAgentDeployments(ctx context.Context, r AgentReader, opts ...client.Lis
 }
 
 // listAgentRegistries lists AgentRegistries via the reader (topology roots).
-func listAgentRegistries(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1alpha1.AgentRegistryList, error) {
-	var out agentsv1alpha1.AgentRegistryList
+func listAgentRegistries(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1beta1.AgentRegistryList, error) {
+	var out agentsv1beta1.AgentRegistryList
 	if err := r.List(ctx, &out, opts...); err != nil {
 		return nil, err
 	}
@@ -68,8 +68,8 @@ func listAgentRegistries(ctx context.Context, r AgentReader, opts ...client.List
 }
 
 // listMCPToolBindings lists MCPToolBindings via the reader (topology tool leaves).
-func listMCPToolBindings(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1alpha1.MCPToolBindingList, error) {
-	var out agentsv1alpha1.MCPToolBindingList
+func listMCPToolBindings(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1beta1.MCPToolBindingList, error) {
+	var out agentsv1beta1.MCPToolBindingList
 	if err := r.List(ctx, &out, opts...); err != nil {
 		return nil, err
 	}
@@ -79,8 +79,8 @@ func listMCPToolBindings(ctx context.Context, r AgentReader, opts ...client.List
 // listAgentVersions lists AgentVersions via the reader (agent-detail version
 // history). Each AgentVersion is a controller-created immutable snapshot pinned to
 // its parent via spec.deploymentName.
-func listAgentVersions(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1alpha1.AgentVersionList, error) {
-	var out agentsv1alpha1.AgentVersionList
+func listAgentVersions(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1beta1.AgentVersionList, error) {
+	var out agentsv1beta1.AgentVersionList
 	if err := r.List(ctx, &out, opts...); err != nil {
 		return nil, err
 	}

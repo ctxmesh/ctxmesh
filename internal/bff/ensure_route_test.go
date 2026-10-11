@@ -12,7 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 func TestInjectModelRoute(t *testing.T) {
@@ -57,7 +57,7 @@ func TestEnsureRouteForModel(t *testing.T) {
 		require.Nil(t, cerr)
 		assert.Equal(t, "anthropic-claude-sonnet-5", name)
 
-		var mr agentsv1alpha1.ModelRoute
+		var mr agentsv1beta1.ModelRoute
 		require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: "default", Name: name}, &mr))
 		require.Len(t, mr.Spec.Providers, 1)
 		assert.Equal(t, "anthropic", mr.Spec.Providers[0].Provider)
@@ -78,7 +78,7 @@ func TestEnsureRouteForModel(t *testing.T) {
 		require.Nil(t, e2)
 		assert.Equal(t, n1, n2)
 
-		var list agentsv1alpha1.ModelRouteList
+		var list agentsv1beta1.ModelRouteList
 		require.NoError(t, c.List(ctx, &list))
 		assert.Len(t, list.Items, 1, "the same (provider, model) must reuse ONE route")
 	})
@@ -95,15 +95,15 @@ func TestEnsureRouteForModel(t *testing.T) {
 	// calls, and the connection's key, went to api.openai.com.
 	t.Run("custom connection: the route keeps the connection's apiBase, and an old route is repaired", func(t *testing.T) {
 		scheme := testScheme(t)
-		connRoute := &agentsv1alpha1.ModelRoute{
+		connRoute := &agentsv1beta1.ModelRoute{
 			ObjectMeta: metav1.ObjectMeta{Name: "my-llm", Namespace: "default", Labels: map[string]string{labelManagedBy: managedByConnect}},
-			Spec: agentsv1alpha1.ModelRouteSpec{Providers: []agentsv1alpha1.ProviderRef{{
+			Spec: agentsv1beta1.ModelRouteSpec{Providers: []agentsv1beta1.ProviderRef{{
 				Provider: "openai", Model: "m", Priority: 1, SecretBindingRef: "my-llm", APIBase: "http://llm.internal:9099/v1",
 			}}},
 		}
-		stale := &agentsv1alpha1.ModelRoute{
+		stale := &agentsv1beta1.ModelRoute{
 			ObjectMeta: metav1.ObjectMeta{Name: "my-llm-old-model", Namespace: "default", Labels: map[string]string{labelManagedBy: managedByModelPicker}},
-			Spec: agentsv1alpha1.ModelRouteSpec{Providers: []agentsv1alpha1.ProviderRef{{
+			Spec: agentsv1beta1.ModelRouteSpec{Providers: []agentsv1beta1.ProviderRef{{
 				Provider: "openai", Model: "old-model", Priority: 1, SecretBindingRef: "my-llm",
 			}}},
 		}
@@ -111,7 +111,7 @@ func TestEnsureRouteForModel(t *testing.T) {
 
 		name, cerr := ensureRouteForModel(ctx, c, scheme, "default", "my-llm", "mock-large")
 		require.Nil(t, cerr)
-		var mr agentsv1alpha1.ModelRoute
+		var mr agentsv1beta1.ModelRoute
 		require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: "default", Name: name}, &mr))
 		assert.Equal(t, "http://llm.internal:9099/v1", mr.Spec.Providers[0].APIBase)
 
@@ -125,14 +125,14 @@ func TestEnsureRouteForModel(t *testing.T) {
 		scheme := testScheme(t)
 		// A named connection "anthropic-prod" of provider type "anthropic", with its
 		// own SecretBinding (named after the connection by the connect flow).
-		connRoute := &agentsv1alpha1.ModelRoute{
+		connRoute := &agentsv1beta1.ModelRoute{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "anthropic-prod",
 				Namespace: "default",
 				Labels:    map[string]string{labelManagedBy: managedByConnect},
 			},
-			Spec: agentsv1alpha1.ModelRouteSpec{
-				Providers: []agentsv1alpha1.ProviderRef{{
+			Spec: agentsv1beta1.ModelRouteSpec{
+				Providers: []agentsv1beta1.ProviderRef{{
 					Provider:         "anthropic",
 					Model:            "claude-opus-4-8",
 					Priority:         1,
@@ -147,7 +147,7 @@ func TestEnsureRouteForModel(t *testing.T) {
 		// The route name keys on the CONNECTION, not the provider type.
 		assert.Equal(t, "anthropic-prod-claude-sonnet-5", name)
 
-		var mr agentsv1alpha1.ModelRoute
+		var mr agentsv1beta1.ModelRoute
 		require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: "default", Name: name}, &mr))
 		require.Len(t, mr.Spec.Providers, 1)
 		// The ensured route serves the connection's provider TYPE...

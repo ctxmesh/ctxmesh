@@ -36,7 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // esNS is the namespace used in EvalSuite tests.
@@ -45,12 +45,12 @@ const esNS = "team-evals"
 // --- fixture helpers --------------------------------------------------------
 
 // mockEvalSuite builds a minimal EvalSuite with one mock scorer.
-func mockEvalSuite(name, ns string) *agentsv1alpha1.EvalSuite {
-	return &agentsv1alpha1.EvalSuite{
+func mockEvalSuite(name, ns string) *agentsv1beta1.EvalSuite {
+	return &agentsv1beta1.EvalSuite{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: agentsv1alpha1.EvalSuiteSpec{
-			Dataset:   agentsv1alpha1.DatasetRef{Ref: "my-dataset"},
-			Scorers:   []agentsv1alpha1.ScorerSpec{{Name: "quality", Type: "mock", Weight: 1}},
+		Spec: agentsv1beta1.EvalSuiteSpec{
+			Dataset:   agentsv1beta1.DatasetRef{Ref: "my-dataset"},
+			Scorers:   []agentsv1beta1.ScorerSpec{{Name: "quality", Type: "mock", Weight: 1}},
 			Threshold: "0.80",
 			Gate:      "block",
 		},
@@ -58,7 +58,7 @@ func mockEvalSuite(name, ns string) *agentsv1alpha1.EvalSuite {
 }
 
 // gatedEvalSuite sets status conditions (gate outcome) on an EvalSuite.
-func gatedEvalSuite(es *agentsv1alpha1.EvalSuite, passed bool) *agentsv1alpha1.EvalSuite {
+func gatedEvalSuite(es *agentsv1beta1.EvalSuite, passed bool) *agentsv1beta1.EvalSuite {
 	status := metav1.ConditionTrue
 	reason := "GatePassed"
 	msg := "suite score 0.92 >= threshold 0.80"
@@ -259,7 +259,7 @@ func TestListEvalSuitesNamespaceScoping(t *testing.T) {
 
 // TestListEvalSuitesLimitAndCursor proves limit/cursor paging works.
 func TestListEvalSuitesLimitAndCursor(t *testing.T) {
-	all := []*agentsv1alpha1.EvalSuite{
+	all := []*agentsv1beta1.EvalSuite{
 		mockEvalSuite("es-000", esNS),
 		mockEvalSuite("es-001", esNS),
 		mockEvalSuite("es-002", esNS),
@@ -283,7 +283,7 @@ func TestListEvalSuitesLimitAndCursor(t *testing.T) {
 			if lo.Limit > 0 && start+int(lo.Limit) < end {
 				end = start + int(lo.Limit)
 			}
-			esList, ok := list.(*agentsv1alpha1.EvalSuiteList)
+			esList, ok := list.(*agentsv1beta1.EvalSuiteList)
 			if !ok {
 				return fmt.Errorf("unexpected list type %T", list)
 			}
@@ -432,7 +432,7 @@ func TestCreateEvalSuiteSucceeds(t *testing.T) {
 	assert.Equal(t, "quality", detail.Scorers[0].Name)
 
 	// Confirm it landed in the fake store.
-	var got agentsv1alpha1.EvalSuite
+	var got agentsv1beta1.EvalSuite
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: esNS, Name: "new-suite"}, &got))
 	assert.Equal(t, "ci-dataset", got.Spec.Dataset.Ref)
 	assert.Len(t, got.Spec.Scorers, 1)
@@ -728,7 +728,7 @@ func TestDeleteEvalSuiteRemovesObject(t *testing.T) {
 	rec := deleteEvalSuite(t, s, esNS, "my-suite")
 	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
 
-	var got agentsv1alpha1.EvalSuite
+	var got agentsv1beta1.EvalSuite
 	err := c.Get(context.Background(), client.ObjectKey{Namespace: esNS, Name: "my-suite"}, &got)
 	require.True(t, apierrors.IsNotFound(err), "EvalSuite must be gone after a successful DELETE")
 }
@@ -818,23 +818,23 @@ func TestEvalSuiteResultsReturnsCRDConditions(t *testing.T) {
 // agent on a DIFFERENT suite is excluded. GateResultsAvailable=true on a successful list.
 func TestEvalSuiteResultsGateResultsAggregatesFromAgents(t *testing.T) {
 	es := mockEvalSuite("my-suite", esNS)
-	gated := &agentsv1alpha1.AgentDeployment{
+	gated := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent-gated", Namespace: esNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{EvalSuiteRef: "my-suite"},
-		Status: agentsv1alpha1.AgentDeploymentStatus{Gate: &agentsv1alpha1.GateStatus{
+		Spec:       agentsv1beta1.AgentDeploymentSpec{EvalSuiteRef: "my-suite"},
+		Status: agentsv1beta1.AgentDeploymentStatus{Gate: &agentsv1beta1.GateStatus{
 			Decision: "promoted", Phase: "awaiting-promotion", Reason: "AwaitingHumanPromotion",
 			Score: "0.9182", ScoredRevision: "agent-gated-abc", Threshold: "0.0000",
 		}},
 	}
-	pending := &agentsv1alpha1.AgentDeployment{
+	pending := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent-pending", Namespace: esNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{EvalSuiteRef: "my-suite"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{EvalSuiteRef: "my-suite"},
 		// no status.gate yet
 	}
-	other := &agentsv1alpha1.AgentDeployment{
+	other := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent-other", Namespace: esNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{EvalSuiteRef: "different-suite"},
-		Status: agentsv1alpha1.AgentDeploymentStatus{Gate: &agentsv1alpha1.GateStatus{
+		Spec:       agentsv1beta1.AgentDeploymentSpec{EvalSuiteRef: "different-suite"},
+		Status: agentsv1beta1.AgentDeploymentStatus{Gate: &agentsv1beta1.GateStatus{
 			Score: "0.5000", Decision: "blocked",
 		}},
 	}

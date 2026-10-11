@@ -51,7 +51,7 @@ const (
 // fields that shape the manifest and the pod template. The controller resolves
 // each binding to one of these (dropping invalid ones) before rendering.
 //
-// It deliberately does NOT depend on the api/v1alpha1 types so the render logic
+// It deliberately does NOT depend on the api/v1beta1 types so the render logic
 // stays a pure, dependency-light unit under test.
 type Binding struct {
 	// BindingName is the MCPToolBinding object name. It orders deterministic

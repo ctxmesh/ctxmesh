@@ -46,7 +46,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	sigsyaml "sigs.k8s.io/yaml"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 var (
@@ -82,8 +82,8 @@ func TestMain(m *testing.M) {
 	if err = scheme.AddToScheme(testScheme); err != nil {
 		panic("failed to add client-go scheme: " + err.Error())
 	}
-	if err = agentsv1alpha1.AddToScheme(testScheme); err != nil {
-		panic("failed to add agents/v1alpha1 scheme: " + err.Error())
+	if err = agentsv1beta1.AddToScheme(testScheme); err != nil {
+		panic("failed to add agents/v1beta1 scheme: " + err.Error())
 	}
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: testScheme})
@@ -173,9 +173,9 @@ func TestAudit_MutationEmitsRecord(t *testing.T) {
 	require.True(t, mgr.GetCache().WaitForCacheSync(ctx), "cache did not sync")
 
 	const name = "audit-probe"
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: "serving",
 			Port:           8080,

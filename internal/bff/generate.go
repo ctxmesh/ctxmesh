@@ -30,7 +30,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/expand"
 )
 
@@ -162,7 +162,7 @@ func (s *Server) buildCallerToolPrompt(ctx context.Context, caller client.Client
 			continue
 		}
 		for _, e := range toolCatalogEntriesFromRegistry(tr) {
-			if e.ApprovalStatus == agentsv1alpha1.ApprovalApproved {
+			if e.ApprovalStatus == agentsv1beta1.ApprovalApproved {
 				catalog = append(catalog, e)
 			}
 		}
@@ -388,9 +388,9 @@ func (s *Server) resolveGeneration(ctx context.Context, caller client.Client, ns
 // the caller's connect-managed routes are listed and the SINGLE one is used — zero
 // connected providers or more than one (with no name) is an honest 400 asking the
 // caller to connect / pick. All reads are caller-scoped (RBAC surfaces as 403).
-func (s *Server) resolveConnectedRoute(ctx context.Context, caller client.Client, ns, name string) (*agentsv1alpha1.ModelRoute, *createError) {
+func (s *Server) resolveConnectedRoute(ctx context.Context, caller client.Client, ns, name string) (*agentsv1beta1.ModelRoute, *createError) {
 	if name != "" {
-		var route agentsv1alpha1.ModelRoute
+		var route agentsv1beta1.ModelRoute
 		if err := caller.Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, &route); err != nil {
 			return nil, getErrorToCreateError(err, "provider")
 		}
@@ -400,7 +400,7 @@ func (s *Server) resolveConnectedRoute(ctx context.Context, caller client.Client
 		return &route, nil
 	}
 
-	var routes agentsv1alpha1.ModelRouteList
+	var routes agentsv1beta1.ModelRouteList
 	if err := caller.List(ctx, &routes,
 		client.InNamespace(ns), client.MatchingLabels{labelManagedBy: managedByConnect}); err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
@@ -429,7 +429,7 @@ func (s *Server) resolveConnectedRoute(ctx context.Context, caller client.Client
 // denied the Secret read is rejected by the API server → the 403 surfaces. The
 // returned key is used ONLY for the chat call; it is never logged or returned.
 func readBindingKey(ctx context.Context, caller client.Client, ns, bindingName string) (string, *createError) {
-	var binding agentsv1alpha1.SecretBinding
+	var binding agentsv1beta1.SecretBinding
 	if err := caller.Get(ctx, client.ObjectKey{Name: bindingName, Namespace: ns}, &binding); err != nil {
 		return "", getErrorToCreateError(err, "secret binding")
 	}
@@ -464,7 +464,7 @@ func getErrorToCreateError(err error, what string) *createError {
 
 // routePrimaryModel returns the connect-managed route's primary model (the first
 // provider entry's model). Empty when the route carries no model.
-func routePrimaryModel(mr *agentsv1alpha1.ModelRoute) string {
+func routePrimaryModel(mr *agentsv1beta1.ModelRoute) string {
 	for _, p := range mr.Spec.Providers {
 		if p.Model != "" {
 			return p.Model

@@ -36,7 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
 	"github.com/ctxmesh/ctxmesh/internal/objectstore"
@@ -292,11 +291,11 @@ func TestKnowledgeBinding_ResolvesEnvVars(t *testing.T) {
 	_ = kb // validated in the reconcile; we just need the CR to exist
 
 	// 2. Create an AgentDeployment that references the KB.
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: ns},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/echo-agent:latest", ExecutionModel: "serving", Port: 8080,
-			KnowledgeBases: []agentsv1alpha1.KnowledgeBaseRef{
+			KnowledgeBases: []agentsv1beta1.KnowledgeBaseRef{
 				{Name: kbName}, // namespace defaults to the agent's ns
 			},
 		},
@@ -345,11 +344,11 @@ func TestKnowledgeBinding_AutoInjectFlowsIntoRoster(t *testing.T) {
 	}
 
 	// The agent auto-injects one KB and leaves the other tool-only — a per-binding choice.
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: ns},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/echo-agent:latest", ExecutionModel: "serving", Port: 8080,
-			KnowledgeBases: []agentsv1alpha1.KnowledgeBaseRef{
+			KnowledgeBases: []agentsv1beta1.KnowledgeBaseRef{
 				{Name: autoKB, AutoInject: true},
 				{Name: toolKB}, // AutoInject unset ⇒ tool-only
 			},
@@ -389,11 +388,11 @@ func TestKnowledgeBinding_DanglingRef_SetsCondition(t *testing.T) {
 	const ns = "default"
 	const agentName = "kb-dangling-agent"
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: ns},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/echo-agent:latest", ExecutionModel: "serving", Port: 8080,
-			KnowledgeBases: []agentsv1alpha1.KnowledgeBaseRef{
+			KnowledgeBases: []agentsv1beta1.KnowledgeBaseRef{
 				{Name: "does-not-exist"},
 			},
 		},
@@ -408,7 +407,7 @@ func TestKnowledgeBinding_DanglingRef_SetsCondition(t *testing.T) {
 	reconcileNN(t, r, agentName, ns)
 
 	// Condition check: KnowledgeBasesResolved must be False/DanglingRef.
-	var liveAgent agentsv1alpha1.AgentDeployment
+	var liveAgent agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: agentName, Namespace: ns}, &liveAgent))
 	cond := apimeta.FindStatusCondition(liveAgent.Status.Conditions, "KnowledgeBasesResolved")
@@ -433,9 +432,9 @@ func TestKnowledgeBinding_NoKnowledgeBases_NoByteDrift(t *testing.T) {
 	const ns = "default"
 	const agentName = "kb-none-agent"
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: ns},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/echo-agent:latest", ExecutionModel: "serving", Port: 8080,
 			// KnowledgeBases intentionally absent
 		},
@@ -1054,11 +1053,11 @@ func TestKnowledgeSettle_OneRevisionNotThree(t *testing.T) {
 	const agentName = "kb-settle-agent"
 	const kbName = "kb-settle-corpus"
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: ns},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/echo-agent:latest", ExecutionModel: "serving", Port: 8080,
-			KnowledgeBases: []agentsv1alpha1.KnowledgeBaseRef{{Name: kbName}},
+			KnowledgeBases: []agentsv1beta1.KnowledgeBaseRef{{Name: kbName}},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, agent))
@@ -1076,7 +1075,7 @@ func TestKnowledgeSettle_OneRevisionNotThree(t *testing.T) {
 		"no ksvc may be published while the KB refs are still settling — publishing one is what "+
 			"created the second, corrected revision a beat later")
 
-	var live agentsv1alpha1.AgentDeployment
+	var live agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: agentName, Namespace: ns}, &live))
 	cond := apimeta.FindStatusCondition(live.Status.Conditions, "KnowledgeBasesResolved")
 	require.NotNil(t, cond)
@@ -1122,11 +1121,11 @@ func TestKnowledgeSettle_AWindowThatElapsesDeploysAnyway(t *testing.T) {
 	const ns = "default"
 	const agentName = "kb-settle-expired"
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: ns},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/echo-agent:latest", ExecutionModel: "serving", Port: 8080,
-			KnowledgeBases: []agentsv1alpha1.KnowledgeBaseRef{{Name: "deleted-corpus"}},
+			KnowledgeBases: []agentsv1beta1.KnowledgeBaseRef{{Name: "deleted-corpus"}},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, agent))
@@ -1147,7 +1146,7 @@ func TestKnowledgeSettle_AWindowThatElapsesDeploysAnyway(t *testing.T) {
 	}, 5*time.Second, 50*time.Millisecond,
 		"once the settle window elapses the agent must deploy WITHOUT the missing corpus")
 
-	var live agentsv1alpha1.AgentDeployment
+	var live agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: agentName, Namespace: ns}, &live))
 	cond := apimeta.FindStatusCondition(live.Status.Conditions, "KnowledgeBasesResolved")
 	require.NotNil(t, cond)
@@ -1162,9 +1161,9 @@ func TestKnowledgeSettle_NoKnowledgeBasesIsUnaffected(t *testing.T) {
 	const ns = "default"
 	const agentName = "kb-settle-none"
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: ns},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/echo-agent:latest", ExecutionModel: "serving", Port: 8080,
 		},
 	}
@@ -1174,7 +1173,7 @@ func TestKnowledgeSettle_NoKnowledgeBasesIsUnaffected(t *testing.T) {
 	res := reconcileNN(t, newReconciler(), agentName, ns)
 	assert.Zero(t, res.RequeueAfter, "the settle gate must be inert without knowledgeBases")
 
-	var live agentsv1alpha1.AgentDeployment
+	var live agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: agentName, Namespace: ns}, &live))
 	assert.Nil(t, apimeta.FindStatusCondition(live.Status.Conditions, "KnowledgeBasesResolved"),
 		"no KB refs ⇒ no KnowledgeBasesResolved condition at all")

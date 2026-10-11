@@ -24,7 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
@@ -35,17 +35,17 @@ func TestAgentBoundary(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)
 
-	member := &agentsv1alpha1.AgentDeployment{
+	member := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "worker", Namespace: "team", Labels: map[string]string{"squad": "a"},
 		},
 	}
-	solo := &agentsv1alpha1.AgentDeployment{
+	solo := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "solo", Namespace: "team"},
 	}
-	reg := &agentsv1alpha1.AgentRegistry{
+	reg := &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "squad-a-registry", Namespace: "team"},
-		Spec: agentsv1alpha1.AgentRegistrySpec{
+		Spec: agentsv1beta1.AgentRegistrySpec{
 			RegistryId:     "squad-a",
 			MemberSelector: metav1.LabelSelector{MatchLabels: map[string]string{"squad": "a"}},
 		},

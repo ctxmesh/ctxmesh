@@ -35,7 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
@@ -55,7 +54,7 @@ func ksvcEnvMap(t *testing.T, name, namespace string) (map[string]corev1.EnvVar,
 // readyCondition returns the Ready condition off the AgentDeployment status, or nil.
 func readyCondition(t *testing.T, name, namespace string) *metav1.Condition {
 	t.Helper()
-	var d agentsv1alpha1.AgentDeployment
+	var d agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &d))
 	return apimeta.FindStatusCondition(d.Status.Conditions, conditionReady)
 }
@@ -104,9 +103,9 @@ func TestReconcile_GuardrailValidRef(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, policy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, policy) })
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:              "ghcr.io/ctxmesh/example-agent:latest",
 			GuardrailPolicyRef: policyN,
 		},
@@ -191,9 +190,9 @@ func TestReconcile_GuardrailDanglingRefFailsClosed(t *testing.T) {
 		namespace = "default"
 	)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:              "ghcr.io/ctxmesh/example-agent:latest",
 			GuardrailPolicyRef: "does-not-exist",
 		},
@@ -232,9 +231,9 @@ func TestReconcile_GuardrailInvalidRefFailsClosed(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, policy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, policy) })
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:              "ghcr.io/ctxmesh/example-agent:latest",
 			GuardrailPolicyRef: policyN,
 		},
@@ -274,9 +273,9 @@ func TestReconcile_GuardrailPolicyEditNoRoll(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, policy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, policy) })
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:              "ghcr.io/ctxmesh/example-agent:latest",
 			GuardrailPolicyRef: policyN,
 		},
@@ -334,9 +333,9 @@ func TestReconcile_GuardedAgentGetsBFFURL(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, policy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, policy) })
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:              "ghcr.io/ctxmesh/example-agent:latest",
 			GuardrailPolicyRef: policyN,
 		},
@@ -379,13 +378,13 @@ func TestReconcile_GuardedSupervisorGetsBFFURLOnce(t *testing.T) {
 	mkRegistryMesh(t, regName, namespace, regName, regName)
 
 	// Supervisor agent: both guarded AND a registry member (label matches the registry selector).
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 			Labels:    map[string]string{"registry": regName},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:              "ghcr.io/ctxmesh/example-agent:latest",
 			GuardrailPolicyRef: policyN,
 		},
@@ -395,13 +394,13 @@ func TestReconcile_GuardedSupervisorGetsBFFURLOnce(t *testing.T) {
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
 
 	// Create a worker for the AgentTeam roster; it must be a registry member too.
-	worker := &agentsv1alpha1.AgentDeployment{
+	worker := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "bff-sup-worker",
 			Namespace: namespace,
 			Labels:    map[string]string{"registry": regName},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest",
 		},
 	}
@@ -449,9 +448,9 @@ func TestReconcile_EveryAgentGetsBFFURL(t *testing.T) {
 			want: "http://own:9090",
 		},
 	} {
-		deploy := &agentsv1alpha1.AgentDeployment{
+		deploy := &agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: tc.name, Namespace: namespace},
-			Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Spec: agentsv1beta1.AgentDeploymentSpec{
 				Image: "ghcr.io/ctxmesh/example-agent:latest",
 				Env:   tc.userEnv,
 			},
@@ -529,9 +528,9 @@ func TestReconcile_GuardedAgentGetsABFFPodToken(t *testing.T) {
 		name    string
 		guarded bool
 	}{{"guarded-pod-token", true}, {"unguarded-pod-token", false}} {
-		deploy := &agentsv1alpha1.AgentDeployment{
+		deploy := &agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: tc.name, Namespace: namespace},
-			Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+			Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
 		}
 		if tc.guarded {
 			deploy.Spec.GuardrailPolicyRef = policy.Name

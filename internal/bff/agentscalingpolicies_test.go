@@ -36,7 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // aspNS is the namespace used in AgentScalingPolicy tests.
@@ -45,10 +45,10 @@ const aspNS = "team-scaling"
 // --- fixture helpers --------------------------------------------------------
 
 // mockASP builds a minimal AgentScalingPolicy with request-rate trigger.
-func mockASP(name, ns, agentRef string) *agentsv1alpha1.AgentScalingPolicy {
-	return &agentsv1alpha1.AgentScalingPolicy{
+func mockASP(name, ns, agentRef string) *agentsv1beta1.AgentScalingPolicy {
+	return &agentsv1beta1.AgentScalingPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: agentsv1alpha1.AgentScalingPolicySpec{
+		Spec: agentsv1beta1.AgentScalingPolicySpec{
 			AgentRef: agentRef,
 			Trigger:  "request-rate",
 			Min:      0,
@@ -58,10 +58,10 @@ func mockASP(name, ns, agentRef string) *agentsv1alpha1.AgentScalingPolicy {
 }
 
 // mockASPSchedule builds an AgentScalingPolicy with schedule trigger.
-func mockASPSchedule(name, ns, agentRef, schedule string) *agentsv1alpha1.AgentScalingPolicy {
-	return &agentsv1alpha1.AgentScalingPolicy{
+func mockASPSchedule(name, ns, agentRef, schedule string) *agentsv1beta1.AgentScalingPolicy {
+	return &agentsv1beta1.AgentScalingPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: agentsv1alpha1.AgentScalingPolicySpec{
+		Spec: agentsv1beta1.AgentScalingPolicySpec{
 			AgentRef: agentRef,
 			Trigger:  "schedule",
 			Min:      1,
@@ -72,7 +72,7 @@ func mockASPSchedule(name, ns, agentRef, schedule string) *agentsv1alpha1.AgentS
 }
 
 // readyASP sets the Ready condition and backend on an AgentScalingPolicy.
-func readyASP(p *agentsv1alpha1.AgentScalingPolicy) *agentsv1alpha1.AgentScalingPolicy {
+func readyASP(p *agentsv1beta1.AgentScalingPolicy) *agentsv1beta1.AgentScalingPolicy {
 	p.Status.Backend = "knative-annotations"
 	p.Status.Conditions = []metav1.Condition{
 		{
@@ -206,7 +206,7 @@ func TestListAgentScalingPoliciesReturnsItems(t *testing.T) {
 
 // TestListAgentScalingPoliciesLimitAndCursor proves limit/cursor pagination.
 func TestListAgentScalingPoliciesLimitAndCursor(t *testing.T) {
-	all := []*agentsv1alpha1.AgentScalingPolicy{
+	all := []*agentsv1beta1.AgentScalingPolicy{
 		mockASP("asp-000", aspNS, "agent-0"),
 		mockASP("asp-001", aspNS, "agent-1"),
 		mockASP("asp-002", aspNS, "agent-2"),
@@ -230,7 +230,7 @@ func TestListAgentScalingPoliciesLimitAndCursor(t *testing.T) {
 			if lo.Limit > 0 && start+int(lo.Limit) < end {
 				end = start + int(lo.Limit)
 			}
-			aspList, ok := list.(*agentsv1alpha1.AgentScalingPolicyList)
+			aspList, ok := list.(*agentsv1beta1.AgentScalingPolicyList)
 			if !ok {
 				return fmt.Errorf("unexpected list type %T", list)
 			}
@@ -402,7 +402,7 @@ func TestCreateAgentScalingPolicyBasic(t *testing.T) {
 	assert.Equal(t, int32(10), detail.Max)
 
 	// Confirm it landed in the fake store.
-	var got agentsv1alpha1.AgentScalingPolicy
+	var got agentsv1beta1.AgentScalingPolicy
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: aspNS, Name: "my-asp"}, &got))
 	assert.Equal(t, "my-agent", got.Spec.AgentRef)
 }
@@ -598,7 +598,7 @@ func TestUpdateAgentScalingPolicyEditsMax(t *testing.T) {
 	assert.Equal(t, int32(20), detail.Max)
 
 	// Confirm the change landed.
-	var got agentsv1alpha1.AgentScalingPolicy
+	var got agentsv1beta1.AgentScalingPolicy
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: aspNS, Name: "my-asp"}, &got))
 	assert.Equal(t, int32(20), got.Spec.Max)
 }
@@ -721,7 +721,7 @@ func TestDeleteAgentScalingPolicyRemovesObject(t *testing.T) {
 	rec := deleteAgentScalingPolicy(t, s, aspNS, "my-asp")
 	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
 
-	var got agentsv1alpha1.AgentScalingPolicy
+	var got agentsv1beta1.AgentScalingPolicy
 	err := c.Get(context.Background(), client.ObjectKey{Namespace: aspNS, Name: "my-asp"}, &got)
 	require.True(t, apierrors.IsNotFound(err), "AgentScalingPolicy must be gone after DELETE")
 }

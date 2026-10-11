@@ -47,7 +47,6 @@ import (
 
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/promql"
 )
@@ -165,7 +164,7 @@ func (r *AlertPolicyReconciler) evalErrorRate(
 	ctx context.Context,
 	ap *agentsv1beta1.AlertPolicy,
 	cond agentsv1beta1.AlertCondition,
-	agents []agentsv1alpha1.AgentDeployment,
+	agents []agentsv1beta1.AgentDeployment,
 ) (bool, string) {
 	return r.evalEdgeSLO(ctx, ap, cond, agents, sloErrorRate)
 }
@@ -176,7 +175,7 @@ func (r *AlertPolicyReconciler) evalP95Latency(
 	ctx context.Context,
 	ap *agentsv1beta1.AlertPolicy,
 	cond agentsv1beta1.AlertCondition,
-	agents []agentsv1alpha1.AgentDeployment,
+	agents []agentsv1beta1.AgentDeployment,
 ) (bool, string) {
 	return r.evalEdgeSLO(ctx, ap, cond, agents, sloP95Latency)
 }
@@ -197,7 +196,7 @@ func (r *AlertPolicyReconciler) evalEdgeSLO(
 	ctx context.Context,
 	ap *agentsv1beta1.AlertPolicy,
 	cond agentsv1beta1.AlertCondition,
-	agents []agentsv1alpha1.AgentDeployment,
+	agents []agentsv1beta1.AgentDeployment,
 	kind sloKind,
 ) (bool, string) {
 	log := logf.FromContext(ctx)

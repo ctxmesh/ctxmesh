@@ -29,7 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/eval"
 )
 
@@ -76,7 +76,7 @@ const rolloutAbortAnnotation = "agents.ctxmesh.ai/rollout-abort"
 // promote-all/hold, byte-for-byte unchanged). Canary is serving-only: for
 // eventing/job the strategy is deferred and ignored (the caller falls back to
 // promote-all/hold — see the m69.9 scope note).
-func canaryConfigured(deploy *agentsv1alpha1.AgentDeployment, model string) bool {
+func canaryConfigured(deploy *agentsv1beta1.AgentDeployment, model string) bool {
 	if model != execModelServing {
 		return false
 	}
@@ -86,7 +86,7 @@ func canaryConfigured(deploy *agentsv1alpha1.AgentDeployment, model string) bool
 // canaryPercent returns the candidate-arm traffic percent for a canary rollout,
 // clamped to the CRD-validated 1..99 band (defence for a hand-built spec that
 // bypassed admission). Defaults to 10 when unset.
-func canaryPercent(deploy *agentsv1alpha1.AgentDeployment) int64 {
+func canaryPercent(deploy *agentsv1beta1.AgentDeployment) int64 {
 	p := int64(10)
 	if deploy.Spec.Rollout != nil && deploy.Spec.Rollout.CanaryPercent != 0 {
 		p = int64(deploy.Spec.Rollout.CanaryPercent)
@@ -194,7 +194,7 @@ func namedFullTraffic(rev string) []servingv1.TrafficTarget {
 // same value the gate scored + pinned). oldRev is the currently-serving revision.
 func (r *AgentDeploymentReconciler) reconcileCanary(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	hash, versionName, candidateRev, oldRev string,
 	outcome *gateOutcome,
 ) (ctrl.Result, error) {
@@ -319,11 +319,11 @@ const (
 
 // autoProgressDecision is the pure output of the auto-progression state machine.
 type autoProgressDecision struct {
-	rollout          *agentsv1alpha1.RolloutStatus // the status.rollout to persist
-	effectivePercent int32                         // candidate-arm traffic to converge to (ignored when promote)
-	promote          bool                          // true ⇒ auto-promote to 100% candidate
-	requeue          time.Duration                 // RequeueAfter for the split path (dwell-driven)
-	reason           string                        // human-facing reason (status + condition)
+	rollout          *agentsv1beta1.RolloutStatus // the status.rollout to persist
+	effectivePercent int32                        // candidate-arm traffic to converge to (ignored when promote)
+	promote          bool                         // true ⇒ auto-promote to 100% candidate
+	requeue          time.Duration                // RequeueAfter for the split path (dwell-driven)
+	reason           string                       // human-facing reason (status + condition)
 }
 
 // decideAutoProgress is the PURE auto-progression state machine (ADR 0113) — no cluster reads, unit-tested
@@ -331,10 +331,10 @@ type autoProgressDecision struct {
 // anything else (Unknown, regressed, frozen, mid-dwell), and auto-promotes at 100%. Fail-safe by
 // construction: monotone, one step per reconcile (never fast-forward), hold on absence of evidence.
 func decideAutoProgress(
-	prior *agentsv1alpha1.RolloutStatus,
+	prior *agentsv1beta1.RolloutStatus,
 	candidateRev string,
 	basePercent int32,
-	steps []agentsv1alpha1.CanaryStep,
+	steps []agentsv1beta1.CanaryStep,
 	dwell time.Duration,
 	regression metav1.ConditionStatus,
 	frozen bool,
@@ -344,7 +344,7 @@ func decideAutoProgress(
 	// new candidate must EARN its percent from step 0, never inherit the prior candidate's earned percent.
 	if prior == nil || prior.CandidateRevision != candidateRev {
 		return autoProgressDecision{
-			rollout: &agentsv1alpha1.RolloutStatus{
+			rollout: &agentsv1beta1.RolloutStatus{
 				CandidateRevision: candidateRev,
 				CurrentPercent:    basePercent,
 				LastAdvanceAt:     &metav1.Time{Time: now},
@@ -363,7 +363,7 @@ func decideAutoProgress(
 	// hold carries the live percent + dwell clock forward unchanged, only updating the reason.
 	hold := func(reason string, requeue time.Duration) autoProgressDecision {
 		return autoProgressDecision{
-			rollout: &agentsv1alpha1.RolloutStatus{
+			rollout: &agentsv1beta1.RolloutStatus{
 				CandidateRevision: candidateRev,
 				CurrentPercent:    current,
 				LastAdvanceAt:     prior.LastAdvanceAt,
@@ -401,7 +401,7 @@ func decideAutoProgress(
 	}
 	if next >= 100 {
 		return autoProgressDecision{
-			rollout: &agentsv1alpha1.RolloutStatus{
+			rollout: &agentsv1beta1.RolloutStatus{
 				CandidateRevision: candidateRev,
 				CurrentPercent:    100,
 				LastAdvanceAt:     &metav1.Time{Time: now},
@@ -415,7 +415,7 @@ func decideAutoProgress(
 	// Advance EXACTLY ONE step: bump currentPercent + reset the dwell clock atomically (the forward
 	// anti-runaway — never fast-forward multiple steps after controller downtime).
 	return autoProgressDecision{
-		rollout: &agentsv1alpha1.RolloutStatus{
+		rollout: &agentsv1beta1.RolloutStatus{
 			CandidateRevision: candidateRev,
 			CurrentPercent:    next,
 			LastAdvanceAt:     &metav1.Time{Time: now},
@@ -432,7 +432,7 @@ func decideAutoProgress(
 // order-independent: a mis-ordered schedule still advances monotonically one rung at a time and never
 // regresses traffic (admission does not enforce ordering — see AutoProgressConfig.Steps). An empty
 // schedule is the implicit single 100% step (enabled-alone = soak then auto-promote).
-func nextCanaryStep(current int32, steps []agentsv1alpha1.CanaryStep) int32 {
+func nextCanaryStep(current int32, steps []agentsv1beta1.CanaryStep) int32 {
 	if len(steps) == 0 {
 		if current < 100 {
 			return 100
@@ -451,7 +451,7 @@ func nextCanaryStep(current int32, steps []agentsv1alpha1.CanaryStep) int32 {
 
 // autoProgressConfig returns the auto-progression config when it is opt-in enabled, else nil (the M69
 // hold-for-human default). Nil-safe against a partial spec.
-func autoProgressConfig(deploy *agentsv1alpha1.AgentDeployment) *agentsv1alpha1.AutoProgressConfig {
+func autoProgressConfig(deploy *agentsv1beta1.AgentDeployment) *agentsv1beta1.AutoProgressConfig {
 	ro := deploy.Spec.Rollout
 	if ro == nil || ro.AutoProgress == nil || !ro.AutoProgress.Enabled {
 		return nil
@@ -461,7 +461,7 @@ func autoProgressConfig(deploy *agentsv1alpha1.AgentDeployment) *agentsv1alpha1.
 
 // autoProgressDwell is the per-step soak, defaulting to one aggregate window (3600s) and flooring a
 // hand-built spec that bypassed admission (the CRD enforces min 60).
-func autoProgressDwell(cfg *agentsv1alpha1.AutoProgressConfig) time.Duration {
+func autoProgressDwell(cfg *agentsv1beta1.AutoProgressConfig) time.Duration {
 	secs := cfg.DwellSeconds
 	if secs < 60 {
 		secs = 3600
@@ -471,7 +471,7 @@ func autoProgressDwell(cfg *agentsv1alpha1.AutoProgressConfig) time.Duration {
 
 // regressionVerdict reads the candidate's RegressionDetected verdict (the detector sets it against
 // status.latestVersion = the candidate during a canary). Absent ⇒ Unknown (no verdict yet ⇒ hold).
-func regressionVerdict(deploy *agentsv1alpha1.AgentDeployment) metav1.ConditionStatus {
+func regressionVerdict(deploy *agentsv1beta1.AgentDeployment) metav1.ConditionStatus {
 	if c := apimeta.FindStatusCondition(deploy.Status.Conditions, conditionRegressionDetected); c != nil {
 		return c.Status
 	}
@@ -488,7 +488,7 @@ func clampAutoProgressRequeue(d time.Duration) time.Duration {
 }
 
 // canaryAbortRequested reports whether the human set the rollout-abort annotation.
-func (r *AgentDeploymentReconciler) canaryAbortRequested(deploy *agentsv1alpha1.AgentDeployment) bool {
+func (r *AgentDeploymentReconciler) canaryAbortRequested(deploy *agentsv1beta1.AgentDeployment) bool {
 	_, ok := deploy.Annotations[rolloutAbortAnnotation]
 	return ok
 }
@@ -504,7 +504,7 @@ func (r *AgentDeploymentReconciler) canaryAbortRequested(deploy *agentsv1alpha1.
 // the write when they already match (and the template is already the candidate).
 func (r *AgentDeploymentReconciler) setCanaryTraffic(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	hash string,
 	traffic []servingv1.TrafficTarget,
 ) error {
@@ -573,18 +573,18 @@ func trafficEqual(a, b []servingv1.TrafficTarget) bool {
 // the auto-progress path returns the dwell clock (its drive shaft); everyone else returns ctrl.Result{}.
 func (r *AgentDeploymentReconciler) recordCanaryPhase(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	versionName, candidateRev, score, threshold, phase, decision, reason string,
 	condStatus metav1.ConditionStatus,
 	condMsg string,
-	rollout *agentsv1alpha1.RolloutStatus,
+	rollout *agentsv1beta1.RolloutStatus,
 	result ctrl.Result,
 ) (ctrl.Result, error) {
-	var fresh agentsv1alpha1.AgentDeployment
+	var fresh agentsv1beta1.AgentDeployment
 	if err := r.Get(ctx, client.ObjectKeyFromObject(deploy), &fresh); err != nil {
 		return ctrl.Result{}, fmt.Errorf("re-fetching for canary status: %w", err)
 	}
-	gs := agentsv1alpha1.GateStatus{
+	gs := agentsv1beta1.GateStatus{
 		Phase:          phase,
 		Decision:       decision,
 		ScoredRevision: candidateRev,
@@ -613,9 +613,9 @@ func (r *AgentDeploymentReconciler) recordCanaryPhase(
 // (metadata Update, idempotent). Mirrors the rollback actuator's annotation-clear.
 func (r *AgentDeploymentReconciler) clearCanaryAbort(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 ) error {
-	var fresh agentsv1alpha1.AgentDeployment
+	var fresh agentsv1beta1.AgentDeployment
 	if err := r.Get(ctx, client.ObjectKeyFromObject(deploy), &fresh); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil

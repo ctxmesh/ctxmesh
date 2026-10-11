@@ -34,7 +34,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/gateway"
 	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 )
@@ -90,7 +90,7 @@ func (r *ModelRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// Check whether the triggering ModelRoute still exists. If deleted we still
 	// fall through to renderAndSync so the config reflects the deletion.
-	var trigger agentsv1alpha1.ModelRoute
+	var trigger agentsv1beta1.ModelRoute
 	if err := r.Get(ctx, req.NamespacedName, &trigger); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("fetching triggering ModelRoute: %w", err)
@@ -109,13 +109,13 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 	log := logf.FromContext(ctx)
 
 	// ── 1. List all ModelRoutes ────────────────────────────────────────────────
-	var mrList agentsv1alpha1.ModelRouteList
+	var mrList agentsv1beta1.ModelRouteList
 	if err := r.List(ctx, &mrList); err != nil {
 		return ctrl.Result{}, fmt.Errorf("listing ModelRoutes: %w", err)
 	}
 
 	// ── 2. Resolve SecretBindings and Secrets ─────────────────────────────────
-	bindings := make(map[string]agentsv1alpha1.SecretBinding)
+	bindings := make(map[string]agentsv1beta1.SecretBinding)
 	secretRVs := make(map[string]string)
 	// mirrors: provider Secrets to sync into the gateway namespace so the Deployment's SB_*
 	// secretKeyRefs can mount a provider connected in another namespace (ADR 0018), keyed by
@@ -134,7 +134,7 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 				continue
 			}
 
-			var sb agentsv1alpha1.SecretBinding
+			var sb agentsv1beta1.SecretBinding
 			if err := r.Get(ctx, client.ObjectKey{
 				Namespace: mr.Namespace,
 				Name:      p.SecretBindingRef,
@@ -269,7 +269,7 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 // made right after `kubectl wait` fail with LiteLLM's "Invalid model name". A route already served at
 // this generation stays served while another route's change rolls the gateway, because the old pods'
 // config holds it too.
-func routeReadyCondition(mr *agentsv1alpha1.ModelRoute, excluded bool, serving gatewayState) metav1.Condition {
+func routeReadyCondition(mr *agentsv1beta1.ModelRoute, excluded bool, serving gatewayState) metav1.Condition {
 	c := metav1.Condition{Type: conditionReady, Status: metav1.ConditionFalse, ObservedGeneration: mr.Generation}
 	prev := apimeta.FindStatusCondition(mr.Status.Conditions, conditionReady)
 	alreadyServed := prev != nil && prev.Status == metav1.ConditionTrue && prev.Reason == reasonServed &&
@@ -550,7 +550,7 @@ func (r *ModelRouteReconciler) syncGatewayDeployment(ctx context.Context, result
 func (r *ModelRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	enqueueAll := handler.EnqueueRequestsFromMapFunc(
 		func(ctx context.Context, _ client.Object) []reconcile.Request {
-			var mrList agentsv1alpha1.ModelRouteList
+			var mrList agentsv1beta1.ModelRouteList
 			if err := mgr.GetClient().List(ctx, &mrList); err != nil {
 				return nil
 			}
@@ -568,8 +568,8 @@ func (r *ModelRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// One worker, deliberately: every route renders into the ONE gateway ConfigMap and Deployment, so
 		// concurrent reconciles of different routes would only race each other's writes.
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
-		For(&agentsv1alpha1.ModelRoute{}).
-		Watches(&agentsv1alpha1.SecretBinding{}, enqueueAll).
+		For(&agentsv1beta1.ModelRoute{}).
+		Watches(&agentsv1beta1.SecretBinding{}, enqueueAll).
 		// SEC-3: metadata-only Secret watch — the informer caches PartialObjectMetadata
 		// (name/ns/labels/RV), NEVER Secret Data, so cluster-wide Secret events (rotation)
 		// still roll the gateway without mirroring every Secret's payload into memory. Reads

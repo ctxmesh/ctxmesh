@@ -21,7 +21,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
 
@@ -39,7 +39,7 @@ import (
 // M42 and the store read only becomes the default in M43 (a best-effort,
 // unbackfilled mirror must never be trusted as the reconcile read source).
 type RegistryReader interface {
-	GetRegistry(ctx context.Context, namespace, name string) (*agentsv1alpha1.ToolRegistry, error)
+	GetRegistry(ctx context.Context, namespace, name string) (*agentsv1beta1.ToolRegistry, error)
 }
 
 // NewPostgresRegistryReader reads ToolRegistries from the control-plane store
@@ -52,7 +52,7 @@ func NewPostgresRegistryReader(store toolregistry.Store) RegistryReader {
 
 type pgRegistryReader struct{ store toolregistry.Store }
 
-func (p pgRegistryReader) GetRegistry(ctx context.Context, namespace, name string) (*agentsv1alpha1.ToolRegistry, error) {
+func (p pgRegistryReader) GetRegistry(ctx context.Context, namespace, name string) (*agentsv1beta1.ToolRegistry, error) {
 	r, err := p.store.Get(ctx, namespace, name)
 	if err != nil {
 		return nil, err // includes controlplane.ErrNotFound — the caller distinguishes
@@ -70,8 +70,8 @@ func (p pgRegistryReader) GetRegistry(ctx context.Context, namespace, name strin
 // path reads none of them, and the store's OCC Version is not the CRD's
 // ObjectMeta.ResourceVersion (different semantics — conflating them would mislead
 // the M43 read-switch).
-func storeRegistryToCRD(r *toolregistry.ToolRegistry) *agentsv1alpha1.ToolRegistry {
-	out := &agentsv1alpha1.ToolRegistry{}
+func storeRegistryToCRD(r *toolregistry.ToolRegistry) *agentsv1beta1.ToolRegistry {
+	out := &agentsv1beta1.ToolRegistry{}
 	out.Namespace = r.Namespace
 	out.Name = r.Name
 	if len(r.Annotations) > 0 {
@@ -81,10 +81,10 @@ func storeRegistryToCRD(r *toolregistry.ToolRegistry) *agentsv1alpha1.ToolRegist
 		out.Labels = r.Labels
 	}
 	if len(r.Tools) > 0 {
-		out.Spec.Tools = make([]agentsv1alpha1.ToolEntry, len(r.Tools))
+		out.Spec.Tools = make([]agentsv1beta1.ToolEntry, len(r.Tools))
 		for i := range r.Tools {
 			e := r.Tools[i]
-			te := agentsv1alpha1.ToolEntry{
+			te := agentsv1beta1.ToolEntry{
 				Name:           e.Name,
 				Image:          e.Image,
 				URL:            e.URL,

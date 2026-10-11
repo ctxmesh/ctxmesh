@@ -26,7 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // The Tenants console surface (M47, ADR 0046). A Tenant is a cluster-scoped grouping of namespaces with
@@ -118,9 +118,9 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	t := &agentsv1alpha1.Tenant{
+	t := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       agentsv1alpha1.TenantSpec{Namespaces: req.Namespaces, NetworkIsolation: req.NetworkIsolation},
+		Spec:       agentsv1beta1.TenantSpec{Namespaces: req.Namespaces, NetworkIsolation: req.NetworkIsolation},
 	}
 	if err := ensureGVK(t, s.scheme); err != nil {
 		s.log.Error(err, "resolve GVK for Tenant failed")
@@ -147,7 +147,7 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, newTenantSummary(t))
 }
 
-func tenantReady(t *agentsv1alpha1.Tenant) bool {
+func tenantReady(t *agentsv1beta1.Tenant) bool {
 	for i := range t.Status.Conditions {
 		if t.Status.Conditions[i].Type == phaseReady {
 			return t.Status.Conditions[i].Status == metav1.ConditionTrue
@@ -156,7 +156,7 @@ func tenantReady(t *agentsv1alpha1.Tenant) bool {
 	return false
 }
 
-func newTenantSummary(t *agentsv1alpha1.Tenant) TenantSummary {
+func newTenantSummary(t *agentsv1beta1.Tenant) TenantSummary {
 	ns := t.Spec.Namespaces
 	if ns == nil {
 		ns = []string{}
@@ -173,7 +173,7 @@ func newTenantSummary(t *agentsv1alpha1.Tenant) TenantSummary {
 	return sum
 }
 
-func newTenantDetail(t *agentsv1alpha1.Tenant) TenantDetail {
+func newTenantDetail(t *agentsv1beta1.Tenant) TenantDetail {
 	d := TenantDetail{
 		Name:             t.Name,
 		Namespaces:       t.Spec.Namespaces,
@@ -205,7 +205,7 @@ func (s *Server) handleListTenants(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var list agentsv1alpha1.TenantList
+	var list agentsv1beta1.TenantList
 	if err := caller.List(r.Context(), &list); err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
@@ -238,7 +238,7 @@ func (s *Server) handleGetTenant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	var t agentsv1alpha1.Tenant
+	var t agentsv1beta1.Tenant
 	if err := caller.Get(r.Context(), client.ObjectKey{Name: name}, &t); err != nil {
 		s.writeGetError(w, err, "tenant")
 		return

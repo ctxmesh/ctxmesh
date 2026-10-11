@@ -38,7 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
@@ -138,8 +138,8 @@ func seedGrant(server, username, access, refresh, tokenEndpoint string, expiry t
 
 // oauthToolRegistry is a register-managed ToolRegistry marked as an OAuth server, so
 // the resolver's serverIsOAuth check + the consent-begin confirmation pass.
-func oauthToolRegistry(server, url string) *agentsv1alpha1.ToolRegistry {
-	return &agentsv1alpha1.ToolRegistry{
+func oauthToolRegistry(server, url string) *agentsv1beta1.ToolRegistry {
+	return &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        server,
 			Namespace:   grantNS,
@@ -324,7 +324,7 @@ func TestMCPGrantConsentDelegatesToGrantStore(t *testing.T) {
 func TestMCPGrantConsentNonOAuthServerIs4xx(t *testing.T) {
 	oauth := newFakeOAuthServer(t)
 	const server, ns = "plain-mcp", "prod"
-	tr := &agentsv1alpha1.ToolRegistry{
+	tr := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        server,
 			Namespace:   ns,
@@ -353,7 +353,7 @@ func TestMCPGrantConsentUnknownServerIs404(t *testing.T) {
 
 // oauthToolRegistryWithConfig builds an OAuth ToolRegistry carrying the persisted OAuth
 // client config annotations (ADR 0031), so a grant can be begun from just {server, ns}.
-func oauthToolRegistryWithConfig(server, url string, o *fakeOAuthServer) *agentsv1alpha1.ToolRegistry {
+func oauthToolRegistryWithConfig(server, url string, o *fakeOAuthServer) *agentsv1beta1.ToolRegistry {
 	tr := oauthToolRegistry(server, url)
 	tr.Annotations[annMCPOAuthAuthEndpoint] = o.authorizeURL()
 	tr.Annotations[annMCPOAuthTokenEndpoint] = o.tokenURL()

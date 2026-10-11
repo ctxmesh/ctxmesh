@@ -34,14 +34,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 // TestApproverMatches: a User entry matches the exact username; a Group entry matches any caller group.
 // A non-approver matches nothing.
 func TestApproverMatches(t *testing.T) {
-	approvers := []agentsv1alpha1.Approver{
+	approvers := []agentsv1beta1.Approver{
 		{Kind: "User", Name: "alice"},
 		{Kind: "Group", Name: "sre"},
 	}
@@ -56,9 +56,9 @@ func TestApproverMatches(t *testing.T) {
 
 // approverAgent is a ready agent whose spec.runtime.toolPolicy requires approval and names approvers
 // (nil approvers = the toolPolicy is set but the list is empty).
-func approverAgent(approvers []agentsv1alpha1.Approver) *agentsv1alpha1.AgentDeployment {
+func approverAgent(approvers []agentsv1beta1.Approver) *agentsv1beta1.AgentDeployment {
 	a := readyAgent("mailer", "prod", "http://mailer.prod.svc.cluster.local")
-	a.Spec.Runtime = &agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{
+	a.Spec.Runtime = &agentsv1beta1.RuntimeSpec{ToolPolicy: &agentsv1beta1.ToolPolicySpec{
 		Default:   "require-approval",
 		Approvers: approvers,
 	}}
@@ -67,7 +67,7 @@ func approverAgent(approvers []agentsv1alpha1.Approver) *agentsv1alpha1.AgentDep
 
 // pausedRunAs builds a server whose caller resolves (SelfSubjectReview) to username + groups, runs the
 // HITL agent until it pauses for approval, and returns the server and the paused run's id.
-func pausedRunAs(t *testing.T, agent *agentsv1alpha1.AgentDeployment, username string, groups []string) (*Server, string) {
+func pausedRunAs(t *testing.T, agent *agentsv1beta1.AgentDeployment, username string, groups []string) (*Server, string) {
 	t.Helper()
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
 		WithObjects(agent).
@@ -85,7 +85,7 @@ func pausedRunAs(t *testing.T, agent *agentsv1alpha1.AgentDeployment, username s
 // TestResumeApproval_NonApproverRefused: a caller with resume RBAC who is not in the agent's approvers
 // is refused, and the paused run is left exactly as it was.
 func TestResumeApproval_NonApproverRefused(t *testing.T) {
-	agent := approverAgent([]agentsv1alpha1.Approver{{Kind: "Group", Name: "dba"}})
+	agent := approverAgent([]agentsv1beta1.Approver{{Kind: "Group", Name: "dba"}})
 	s, id := pausedRunAs(t, agent, "bob@example.com", []string{"system:authenticated", "dev"})
 
 	rec := resumeRun(t, s, id, `{"decision":"approve"}`)
@@ -98,7 +98,7 @@ func TestResumeApproval_NonApproverRefused(t *testing.T) {
 
 // TestResumeApproval_GroupApproverAllowed: a caller in an approver Group approves, and the run resumes.
 func TestResumeApproval_GroupApproverAllowed(t *testing.T) {
-	agent := approverAgent([]agentsv1alpha1.Approver{{Kind: "Group", Name: "dba"}})
+	agent := approverAgent([]agentsv1beta1.Approver{{Kind: "Group", Name: "dba"}})
 	s, id := pausedRunAs(t, agent, "carol@example.com", []string{"system:authenticated", "dba"})
 
 	require.Equal(t, http.StatusAccepted, resumeRun(t, s, id, `{"decision":"approve"}`).Code)
@@ -108,7 +108,7 @@ func TestResumeApproval_GroupApproverAllowed(t *testing.T) {
 
 // TestResumeApproval_UserApproverAllowed: a User entry matches the caller's exact username.
 func TestResumeApproval_UserApproverAllowed(t *testing.T) {
-	agent := approverAgent([]agentsv1alpha1.Approver{{Kind: "User", Name: "alice@example.com"}})
+	agent := approverAgent([]agentsv1beta1.Approver{{Kind: "User", Name: "alice@example.com"}})
 	s, id := pausedRunAs(t, agent, "alice@example.com", nil)
 
 	require.Equal(t, http.StatusAccepted, resumeRun(t, s, id, `{"decision":"approve"}`).Code)
@@ -129,7 +129,7 @@ func TestResumeApproval_EmptyApproversIsRBACOnly(t *testing.T) {
 // forbidAgentGet makes every AgentDeployment Get fail with Forbidden, the way a caller without read on
 // the agent sees it; every other read passes through.
 func forbidAgentGet(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-	if _, ok := obj.(*agentsv1alpha1.AgentDeployment); ok {
+	if _, ok := obj.(*agentsv1beta1.AgentDeployment); ok {
 		return apierrors.NewForbidden(schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "agentdeployments"},
 			key.Name, errors.New("caller cannot get agentdeployments"))
 	}
@@ -138,7 +138,7 @@ func forbidAgentGet(ctx context.Context, c client.WithWatch, key client.ObjectKe
 
 // enforceApproversWith runs the approver gate for a paused run of approverAgent's "mailer" agent, on a
 // caller client built from funcs.
-func enforceApproversWith(t *testing.T, approvers []agentsv1alpha1.Approver, funcs interceptor.Funcs) (bool, *httptest.ResponseRecorder) {
+func enforceApproversWith(t *testing.T, approvers []agentsv1beta1.Approver, funcs interceptor.Funcs) (bool, *httptest.ResponseRecorder) {
 	t.Helper()
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
 		WithObjects(approverAgent(approvers)).
@@ -157,7 +157,7 @@ func enforceApproversWith(t *testing.T, approvers []agentsv1alpha1.Approver, fun
 func TestEnforceApprovers_UnreadableAgentRefuses(t *testing.T) {
 	funcs := ssrInterceptor("alice@example.com", nil)
 	funcs.Get = forbidAgentGet
-	ok, rec := enforceApproversWith(t, []agentsv1alpha1.Approver{{Kind: "User", Name: "alice@example.com"}}, funcs)
+	ok, rec := enforceApproversWith(t, []agentsv1beta1.Approver{{Kind: "User", Name: "alice@example.com"}}, funcs)
 	assert.False(t, ok, "an unreadable agent must refuse the approve")
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
@@ -173,7 +173,7 @@ func TestEnforceApprovers_IdentityReviewErrorRefuses(t *testing.T) {
 			return c.Create(ctx, obj, opts...)
 		},
 	}
-	ok, rec := enforceApproversWith(t, []agentsv1alpha1.Approver{{Kind: "User", Name: "alice@example.com"}}, funcs)
+	ok, rec := enforceApproversWith(t, []agentsv1beta1.Approver{{Kind: "User", Name: "alice@example.com"}}, funcs)
 	assert.False(t, ok, "an unverifiable identity must refuse the approve")
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }

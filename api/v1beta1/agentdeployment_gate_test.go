@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Unit tests for AgentDeployment GateStatus field: deepcopy round-trip (M9).
-package v1alpha1
+package v1beta1
 
 import (
 	"testing"

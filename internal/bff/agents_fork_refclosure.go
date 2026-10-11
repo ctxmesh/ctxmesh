@@ -54,7 +54,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
@@ -178,7 +178,7 @@ func danglingEvalSuiteRef(spec *forkRefSpec) string {
 // OTHER read error → true (fail-OPEN: do not flag a healthy-but-unreadable route as broken, since
 // the create already succeeded — log it so the hiccup is visible).
 func (s *Server) targetHasModelRoute(ctx context.Context, caller client.Client, ns, name string) bool {
-	var mr agentsv1alpha1.ModelRoute
+	var mr agentsv1beta1.ModelRoute
 	err := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &mr)
 	if err == nil {
 		return true
@@ -194,7 +194,7 @@ func (s *Server) targetHasModelRoute(ctx context.Context, caller client.Client, 
 // targetHasEvalSuite reports whether an EvalSuite of that name exists in the target ns (caller-
 // scoped GET). Same fail-OPEN degradation as targetHasModelRoute.
 func (s *Server) targetHasEvalSuite(ctx context.Context, caller client.Client, ns, name string) bool {
-	var es agentsv1alpha1.EvalSuite
+	var es agentsv1beta1.EvalSuite
 	err := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &es)
 	if err == nil {
 		return true

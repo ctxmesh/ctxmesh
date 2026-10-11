@@ -1,4 +1,4 @@
-apiVersion: agents.ctxmesh.ai/v1alpha1
+apiVersion: agents.ctxmesh.ai/v1beta1
 kind: MCPToolBinding
 metadata:
   name: managed-agent-echo-tool
@@ -10,7 +10,7 @@ spec:
   server:
     url: http://echo-tool.mcp.svc.cluster.local/mcp
 ---
-apiVersion: agents.ctxmesh.ai/v1alpha1
+apiVersion: agents.ctxmesh.ai/v1beta1
 kind: MCPToolBinding
 metadata:
   name: managed-agent-word-count
@@ -22,7 +22,7 @@ spec:
   server:
     url: http://word-count.mcp.svc.cluster.local/mcp
 ---
-apiVersion: agents.ctxmesh.ai/v1alpha1
+apiVersion: agents.ctxmesh.ai/v1beta1
 kind: AgentDeployment
 metadata:
   name: managed-agent

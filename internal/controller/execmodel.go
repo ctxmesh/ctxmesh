@@ -33,7 +33,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 )
 
@@ -93,12 +93,12 @@ func listAgentScalingPolicies(
 	ctx context.Context,
 	c client.Client,
 	namespace, agentName string,
-) ([]agentsv1alpha1.AgentScalingPolicy, error) {
-	var all agentsv1alpha1.AgentScalingPolicyList
+) ([]agentsv1beta1.AgentScalingPolicy, error) {
+	var all agentsv1beta1.AgentScalingPolicyList
 	if err := c.List(ctx, &all, client.InNamespace(namespace)); err != nil {
 		return nil, err
 	}
-	out := make([]agentsv1alpha1.AgentScalingPolicy, 0, len(all.Items))
+	out := make([]agentsv1beta1.AgentScalingPolicy, 0, len(all.Items))
 	for i := range all.Items {
 		p := &all.Items[i]
 		if p.Spec.AgentRef == agentName && p.DeletionTimestamp.IsZero() {
@@ -114,13 +114,13 @@ func listAgentScalingPolicies(
 // first by name is chosen deterministically so the ksvc annotations are stable.
 func (r *AgentDeploymentReconciler) knativeScalingPolicy(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
-) (*agentsv1alpha1.AgentScalingPolicy, error) {
+	deploy *agentsv1beta1.AgentDeployment,
+) (*agentsv1beta1.AgentScalingPolicy, error) {
 	policies, err := listAgentScalingPolicies(ctx, r.Client, deploy.Namespace, deploy.Name)
 	if err != nil {
 		return nil, err
 	}
-	var chosen *agentsv1alpha1.AgentScalingPolicy
+	var chosen *agentsv1beta1.AgentScalingPolicy
 	for i := range policies {
 		t := policies[i].Spec.Trigger
 		if t != triggerRequestRate && t != triggerCustomMetric {
@@ -139,7 +139,7 @@ func (r *AgentDeploymentReconciler) knativeScalingPolicy(
 // CronJob-vs-Job choice.
 func (r *AgentDeploymentReconciler) scheduleForAgent(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 ) (string, error) {
 	policies, err := listAgentScalingPolicies(ctx, r.Client, deploy.Namespace, deploy.Name)
 	if err != nil {
@@ -172,7 +172,7 @@ func (r *AgentDeploymentReconciler) scheduleForAgent(
 // Service (the eventing workload is a Deployment + Service, not a ksvc).
 func (r *AgentDeploymentReconciler) reconcileTrigger(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	membership registryMembership,
 ) error {
 	// Fail LOUDLY, never silently. Returning nil here would leave an eventing agent looking
@@ -261,7 +261,7 @@ func eventingSelectorLabels(agentName string) map[string]string {
 // with any M6 registry-membership label (NetworkPolicy selection).
 func (r *AgentDeploymentReconciler) reconcileEventingDeployment(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	pod podTemplate,
 ) error {
 	selector := eventingSelectorLabels(deploy.Name)
@@ -309,7 +309,7 @@ func (r *AgentDeploymentReconciler) reconcileEventingDeployment(
 // else 1. A plain Deployment has no KPA, so it must not default to 0 (that would
 // idle a consumer with nothing to wake it); a queue-depth ScaledObject, when
 // present, overrides replicas via the HPA it manages.
-func eventingReplicas(deploy *agentsv1alpha1.AgentDeployment) int32 {
+func eventingReplicas(deploy *agentsv1beta1.AgentDeployment) int32 {
 	if deploy.Spec.Scaling != nil && deploy.Spec.Scaling.Min > 0 {
 		return deploy.Spec.Scaling.Min
 	}
@@ -323,7 +323,7 @@ func eventingReplicas(deploy *agentsv1alpha1.AgentDeployment) int32 {
 // Deployment's pod label.
 func (r *AgentDeploymentReconciler) reconcileEventingService(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	port int32,
 ) error {
 	svc := &corev1.Service{
@@ -368,7 +368,7 @@ func (r *AgentDeploymentReconciler) reconcileEventingService(
 // one-shot semantics.
 func (r *AgentDeploymentReconciler) reconcileBatchJob(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	pod podTemplate,
 ) error {
 	backoff := jobBackoffLimit
@@ -403,7 +403,7 @@ func (r *AgentDeploymentReconciler) reconcileBatchJob(
 // template is re-applied on every reconcile to keep it in sync with the pod spec.
 func (r *AgentDeploymentReconciler) reconcileCronJob(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	pod podTemplate,
 	schedule string,
 ) error {
@@ -492,7 +492,7 @@ func jobPodTemplateSpec(pod podTemplate) corev1.PodTemplateSpec {
 // are set to the agent's before the delete.
 func (r *AgentDeploymentReconciler) deleteWorkload(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	obj client.Object,
 ) error {
 	return r.deleteNamedWorkload(ctx, deploy, obj, deploy.Name)
@@ -503,7 +503,7 @@ func (r *AgentDeploymentReconciler) deleteWorkload(
 // agent name). Otherwise identical to deleteWorkload.
 func (r *AgentDeploymentReconciler) deleteNamedWorkload(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	obj client.Object,
 	name string,
 ) error {
@@ -535,7 +535,7 @@ func (r *AgentDeploymentReconciler) deleteNamedWorkload(
 // latestVersion. isCron distinguishes the CronJob path in the reason/message.
 func (r *AgentDeploymentReconciler) setJobReady(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	latestVersion string,
 	isCron bool,
 ) error {
@@ -571,7 +571,7 @@ func (r *AgentDeploymentReconciler) setJobReady(
 // Ready=Unknown, matching the serving path's AwaitingKnativeController shape.
 func (r *AgentDeploymentReconciler) setEventingReady(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	dep *appsv1.Deployment,
 	latestVersion string,
 ) error {

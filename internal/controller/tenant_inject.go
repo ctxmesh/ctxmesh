@@ -24,7 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // tenantContext is the resolved tenant identity + model caps for an agent's namespace (ADR 0046, M47).
@@ -55,7 +55,7 @@ func resolveTenantForNamespace(ctx context.Context, c client.Client, ns string) 
 	if name == "" {
 		return tenantContext{}, false, nil
 	}
-	var t agentsv1alpha1.Tenant
+	var t agentsv1beta1.Tenant
 	if err := c.Get(ctx, client.ObjectKey{Name: name}, &t); err != nil {
 		// The label points at a tenant that no longer exists (mid-prune) — treat as no tenant.
 		return tenantContext{}, false, client.IgnoreNotFound(err)

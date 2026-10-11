@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 func readyCond() []metav1.Condition {
@@ -42,39 +42,39 @@ func readyCond() []metav1.Condition {
 // member agents, one of which binds a tool; plus an unregistered agent.
 func topologyFixtureServer(t *testing.T) *Server {
 	t.Helper()
-	reg := &agentsv1alpha1.AgentRegistry{
+	reg := &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "team", Namespace: "prod"},
-		Spec:       agentsv1alpha1.AgentRegistrySpec{RegistryId: "team-a"},
-		Status: agentsv1alpha1.AgentRegistryStatus{
+		Spec:       agentsv1beta1.AgentRegistrySpec{RegistryId: "team-a"},
+		Status: agentsv1beta1.AgentRegistryStatus{
 			Members:    []string{"echo", "planner"},
 			Conditions: readyCond(),
 		},
 	}
-	echo := &agentsv1alpha1.AgentDeployment{
+	echo := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "prod"},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "echo:1"},
-		Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: readyCond()},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "echo:1"},
+		Status:     agentsv1beta1.AgentDeploymentStatus{Conditions: readyCond()},
 	}
-	planner := &agentsv1alpha1.AgentDeployment{
+	planner := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "planner", Namespace: "prod"},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "planner:2"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "planner:2"},
 		// no conditions → pending
 	}
-	orphan := &agentsv1alpha1.AgentDeployment{
+	orphan := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "loner", Namespace: "prod"},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "loner:1"},
-		Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: readyCond()},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "loner:1"},
+		Status:     agentsv1beta1.AgentDeploymentStatus{Conditions: readyCond()},
 	}
-	binding := &agentsv1alpha1.MCPToolBinding{
+	binding := &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo-search", Namespace: "prod"},
-		Spec: agentsv1alpha1.MCPToolBindingSpec{
+		Spec: agentsv1beta1.MCPToolBindingSpec{
 			AgentRef:    "echo",
 			RegistryRef: "tools",
 			ToolName:    "search",
 			Mode:        "remote",
-			Server:      agentsv1alpha1.ToolServer{URL: "http://tools.svc"},
+			Server:      agentsv1beta1.ToolServer{URL: "http://tools.svc"},
 		},
-		Status: agentsv1alpha1.MCPToolBindingStatus{Conditions: readyCond()},
+		Status: agentsv1beta1.MCPToolBindingStatus{Conditions: readyCond()},
 	}
 	c := fake.NewClientBuilder().
 		WithScheme(testScheme(t)).
@@ -85,26 +85,26 @@ func topologyFixtureServer(t *testing.T) *Server {
 
 func TestBuildTopologyGraph(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(
-		&agentsv1alpha1.AgentRegistry{
+		&agentsv1beta1.AgentRegistry{
 			ObjectMeta: metav1.ObjectMeta{Name: "team", Namespace: "prod"},
-			Spec:       agentsv1alpha1.AgentRegistrySpec{RegistryId: "team-a"},
-			Status: agentsv1alpha1.AgentRegistryStatus{
+			Spec:       agentsv1beta1.AgentRegistrySpec{RegistryId: "team-a"},
+			Status: agentsv1beta1.AgentRegistryStatus{
 				Members:    []string{"echo"},
 				Conditions: readyCond(),
 			},
 		},
-		&agentsv1alpha1.AgentDeployment{
+		&agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "prod"},
-			Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "echo:1"},
-			Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: readyCond()},
+			Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "echo:1"},
+			Status:     agentsv1beta1.AgentDeploymentStatus{Conditions: readyCond()},
 		},
-		&agentsv1alpha1.MCPToolBinding{
+		&agentsv1beta1.MCPToolBinding{
 			ObjectMeta: metav1.ObjectMeta{Name: "echo-search", Namespace: "prod"},
-			Spec: agentsv1alpha1.MCPToolBindingSpec{
+			Spec: agentsv1beta1.MCPToolBindingSpec{
 				AgentRef: "echo", RegistryRef: "tools", ToolName: "search",
-				Mode: "remote", Server: agentsv1alpha1.ToolServer{URL: "http://x"},
+				Mode: "remote", Server: agentsv1beta1.ToolServer{URL: "http://x"},
 			},
-			Status: agentsv1alpha1.MCPToolBindingStatus{Conditions: readyCond()},
+			Status: agentsv1beta1.MCPToolBindingStatus{Conditions: readyCond()},
 		},
 	).Build()
 
@@ -147,15 +147,15 @@ func TestBuildTopologyGraph(t *testing.T) {
 // just the agents list (m24.3).
 func TestTopologyNamespaceScope(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(
-		&agentsv1alpha1.AgentDeployment{
+		&agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "prod-agent", Namespace: "prod"},
-			Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "a:1"},
-			Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: readyCond()},
+			Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "a:1"},
+			Status:     agentsv1beta1.AgentDeploymentStatus{Conditions: readyCond()},
 		},
-		&agentsv1alpha1.AgentDeployment{
+		&agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "staging-agent", Namespace: "staging"},
-			Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "b:1"},
-			Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: readyCond()},
+			Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "b:1"},
+			Status:     agentsv1beta1.AgentDeploymentStatus{Conditions: readyCond()},
 		},
 	).Build()
 	s := newTestServer(t, c)
@@ -216,57 +216,57 @@ func notReadyCond() []metav1.Condition {
 func groupedFixtureServer(t *testing.T) *Server {
 	t.Helper()
 	objs := []client.Object{
-		&agentsv1alpha1.AgentRegistry{
+		&agentsv1beta1.AgentRegistry{
 			ObjectMeta: metav1.ObjectMeta{Name: "team-a", Namespace: "prod"},
-			Spec:       agentsv1alpha1.AgentRegistrySpec{RegistryId: "a"},
-			Status: agentsv1alpha1.AgentRegistryStatus{
+			Spec:       agentsv1beta1.AgentRegistrySpec{RegistryId: "a"},
+			Status: agentsv1beta1.AgentRegistryStatus{
 				Members: []string{"echo", "planner", "worker"}, Conditions: readyCond(),
 			},
 		},
-		&agentsv1alpha1.AgentRegistry{
+		&agentsv1beta1.AgentRegistry{
 			ObjectMeta: metav1.ObjectMeta{Name: "team-b", Namespace: "prod"},
-			Spec:       agentsv1alpha1.AgentRegistrySpec{RegistryId: "b"},
-			Status: agentsv1alpha1.AgentRegistryStatus{
+			Spec:       agentsv1beta1.AgentRegistrySpec{RegistryId: "b"},
+			Status: agentsv1beta1.AgentRegistryStatus{
 				Members: []string{"scribe", "ghost"}, Conditions: readyCond(),
 			},
 		},
-		&agentsv1alpha1.AgentDeployment{
+		&agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "prod"},
-			Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "echo:1"},
-			Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: readyCond()},
+			Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "echo:1"},
+			Status:     agentsv1beta1.AgentDeploymentStatus{Conditions: readyCond()},
 		},
-		&agentsv1alpha1.AgentDeployment{
+		&agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "planner", Namespace: "prod"},
-			Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "planner:2"},
-			Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: notReadyCond()},
+			Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "planner:2"},
+			Status:     agentsv1beta1.AgentDeploymentStatus{Conditions: notReadyCond()},
 		},
-		&agentsv1alpha1.AgentDeployment{
+		&agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "prod"},
-			Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "worker:1"},
-			Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: readyCond()},
+			Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "worker:1"},
+			Status:     agentsv1beta1.AgentDeploymentStatus{Conditions: readyCond()},
 		},
-		&agentsv1alpha1.AgentDeployment{
+		&agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "scribe", Namespace: "prod"},
-			Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "scribe:1"},
-			Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: readyCond()},
+			Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "scribe:1"},
+			Status:     agentsv1beta1.AgentDeploymentStatus{Conditions: readyCond()},
 		},
-		&agentsv1alpha1.AgentDeployment{
+		&agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "ghost", Namespace: "prod"},
-			Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghost:1"},
+			Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "ghost:1"},
 			// no conditions → unknown
 		},
-		&agentsv1alpha1.AgentDeployment{
+		&agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "loner", Namespace: "prod"},
-			Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "loner:1"},
-			Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: readyCond()},
+			Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "loner:1"},
+			Status:     agentsv1beta1.AgentDeploymentStatus{Conditions: readyCond()},
 		},
-		&agentsv1alpha1.MCPToolBinding{
+		&agentsv1beta1.MCPToolBinding{
 			ObjectMeta: metav1.ObjectMeta{Name: "echo-search", Namespace: "prod"},
-			Spec: agentsv1alpha1.MCPToolBindingSpec{
+			Spec: agentsv1beta1.MCPToolBindingSpec{
 				AgentRef: "echo", RegistryRef: "tools", ToolName: "search",
-				Mode: "remote", Server: agentsv1alpha1.ToolServer{URL: "http://x"},
+				Mode: "remote", Server: agentsv1beta1.ToolServer{URL: "http://x"},
 			},
-			Status: agentsv1alpha1.MCPToolBindingStatus{Conditions: readyCond()},
+			Status: agentsv1beta1.MCPToolBindingStatus{Conditions: readyCond()},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
@@ -398,22 +398,22 @@ func TestTopologyExpandGroup(t *testing.T) {
 // shownCount==cap, while the rollup still counts the FULL group.
 func TestTopologyExpandTruncatesAtCap(t *testing.T) {
 	objs := make([]client.Object, 0, 131)
-	objs = append(objs, &agentsv1alpha1.AgentRegistry{
+	objs = append(objs, &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "big", Namespace: "prod"},
-		Spec:       agentsv1alpha1.AgentRegistrySpec{RegistryId: "big"},
-		Status:     agentsv1alpha1.AgentRegistryStatus{Conditions: readyCond()},
+		Spec:       agentsv1beta1.AgentRegistrySpec{RegistryId: "big"},
+		Status:     agentsv1beta1.AgentRegistryStatus{Conditions: readyCond()},
 	})
 	members := make([]string, 0, 130)
 	for i := range 130 {
 		name := fmt.Sprintf("agent-%03d", i)
 		members = append(members, name)
-		objs = append(objs, &agentsv1alpha1.AgentDeployment{
+		objs = append(objs, &agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "prod"},
-			Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "x:1"},
-			Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: readyCond()},
+			Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "x:1"},
+			Status:     agentsv1beta1.AgentDeploymentStatus{Conditions: readyCond()},
 		})
 	}
-	reg := objs[0].(*agentsv1alpha1.AgentRegistry)
+	reg := objs[0].(*agentsv1beta1.AgentRegistry)
 	reg.Status.Members = members
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
 	s := newTestServer(t, c)
@@ -468,17 +468,17 @@ func TestTopologyBackwardCompatRawMode(t *testing.T) {
 	// Same underlying client feeds both the handler and buildTopology directly, so
 	// this proves the grouped-mode dispatch left the raw response byte-identical.
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(
-		&agentsv1alpha1.AgentRegistry{
+		&agentsv1beta1.AgentRegistry{
 			ObjectMeta: metav1.ObjectMeta{Name: "team", Namespace: "prod"},
-			Spec:       agentsv1alpha1.AgentRegistrySpec{RegistryId: "team-a"},
-			Status: agentsv1alpha1.AgentRegistryStatus{
+			Spec:       agentsv1beta1.AgentRegistrySpec{RegistryId: "team-a"},
+			Status: agentsv1beta1.AgentRegistryStatus{
 				Members: []string{"echo"}, Conditions: readyCond(),
 			},
 		},
-		&agentsv1alpha1.AgentDeployment{
+		&agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "prod"},
-			Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "echo:1"},
-			Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: readyCond()},
+			Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "echo:1"},
+			Status:     agentsv1beta1.AgentDeploymentStatus{Conditions: readyCond()},
 		},
 	).Build()
 	s := newTestServer(t, c)

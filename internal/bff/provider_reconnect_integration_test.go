@@ -39,7 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/yaml"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // TestProviderReconnect_RotatesTheKeyAgainstARealAPIServer connects a provider and then
@@ -85,11 +85,11 @@ func TestProviderReconnect_RotatesTheKeyAgainstARealAPIServer(t *testing.T) {
 			require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: providerCustom}, &secret))
 			assert.Equal(t, "sk-rotated-key", string(secret.Data[secretKeyAPIKey]), "the second connect rotates the key")
 
-			var route agentsv1alpha1.ModelRoute
+			var route agentsv1beta1.ModelRoute
 			require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: providerCustom}, &route))
 			require.Len(t, route.Spec.Providers, 1)
 			assert.Equal(t, prov.URL, route.Spec.Providers[0].APIBase)
-			var binding agentsv1alpha1.SecretBinding
+			var binding agentsv1beta1.SecretBinding
 			require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: providerCustom}, &binding))
 			assert.Equal(t, providerCustom, binding.Spec.SecretRef.Name)
 		})
@@ -138,12 +138,12 @@ func TestProviderRotate_RewritesTheKeyWithoutReadingIt(t *testing.T) {
 			assert.Equal(t, "sk-rotated-key", string(secret.Data[secretKeyAPIKey]), "the rotate stored the new key")
 			assert.Equal(t, managedByConnect, secret.Labels[labelManagedBy], "the rebuilt Secret is still connect-managed")
 
-			var route agentsv1alpha1.ModelRoute
+			var route agentsv1beta1.ModelRoute
 			require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: providerCustom}, &route))
 			require.Len(t, route.Spec.Providers, 1)
 			assert.Equal(t, prov.URL, route.Spec.Providers[0].APIBase, "the custom endpoint survives the rotate")
 			assert.Equal(t, providerCustom, route.Labels[labelProvider])
-			var binding agentsv1alpha1.SecretBinding
+			var binding agentsv1beta1.SecretBinding
 			require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: providerCustom}, &binding))
 			assert.Equal(t, providerCustom, binding.Spec.SecretRef.Name)
 
@@ -155,7 +155,7 @@ func TestProviderRotate_RewritesTheKeyWithoutReadingIt(t *testing.T) {
 			assert.Contains(t, rec.Body.String(), "not allowed to update Secret")
 			require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: providerCustom}, &secret))
 			assert.Equal(t, "sk-rotated-key", string(secret.Data[secretKeyAPIKey]), "a refused rotate writes nothing")
-			var after agentsv1alpha1.ModelRoute
+			var after agentsv1beta1.ModelRoute
 			require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: providerCustom}, &after))
 			assert.Equal(t, route.ResourceVersion, after.ResourceVersion, "a refused rotate leaves the route untouched")
 
@@ -185,12 +185,12 @@ func TestProviderConnect_RefusesAModelRouteItDidNotCreate(t *testing.T) {
 	require.NoError(t, admin.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}))
 	alice := personaUser(t, admin, ns, "alice-"+ns, role, credentialAdmin)
 
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "prod-llm", Namespace: ns,
 			Labels: map[string]string{"app.kubernetes.io/instance": "argocd-prod"},
 		},
-		Spec: agentsv1alpha1.ModelRouteSpec{Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{Providers: []agentsv1beta1.ProviderRef{
 			{Provider: "openai", Model: "gpt-5", Priority: 1, SecretBindingRef: "openai"},
 			{Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 2, SecretBindingRef: "anthropic"},
 		}},
@@ -207,11 +207,11 @@ func TestProviderConnect_RefusesAModelRouteItDidNotCreate(t *testing.T) {
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), `ModelRoute \"prod-llm\" exists and was not created by connecting a provider`)
 
-	var after agentsv1alpha1.ModelRoute
+	var after agentsv1beta1.ModelRoute
 	require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(route), &after))
 	assert.Equal(t, route.ResourceVersion, after.ResourceVersion, "the route is untouched")
 	assert.Len(t, after.Spec.Providers, 2)
-	for _, o := range []client.Object{&corev1.Secret{}, &agentsv1alpha1.SecretBinding{}} {
+	for _, o := range []client.Object{&corev1.Secret{}, &agentsv1beta1.SecretBinding{}} {
 		err := admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: "prod-llm"}, o)
 		assert.True(t, apierrors.IsNotFound(err), "%T must not be written by a refused connect; got %v", o, err)
 	}
@@ -237,7 +237,7 @@ func TestProviderRotate_RefusesARouteRepointedDuringTheProbe(t *testing.T) {
 
 	prov := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "Bearer sk-rotated-key" {
-			var route agentsv1alpha1.ModelRoute
+			var route agentsv1beta1.ModelRoute
 			if err := admin.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: providerCustom}, &route); err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				return
@@ -266,7 +266,7 @@ func TestProviderRotate_RefusesARouteRepointedDuringTheProbe(t *testing.T) {
 	require.Equal(t, http.StatusConflict, rec.Code, "rotate: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "was changed while the key was being rotated")
 
-	var route agentsv1alpha1.ModelRoute
+	var route agentsv1beta1.ModelRoute
 	require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: providerCustom}, &route))
 	assert.Equal(t, repointed, route.Spec.Providers[0].APIBase, "the re-point is kept")
 	var secret corev1.Secret

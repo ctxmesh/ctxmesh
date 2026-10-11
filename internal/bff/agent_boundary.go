@@ -23,7 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
@@ -40,17 +40,17 @@ import (
 func agentBoundary(ctx context.Context, c client.Client, ns, agentName string) string {
 	standalone := credresolve.AgentBoundary(ns, agentName)
 
-	var agent agentsv1alpha1.AgentDeployment
+	var agent agentsv1beta1.AgentDeployment
 	if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: agentName}, &agent); err != nil {
 		return standalone
 	}
-	var registries agentsv1alpha1.AgentRegistryList
+	var registries agentsv1beta1.AgentRegistryList
 	if err := c.List(ctx, &registries, client.InNamespace(ns)); err != nil {
 		return standalone
 	}
 
 	agentLabels := labels.Set(agent.Labels)
-	var best *agentsv1alpha1.AgentRegistry
+	var best *agentsv1beta1.AgentRegistry
 	for i := range registries.Items {
 		reg := &registries.Items[i]
 		if !reg.DeletionTimestamp.IsZero() {

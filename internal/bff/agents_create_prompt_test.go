@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
 	"github.com/ctxmesh/ctxmesh/internal/prompt"
 )
@@ -23,9 +23,9 @@ func TestStampResolvedPrompt(t *testing.T) {
 	ctx := context.Background()
 
 	objsFor := func(promptRef string) []decodedObject {
-		agent := &agentsv1alpha1.AgentDeployment{
+		agent := &agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "default"},
-			Spec:       agentsv1alpha1.AgentDeploymentSpec{PromptRef: promptRef},
+			Spec:       agentsv1beta1.AgentDeploymentSpec{PromptRef: promptRef},
 		}
 		return []decodedObject{{obj: agent, kind: agentDeploymentOwnerKind}}
 	}

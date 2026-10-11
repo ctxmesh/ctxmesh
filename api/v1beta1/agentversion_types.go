@@ -19,37 +19,47 @@ package v1beta1
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/conversion"
-
-	v1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 )
+
+// AgentVersionSpec is an immutable snapshot of an AgentDeploymentSpec captured
+// at a specific point in time. Created by the controller whenever the
+// AgentDeployment spec hash changes; named "<deployment>-<spec-hash-8>".
+//
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="AgentVersion spec is immutable"
+type AgentVersionSpec struct {
+	// deploymentName is the name of the parent AgentDeployment this version
+	// was snapshotted from.
+	// +kubebuilder:validation:MinLength=1
+	DeploymentName string `json:"deploymentName"`
+
+	// snapshot is a verbatim copy of the AgentDeploymentSpec at the time this
+	// AgentVersion was created. It is used by the controller to drive the
+	// Knative Service template and is never modified after creation.
+	Snapshot AgentDeploymentSpec `json:"snapshot"`
+}
 
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
+// +kubebuilder:resource:categories={agents}
+// +kubebuilder:printcolumn:name="Deployment",type="string",JSONPath=".spec.deploymentName"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
-// AgentVersion is the v1beta1 schema — a field-identical graduation of the v1alpha1 AgentVersion (ADR 0037, M34),
-// reusing the v1alpha1 spec/status so conversion is a direct copy.
+// AgentVersion is the Schema for the agentversions API.
+// Each AgentVersion is an immutable, controller-created snapshot of an
+// AgentDeployment's spec at a specific point in time. Immutability is enforced
+// by a CRD-level CEL rule — no webhook is required. AgentVersions are
+// owner-referenced to their parent AgentDeployment and garbage collected
+// automatically when the deployment is deleted.
 type AgentVersion struct {
-	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty"`
+	metav1.TypeMeta `json:",inline"`
 
-	Spec v1alpha1.AgentVersionSpec `json:"spec"`
-}
+	// metadata is standard Kubernetes object metadata.
+	// +optional
+	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-// ConvertTo converts this v1beta1 AgentVersion to the v1alpha1 hub.
-func (src *AgentVersion) ConvertTo(dstRaw conversion.Hub) error {
-	dst := dstRaw.(*v1alpha1.AgentVersion)
-	dst.ObjectMeta = src.ObjectMeta
-	dst.Spec = src.Spec
-	return nil
-}
-
-// ConvertFrom populates this v1beta1 AgentVersion from the v1alpha1 hub.
-func (dst *AgentVersion) ConvertFrom(srcRaw conversion.Hub) error {
-	src := srcRaw.(*v1alpha1.AgentVersion)
-	dst.ObjectMeta = src.ObjectMeta
-	dst.Spec = src.Spec
-	return nil
+	// spec holds the immutable snapshot of the AgentDeployment spec.
+	// +required
+	Spec AgentVersionSpec `json:"spec"`
 }
 
 // +kubebuilder:object:root=true
@@ -57,7 +67,7 @@ func (dst *AgentVersion) ConvertFrom(srcRaw conversion.Hub) error {
 // AgentVersionList contains a list of AgentVersion.
 type AgentVersionList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty"`
+	metav1.ListMeta `json:"metadata,omitzero"`
 	Items           []AgentVersion `json:"items"`
 }
 

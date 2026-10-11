@@ -39,7 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // Recognizable SECRET token values so a leak scan (response body + log buffer)
@@ -319,7 +319,7 @@ func TestMCPOAuthFullFlow(t *testing.T) {
 	assert.Equal(t, theOAuthClientID, string(secret.Data[secretKeyOAuthClientID]))
 
 	// The SecretBinding points at the OAuth access-token key (not the api-key key).
-	var binding agentsv1alpha1.SecretBinding
+	var binding agentsv1beta1.SecretBinding
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "my-oauth-mcp", Namespace: "prod"}, &binding))
 	assert.Equal(t, secretKeyOAuthAccessToken, binding.Spec.SecretRef.Key)
 

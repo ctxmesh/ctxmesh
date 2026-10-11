@@ -29,7 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 )
@@ -46,16 +46,16 @@ const trNS = "team-tools"
 // --- fixture helpers --------------------------------------------------------
 
 // mockToolRegistry builds a minimal ToolRegistry with one approved curated entry.
-func mockToolRegistry(name, ns string) *agentsv1alpha1.ToolRegistry {
-	return &agentsv1alpha1.ToolRegistry{
+func mockToolRegistry(name, ns string) *agentsv1beta1.ToolRegistry {
+	return &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: agentsv1alpha1.ToolRegistrySpec{
-			Tools: []agentsv1alpha1.ToolEntry{
+		Spec: agentsv1beta1.ToolRegistrySpec{
+			Tools: []agentsv1beta1.ToolEntry{
 				{
 					Name:           "search",
 					Description:    "web search",
-					Source:         agentsv1alpha1.SourceCurated,
-					ApprovalStatus: agentsv1alpha1.ApprovalApproved,
+					Source:         agentsv1beta1.SourceCurated,
+					ApprovalStatus: agentsv1beta1.ApprovalApproved,
 				},
 			},
 		},
@@ -63,16 +63,16 @@ func mockToolRegistry(name, ns string) *agentsv1alpha1.ToolRegistry {
 }
 
 // mockToolRegistryWithPending builds a ToolRegistry with one pending entry.
-func mockToolRegistryWithPending(name, ns string) *agentsv1alpha1.ToolRegistry {
-	return &agentsv1alpha1.ToolRegistry{
+func mockToolRegistryWithPending(name, ns string) *agentsv1beta1.ToolRegistry {
+	return &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: agentsv1alpha1.ToolRegistrySpec{
-			Tools: []agentsv1alpha1.ToolEntry{
+		Spec: agentsv1beta1.ToolRegistrySpec{
+			Tools: []agentsv1beta1.ToolEntry{
 				{
 					Name:           "byo-tool",
 					Description:    "BYO MCP tool",
-					Source:         agentsv1alpha1.SourceUserAdded,
-					ApprovalStatus: agentsv1alpha1.ApprovalPending,
+					Source:         agentsv1beta1.SourceUserAdded,
+					ApprovalStatus: agentsv1beta1.ApprovalPending,
 				},
 			},
 		},
@@ -83,7 +83,7 @@ func mockToolRegistryWithPending(name, ns string) *agentsv1alpha1.ToolRegistry {
 // the ToolRegistry source, seeded with regs and gated by auth (nil ⇒ a permissive
 // recordingAuthorizer). It returns the server, the caller-client factory (so token
 // routing can be asserted) and the store (for post-request state assertions).
-func newTRConsoleServer(t *testing.T, auth authz.Authorizer, regs ...*agentsv1alpha1.ToolRegistry) (*Server, *fakeCallerClientFactory) {
+func newTRConsoleServer(t *testing.T, auth authz.Authorizer, regs ...*agentsv1beta1.ToolRegistry) (*Server, *fakeCallerClientFactory) {
 	t.Helper()
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	factory := &fakeCallerClientFactory{client: c}
@@ -309,7 +309,7 @@ func TestGetToolRegistryReturnsDetail(t *testing.T) {
 	assert.Equal(t, phaseReady, detail.Phase)
 	require.Len(t, detail.Tools, 1)
 	assert.Equal(t, "search", detail.Tools[0].Name)
-	assert.Equal(t, agentsv1alpha1.ApprovalApproved, detail.Tools[0].ApprovalStatus)
+	assert.Equal(t, agentsv1beta1.ApprovalApproved, detail.Tools[0].ApprovalStatus)
 }
 
 // TestGetToolRegistryNotFoundIs404 proves a missing ToolRegistry yields 404.
@@ -345,7 +345,7 @@ func TestCreateToolRegistrySucceeds(t *testing.T) {
 		Name:      "new-catalog",
 		Namespace: trNS,
 		Tools: []ToolEntryCreateDTO{
-			{Name: "web-search", Description: "search the web", Source: agentsv1alpha1.SourceCurated},
+			{Name: "web-search", Description: "search the web", Source: agentsv1beta1.SourceCurated},
 		},
 	}
 	detail, code, body := createToolRegistry(t, s, req)
@@ -503,14 +503,14 @@ func TestUpdateToolRegistryDoesNotFlipApprovalStatus(t *testing.T) {
 
 	// THE APPROVAL-PRESERVATION PROPERTY: the tool's approvalStatus must still be
 	// "pending" — the PUT must not have flipped it to "approved".
-	assert.Equal(t, agentsv1alpha1.ApprovalPending, detail.Tools[0].ApprovalStatus,
+	assert.Equal(t, agentsv1beta1.ApprovalPending, detail.Tools[0].ApprovalStatus,
 		"PUT must NOT flip a tool entry's approvalStatus — approval is controller-owned")
 
 	// Also verify in the store.
 	got, err := store.Get(context.Background(), trNS, "my-catalog")
 	require.NoError(t, err)
 	require.Len(t, got.Tools, 1)
-	assert.Equal(t, agentsv1alpha1.ApprovalPending, got.Tools[0].ApprovalStatus,
+	assert.Equal(t, agentsv1beta1.ApprovalPending, got.Tools[0].ApprovalStatus,
 		"stored approvalStatus must be preserved, not overwritten by the PUT")
 }
 

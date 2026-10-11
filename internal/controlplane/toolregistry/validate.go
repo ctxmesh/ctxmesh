@@ -25,7 +25,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 )
 
-// Bounds mirroring the ToolRegistry CRD's OpenAPI/CEL markers (api/v1alpha1/
+// Bounds mirroring the ToolRegistry CRD's OpenAPI/CEL markers (api/v1beta1/
 // toolregistry_types.go) — replicated here so the write path enforces them once
 // ToolRegistry writes leave the CRD (ADR 0044). These are duplicated by design:
 // the api package must not become a dependency of the CRD-independent control

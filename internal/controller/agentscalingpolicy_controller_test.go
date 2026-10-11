@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/kedatypes"
 )
 
@@ -61,9 +61,9 @@ func reconcileScalingNN(t *testing.T, r *AgentScalingPolicyReconciler, name, ns 
 // scaling policy reconciler's agent-exists check passes.
 func createMinimalAgent(t *testing.T, name, ns string) {
 	t.Helper()
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest",
 			Port:  8080,
 		},
@@ -86,9 +86,9 @@ func TestScalingPolicy_QueueDepth_CreatesScaledObject(t *testing.T) {
 
 	createMinimalAgent(t, agentName, ns)
 
-	policy := &agentsv1alpha1.AgentScalingPolicy{
+	policy := &agentsv1beta1.AgentScalingPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: policyName, Namespace: ns},
-		Spec: agentsv1alpha1.AgentScalingPolicySpec{
+		Spec: agentsv1beta1.AgentScalingPolicySpec{
 			AgentRef: agentName,
 			Trigger:  "queue-depth",
 			Min:      0,
@@ -132,7 +132,7 @@ func TestScalingPolicy_QueueDepth_CreatesScaledObject(t *testing.T) {
 	assert.True(t, *so.OwnerReferences[0].Controller, "owner-ref must be a controller ref")
 
 	// ── Verify status ────────────────────────────────────────────────────────
-	var updatedPolicy agentsv1alpha1.AgentScalingPolicy
+	var updatedPolicy agentsv1beta1.AgentScalingPolicy
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(policy), &updatedPolicy))
 	assert.Equal(t, backendKEDAScaledObject, updatedPolicy.Status.Backend, "status.backend must be keda-scaledobject")
 	readyCond := apimeta.FindStatusCondition(updatedPolicy.Status.Conditions, conditionReady)
@@ -152,9 +152,9 @@ func TestScalingPolicy_QueueDepth_DefaultsBrokerFromAgentRef(t *testing.T) {
 
 	createMinimalAgent(t, agentName, ns)
 
-	policy := &agentsv1alpha1.AgentScalingPolicy{
+	policy := &agentsv1beta1.AgentScalingPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: policyName, Namespace: ns},
-		Spec: agentsv1alpha1.AgentScalingPolicySpec{
+		Spec: agentsv1beta1.AgentScalingPolicySpec{
 			AgentRef: agentName,
 			Trigger:  "queue-depth",
 			Min:      1,
@@ -193,14 +193,14 @@ func TestScalingPolicy_QueueDepth_ExplicitQueueRef(t *testing.T) {
 
 	createMinimalAgent(t, agentName, ns)
 
-	policy := &agentsv1alpha1.AgentScalingPolicy{
+	policy := &agentsv1beta1.AgentScalingPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: policyName, Namespace: ns},
-		Spec: agentsv1alpha1.AgentScalingPolicySpec{
+		Spec: agentsv1beta1.AgentScalingPolicySpec{
 			AgentRef: agentName,
 			Trigger:  "queue-depth",
 			Min:      2,
 			Max:      8,
-			QueueRef: &agentsv1alpha1.QueueRef{Name: brokerName},
+			QueueRef: &agentsv1beta1.QueueRef{Name: brokerName},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, policy))
@@ -231,9 +231,9 @@ func TestScalingPolicy_RequestRate_NoScaledObject(t *testing.T) {
 
 	createMinimalAgent(t, agentName, ns)
 
-	policy := &agentsv1alpha1.AgentScalingPolicy{
+	policy := &agentsv1beta1.AgentScalingPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: policyName, Namespace: ns},
-		Spec: agentsv1alpha1.AgentScalingPolicySpec{
+		Spec: agentsv1beta1.AgentScalingPolicySpec{
 			AgentRef: agentName,
 			Trigger:  "request-rate",
 			Min:      1,
@@ -254,7 +254,7 @@ func TestScalingPolicy_RequestRate_NoScaledObject(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err), "ScaledObject must NOT be created for request-rate trigger")
 
 	// status.backend must be knative-autoscaling
-	var updatedPolicy agentsv1alpha1.AgentScalingPolicy
+	var updatedPolicy agentsv1beta1.AgentScalingPolicy
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(policy), &updatedPolicy))
 	assert.Equal(t, backendKnativeAutoscaling, updatedPolicy.Status.Backend)
 	readyCond := apimeta.FindStatusCondition(updatedPolicy.Status.Conditions, conditionReady)
@@ -273,9 +273,9 @@ func TestScalingPolicy_Schedule_NoScaledObject(t *testing.T) {
 
 	createMinimalAgent(t, agentName, ns)
 
-	policy := &agentsv1alpha1.AgentScalingPolicy{
+	policy := &agentsv1beta1.AgentScalingPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: policyName, Namespace: ns},
-		Spec: agentsv1alpha1.AgentScalingPolicySpec{
+		Spec: agentsv1beta1.AgentScalingPolicySpec{
 			AgentRef: agentName,
 			Trigger:  "schedule",
 			Min:      0,
@@ -296,7 +296,7 @@ func TestScalingPolicy_Schedule_NoScaledObject(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err), "ScaledObject must NOT be created for schedule trigger")
 
 	// status.backend must be cronjob
-	var updatedPolicy agentsv1alpha1.AgentScalingPolicy
+	var updatedPolicy agentsv1beta1.AgentScalingPolicy
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(policy), &updatedPolicy))
 	assert.Equal(t, backendCronJob, updatedPolicy.Status.Backend)
 	readyCond := apimeta.FindStatusCondition(updatedPolicy.Status.Conditions, conditionReady)
@@ -312,9 +312,9 @@ func TestScalingPolicy_AgentNotFound(t *testing.T) {
 		policyName = "notfound-scale"
 	)
 
-	policy := &agentsv1alpha1.AgentScalingPolicy{
+	policy := &agentsv1beta1.AgentScalingPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: policyName, Namespace: ns},
-		Spec: agentsv1alpha1.AgentScalingPolicySpec{
+		Spec: agentsv1beta1.AgentScalingPolicySpec{
 			AgentRef: "does-not-exist",
 			Trigger:  "queue-depth",
 			Min:      0,
@@ -327,7 +327,7 @@ func TestScalingPolicy_AgentNotFound(t *testing.T) {
 	r := newScalingReconciler()
 	reconcileScalingNN(t, r, policyName, ns)
 
-	var updatedPolicy agentsv1alpha1.AgentScalingPolicy
+	var updatedPolicy agentsv1beta1.AgentScalingPolicy
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(policy), &updatedPolicy))
 	readyCond := apimeta.FindStatusCondition(updatedPolicy.Status.Conditions, conditionReady)
 	require.NotNil(t, readyCond)

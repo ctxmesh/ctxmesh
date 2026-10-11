@@ -9,7 +9,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,7 +37,7 @@ func getCensus(t *testing.T, s *Server, query string) CensusResponse {
 // controller-runtime fake client ignores both, so a census test that goes through it
 // proves the tally and nothing at all about the walk.
 type pagingReader struct {
-	items    []agentsv1alpha1.AgentDeployment
+	items    []agentsv1beta1.AgentDeployment
 	calls    int
 	maxLimit int64
 }
@@ -61,7 +61,7 @@ func (p *pagingReader) List(_ context.Context, list client.ObjectList, opts ...c
 	if o.Limit == 0 || end > len(p.items) {
 		end = len(p.items)
 	}
-	out := list.(*agentsv1alpha1.AgentDeploymentList)
+	out := list.(*agentsv1beta1.AgentDeploymentList)
 	out.Items = p.items[start:end]
 	if end < len(p.items) {
 		out.Continue = fmt.Sprintf("at-%d", end)
@@ -71,8 +71,8 @@ func (p *pagingReader) List(_ context.Context, list client.ObjectList, opts ...c
 	return nil
 }
 
-func agentsNamed(n int) []agentsv1alpha1.AgentDeployment {
-	out := make([]agentsv1alpha1.AgentDeployment, 0, n)
+func agentsNamed(n int) []agentsv1beta1.AgentDeployment {
+	out := make([]agentsv1beta1.AgentDeployment, 0, n)
 	for i := range n {
 		out = append(out, *publishedAgent(fmt.Sprintf("agent-%05d", i), "prod"))
 	}
@@ -115,7 +115,7 @@ func TestCensusPastTheCeilingIsADeclaredBound(t *testing.T) {
 // A pathological fleet may not shrink Total. Groups may be truncated and must declare it;
 // the count of agents must still be right.
 func TestCensusGroupOverflowNeverUndercountsTheTotal(t *testing.T) {
-	items := make([]agentsv1alpha1.AgentDeployment, 0, censusMaxGroups*2)
+	items := make([]agentsv1beta1.AgentDeployment, 0, censusMaxGroups*2)
 	for i := range censusMaxGroups * 2 {
 		a := *publishedAgent(fmt.Sprintf("agent-%05d", i), "prod")
 		// Phase/Reason come off the Ready condition, so a distinct reason is a distinct tuple.

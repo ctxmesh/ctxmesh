@@ -25,35 +25,35 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // strictToolPolicy is the live policy: two tools need approval and only the dba group may approve.
-func strictToolPolicy() *agentsv1alpha1.ToolPolicySpec {
-	return &agentsv1alpha1.ToolPolicySpec{
+func strictToolPolicy() *agentsv1beta1.ToolPolicySpec {
+	return &agentsv1beta1.ToolPolicySpec{
 		Default: "allow",
-		Overrides: []agentsv1alpha1.ToolPolicyOverride{
+		Overrides: []agentsv1beta1.ToolPolicyOverride{
 			{Name: "db.delete", Rule: "require-approval"},
 			{Name: "send_email", Rule: "require-approval"},
 		},
-		Approvers: []agentsv1alpha1.Approver{{Kind: "Group", Name: "dba"}},
+		Approvers: []agentsv1beta1.Approver{{Kind: "Group", Name: "dba"}},
 	}
 }
 
 // weakToolPolicy is what an older version carried: one approval gate fewer, and an approver who has
 // since been revoked.
-func weakToolPolicy() *agentsv1alpha1.ToolPolicySpec {
-	return &agentsv1alpha1.ToolPolicySpec{
+func weakToolPolicy() *agentsv1beta1.ToolPolicySpec {
+	return &agentsv1beta1.ToolPolicySpec{
 		Default:   "allow",
-		Overrides: []agentsv1alpha1.ToolPolicyOverride{{Name: "db.delete", Rule: "require-approval"}},
-		Approvers: []agentsv1alpha1.Approver{{Kind: "User", Name: "mallory@example.com"}},
+		Overrides: []agentsv1beta1.ToolPolicyOverride{{Name: "db.delete", Rule: "require-approval"}},
+		Approvers: []agentsv1beta1.Approver{{Kind: "User", Name: "mallory@example.com"}},
 	}
 }
 
-func feedbackDecl(score string) *agentsv1alpha1.FeedbackSpec {
-	return &agentsv1alpha1.FeedbackSpec{
-		Mode:  agentsv1alpha1.FeedbackEnforce,
-		Human: &agentsv1alpha1.HumanSource{Scores: []agentsv1alpha1.ScoreDecl{{Name: score, DataType: agentsv1alpha1.ScoreBoolean}}},
+func feedbackDecl(score string) *agentsv1beta1.FeedbackSpec {
+	return &agentsv1beta1.FeedbackSpec{
+		Mode:  agentsv1beta1.FeedbackEnforce,
+		Human: &agentsv1beta1.HumanSource{Scores: []agentsv1beta1.ScoreDecl{{Name: score, DataType: agentsv1beta1.ScoreBoolean}}},
 	}
 }
 
@@ -63,7 +63,7 @@ func feedbackDecl(score string) *agentsv1alpha1.FeedbackSpec {
 // and feedback declaration.
 func TestRollbackSpec_KeepsLiveGovernance(t *testing.T) {
 	schema := &k8sruntime.RawExtension{Raw: []byte(`{"type":"object"}`)}
-	resilience := &agentsv1alpha1.ResilienceSpec{ModelCall: &agentsv1alpha1.CallResilience{MaxRetries: 2}}
+	resilience := &agentsv1beta1.ResilienceSpec{ModelCall: &agentsv1beta1.CallResilience{MaxRetries: 2}}
 	weak := weakToolPolicy()
 	weak.ForcedChoice = "required"
 	weak.ParallelLimit = 2
@@ -72,22 +72,22 @@ func TestRollbackSpec_KeepsLiveGovernance(t *testing.T) {
 	strict.ForcedChoice = "auto"
 	strict.ParallelLimit = 8
 	strict.MaxToolCallsPerRun = 20
-	snapshot := agentsv1alpha1.AgentDeploymentSpec{
+	snapshot := agentsv1beta1.AgentDeploymentSpec{
 		Image:     "ghcr.io/ctxmesh/example-agent:v1",
 		PromptRef: "support-prompt-v1",
 		Env:       []corev1.EnvVar{{Name: "MODEL_ROUTE", Value: "haiku"}},
-		Runtime: &agentsv1alpha1.RuntimeSpec{
+		Runtime: &agentsv1beta1.RuntimeSpec{
 			OutputSchema: schema,
 			ToolPolicy:   weak,
 			Resilience:   resilience,
 		},
 		Feedback: feedbackDecl("thumbs-old"),
 	}
-	live := agentsv1alpha1.AgentDeploymentSpec{
+	live := agentsv1beta1.AgentDeploymentSpec{
 		Image:     "ghcr.io/ctxmesh/example-agent:v2-bad",
 		PromptRef: "support-prompt-v2",
 		Env:       []corev1.EnvVar{{Name: "MODEL_ROUTE", Value: "sonnet"}},
-		Runtime:   &agentsv1alpha1.RuntimeSpec{ToolPolicy: strict},
+		Runtime:   &agentsv1beta1.RuntimeSpec{ToolPolicy: strict},
 		Feedback:  feedbackDecl("thumbs"),
 	}
 
@@ -131,26 +131,26 @@ func TestRollbackToolPolicy_ClassifiesEveryField(t *testing.T) {
 		"ForcedChoice":       restored,
 		"ParallelLimit":      restored,
 	}
-	snapshot := &agentsv1alpha1.ToolPolicySpec{
+	snapshot := &agentsv1beta1.ToolPolicySpec{
 		Default:            "deny",
-		Overrides:          []agentsv1alpha1.ToolPolicyOverride{{Name: "old.tool", Rule: "allow"}},
+		Overrides:          []agentsv1beta1.ToolPolicyOverride{{Name: "old.tool", Rule: "allow"}},
 		ForcedChoice:       "required",
 		ParallelLimit:      1,
 		MaxToolCallsPerRun: 1000,
-		Approvers:          []agentsv1alpha1.Approver{{Kind: "User", Name: "old@example.com"}},
+		Approvers:          []agentsv1beta1.Approver{{Kind: "User", Name: "old@example.com"}},
 	}
-	live := &agentsv1alpha1.ToolPolicySpec{
+	live := &agentsv1beta1.ToolPolicySpec{
 		Default:            "require-approval",
-		Overrides:          []agentsv1alpha1.ToolPolicyOverride{{Name: "db.delete", Rule: "deny"}},
+		Overrides:          []agentsv1beta1.ToolPolicyOverride{{Name: "db.delete", Rule: "deny"}},
 		ForcedChoice:       "auto",
 		ParallelLimit:      4,
 		MaxToolCallsPerRun: 10,
-		Approvers:          []agentsv1alpha1.Approver{{Kind: "Group", Name: "dba"}},
+		Approvers:          []agentsv1beta1.Approver{{Kind: "Group", Name: "dba"}},
 	}
 	got := rollbackToolPolicy(snapshot, live)
 	require.NotNil(t, got)
 
-	typ := reflect.TypeFor[agentsv1alpha1.ToolPolicySpec]()
+	typ := reflect.TypeFor[agentsv1beta1.ToolPolicySpec]()
 	sv, lv, gv := reflect.ValueOf(*snapshot), reflect.ValueOf(*live), reflect.ValueOf(*got)
 	assert.Len(t, classes, typ.NumField(), "the table classifies every field and nothing else")
 	for i := range typ.NumField() {
@@ -169,10 +169,10 @@ func TestRollbackToolPolicy_ClassifiesEveryField(t *testing.T) {
 	}
 
 	assert.Nil(t, rollbackToolPolicy(nil, nil), "no policy on either side is no policy")
-	onlyBehaviour := rollbackToolPolicy(&agentsv1alpha1.ToolPolicySpec{ParallelLimit: 3}, nil)
-	assert.Equal(t, &agentsv1alpha1.ToolPolicySpec{ParallelLimit: 3}, onlyBehaviour,
+	onlyBehaviour := rollbackToolPolicy(&agentsv1beta1.ToolPolicySpec{ParallelLimit: 3}, nil)
+	assert.Equal(t, &agentsv1beta1.ToolPolicySpec{ParallelLimit: 3}, onlyBehaviour,
 		"a version's behaviour settings return even when the live spec has no tool policy")
-	assert.Nil(t, rollbackToolPolicy(&agentsv1alpha1.ToolPolicySpec{Default: "deny"}, nil),
+	assert.Nil(t, rollbackToolPolicy(&agentsv1beta1.ToolPolicySpec{Default: "deny"}, nil),
 		"a version's approval rules never return when the live spec has none")
 }
 
@@ -180,8 +180,8 @@ func TestRollbackToolPolicy_ClassifiesEveryField(t *testing.T) {
 // live spec without a tool policy or feedback removes the snapshot's, and leaves no empty runtime.
 func TestRollbackSpec_NilRuntimeOnEitherSide(t *testing.T) {
 	got := rollbackSpec(
-		agentsv1alpha1.AgentDeploymentSpec{Image: "v1"},
-		agentsv1alpha1.AgentDeploymentSpec{Image: "v2", Runtime: &agentsv1alpha1.RuntimeSpec{ToolPolicy: strictToolPolicy()}},
+		agentsv1beta1.AgentDeploymentSpec{Image: "v1"},
+		agentsv1beta1.AgentDeploymentSpec{Image: "v2", Runtime: &agentsv1beta1.RuntimeSpec{ToolPolicy: strictToolPolicy()}},
 	)
 	assert.Equal(t, "v1", got.Image)
 	require.NotNil(t, got.Runtime, "a snapshot without runtime still carries the live tool policy")
@@ -189,22 +189,22 @@ func TestRollbackSpec_NilRuntimeOnEitherSide(t *testing.T) {
 	assert.Nil(t, got.Runtime.OutputSchema)
 
 	got = rollbackSpec(
-		agentsv1alpha1.AgentDeploymentSpec{
+		agentsv1beta1.AgentDeploymentSpec{
 			Image:    "v1",
-			Runtime:  &agentsv1alpha1.RuntimeSpec{ToolPolicy: weakToolPolicy()},
+			Runtime:  &agentsv1beta1.RuntimeSpec{ToolPolicy: weakToolPolicy()},
 			Feedback: feedbackDecl("thumbs-old"),
 		},
-		agentsv1alpha1.AgentDeploymentSpec{Image: "v2"},
+		agentsv1beta1.AgentDeploymentSpec{Image: "v2"},
 	)
 	assert.Nil(t, got.Runtime, "a runtime that held only the tool policy goes with it")
 	assert.Nil(t, got.Feedback, "no live feedback declaration means none after the rollback")
 
 	got = rollbackSpec(
-		agentsv1alpha1.AgentDeploymentSpec{
+		agentsv1beta1.AgentDeploymentSpec{
 			Image:   "v1",
-			Runtime: &agentsv1alpha1.RuntimeSpec{ToolPolicy: weakToolPolicy(), Resilience: &agentsv1alpha1.ResilienceSpec{}},
+			Runtime: &agentsv1beta1.RuntimeSpec{ToolPolicy: weakToolPolicy(), Resilience: &agentsv1beta1.ResilienceSpec{}},
 		},
-		agentsv1alpha1.AgentDeploymentSpec{Image: "v2", Runtime: &agentsv1alpha1.RuntimeSpec{}},
+		agentsv1beta1.AgentDeploymentSpec{Image: "v2", Runtime: &agentsv1beta1.RuntimeSpec{}},
 	)
 	require.NotNil(t, got.Runtime, "the snapshot's other runtime settings are restored")
 	assert.Nil(t, got.Runtime.ToolPolicy, "the live spec has no tool policy, so neither does the result")

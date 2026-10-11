@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // maxPromptBytes bounds a resolved prompt so a hostile/huge path cannot OOM the BFF.
@@ -57,7 +57,7 @@ func NewHTTPResolver(token string) *HTTPResolver {
 // Resolve fetches the prompt content for the git pointer. A 404 (bad ref / missing
 // path) maps to ErrNotFound (a user error, not a requeue); any other non-200 or a
 // transport error is a transient/infra failure. Never fabricates content.
-func (h *HTTPResolver) Resolve(ctx context.Context, src agentsv1alpha1.GitPromptSource) (Resolved, error) {
+func (h *HTTPResolver) Resolve(ctx context.Context, src agentsv1beta1.GitPromptSource) (Resolved, error) {
 	rawURL, err := rawContentURL(src)
 	if err != nil {
 		// An unsupported host is a user-fixable pointer error, not transient.
@@ -99,7 +99,7 @@ func (h *HTTPResolver) Resolve(ctx context.Context, src agentsv1alpha1.GitPrompt
 // raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}. Other hosts are unsupported in
 // v1 (a go-git resolver would generalise) — reported as a pointer error the caller maps
 // to a user-facing 404.
-func rawContentURL(src agentsv1alpha1.GitPromptSource) (string, error) {
+func rawContentURL(src agentsv1beta1.GitPromptSource) (string, error) {
 	repo := strings.TrimSpace(src.Repo)
 	ref := strings.TrimSpace(src.Ref)
 	path := strings.TrimPrefix(strings.TrimSpace(src.Path), "/")

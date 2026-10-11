@@ -16,7 +16,7 @@ limitations under the License.
 
 package prompt
 
-import agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+import agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 
 // ResolvedPromptAnnotation is the AgentDeployment annotation the BFF stamps with the DENORMALIZED
 // PromptVersion pointer (ADR 0042, m40.3 — compose-and-denormalize). It lets the AgentDeployment
@@ -41,6 +41,6 @@ type ResolvedPointer struct {
 }
 
 // GitSource returns the pointer as the resolver's GitPromptSource.
-func (p ResolvedPointer) GitSource() agentsv1alpha1.GitPromptSource {
-	return agentsv1alpha1.GitPromptSource{Repo: p.Repo, Ref: p.Ref, Path: p.Path}
+func (p ResolvedPointer) GitSource() agentsv1beta1.GitPromptSource {
+	return agentsv1beta1.GitPromptSource{Repo: p.Repo, Ref: p.Ref, Path: p.Path}
 }

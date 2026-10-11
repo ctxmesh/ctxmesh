@@ -25,7 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
@@ -47,7 +47,7 @@ import (
 // toolRegistryGroupResource is the GroupResource for the k8s-shaped errors the seam
 // synthesizes.
 func toolRegistryGroupResource() schema.GroupResource {
-	return schema.GroupResource{Group: agentsv1alpha1.GroupVersion.Group, Resource: resourceToolRegistries}
+	return schema.GroupResource{Group: agentsv1beta1.GroupVersion.Group, Resource: resourceToolRegistries}
 }
 
 // storeToolRegistryToCRD projects a control-plane store row into the CRD shape the
@@ -56,8 +56,8 @@ func toolRegistryGroupResource() schema.GroupResource {
 // inputSchema), the annotations (OAuth-client config, ADR 0028), and the labels
 // (scope/owner, ADR 0029). ToolRegistry has no controller, so status stays empty —
 // no MCP read path consults it.
-func storeToolRegistryToCRD(r *toolregistry.ToolRegistry) *agentsv1alpha1.ToolRegistry {
-	out := &agentsv1alpha1.ToolRegistry{}
+func storeToolRegistryToCRD(r *toolregistry.ToolRegistry) *agentsv1beta1.ToolRegistry {
+	out := &agentsv1beta1.ToolRegistry{}
 	out.Namespace = r.Namespace
 	out.Name = r.Name
 	if len(r.Annotations) > 0 {
@@ -67,10 +67,10 @@ func storeToolRegistryToCRD(r *toolregistry.ToolRegistry) *agentsv1alpha1.ToolRe
 		out.Labels = r.Labels
 	}
 	if len(r.Tools) > 0 {
-		out.Spec.Tools = make([]agentsv1alpha1.ToolEntry, len(r.Tools))
+		out.Spec.Tools = make([]agentsv1beta1.ToolEntry, len(r.Tools))
 		for i := range r.Tools {
 			e := r.Tools[i]
-			te := agentsv1alpha1.ToolEntry{
+			te := agentsv1beta1.ToolEntry{
 				Name: e.Name, Image: e.Image, URL: e.URL,
 				Description: e.Description, Source: e.Source, ApprovalStatus: e.ApprovalStatus,
 			}
@@ -101,7 +101,7 @@ func toolRegistryReadErrAsAPIError(err error, name string) error {
 // (projected to the CRD shape) behind a caller-scoped SSAR (RBAC parity). Store /
 // authz errors are shaped as k8s apierrors so the MCP callers' handling is
 // unchanged (ToolRegistry is retired, ADR 0044 — there is no CRD to read).
-func (s *Server) mcpGetToolRegistry(ctx context.Context, caller client.Client, ns, name string) (*agentsv1alpha1.ToolRegistry, error) {
+func (s *Server) mcpGetToolRegistry(ctx context.Context, caller client.Client, ns, name string) (*agentsv1beta1.ToolRegistry, error) {
 	if err := s.authorizeStore(ctx, caller, authz.VerbGet, resourceToolRegistries, ns, name); err != nil {
 		return nil, toolRegistryReadErrAsAPIError(err, name)
 	}
@@ -116,11 +116,11 @@ func (s *Server) mcpGetToolRegistry(ctx context.Context, caller client.Client, n
 // projected), optionally namespace-scoped and label-filtered (e.g.
 // managed-by=ctxmesh-mcp for the BYO-server surfaces). labels are AND-ed
 // equality filters, matching the store's ListOptions.Labels.
-func (s *Server) mcpListToolRegistries(ctx context.Context, caller client.Client, ns string, labels map[string]string) (*agentsv1alpha1.ToolRegistryList, error) {
+func (s *Server) mcpListToolRegistries(ctx context.Context, caller client.Client, ns string, labels map[string]string) (*agentsv1beta1.ToolRegistryList, error) {
 	if err := s.authorizeStore(ctx, caller, authz.VerbList, resourceToolRegistries, ns, ""); err != nil {
 		return nil, toolRegistryReadErrAsAPIError(err, "")
 	}
-	out := &agentsv1alpha1.ToolRegistryList{}
+	out := &agentsv1beta1.ToolRegistryList{}
 	token := ""
 	for {
 		page, err := s.toolRegistryStore.List(ctx, controlplane.ListOptions{

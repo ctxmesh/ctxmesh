@@ -38,7 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/publishedartifact"
 )
 
@@ -71,20 +71,20 @@ func getDetail(t *testing.T, s *Server, name string) *httptest.ResponseRecorder 
 // Knative URL, readiness/phase, the bindings referencing THIS agent (tool +
 // memory), and the version history — with []-not-null slices — read caller-scoped.
 func TestAgentDetailHappyPath(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "team-a"},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "img:1",
 			ExecutionModel: "serving",
 			Role:           "worker",
 			PromptRef:      "system-prompt-v2",
 			Env:            []corev1.EnvVar{{Name: "MODEL_ROUTE", Value: "anthropic"}},
-			Scaling:        &agentsv1alpha1.ScalingSpec{Min: 1, Max: 5},
+			Scaling:        &agentsv1beta1.ScalingSpec{Min: 1, Max: 5},
 			// Session memory is the folded spec field (ADR 0101 — MemoryBinding retired):
 			// the detail projection surfaces it as a "memory" binding row.
-			SessionMemory: &agentsv1alpha1.SessionMemorySpec{Scope: "session"},
+			SessionMemory: &agentsv1beta1.SessionMemorySpec{Scope: "session"},
 		},
-		Status: agentsv1alpha1.AgentDeploymentStatus{
+		Status: agentsv1beta1.AgentDeploymentStatus{
 			Conditions:    []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "serving")},
 			URL:           "http://echo.team-a.example",
 			LatestVersion: "echo-abc123",
@@ -92,22 +92,22 @@ func TestAgentDetailHappyPath(t *testing.T) {
 	}
 	// A tool binding referencing echo, plus a decoy binding for a different agent
 	// that must NOT appear. (Memory comes from ad.Spec.SessionMemory above.)
-	toolBinding := &agentsv1alpha1.MCPToolBinding{
+	toolBinding := &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo-search", Namespace: "team-a"},
-		Spec:       agentsv1alpha1.MCPToolBindingSpec{AgentRef: "echo", ToolName: "search", RegistryRef: "reg", Mode: "remote", Server: agentsv1alpha1.ToolServer{URL: "http://x"}},
-		Status:     agentsv1alpha1.MCPToolBindingStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Bound", "ok")}},
+		Spec:       agentsv1beta1.MCPToolBindingSpec{AgentRef: "echo", ToolName: "search", RegistryRef: "reg", Mode: "remote", Server: agentsv1beta1.ToolServer{URL: "http://x"}},
+		Status:     agentsv1beta1.MCPToolBindingStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Bound", "ok")}},
 	}
-	decoyBinding := &agentsv1alpha1.MCPToolBinding{
+	decoyBinding := &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "other-tool", Namespace: "team-a"},
-		Spec:       agentsv1alpha1.MCPToolBindingSpec{AgentRef: "other", ToolName: "nope", RegistryRef: "reg", Mode: "remote", Server: agentsv1alpha1.ToolServer{URL: "http://y"}},
+		Spec:       agentsv1beta1.MCPToolBindingSpec{AgentRef: "other", ToolName: "nope", RegistryRef: "reg", Mode: "remote", Server: agentsv1beta1.ToolServer{URL: "http://y"}},
 	}
-	version := &agentsv1alpha1.AgentVersion{
+	version := &agentsv1beta1.AgentVersion{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo-abc123", Namespace: "team-a"},
-		Spec:       agentsv1alpha1.AgentVersionSpec{DeploymentName: "echo", Snapshot: agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"}},
+		Spec:       agentsv1beta1.AgentVersionSpec{DeploymentName: "echo", Snapshot: agentsv1beta1.AgentDeploymentSpec{Image: "img:1"}},
 	}
-	decoyVersion := &agentsv1alpha1.AgentVersion{
+	decoyVersion := &agentsv1beta1.AgentVersion{
 		ObjectMeta: metav1.ObjectMeta{Name: "other-v1", Namespace: "team-a"},
-		Spec:       agentsv1alpha1.AgentVersionSpec{DeploymentName: "other", Snapshot: agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"}},
+		Spec:       agentsv1beta1.AgentVersionSpec{DeploymentName: "other", Snapshot: agentsv1beta1.AgentDeploymentSpec{Image: "img:1"}},
 	}
 
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
@@ -162,7 +162,7 @@ func TestAgentDetailHappyPath(t *testing.T) {
 // fields (U14, m101.4) — the banner previously keyed on a `labels` map the BFF never sent (dead in
 // prod). NeedsRebinding comes from the label; ForkUnresolvedRefs is parsed from the annotation.
 func TestAgentDetailForkNeedsRebinding(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "forked",
 			Namespace: detailNS,
@@ -171,8 +171,8 @@ func TestAgentDetailForkNeedsRebinding(t *testing.T) {
 				annForkUnresolvedRefs: `["model route: gpt4","prompt: greeting"]`,
 			},
 		},
-		Spec:   agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
-		Status: agentsv1alpha1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionFalse, "NotReady", "pending")}},
+		Spec:   agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
+		Status: agentsv1beta1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionFalse, "NotReady", "pending")}},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -189,10 +189,10 @@ func TestAgentDetailForkNeedsRebinding(t *testing.T) {
 
 // TestAgentDetailNoForkStateIsClean proves a normal agent carries no needs-rebinding state.
 func TestAgentDetailNoForkStateIsClean(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "clean", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
-		Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "ok")}},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
+		Status:     agentsv1beta1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "ok")}},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -208,10 +208,10 @@ func TestAgentDetailNoForkStateIsClean(t *testing.T) {
 // TestAgentDetailPublishedState proves the durable published-template state is projected onto the
 // detail (U13, m101.4) — so the badge survives a reload (it was in-session only).
 func TestAgentDetailPublishedState(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
-		Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "ok")}},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
+		Status:     agentsv1beta1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "ok")}},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -235,10 +235,10 @@ func TestAgentDetailPublishedState(t *testing.T) {
 
 // TestAgentDetailNotPublishedIsNil proves an unpublished agent carries no published state.
 func TestAgentDetailNotPublishedIsNil(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "solo", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
-		Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "ok")}},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
+		Status:     agentsv1beta1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "ok")}},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -281,9 +281,9 @@ func TestAgentDetailForbiddenAgentIs403(t *testing.T) {
 // list is degraded (200 with empty bindings), not fatal — the caller can read the
 // agent, so hiding it behind a binding-RBAC 403 would be worse than a partial view.
 func TestAgentDetailForbiddenBindingsIsDegraded(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "team-a"},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).
 		WithInterceptorFuncs(interceptor.Funcs{
@@ -311,9 +311,9 @@ func TestAgentDetailForbiddenBindingsIsDegraded(t *testing.T) {
 // TestAgentDetailScalingDefault proves a nil spec.Scaling projects the CRD default
 // (min=0, max=3) so the page never shows a bare 0/0.
 func TestAgentDetailScalingDefault(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "team-a"},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -336,26 +336,26 @@ func TestAgentDetailScalingDefault(t *testing.T) {
 // parallelLimit), and resilience (modelCall + toolCall + circuitBreaker).
 func TestAgentDetailRuntimeProjected(t *testing.T) {
 	schemaRaw := []byte(`{"type":"object","properties":{"answer":{"type":"string"}}}`)
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "team-a"},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "img:1",
-			Runtime: &agentsv1alpha1.RuntimeSpec{
+			Runtime: &agentsv1beta1.RuntimeSpec{
 				OutputSchema: &k8sruntime.RawExtension{Raw: schemaRaw},
-				ToolPolicy: &agentsv1alpha1.ToolPolicySpec{
+				ToolPolicy: &agentsv1beta1.ToolPolicySpec{
 					Default: "allow",
-					Overrides: []agentsv1alpha1.ToolPolicyOverride{
+					Overrides: []agentsv1beta1.ToolPolicyOverride{
 						{Name: "send_email", Rule: "require-approval", Retryable: false},
 					},
 					ForcedChoice:  "auto",
 					ParallelLimit: 4,
 				},
-				Resilience: &agentsv1alpha1.ResilienceSpec{
-					ModelCall: &agentsv1alpha1.CallResilience{TimeoutSeconds: 30, MaxRetries: 2},
-					ToolCall: &agentsv1alpha1.ToolCallResilience{
+				Resilience: &agentsv1beta1.ResilienceSpec{
+					ModelCall: &agentsv1beta1.CallResilience{TimeoutSeconds: 30, MaxRetries: 2},
+					ToolCall: &agentsv1beta1.ToolCallResilience{
 						TimeoutSeconds: 10,
 						MaxRetries:     1,
-						CircuitBreaker: &agentsv1alpha1.CircuitBreakerSpec{FailureThreshold: 5, CooldownSeconds: 60},
+						CircuitBreaker: &agentsv1beta1.CircuitBreakerSpec{FailureThreshold: 5, CooldownSeconds: 60},
 					},
 				},
 			},
@@ -398,9 +398,9 @@ func TestAgentDetailRuntimeProjected(t *testing.T) {
 // JSON field is omitted entirely (nil, not an empty object) so agents without a
 // runtime config don't produce noise on the wire.
 func TestAgentDetailRuntimeAbsentIsNil(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "team-a"},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -634,10 +634,10 @@ func getRuns(t *testing.T, s *Server, ns, name, query string) *httptest.Response
 }
 
 // agentFixture is a minimal AgentDeployment the caller can Get for the runs route.
-func agentFixture(ns, name string) *agentsv1alpha1.AgentDeployment {
-	return &agentsv1alpha1.AgentDeployment{
+func agentFixture(ns, name string) *agentsv1beta1.AgentDeployment {
+	return &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 }
 

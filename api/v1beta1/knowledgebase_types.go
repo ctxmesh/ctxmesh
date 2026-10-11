@@ -16,11 +16,6 @@ limitations under the License.
 
 package v1beta1
 
-// KnowledgeBase is a NEW type (M68, ADR 0061) with no v1alpha1 history, so it is born directly in the
-// storage version (v1beta1) as a SINGLE-version CRD — no deprecated spoke, no conversion (the
-// AgentTeam/GuardrailPolicy/Workflow precedent). The CRD-version-parity guard
-// (hack/check-crd-version-parity.sh) skips single-version CRDs.
-
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -229,7 +224,6 @@ type KnowledgeBaseStatus struct {
 
 // KnowledgeBase is a namespaced managed RAG corpus: a user uploads documents; the platform
 // chunks, embeds, indexes, and serves them for retrieval-augmented generation (M68, ADR 0061).
-// It is a SINGLE-version CRD born directly in v1beta1 — no v1alpha1 history, no conversion webhook.
 //
 // Key design properties:
 //   - embeddingRoute and chunking parameters are IMMUTABLE after creation (the two one-way doors,

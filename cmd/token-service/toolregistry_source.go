@@ -25,7 +25,7 @@ import (
 	"github.com/go-logr/logr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
@@ -55,7 +55,7 @@ type toolRegistrySource struct {
 }
 
 type trCacheEntry struct {
-	tr        *agentsv1alpha1.ToolRegistry // nil ⇒ negative (server does not exist)
+	tr        *agentsv1beta1.ToolRegistry // nil ⇒ negative (server does not exist)
 	fetchedAt time.Time
 }
 
@@ -71,7 +71,7 @@ func newToolRegistrySource(store toolregistry.Store, ttl time.Duration, log logr
 // (not-OAuth / not-org). Only the fields the runtime consults are projected: the
 // auth-type / OAuth-config annotations and the scope label (ToolRegistry has no
 // controller-owned status the runtime reads).
-func (s *toolRegistrySource) getTR(ctx context.Context, ns, server string) (*agentsv1alpha1.ToolRegistry, error) {
+func (s *toolRegistrySource) getTR(ctx context.Context, ns, server string) (*agentsv1beta1.ToolRegistry, error) {
 	key := ns + "/" + server
 	if e, ok := s.fresh(key); ok {
 		return e.tr, nil
@@ -92,7 +92,7 @@ func (s *toolRegistrySource) getTR(ctx context.Context, ns, server string) (*age
 		}
 		return nil, err
 	}
-	tr := &agentsv1alpha1.ToolRegistry{ObjectMeta: metav1.ObjectMeta{
+	tr := &agentsv1beta1.ToolRegistry{ObjectMeta: metav1.ObjectMeta{
 		Namespace: r.Namespace, Name: r.Name, Annotations: r.Annotations, Labels: r.Labels,
 	}}
 	s.put(key, tr)
@@ -118,7 +118,7 @@ func (s *toolRegistrySource) stale(key string) (trCacheEntry, bool) {
 	return e, ok
 }
 
-func (s *toolRegistrySource) put(key string, tr *agentsv1alpha1.ToolRegistry) {
+func (s *toolRegistrySource) put(key string, tr *agentsv1beta1.ToolRegistry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rows[key] = trCacheEntry{tr: tr, fetchedAt: time.Now()}

@@ -25,18 +25,18 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/gateway"
 )
 
 const testNS = "default"
 
 // newMockRoute constructs a ModelRoute with a single mock provider.
-func newMockRoute(name string) agentsv1alpha1.ModelRoute {
-	return agentsv1alpha1.ModelRoute{
+func newMockRoute(name string) agentsv1beta1.ModelRoute {
+	return agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{
 				{Provider: "mock", Model: "mock-default", Priority: 1},
 			},
 		},
@@ -44,11 +44,11 @@ func newMockRoute(name string) agentsv1alpha1.ModelRoute {
 }
 
 // newRealRoute constructs a ModelRoute with a single non-mock provider.
-func newRealRoute(name, bindingRef, provider, model string, priority int32) agentsv1alpha1.ModelRoute {
-	return agentsv1alpha1.ModelRoute{
+func newRealRoute(name, bindingRef, provider, model string, priority int32) agentsv1beta1.ModelRoute {
+	return agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{
 				{Provider: provider, Model: model, Priority: priority, SecretBindingRef: bindingRef},
 			},
 		},
@@ -58,11 +58,11 @@ func newRealRoute(name, bindingRef, provider, model string, priority int32) agen
 // newAPIBaseRoute constructs a ModelRoute with a single provider that targets an
 // arbitrary OpenAI-compatible upstream via apiBase (the tool-mock seam) — no
 // SecretBinding.
-func newAPIBaseRoute(name, provider, model, apiBase string) agentsv1alpha1.ModelRoute {
-	return agentsv1alpha1.ModelRoute{
+func newAPIBaseRoute(name, provider, model, apiBase string) agentsv1beta1.ModelRoute {
+	return agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{
 				{Provider: provider, Model: model, Priority: 1, APIBase: apiBase},
 			},
 		},
@@ -70,12 +70,12 @@ func newAPIBaseRoute(name, provider, model, apiBase string) agentsv1alpha1.Model
 }
 
 // newBinding constructs a SecretBinding.
-func newBinding(name, secretName, secretKey string) agentsv1alpha1.SecretBinding {
-	return agentsv1alpha1.SecretBinding{
+func newBinding(name, secretName, secretKey string) agentsv1beta1.SecretBinding {
+	return agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend: "kubernetes",
-			SecretRef: agentsv1alpha1.SecretKeyRef{
+			SecretRef: agentsv1beta1.SecretKeyRef{
 				Name: secretName,
 				Key:  secretKey,
 			},
@@ -94,23 +94,23 @@ func secretKey(name string) string { return testNS + "/" + name }
 // route, plus a standalone mock-only route. Providers are sorted by priority;
 // routes by namespace/name. The golden string is the source of truth.
 func TestRender_GoldenConfig(t *testing.T) {
-	routes := []agentsv1alpha1.ModelRoute{
+	routes := []agentsv1beta1.ModelRoute{
 		// z-route: mock-only, should appear AFTER a-route (sorted by name).
 		newMockRoute("z-route"),
 		// a-route: real + mock providers (priority 1 real, 2 mock).
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "a-route", Namespace: testNS},
-			Spec: agentsv1alpha1.ModelRouteSpec{
-				Providers: []agentsv1alpha1.ProviderRef{
+			Spec: agentsv1beta1.ModelRouteSpec{
+				Providers: []agentsv1beta1.ProviderRef{
 					{Provider: "mock", Model: "mock-default", Priority: 2},
 					{Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 1, SecretBindingRef: "anthropic-key"},
 				},
-				RateLimit: &agentsv1alpha1.RateLimit{TenantRPM: 600},
+				RateLimit: &agentsv1beta1.RateLimit{TenantRPM: 600},
 			},
 		},
 	}
 
-	bindings := map[string]agentsv1alpha1.SecretBinding{
+	bindings := map[string]agentsv1beta1.SecretBinding{
 		bindingKey("anthropic-key"): newBinding("anthropic-key", "anthropic-api-key", "api-key"),
 	}
 	rvs := map[string]string{
@@ -173,12 +173,12 @@ func TestRender_EmptyRoutes(t *testing.T) {
 // inputs produces identical configYAML and hash. This is the foundation of
 // idempotent reconciles (no spurious gateway rollouts).
 func TestRender_Deterministic(t *testing.T) {
-	routes := []agentsv1alpha1.ModelRoute{
+	routes := []agentsv1beta1.ModelRoute{
 		newMockRoute("beta-route"),
 		newMockRoute("alpha-route"),
 		newRealRoute("gamma-route", "my-binding", "openai", "gpt-4o", 1),
 	}
-	bindings := map[string]agentsv1alpha1.SecretBinding{
+	bindings := map[string]agentsv1beta1.SecretBinding{
 		bindingKey("my-binding"): newBinding("my-binding", "my-secret", "api-key"),
 	}
 	rvs := map[string]string{secretKey("my-secret"): "rv-42"}
@@ -194,12 +194,12 @@ func TestRender_Deterministic(t *testing.T) {
 // order does not affect the rendered config or the hash (routes are sorted
 // internally by namespace/name).
 func TestRender_RouteOrderDoesNotAffectOutput(t *testing.T) {
-	routes1 := []agentsv1alpha1.ModelRoute{
+	routes1 := []agentsv1beta1.ModelRoute{
 		newMockRoute("z"),
 		newMockRoute("a"),
 		newMockRoute("m"),
 	}
-	routes2 := []agentsv1alpha1.ModelRoute{
+	routes2 := []agentsv1beta1.ModelRoute{
 		newMockRoute("m"),
 		newMockRoute("z"),
 		newMockRoute("a"),
@@ -215,13 +215,13 @@ func TestRender_RouteOrderDoesNotAffectOutput(t *testing.T) {
 // non-mock provider references a missing SecretBinding is excluded from the
 // rendered config and reported in Result.Excluded. Other routes still render.
 func TestRender_ExcludesRouteWithMissingBinding(t *testing.T) {
-	routes := []agentsv1alpha1.ModelRoute{
+	routes := []agentsv1beta1.ModelRoute{
 		newMockRoute("ok-route"),
 		newRealRoute("bad-route", "missing-binding", "anthropic", "claude-sonnet-4-6", 1),
 	}
 
 	// bindings map does NOT contain "missing-binding".
-	result := gateway.Render(routes, map[string]agentsv1alpha1.SecretBinding{}, map[string]string{}, gateway.OTelConfig{})
+	result := gateway.Render(routes, map[string]agentsv1beta1.SecretBinding{}, map[string]string{}, gateway.OTelConfig{})
 
 	require.Contains(t, result.Excluded, bindingKey("bad-route"),
 		"bad-route must be in Excluded")
@@ -233,10 +233,10 @@ func TestRender_ExcludesRouteWithMissingBinding(t *testing.T) {
 // SecretBinding exists but whose referenced k8s Secret is missing (empty RV)
 // is excluded from the rendered config.
 func TestRender_ExcludesRouteWithMissingSecret(t *testing.T) {
-	routes := []agentsv1alpha1.ModelRoute{
+	routes := []agentsv1beta1.ModelRoute{
 		newRealRoute("secret-missing", "my-binding", "anthropic", "claude-sonnet-4-6", 1),
 	}
-	bindings := map[string]agentsv1alpha1.SecretBinding{
+	bindings := map[string]agentsv1beta1.SecretBinding{
 		bindingKey("my-binding"): newBinding("my-binding", "my-secret", "api-key"),
 	}
 	// empty value → secret not found
@@ -253,10 +253,10 @@ func TestRender_ExcludesRouteWithMissingSecret(t *testing.T) {
 // resourceVersion changes the hash (gateway rolls) while the ConfigYAML itself
 // remains identical (it only contains the os.environ reference, not the value).
 func TestRender_HashChangesOnSecretRotation(t *testing.T) {
-	routes := []agentsv1alpha1.ModelRoute{
+	routes := []agentsv1beta1.ModelRoute{
 		newRealRoute("my-route", "my-binding", "anthropic", "claude-sonnet-4-6", 1),
 	}
-	bindings := map[string]agentsv1alpha1.SecretBinding{
+	bindings := map[string]agentsv1beta1.SecretBinding{
 		bindingKey("my-binding"): newBinding("my-binding", "my-secret", "api-key"),
 	}
 
@@ -275,7 +275,7 @@ func TestRender_HashChangesOnSecretRotation(t *testing.T) {
 // TestRender_MockRouteContainsMockOK verifies that a mock provider entry contains
 // the MOCK_OK marker string — the harness's canonical assertion marker.
 func TestRender_MockRouteContainsMockOK(t *testing.T) {
-	routes := []agentsv1alpha1.ModelRoute{newMockRoute("my-route")}
+	routes := []agentsv1beta1.ModelRoute{newMockRoute("my-route")}
 	result := gateway.Render(routes, nil, nil, gateway.OTelConfig{})
 
 	assert.True(t, strings.Contains(result.ConfigYAML, "MOCK_OK"),
@@ -293,7 +293,7 @@ func TestRender_MockRouteContainsMockOK(t *testing.T) {
 // real target is api_base — matching harness/mock-provider/litellm-tool-mock.yaml).
 func TestRender_APIBaseRouteProxiesUpstream(t *testing.T) {
 	const upstream = "http://tool-mock.default.svc.cluster.local:9099/v1"
-	routes := []agentsv1alpha1.ModelRoute{
+	routes := []agentsv1beta1.ModelRoute{
 		newAPIBaseRoute("tool-mock", "openai", "tool-call-mock", upstream),
 	}
 
@@ -340,12 +340,12 @@ func TestSanitizeName(t *testing.T) {
 // TestRender_EnvVarsDeduplicated verifies that two routes referencing the same
 // SecretBinding produce only one SB_* env var (not two).
 func TestRender_EnvVarsDeduplicated(t *testing.T) {
-	routes := []agentsv1alpha1.ModelRoute{
+	routes := []agentsv1beta1.ModelRoute{
 		newRealRoute("route-a", "shared-binding", "anthropic", "claude-opus-4-5", 1),
 		// Use priority 2 to exercise the priority parameter with a different value.
 		newRealRoute("route-b", "shared-binding", "anthropic", "claude-sonnet-4-6", 2),
 	}
-	bindings := map[string]agentsv1alpha1.SecretBinding{
+	bindings := map[string]agentsv1beta1.SecretBinding{
 		bindingKey("shared-binding"): newBinding("shared-binding", "my-secret", "api-key"),
 	}
 	rvs := map[string]string{secretKey("my-secret"): "rv-7"}
@@ -361,10 +361,10 @@ func TestRender_EnvVarsDeduplicated(t *testing.T) {
 // a non-mock provider uses valueFrom.secretKeyRef — never a plain value — so
 // that the secret value is never inlined in the Deployment spec or etcd.
 func TestRender_EnvVarValueFromSecretKeyRef(t *testing.T) {
-	routes := []agentsv1alpha1.ModelRoute{
+	routes := []agentsv1beta1.ModelRoute{
 		newRealRoute("my-route", "my-binding", "openai", "gpt-4o", 1),
 	}
-	bindings := map[string]agentsv1alpha1.SecretBinding{
+	bindings := map[string]agentsv1beta1.SecretBinding{
 		bindingKey("my-binding"): newBinding("my-binding", "openai-secret", "key"),
 	}
 	rvs := map[string]string{secretKey("openai-secret"): "rv-1"}
@@ -388,34 +388,34 @@ func TestRender_EnvVarValueFromSecretKeyRef(t *testing.T) {
 // TestRender_RateLimitAppearsOnAllProviders verifies that rateLimit.tenantRPM
 // is emitted as rpm on the provider entry for a route with a rate limit.
 func TestRender_RateLimitAppearsOnAllProviders(t *testing.T) {
-	route := agentsv1alpha1.ModelRoute{
+	route := agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "limited-route", Namespace: testNS},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{
 				{Provider: "mock", Model: "mock-default", Priority: 1},
 			},
-			RateLimit: &agentsv1alpha1.RateLimit{TenantRPM: 300},
+			RateLimit: &agentsv1beta1.RateLimit{TenantRPM: 300},
 		},
 	}
 
-	result := gateway.Render([]agentsv1alpha1.ModelRoute{route}, nil, nil, gateway.OTelConfig{})
+	result := gateway.Render([]agentsv1beta1.ModelRoute{route}, nil, nil, gateway.OTelConfig{})
 
 	assert.Contains(t, result.ConfigYAML, "rpm: 300",
 		"rpm must appear in config for rate-limited route")
 }
 
 func TestRender_OTelEnabledAddsCallbackAndEnv(t *testing.T) {
-	route := agentsv1alpha1.ModelRoute{
+	route := agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "mock-route", Namespace: testNS},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{
 				{Provider: "mock", Model: "mock-default", Priority: 1},
 			},
 		},
 	}
 	otel := gateway.OTelConfig{Endpoint: "http://langfuse/api/public/otel", HeadersSecret: "gw-otel", HeadersSecretRV: "7"}
 
-	enabled := gateway.Render([]agentsv1alpha1.ModelRoute{route}, nil, nil, otel)
+	enabled := gateway.Render([]agentsv1beta1.ModelRoute{route}, nil, nil, otel)
 	assert.Contains(t, enabled.ConfigYAML, `callbacks: ["otel"]`, "otel callback enabled")
 	// M11.6 PII-leak fix: with otel enabled, the gateway exports its own trace
 	// straight to Langfuse (bypassing the redaction collector). Message logging
@@ -452,11 +452,11 @@ func TestRender_OTelEnabledAddsCallbackAndEnv(t *testing.T) {
 	rotated := otel
 	rotated.HeadersSecretRV = "8"
 	assert.NotEqual(t, enabled.Hash,
-		gateway.Render([]agentsv1alpha1.ModelRoute{route}, nil, nil, rotated).Hash,
+		gateway.Render([]agentsv1beta1.ModelRoute{route}, nil, nil, rotated).Hash,
 		"rotating the OTel header Secret must change the rollout hash")
 
 	// Disabled (zero value) adds neither.
-	off := gateway.Render([]agentsv1alpha1.ModelRoute{route}, nil, nil, gateway.OTelConfig{})
+	off := gateway.Render([]agentsv1beta1.ModelRoute{route}, nil, nil, gateway.OTelConfig{})
 	assert.NotContains(t, off.ConfigYAML, "callbacks", "no otel callback when disabled")
 	for _, e := range off.EnvVars {
 		assert.NotContains(t, e.Name, "OTEL_", "no OTEL_ env when disabled")
@@ -467,28 +467,28 @@ func TestRender_OTelEnabledAddsCallbackAndEnv(t *testing.T) {
 // routes with the SAME name in DIFFERENT namespaces must both be EXCLUDED (fail-closed), never rendered
 // as a shared LiteLLM load-balancing pool (which would let one tenant spend on another's provider key).
 func TestRender_ExcludesCrossNamespaceNameCollision(t *testing.T) {
-	mk := func(name, ns, binding string) agentsv1alpha1.ModelRoute {
-		return agentsv1alpha1.ModelRoute{
+	mk := func(name, ns, binding string) agentsv1beta1.ModelRoute {
+		return agentsv1beta1.ModelRoute{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-			Spec: agentsv1alpha1.ModelRouteSpec{
-				Providers: []agentsv1alpha1.ProviderRef{
+			Spec: agentsv1beta1.ModelRouteSpec{
+				Providers: []agentsv1beta1.ProviderRef{
 					{Provider: "anthropic", Model: "claude-x", Priority: 1, SecretBindingRef: binding},
 				},
 			},
 		}
 	}
-	sb := func(name, ns, secret string) agentsv1alpha1.SecretBinding {
-		return agentsv1alpha1.SecretBinding{
+	sb := func(name, ns, secret string) agentsv1beta1.SecretBinding {
+		return agentsv1beta1.SecretBinding{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-			Spec:       agentsv1alpha1.SecretBindingSpec{Backend: "kubernetes", SecretRef: agentsv1alpha1.SecretKeyRef{Name: secret, Key: "api-key"}},
+			Spec:       agentsv1beta1.SecretBindingSpec{Backend: "kubernetes", SecretRef: agentsv1beta1.SecretKeyRef{Name: secret, Key: "api-key"}},
 		}
 	}
-	routes := []agentsv1alpha1.ModelRoute{
+	routes := []agentsv1beta1.ModelRoute{
 		mk("anthropic", "tenant-a", "sb-a"),
 		mk("anthropic", "tenant-b", "sb-b"),
 		mk("solo", "tenant-a", "sb-a"),
 	}
-	bindings := map[string]agentsv1alpha1.SecretBinding{
+	bindings := map[string]agentsv1beta1.SecretBinding{
 		"tenant-a/sb-a": sb("sb-a", "tenant-a", "s-a"),
 		"tenant-b/sb-b": sb("sb-b", "tenant-b", "s-b"),
 	}

@@ -9,7 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // Knative Eventing is an OPTIONAL capability (ADR 0141). Only one of three execution models needs
@@ -58,7 +58,7 @@ func TestReconcileTriggerRefusesWithoutEventing(t *testing.T) {
 	// returning the specific error, and either way the test goes red.
 	r := &AgentDeploymentReconciler{EventingAvailable: false}
 	err := r.reconcileTrigger(context.Background(),
-		&agentsv1alpha1.AgentDeployment{}, registryMembership{RegistryName: "r"})
+		&agentsv1beta1.AgentDeployment{}, registryMembership{RegistryName: "r"})
 	if err == nil {
 		t.Fatal("reconcileTrigger must refuse on a cluster without Knative Eventing, not silently skip")
 	}
@@ -69,7 +69,7 @@ func TestReconcileTriggerRefusesWithoutEventing(t *testing.T) {
 
 func TestReconcileBrokerRefusesWithoutEventing(t *testing.T) {
 	r := &AgentRegistryReconciler{EventingAvailable: false}
-	err := r.reconcileBroker(context.Background(), &agentsv1alpha1.AgentRegistry{})
+	err := r.reconcileBroker(context.Background(), &agentsv1beta1.AgentRegistry{})
 	if err == nil {
 		t.Fatal("reconcileBroker must refuse on a cluster without Knative Eventing, not silently skip")
 	}

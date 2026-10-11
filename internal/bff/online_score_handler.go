@@ -25,7 +25,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // onlineScoreWindowsToFetch is the number of recent hourly windows returned by
@@ -108,7 +108,7 @@ func (s *Server) handleAgentOnlineScore(w http.ResponseWriter, r *http.Request) 
 	// BEFORE any cpDB read, so no score data is returned for an agent the caller
 	// may not see. A denial is 403, a missing agent is 404 — never a swallowed
 	// empty body.
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &ad); err != nil {
 		s.writeGetError(w, err, "agent")
 		return
@@ -216,7 +216,7 @@ func (s *Server) handleAgentRollback(w http.ResponseWriter, r *http.Request) {
 
 	// Caller-scoped Get first: validate the agent exists and the caller can read it
 	// before attempting a write — gives a clear 404/403 rather than a patch-not-found.
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &ad); err != nil {
 		s.writeGetError(w, err, "agent")
 		return

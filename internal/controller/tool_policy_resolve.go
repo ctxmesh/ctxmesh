@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
 
@@ -91,7 +91,7 @@ type resolvedToolPolicy struct {
 	// controller can decide the STRUCTURAL treatment of an in-pod tool (deny ⇒ non-deployment;
 	// require-approval ⇒ reject) with the SAME first-match-wins semantics the sidecar uses on the
 	// wire (M82.3, ADR 0074 §2).
-	spec *agentsv1alpha1.ToolPolicySpec
+	spec *agentsv1beta1.ToolPolicySpec
 }
 
 // ruleFor returns the effective rule for a tool name: the first matching override's rule, else the
@@ -160,7 +160,7 @@ const reasonInPodToolRequireApprovalUnsupported = "InPodToolRequireApprovalUnsup
 // the sidecar. Nil runtime / nil toolPolicy ⇒ not referenced (permissive, no ConfigMap). The policy
 // has one author, the agent's own spec (ADR 0152 §2), so there is nothing to merge. Approvers are
 // left out of the delivered JSON (runtimeForPod): the BFF enforces them, the sidecar never reads them.
-func resolveToolPolicy(deploy *agentsv1alpha1.AgentDeployment) (resolvedToolPolicy, error) {
+func resolveToolPolicy(deploy *agentsv1beta1.AgentDeployment) (resolvedToolPolicy, error) {
 	rt := runtimeForPod(deploy.Spec.Runtime)
 	if rt == nil || rt.ToolPolicy == nil {
 		return resolvedToolPolicy{}, nil
@@ -185,7 +185,7 @@ func resolveToolPolicy(deploy *agentsv1alpha1.AgentDeployment) (resolvedToolPoli
 // valueFrom — the m5.7 Knative landmine).
 func (r *AgentDeploymentReconciler) reconcileToolPolicyConfigMap(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	tp resolvedToolPolicy,
 ) (vol *corev1.Volume, mount *corev1.VolumeMount, env []corev1.EnvVar, err error) {
 	if !tp.referenced {

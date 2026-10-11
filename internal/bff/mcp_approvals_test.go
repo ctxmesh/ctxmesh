@@ -33,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
@@ -49,48 +49,48 @@ const pendingMCPURL = "http://10.0.0.5:8080/mcp"
 // status annotation + URL annotation, and every entry ApprovalPending). withKey
 // stamps the Secret-name annotation so a reject test can prove the credential
 // artifacts are cleaned up.
-func pendingMCPRegistry(name string, withKey bool) *agentsv1alpha1.ToolRegistry {
+func pendingMCPRegistry(name string, withKey bool) *agentsv1beta1.ToolRegistry {
 	ann := map[string]string{
 		annMCPURL:    pendingMCPURL,
-		annMCPStatus: agentsv1alpha1.ApprovalPending,
+		annMCPStatus: agentsv1beta1.ApprovalPending,
 	}
 	if withKey {
 		ann[annMCPSecret] = name
 	}
-	return &agentsv1alpha1.ToolRegistry{
+	return &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Namespace:   "prod",
 			Labels:      map[string]string{labelManagedBy: managedByMCP},
 			Annotations: ann,
 		},
-		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{
+		Spec: agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{{
 			Name:           "get_weather",
 			URL:            pendingMCPURL,
-			Source:         agentsv1alpha1.SourceUserAdded,
-			ApprovalStatus: agentsv1alpha1.ApprovalPending,
+			Source:         agentsv1beta1.SourceUserAdded,
+			ApprovalStatus: agentsv1beta1.ApprovalPending,
 		}}},
 	}
 }
 
 // approvedMCPRegistry builds a register-managed ToolRegistry already approved (the
 // self-serve shape), for the "only pending is listed" assertion.
-func approvedMCPRegistry(name, url string) *agentsv1alpha1.ToolRegistry {
-	return &agentsv1alpha1.ToolRegistry{
+func approvedMCPRegistry(name, url string) *agentsv1beta1.ToolRegistry {
+	return &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: "prod",
 			Labels:    map[string]string{labelManagedBy: managedByMCP},
 			Annotations: map[string]string{
 				annMCPURL:    url,
-				annMCPStatus: agentsv1alpha1.ApprovalApproved,
+				annMCPStatus: agentsv1beta1.ApprovalApproved,
 			},
 		},
-		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{
+		Spec: agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{{
 			Name:           "echo",
 			URL:            url,
-			Source:         agentsv1alpha1.SourceUserAdded,
-			ApprovalStatus: agentsv1alpha1.ApprovalApproved,
+			Source:         agentsv1beta1.SourceUserAdded,
+			ApprovalStatus: agentsv1beta1.ApprovalApproved,
 		}}},
 	}
 }
@@ -104,7 +104,7 @@ func approvedMCPRegistry(name, url string) *agentsv1alpha1.ToolRegistry {
 // from a memstore (retired; no CRD, ADR 0044) seeded with regs; c backs the non-TR
 // objects (Secret/SecretBinding/NetworkPolicy). The SSAR authorizer is permissive
 // by default (RBAC-denial cases override s.authorizer).
-func newApprovalServer(t *testing.T, c client.Client, requireApproval bool, regs ...*agentsv1alpha1.ToolRegistry) (*Server, *fakeCallerClientFactory, toolregistry.Store) {
+func newApprovalServer(t *testing.T, c client.Client, requireApproval bool, regs ...*agentsv1beta1.ToolRegistry) (*Server, *fakeCallerClientFactory, toolregistry.Store) {
 	t.Helper()
 	s, factory, _ := newMCPServer(t, c, requireApproval)
 	store := toolregistry.NewMemStore()
@@ -120,9 +120,9 @@ func newApprovalServer(t *testing.T, c client.Client, requireApproval bool, regs
 func TestListMCPApprovalsReturnsOnlyPending(t *testing.T) {
 	pending := pendingMCPRegistry("pending-mcp", false)
 	approved := approvedMCPRegistry("approved-mcp", "http://10.0.0.6:8080/mcp")
-	curated := &agentsv1alpha1.ToolRegistry{
+	curated := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "default-tools", Namespace: "prod"},
-		Spec:       agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: "curated_tool"}}},
+		Spec:       agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{{Name: "curated_tool"}}},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _, _ := newApprovalServer(t, c, true, pending, approved, curated)
@@ -137,7 +137,7 @@ func TestListMCPApprovalsReturnsOnlyPending(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Len(t, resp.Servers, 1, "only the pending server is queued")
 	assert.Equal(t, "pending-mcp", resp.Servers[0].Name)
-	assert.Equal(t, agentsv1alpha1.ApprovalPending, resp.Servers[0].Status)
+	assert.Equal(t, agentsv1beta1.ApprovalPending, resp.Servers[0].Status)
 }
 
 // TestListMCPApprovalsEmpty proves an empty queue is [] not null.
@@ -212,14 +212,14 @@ func TestApproveMCPFlipsStatusAndOpensEgress(t *testing.T) {
 	assert.Equal(t, "operator-persona-token", factory.gotToken, "the caller's token scoped the approve")
 	var resp MCPServerSummary
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, agentsv1alpha1.ApprovalApproved, resp.Status)
+	assert.Equal(t, agentsv1beta1.ApprovalApproved, resp.Status)
 
 	// AFTER: the STORE row's entries + status annotation are approved (bindable).
 	tr, err := store.Get(ctx, "prod", "weather-mcp")
 	require.NoError(t, err)
-	assert.Equal(t, agentsv1alpha1.ApprovalApproved, tr.Annotations[annMCPStatus])
+	assert.Equal(t, agentsv1beta1.ApprovalApproved, tr.Annotations[annMCPStatus])
 	for _, e := range tr.Tools {
-		assert.Equal(t, agentsv1alpha1.ApprovalApproved, e.ApprovalStatus, "approve makes every entry bindable")
+		assert.Equal(t, agentsv1beta1.ApprovalApproved, e.ApprovalStatus, "approve makes every entry bindable")
 	}
 
 	// AFTER: the per-server egress NetworkPolicy now EXISTS, egress-only + bounded.
@@ -252,9 +252,9 @@ func TestApproveMCPNotFoundIs404(t *testing.T) {
 // ONLY on register-managed BYO servers — an operator-curated ToolRegistry (no
 // managed-by=mcp label) is a 404, never approvable/egress-opened through this path.
 func TestApproveMCPRejectsNonManagedRegistryIs404(t *testing.T) {
-	curated := &agentsv1alpha1.ToolRegistry{
+	curated := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "curated-tools", Namespace: "prod"},
-		Spec:       agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: "curated_tool"}}},
+		Spec:       agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{{Name: "curated_tool"}}},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _, _ := newApprovalServer(t, c, true, curated)
@@ -279,11 +279,11 @@ func TestRejectMCPRemovesEntryAndArtifactsStaysNoEgress(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "keyed-mcp", Namespace: "prod"},
 		Data:       map[string][]byte{secretKeyAPIKey: []byte(theMCPKey)},
 	}
-	binding := &agentsv1alpha1.SecretBinding{
+	binding := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "keyed-mcp", Namespace: "prod"},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend:   secretBackendKubernetes,
-			SecretRef: agentsv1alpha1.SecretKeyRef{Name: "keyed-mcp", Key: secretKeyAPIKey},
+			SecretRef: agentsv1beta1.SecretKeyRef{Name: "keyed-mcp", Key: secretKeyAPIKey},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(secret, binding).Build()
@@ -307,7 +307,7 @@ func TestRejectMCPRemovesEntryAndArtifactsStaysNoEgress(t *testing.T) {
 	var sec corev1.Secret
 	assert.True(t, apierrors.IsNotFound(
 		c.Get(ctx, client.ObjectKey{Name: "keyed-mcp", Namespace: "prod"}, &sec)), "reject deletes the Secret")
-	var sb agentsv1alpha1.SecretBinding
+	var sb agentsv1beta1.SecretBinding
 	assert.True(t, apierrors.IsNotFound(
 		c.Get(ctx, client.ObjectKey{Name: "keyed-mcp", Namespace: "prod"}, &sb)), "reject deletes the SecretBinding")
 

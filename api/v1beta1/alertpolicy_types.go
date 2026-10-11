@@ -16,11 +16,9 @@ limitations under the License.
 
 package v1beta1
 
-// AlertPolicy is a NEW type (M70, ADR 0063 D2) with no v1alpha1 history, so it is born directly in
-// the storage version (v1beta1) as a SINGLE-version CRD — the KnowledgeBase precedent. The alerting
-// plane observes AgentDeployment metrics and fires notifications to console or webhook channels when
-// a condition's threshold is breached. Actuation (auto-rollback) is a SEPARATE controller path
-// (ADR 0063 D4, deferred); AlertPolicy is DETECTION + ROUTING only.
+// The alerting plane observes AgentDeployment metrics and fires notifications to console or webhook
+// channels when a condition's threshold is breached. Actuation (auto-rollback) is a SEPARATE
+// controller path (ADR 0063 D4, deferred); AlertPolicy is DETECTION + ROUTING only.
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -217,9 +215,6 @@ type AlertPolicyStatus struct {
 // when any AgentDeployment metric (errorRate, p95Latency, budget, forecast, regression, runFailureRate)
 // breaches its threshold. This is the M70 alerting-plane CRD (ADR 0063 D2). Detection and routing
 // only — actuation (auto-rollback) is a separate controller path (ADR 0063 D4, deferred).
-//
-// It is a SINGLE-version CRD born directly in v1beta1 — no v1alpha1 history, no conversion webhook
-// (the KnowledgeBase precedent).
 type AlertPolicy struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

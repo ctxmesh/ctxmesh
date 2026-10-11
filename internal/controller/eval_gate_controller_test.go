@@ -30,7 +30,7 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/eval"
 )
 
@@ -56,13 +56,13 @@ func gateReconciler(score float64) *AgentDeploymentReconciler {
 
 // mkEvalSuite creates an EvalSuite with one mock scorer, the given threshold and
 // gate mode, and returns it.
-func mkEvalSuite(t *testing.T, name, namespace, threshold, gate string) *agentsv1alpha1.EvalSuite {
+func mkEvalSuite(t *testing.T, name, namespace, threshold, gate string) *agentsv1beta1.EvalSuite {
 	t.Helper()
-	es := &agentsv1alpha1.EvalSuite{
+	es := &agentsv1beta1.EvalSuite{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.EvalSuiteSpec{
-			Dataset: agentsv1alpha1.DatasetRef{Ref: "golden-cases"},
-			Scorers: []agentsv1alpha1.ScorerSpec{
+		Spec: agentsv1beta1.EvalSuiteSpec{
+			Dataset: agentsv1beta1.DatasetRef{Ref: "golden-cases"},
+			Scorers: []agentsv1beta1.ScorerSpec{
 				{Name: "accuracy", Type: eval.ScorerTypeMock, Weight: 1},
 			},
 			Threshold: threshold,
@@ -75,9 +75,9 @@ func mkEvalSuite(t *testing.T, name, namespace, threshold, gate string) *agentsv
 	return es
 }
 
-func getDeploy(t *testing.T, name, namespace string) *agentsv1alpha1.AgentDeployment {
+func getDeploy(t *testing.T, name, namespace string) *agentsv1beta1.AgentDeployment {
 	t.Helper()
-	var d agentsv1alpha1.AgentDeployment
+	var d agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &d))
 	return &d
 }
@@ -98,9 +98,9 @@ func TestGate_BelowThresholdBlock_CandidateNotServing(t *testing.T) {
 	)
 	es := mkEvalSuite(t, "block-suite", namespace, "0.8", eval.GateBlock)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:        "ghcr.io/ctxmesh/example-agent:latest",
 			EvalSuiteRef: es.Name,
 		},
@@ -138,9 +138,9 @@ func TestGate_AboveThreshold_AwaitingPromotion_ThenApproved(t *testing.T) {
 	)
 	es := mkEvalSuite(t, "pass-suite", namespace, "0.7", eval.GateBlock)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:        "ghcr.io/ctxmesh/example-agent:latest",
 			EvalSuiteRef: es.Name,
 		},
@@ -196,9 +196,9 @@ func TestGate_BelowThresholdWarn_PromotedWithAnnotation(t *testing.T) {
 	)
 	es := mkEvalSuite(t, "warn-suite", namespace, "0.8", eval.GateWarn)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:        "ghcr.io/ctxmesh/example-agent:latest",
 			EvalSuiteRef: es.Name,
 		},
@@ -229,11 +229,11 @@ func TestGate_UnscoredBlock_FailsClosed(t *testing.T) {
 		name      = "gate-unscored-agent"
 		namespace = "default"
 	)
-	es := &agentsv1alpha1.EvalSuite{
+	es := &agentsv1beta1.EvalSuite{
 		ObjectMeta: metav1.ObjectMeta{Name: "unscored-suite", Namespace: namespace},
-		Spec: agentsv1alpha1.EvalSuiteSpec{
-			Dataset: agentsv1alpha1.DatasetRef{Ref: "golden-cases"},
-			Scorers: []agentsv1alpha1.ScorerSpec{
+		Spec: agentsv1beta1.EvalSuiteSpec{
+			Dataset: agentsv1beta1.DatasetRef{Ref: "golden-cases"},
+			Scorers: []agentsv1beta1.ScorerSpec{
 				{Name: "judge", Type: eval.ScorerTypeLLMJudge, Weight: 1},
 			},
 			Threshold: "0.8",
@@ -243,9 +243,9 @@ func TestGate_UnscoredBlock_FailsClosed(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, es))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, es) })
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:        "ghcr.io/ctxmesh/example-agent:latest",
 			EvalSuiteRef: es.Name,
 		},
@@ -272,9 +272,9 @@ func TestGate_MissingEvalSuite_ReadyFalse(t *testing.T) {
 		name      = "gate-badref-agent"
 		namespace = "default"
 	)
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:        "ghcr.io/ctxmesh/example-agent:latest",
 			EvalSuiteRef: "does-not-exist",
 		},
@@ -299,9 +299,9 @@ func TestGate_NoEvalSuiteRef_UnchangedDeploy(t *testing.T) {
 		name      = "gate-none-agent"
 		namespace = "default"
 	)
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
@@ -315,19 +315,19 @@ func TestGate_NoEvalSuiteRef_UnchangedDeploy(t *testing.T) {
 
 // TestEvalSuite_OnlineBlock_RoundTrip: an EvalSuite carrying an `online` block (ADR 0062 Fork 2, M69)
 // applies against the real CRD schema (envtest) and reads back byte-stably. This validates that the
-// v1alpha1 field additions propagated through `make manifests` into the served CRD and round-trip via the
-// v1beta1 storage version (which reuses the v1alpha1 spec) — the offline gate fields are unaffected.
+// field additions propagated through `make manifests` into the served CRD and round-trip through
+// storage — the offline gate fields are unaffected.
 func TestEvalSuite_OnlineBlock_RoundTrip(t *testing.T) {
 	const namespace = "default"
 
-	es := &agentsv1alpha1.EvalSuite{
+	es := &agentsv1beta1.EvalSuite{
 		ObjectMeta: metav1.ObjectMeta{Name: "online-suite", Namespace: namespace},
-		Spec: agentsv1alpha1.EvalSuiteSpec{
-			Dataset:   agentsv1alpha1.DatasetRef{Ref: "golden-cases"},
-			Scorers:   []agentsv1alpha1.ScorerSpec{{Name: "accuracy", Type: eval.ScorerTypeMock, Weight: 1}},
+		Spec: agentsv1beta1.EvalSuiteSpec{
+			Dataset:   agentsv1beta1.DatasetRef{Ref: "golden-cases"},
+			Scorers:   []agentsv1beta1.ScorerSpec{{Name: "accuracy", Type: eval.ScorerTypeMock, Weight: 1}},
 			Threshold: "0.8",
 			Gate:      eval.GateBlock,
-			Online: &agentsv1alpha1.OnlineScoringSpec{
+			Online: &agentsv1beta1.OnlineScoringSpec{
 				SampleRate:      "0.05",
 				MaxScoredPerDay: 25,
 				Window:          "24h",
@@ -338,7 +338,7 @@ func TestEvalSuite_OnlineBlock_RoundTrip(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, es), "the CRD schema must accept the online block")
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, es) })
 
-	var got agentsv1alpha1.EvalSuite
+	var got agentsv1beta1.EvalSuite
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(es), &got))
 
 	// The offline gate fields are unaffected.
@@ -353,18 +353,18 @@ func TestEvalSuite_OnlineBlock_RoundTrip(t *testing.T) {
 	assert.Equal(t, int32(10), got.Spec.Online.MinSamples)
 
 	// An EvalSuite WITHOUT an online block still applies (the field is optional) and reads back nil.
-	esNoOnline := &agentsv1alpha1.EvalSuite{
+	esNoOnline := &agentsv1beta1.EvalSuite{
 		ObjectMeta: metav1.ObjectMeta{Name: "no-online-suite", Namespace: namespace},
-		Spec: agentsv1alpha1.EvalSuiteSpec{
-			Dataset:   agentsv1alpha1.DatasetRef{Ref: "golden-cases"},
-			Scorers:   []agentsv1alpha1.ScorerSpec{{Name: "accuracy", Type: eval.ScorerTypeMock, Weight: 1}},
+		Spec: agentsv1beta1.EvalSuiteSpec{
+			Dataset:   agentsv1beta1.DatasetRef{Ref: "golden-cases"},
+			Scorers:   []agentsv1beta1.ScorerSpec{{Name: "accuracy", Type: eval.ScorerTypeMock, Weight: 1}},
 			Threshold: "0.9",
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, esNoOnline))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, esNoOnline) })
 
-	var gotNoOnline agentsv1alpha1.EvalSuite
+	var gotNoOnline agentsv1beta1.EvalSuite
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(esNoOnline), &gotNoOnline))
 	assert.Nil(t, gotNoOnline.Spec.Online, "the online block is optional (absent ⇒ nil, platform defaults)")
 }

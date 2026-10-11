@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/yaml"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/gateway"
 )
 
@@ -33,11 +33,11 @@ func createProviderSecret(t *testing.T, ns, name, key, value string) {
 
 func createBinding(t *testing.T, ns, name, secret, key string) {
 	t.Helper()
-	sb := &agentsv1alpha1.SecretBinding{
+	sb := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend:   "kubernetes",
-			SecretRef: agentsv1alpha1.SecretKeyRef{Name: secret, Key: key},
+			SecretRef: agentsv1beta1.SecretKeyRef{Name: secret, Key: key},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, sb))
@@ -46,10 +46,10 @@ func createBinding(t *testing.T, ns, name, secret, key string) {
 
 func createBoundRoute(t *testing.T, ns, name, binding, apiBase string) {
 	t.Helper()
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{
 				Provider: "openai", Model: "gpt-4o-mini", Priority: 1,
 				SecretBindingRef: binding, APIBase: apiBase,
 			}},

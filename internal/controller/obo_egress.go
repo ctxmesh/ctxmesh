@@ -24,7 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
@@ -176,7 +176,7 @@ func egressSidecarContainer(
 // `bnd` against it, so registry teammates can redeem a relayed capability (team-OBO) but a
 // different registry cannot. It folds into the egress digest so a membership change rolls a new
 // revision (the EGRESS_BOUNDARY env must actually land).
-func agentEgressBoundary(deploy *agentsv1alpha1.AgentDeployment, m registryMembership) string {
+func agentEgressBoundary(deploy *agentsv1beta1.AgentDeployment, m registryMembership) string {
 	if m.IsMember && m.RegistryID != "" {
 		return credresolve.RegistryBoundary(m.RegistryID)
 	}

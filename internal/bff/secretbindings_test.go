@@ -38,7 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // sbNS is the namespace used in SecretBinding tests.
@@ -50,12 +50,12 @@ const sbNS = "team-b"
 // The Secret object itself is NOT created — only the reference (name+key) is
 // stored in the SecretBinding spec. This mirrors production: the BFF never
 // reads the Secret's data, only the CRD's reference fields.
-func mockSecretBinding(name, ns, secretName, secretKey string) *agentsv1alpha1.SecretBinding {
-	return &agentsv1alpha1.SecretBinding{
+func mockSecretBinding(name, ns, secretName, secretKey string) *agentsv1beta1.SecretBinding {
+	return &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend: "kubernetes",
-			SecretRef: agentsv1alpha1.SecretKeyRef{
+			SecretRef: agentsv1beta1.SecretKeyRef{
 				Name: secretName,
 				Key:  secretKey,
 			},
@@ -243,7 +243,7 @@ func TestListSecretBindingsNamespaceScoping(t *testing.T) {
 // TestListSecretBindingsPaging proves limit/cursor paging works with
 // the list contract.
 func TestListSecretBindingsPaging(t *testing.T) {
-	all := []*agentsv1alpha1.SecretBinding{
+	all := []*agentsv1beta1.SecretBinding{
 		mockSecretBinding("key-000", sbNS, "secret-000", "api-key"),
 		mockSecretBinding("key-001", sbNS, "secret-001", "api-key"),
 		mockSecretBinding("key-002", sbNS, "secret-002", "api-key"),
@@ -267,7 +267,7 @@ func TestListSecretBindingsPaging(t *testing.T) {
 			if lo.Limit > 0 && start+int(lo.Limit) < end {
 				end = start + int(lo.Limit)
 			}
-			sbList, ok := list.(*agentsv1alpha1.SecretBindingList)
+			sbList, ok := list.(*agentsv1beta1.SecretBindingList)
 			if !ok {
 				return fmt.Errorf("unexpected list type %T", list)
 			}
@@ -537,7 +537,7 @@ func TestCreateSecretBindingSucceeds(t *testing.T) {
 	assert.Equal(t, "api-key", detail.SecretRef.Key)
 
 	// Confirm it landed in the fake store.
-	var got agentsv1alpha1.SecretBinding
+	var got agentsv1beta1.SecretBinding
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: sbNS, Name: "my-binding"}, &got))
 	assert.Equal(t, "my-secret", got.Spec.SecretRef.Name)
 	assert.Equal(t, "api-key", got.Spec.SecretRef.Key)
@@ -567,7 +567,7 @@ func TestCreateSecretBindingNoValueInResponse(t *testing.T) {
 	}
 
 	// The persisted CRD must also not have leaked the value.
-	var got agentsv1alpha1.SecretBinding
+	var got agentsv1beta1.SecretBinding
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: sbNS, Name: "smuggle-binding"}, &got))
 	assert.Equal(t, "my-secret", got.Spec.SecretRef.Name)
 	assert.Equal(t, "api-key", got.Spec.SecretRef.Key)
@@ -737,7 +737,7 @@ func TestUpdateSecretBindingEditsField(t *testing.T) {
 	assert.Equal(t, "new-key", detail.SecretRef.Key)
 
 	// Confirm the change landed.
-	var got agentsv1alpha1.SecretBinding
+	var got agentsv1beta1.SecretBinding
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: sbNS, Name: "my-binding"}, &got))
 	assert.Equal(t, "new-secret", got.Spec.SecretRef.Name)
 	assert.Equal(t, "new-key", got.Spec.SecretRef.Key)
@@ -861,7 +861,7 @@ func TestDeleteSecretBindingRemovesObject(t *testing.T) {
 	rec := deleteSecretBinding(t, s, "my-binding")
 	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
 
-	var got agentsv1alpha1.SecretBinding
+	var got agentsv1beta1.SecretBinding
 	err := c.Get(context.Background(), client.ObjectKey{Namespace: sbNS, Name: "my-binding"}, &got)
 	require.True(t, apierrors.IsNotFound(err), "SecretBinding must be gone after a successful DELETE")
 }

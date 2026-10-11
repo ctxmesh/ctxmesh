@@ -47,7 +47,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/enduseragent"
@@ -426,7 +425,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	log := logf.FromContext(ctx)
 
 	// ── Step 1: Fetch ────────────────────────────────────────────────────────
-	var deploy agentsv1alpha1.AgentDeployment
+	var deploy agentsv1beta1.AgentDeployment
 	if err := r.Get(ctx, req.NamespacedName, &deploy); err != nil {
 		if apierrors.IsNotFound(err) {
 			// M137/EU1b (ADR 0107): prune the end-user exposure mirror for a deleted agent (the row is a
@@ -580,7 +579,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 // all three models before returning.
 func (r *AgentDeploymentReconciler) reconcileWorkload(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	model, hash, versionName string,
 ) (ctrl.Result, error) {
 	switch model {
@@ -601,7 +600,7 @@ func (r *AgentDeploymentReconciler) reconcileWorkload(
 // AgentScalingPolicy controller owns only the KEDA ScaledObject).
 func (r *AgentDeploymentReconciler) reconcileServing(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	hash, versionName string,
 ) (ctrl.Result, error) {
 	// Tear down the workloads owned by the other models (transition handling):
@@ -701,7 +700,7 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 // the EXACT candidate the ksvc would create.
 func (r *AgentDeploymentReconciler) candidateRevisionName(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	hash string,
 ) (string, error) {
 	pod, err := r.buildPodTemplate(ctx, deploy)
@@ -723,7 +722,7 @@ func (r *AgentDeploymentReconciler) candidateRevisionName(
 // split against. See oldServingRevision for the resolution order.
 func (r *AgentDeploymentReconciler) currentServingRevision(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	candidateRev string,
 ) (string, error) {
 	var ksvc servingv1.Service
@@ -752,7 +751,7 @@ func (r *AgentDeploymentReconciler) currentServingRevision(
 // while membership is fixed.
 func (r *AgentDeploymentReconciler) reconcileEventing(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	_ /* hash */, versionName string,
 ) (ctrl.Result, error) {
 	// Tear down the workloads owned by the OTHER models (transition handling):
@@ -819,7 +818,7 @@ func (r *AgentDeploymentReconciler) reconcileEventing(
 // No ksvc / Trigger is emitted; any left over from a previous model is deleted.
 func (r *AgentDeploymentReconciler) reconcileJob(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	versionName string,
 ) (ctrl.Result, error) {
 	// Tear down the serving/eventing workloads (transition handling): the serving
@@ -880,7 +879,7 @@ func (r *AgentDeploymentReconciler) reconcileJob(
 // structs (fields in declaration order) and all leaf types used in
 // AgentDeploymentSpec (strings, int32, resource.Quantity) serialise
 // deterministically.
-func specHash(spec agentsv1alpha1.AgentDeploymentSpec) (string, error) {
+func specHash(spec agentsv1beta1.AgentDeploymentSpec) (string, error) {
 	data, err := json.Marshal(versionedSpec(spec))
 	if err != nil {
 		return "", fmt.Errorf("marshalling spec to JSON: %w", err)
@@ -894,7 +893,7 @@ func specHash(spec agentsv1alpha1.AgentDeploymentSpec) (string, error) {
 // changes nothing that runs and must not mint a version, and a rollback never restores them, so a
 // snapshot carrying them would show stale governance in the version diff. An agent without them
 // hashes exactly as before.
-func versionedSpec(spec agentsv1alpha1.AgentDeploymentSpec) agentsv1alpha1.AgentDeploymentSpec {
+func versionedSpec(spec agentsv1beta1.AgentDeploymentSpec) agentsv1beta1.AgentDeploymentSpec {
 	out := *spec.DeepCopy()
 	out.Feedback = nil
 	out.Runtime = runtimeForPod(out.Runtime)
@@ -905,10 +904,10 @@ func versionedSpec(spec agentsv1alpha1.AgentDeploymentSpec) agentsv1alpha1.Agent
 // already exist. Existing versions are never modified (spec is CEL-immutable).
 func (r *AgentDeploymentReconciler) ensureAgentVersion(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	versionName string,
 ) error {
-	var av agentsv1alpha1.AgentVersion
+	var av agentsv1beta1.AgentVersion
 	err := r.Get(ctx, client.ObjectKey{Name: versionName, Namespace: deploy.Namespace}, &av)
 	if err == nil {
 		return nil // already exists — nothing to do
@@ -917,12 +916,12 @@ func (r *AgentDeploymentReconciler) ensureAgentVersion(
 		return err
 	}
 
-	av = agentsv1alpha1.AgentVersion{
+	av = agentsv1beta1.AgentVersion{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      versionName,
 			Namespace: deploy.Namespace,
 		},
-		Spec: agentsv1alpha1.AgentVersionSpec{
+		Spec: agentsv1beta1.AgentVersionSpec{
 			DeploymentName: deploy.Name,
 			Snapshot:       versionedSpec(deploy.Spec),
 		},
@@ -983,7 +982,7 @@ type podTemplate struct {
 //nolint:gocyclo // sequential injection steps (collector/tools/memory/registry) kept in one auditable place
 func (r *AgentDeploymentReconciler) buildPodTemplate(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 ) (podTemplate, error) {
 	port := deploy.Spec.Port
 	if port == 0 {
@@ -2067,7 +2066,7 @@ func langfuseSecretRequests(ctx context.Context, c client.Reader, obj client.Obj
 	if obj.GetName() != telemetry.LangfuseSecretName {
 		return nil
 	}
-	var list agentsv1alpha1.AgentDeploymentList
+	var list agentsv1beta1.AgentDeploymentList
 	if err := c.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
 		logf.FromContext(ctx).Error(err, "listing agents for a langfuse-otlp Secret change; they re-render at the next resync",
 			"namespace", obj.GetNamespace())
@@ -2292,7 +2291,7 @@ func injectPlatformLauncher(containers []corev1.Container, volumes []corev1.Volu
 // agent back in — only for one that legitimately builds an in-cluster kube config. It
 // feeds both ensureAgentIdentitySA (the SA-level AutomountServiceAccountToken) and the
 // structural digest (so toggling it rolls a new revision, the M4 landmine).
-func mountAPIToken(deploy *agentsv1alpha1.AgentDeployment) bool {
+func mountAPIToken(deploy *agentsv1beta1.AgentDeployment) bool {
 	return deploy.Spec.MountServiceAccountToken != nil && *deploy.Spec.MountServiceAccountToken
 }
 
@@ -2347,7 +2346,7 @@ func asIdentitySAConflictError(err error) (*identitySAConflictError, bool) {
 // SetControllerReference returns a *controllerutil.AlreadyOwnedError.
 // ensureAgentIdentitySA wraps it as an *identitySAConflictError so the caller
 // (Reconcile) can surface Ready=False and stop cleanly — no hot-loop.
-func (r *AgentDeploymentReconciler) ensureAgentIdentitySA(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment, saName, registryID string) error {
+func (r *AgentDeploymentReconciler) ensureAgentIdentitySA(ctx context.Context, deploy *agentsv1beta1.AgentDeployment, saName, registryID string) error {
 	if saName == "" {
 		return nil
 	}
@@ -2432,7 +2431,7 @@ func (r *AgentDeploymentReconciler) ensureAgentIdentitySA(ctx context.Context, d
 // separate KEDA ScaledObject).
 func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	hash string,
 ) (*servingv1.Service, []string, error) {
 	pod, err := r.buildPodTemplate(ctx, deploy)
@@ -2522,7 +2521,7 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 // defaults reach only an object that has a scaling stanza.
 const defaultRunTimeoutSeconds = int64(600) // the BFF's default run limit (RUN_EXEC_TIMEOUT) and Knative's default maximum
 
-func runConcurrency(deploy *agentsv1alpha1.AgentDeployment) *int64 {
+func runConcurrency(deploy *agentsv1beta1.AgentDeployment) *int64 {
 	if deploy.Spec.Scaling == nil || deploy.Spec.Scaling.Concurrency == nil {
 		return nil
 	}
@@ -2530,7 +2529,7 @@ func runConcurrency(deploy *agentsv1alpha1.AgentDeployment) *int64 {
 	return &cc
 }
 
-func runTimeoutSeconds(deploy *agentsv1alpha1.AgentDeployment) *int64 {
+func runTimeoutSeconds(deploy *agentsv1beta1.AgentDeployment) *int64 {
 	t := defaultRunTimeoutSeconds
 	if deploy.Spec.Scaling != nil && deploy.Spec.Scaling.TimeoutSeconds != nil {
 		t = *deploy.Spec.Scaling.TimeoutSeconds
@@ -2541,7 +2540,7 @@ func runTimeoutSeconds(deploy *agentsv1alpha1.AgentDeployment) *int64 {
 // targetBurstCapacity defaults by concurrency (measured, ADR 0147): with concurrency unlimited the
 // activator can leave the path (0); with concurrency bounded it must stay (-1) and queue the runs that
 // find every slot taken — at concurrency 1 with 0, half of a 12-run burst against 4 pods was dropped.
-func targetBurstCapacity(deploy *agentsv1alpha1.AgentDeployment) int32 {
+func targetBurstCapacity(deploy *agentsv1beta1.AgentDeployment) int32 {
 	if deploy.Spec.Scaling != nil && deploy.Spec.Scaling.TargetBurstCapacity != nil {
 		return *deploy.Spec.Scaling.TargetBurstCapacity
 	}
@@ -2557,7 +2556,7 @@ func targetBurstCapacity(deploy *agentsv1alpha1.AgentDeployment) int32 {
 // overrides them and adds the class/metric annotations.
 func (r *AgentDeploymentReconciler) autoscalingAnnotations(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 ) (map[string]string, error) {
 	minScale := int32(0)
 	maxScale := int32(3)
@@ -2632,7 +2631,7 @@ func (r *AgentDeploymentReconciler) discoveryImage() string {
 // reports whether export is on, for the revision digest (traceExportFold).
 func (r *AgentDeploymentReconciler) reconcileCollector(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 ) (corev1.Container, corev1.Volume, bool, error) {
 	langfuse := false
 
@@ -2716,7 +2715,7 @@ func (r *AgentDeploymentReconciler) reconcileCollector(
 // customDetectors adapts the AgentDeployment's optional spec.tracePolicy into
 // the telemetry package's detector-spec shape. Returns nil when no tracePolicy
 // (or no custom detectors) is set, so only the built-in defaults apply.
-func customDetectors(deploy *agentsv1alpha1.AgentDeployment) []telemetry.CustomDetectorSpec {
+func customDetectors(deploy *agentsv1beta1.AgentDeployment) []telemetry.CustomDetectorSpec {
 	if deploy.Spec.TracePolicy == nil || len(deploy.Spec.TracePolicy.CustomDetectors) == 0 {
 		return nil
 	}
@@ -2733,7 +2732,7 @@ func customDetectors(deploy *agentsv1alpha1.AgentDeployment) []telemetry.CustomD
 // controller runs), status is set to Unknown.
 func (r *AgentDeploymentReconciler) syncStatus(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	ksvc *servingv1.Service,
 	latestVersion string,
 	resolvedSkills []string,
@@ -2820,7 +2819,7 @@ func preferredAgentURL(ksvc *servingv1.Service) string {
 // watch trigger will re-evaluate).
 func (r *AgentDeploymentReconciler) setReadyFalse(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	reason, message string,
 ) (ctrl.Result, error) {
 	apimeta.SetStatusCondition(&deploy.Status.Conditions, metav1.Condition{
@@ -2848,7 +2847,7 @@ func (r *AgentDeploymentReconciler) setReadyFalse(
 // ADR 0107): Set (endpoint + spec) when spec.endUserAccess (serving-only, CEL-enforced), else prune. The
 // endpoint is the passed value (status.URL when Ready, "" when not) so the BFF 409s a not-Ready exposed
 // agent vs 404s an unexposed one. Best-effort — a store error is logged, never fails the reconcile.
-func (r *AgentDeploymentReconciler) syncEndUserAgentMirror(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment, endpoint string) {
+func (r *AgentDeploymentReconciler) syncEndUserAgentMirror(ctx context.Context, deploy *agentsv1beta1.AgentDeployment, endpoint string) {
 	if r.EndUserAgentStore == nil {
 		return
 	}
@@ -2886,7 +2885,7 @@ func (r *AgentDeploymentReconciler) pruneEndUserAgentMirror(ctx context.Context,
 // two derivations of one CRD field would be a drift waiting to happen.
 //
 // Best-effort: a store error is logged and re-converges on the next reconcile, like the other mirrors.
-func (r *AgentDeploymentReconciler) syncSpawnBudget(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment) {
+func (r *AgentDeploymentReconciler) syncSpawnBudget(ctx context.Context, deploy *agentsv1beta1.AgentDeployment) {
 	if r.SpawnBudgetStore == nil {
 		return
 	}
@@ -2934,7 +2933,7 @@ func (r *AgentDeploymentReconciler) pruneSpawnBudget(ctx context.Context, namesp
 // An agent that is neither a member nor described is pruned. Best-effort: a store error is logged and
 // re-converges on the next reconcile, exactly like the end-user mirror; it never fails the reconcile.
 func (r *AgentDeploymentReconciler) syncCapabilityRegistration(
-	ctx context.Context, deploy *agentsv1alpha1.AgentDeployment, ready bool,
+	ctx context.Context, deploy *agentsv1beta1.AgentDeployment, ready bool,
 ) {
 	if r.AgentCapabilityStore == nil {
 		return
@@ -3125,7 +3124,7 @@ func registryMembershipDigest(m registryMembership, role string, allowedCallers 
 // server-side on create, but a client-side build (envtest, direct construction)
 // may leave it 0; defaulting here keeps the injected BUDGET_SOFT_PCT sane in
 // every path.
-func budgetSoftPct(b *agentsv1alpha1.BudgetSpec) int32 {
+func budgetSoftPct(b *agentsv1beta1.BudgetSpec) int32 {
 	if b == nil || b.SoftThresholdPct == 0 {
 		return 80
 	}
@@ -3140,7 +3139,7 @@ func budgetSoftPct(b *agentsv1alpha1.BudgetSpec) int32 {
 // skips re-applying the spec when the revision name is unchanged (the M4
 // silent-loss landmine). Returns "" when no budget is set (symmetric with the
 // tool/memory/registry components).
-func budgetDigest(b *agentsv1alpha1.BudgetSpec) string {
+func budgetDigest(b *agentsv1beta1.BudgetSpec) string {
 	if b == nil {
 		return ""
 	}
@@ -3158,7 +3157,7 @@ func budgetDigest(b *agentsv1alpha1.BudgetSpec) string {
 // re-applying the spec when the revision name is unchanged (the M4
 // silent-loss landmine). Returns "" when spec.runtime is nil (symmetric with
 // the other components, backward-compatible: pre-M65 revision names unchanged).
-func runtimeDigest(rt *agentsv1alpha1.RuntimeSpec) string {
+func runtimeDigest(rt *agentsv1beta1.RuntimeSpec) string {
 	if rt == nil {
 		return ""
 	}
@@ -3176,7 +3175,7 @@ func runtimeDigest(rt *agentsv1alpha1.RuntimeSpec) string {
 // runtimeForPod returns a copy of rt without spec.runtime.toolPolicy.approvers. Approvers are
 // enforced by the BFF alone, so they never reach the pod (AGENT_RUNTIME, the sidecar's policy
 // ConfigMap) or a digest that would roll it. Nil stays nil.
-func runtimeForPod(rt *agentsv1alpha1.RuntimeSpec) *agentsv1alpha1.RuntimeSpec {
+func runtimeForPod(rt *agentsv1beta1.RuntimeSpec) *agentsv1beta1.RuntimeSpec {
 	if rt == nil {
 		return nil
 	}
@@ -3215,7 +3214,7 @@ const agentDeploymentWorkers = 4
 func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	mapBindingToAgent := handler.EnqueueRequestsFromMapFunc(
 		func(_ context.Context, obj client.Object) []reconcile.Request {
-			b, ok := obj.(*agentsv1alpha1.MCPToolBinding)
+			b, ok := obj.(*agentsv1beta1.MCPToolBinding)
 			if !ok || b.Spec.AgentRef == "" {
 				return nil
 			}
@@ -3235,11 +3234,11 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// registries are few and this only fires on registry events, not steady state.
 	mapRegistryToAgents := handler.EnqueueRequestsFromMapFunc(
 		func(ctx context.Context, obj client.Object) []reconcile.Request {
-			reg, ok := obj.(*agentsv1alpha1.AgentRegistry)
+			reg, ok := obj.(*agentsv1beta1.AgentRegistry)
 			if !ok {
 				return nil
 			}
-			var list agentsv1alpha1.AgentDeploymentList
+			var list agentsv1beta1.AgentDeploymentList
 			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(reg.Namespace)); err != nil {
 				return nil
 			}
@@ -3256,7 +3255,7 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// ModelRoute → requeue the agents in its namespace that name it (ModelRouteReady mirrors its Ready).
 	mapRouteToAgents := handler.EnqueueRequestsFromMapFunc(
 		func(ctx context.Context, obj client.Object) []reconcile.Request {
-			var list agentsv1alpha1.AgentDeploymentList
+			var list agentsv1beta1.AgentDeploymentList
 			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
 				return nil
 			}
@@ -3279,7 +3278,7 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// the AgentScalingPolicy controller's KEDA path).
 	mapScalingPolicyToAgent := handler.EnqueueRequestsFromMapFunc(
 		func(_ context.Context, obj client.Object) []reconcile.Request {
-			p, ok := obj.(*agentsv1alpha1.AgentScalingPolicy)
+			p, ok := obj.(*agentsv1beta1.AgentScalingPolicy)
 			if !ok || p.Spec.AgentRef == "" {
 				return nil
 			}
@@ -3296,13 +3295,13 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// only fires on tenant events.
 	mapTenantToAgents := handler.EnqueueRequestsFromMapFunc(
 		func(ctx context.Context, obj client.Object) []reconcile.Request {
-			t, ok := obj.(*agentsv1alpha1.Tenant)
+			t, ok := obj.(*agentsv1beta1.Tenant)
 			if !ok {
 				return nil
 			}
 			var reqs []reconcile.Request
 			for _, ns := range t.Spec.Namespaces {
-				var list agentsv1alpha1.AgentDeploymentList
+				var list agentsv1beta1.AgentDeploymentList
 				if err := mgr.GetClient().List(ctx, &list, client.InNamespace(ns)); err != nil {
 					continue
 				}
@@ -3344,7 +3343,7 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			if !ok {
 				return nil
 			}
-			var list agentsv1alpha1.AgentDeploymentList
+			var list agentsv1beta1.AgentDeploymentList
 			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(gp.Namespace)); err != nil {
 				return nil
 			}
@@ -3376,8 +3375,8 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// a slow store) stops every agent from reconciling — the M181 wedge. Reconciles of different
 		// agents share no mutable state (the reconciler holds configuration and pool-backed stores).
 		WithOptions(controller.Options{MaxConcurrentReconciles: agentDeploymentWorkers}).
-		For(&agentsv1alpha1.AgentDeployment{}).
-		Owns(&agentsv1alpha1.AgentVersion{}).
+		For(&agentsv1beta1.AgentDeployment{}).
+		Owns(&agentsv1beta1.AgentVersion{}).
 		Owns(&servingv1.Service{})
 	if r.EventingAvailable {
 		b = b.Owns(&eventingv1.Trigger{})
@@ -3387,11 +3386,11 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&batchv1.CronJob{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
-		Watches(&agentsv1alpha1.MCPToolBinding{}, mapBindingToAgent).
-		Watches(&agentsv1alpha1.AgentRegistry{}, mapRegistryToAgents).
-		Watches(&agentsv1alpha1.ModelRoute{}, mapRouteToAgents).
-		Watches(&agentsv1alpha1.AgentScalingPolicy{}, mapScalingPolicyToAgent).
-		Watches(&agentsv1alpha1.Tenant{}, mapTenantToAgents).
+		Watches(&agentsv1beta1.MCPToolBinding{}, mapBindingToAgent).
+		Watches(&agentsv1beta1.AgentRegistry{}, mapRegistryToAgents).
+		Watches(&agentsv1beta1.ModelRoute{}, mapRouteToAgents).
+		Watches(&agentsv1beta1.AgentScalingPolicy{}, mapScalingPolicyToAgent).
+		Watches(&agentsv1beta1.Tenant{}, mapTenantToAgents).
 		Watches(&agentsv1beta1.AgentTeam{}, mapTeamToSupervisor).
 		Watches(&agentsv1beta1.GuardrailPolicy{}, mapGuardrailPolicyToAgents).
 		WatchesMetadata(&corev1.Secret{}, mapLangfuseSecretToAgents).

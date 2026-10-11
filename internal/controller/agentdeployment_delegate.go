@@ -25,7 +25,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
@@ -52,7 +51,7 @@ const (
 // agent name) in the same namespace, or nil when the agent is not a supervisor. v1: an agent supervises
 // at most one team; the first match by name wins deterministically.
 func resolveSupervisedTeam(
-	ctx context.Context, c client.Client, agent *agentsv1alpha1.AgentDeployment,
+	ctx context.Context, c client.Client, agent *agentsv1beta1.AgentDeployment,
 ) (*agentsv1beta1.AgentTeam, error) {
 	var teams agentsv1beta1.AgentTeamList
 	if err := c.List(ctx, &teams, client.InNamespace(agent.Namespace)); err != nil {

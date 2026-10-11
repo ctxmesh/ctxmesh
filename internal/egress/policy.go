@@ -32,7 +32,7 @@ import (
 )
 
 // ToolPolicy is the parsed spec.runtime.toolPolicy the sidecar holds. It mirrors the CRD's
-// ToolPolicySpec (api/v1alpha1) — the SAME shape the controller marshals into the mounted file and
+// ToolPolicySpec (api/v1beta1) — the SAME shape the controller marshals into the mounted file and
 // into AGENT_RUNTIME for the SDK — so the wire enforcement (a later M82 task) and the SDK's managed
 // loop judge the same policy. Only the deny/require-approval-relevant fields are needed at the
 // sidecar; the SDK-only steering fields (forcedChoice, parallelLimit) are parsed + retained for
@@ -51,7 +51,7 @@ type ToolPolicy struct {
 	// forward at most this many tool calls through the sidecar. 0 ⇒ unlimited (the default). Unlike
 	// ForcedChoice/ParallelLimit this IS wire-enforced here — the sidecar counts forwardable tool
 	// calls per verified run and denies the (N+1)th with a terminal 403. Mirrors the CRD field
-	// byte-for-byte (api/v1alpha1 ToolPolicySpec), which the controller marshals straight into the
+	// byte-for-byte (api/v1beta1 ToolPolicySpec), which the controller marshals straight into the
 	// mounted ConfigMap.
 	MaxToolCallsPerRun int32 `json:"maxToolCallsPerRun,omitempty"`
 }

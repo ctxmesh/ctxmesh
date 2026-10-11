@@ -28,7 +28,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/guardrail"
 )
@@ -147,7 +146,7 @@ func (r *GuardrailPolicyReconciler) referencingAgents(
 	ctx context.Context,
 	policy *agentsv1beta1.GuardrailPolicy,
 ) []string {
-	var list agentsv1alpha1.AgentDeploymentList
+	var list agentsv1beta1.AgentDeploymentList
 	if err := r.List(ctx, &list, client.InNamespace(policy.Namespace)); err != nil {
 		return nil
 	}

@@ -25,7 +25,7 @@ import (
 
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
@@ -36,7 +36,7 @@ import (
 // carried verbatim (RawExtension.Raw), the annotations (OAuth-client config) and
 // labels (scope/owner) as-is. Used by both the best-effort mirror and the
 // retired write paths (register/approve/org/oauth) that write the store directly.
-func crdToolRegistryToStore(tr *agentsv1alpha1.ToolRegistry) toolregistry.ToolRegistry {
+func crdToolRegistryToStore(tr *agentsv1beta1.ToolRegistry) toolregistry.ToolRegistry {
 	tools := make([]toolregistry.ToolEntry, len(tr.Spec.Tools))
 	for i := range tr.Spec.Tools {
 		e := tr.Spec.Tools[i]

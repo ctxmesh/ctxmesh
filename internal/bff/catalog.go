@@ -172,7 +172,7 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 
 // catalogVisibilityFromLabels reads the ADR 0067 §1/§2 visibility + credentialSource
 // from a store row's label map, applying the same dual-read logic as mcpVisibility
-// (which operates on agentsv1alpha1.ToolRegistry). This variant operates on the raw
+// (which operates on agentsv1beta1.ToolRegistry). This variant operates on the raw
 // map[string]string from the store so the catalog handler does not need to project
 // through the CRD shape.
 func catalogVisibilityFromLabels(labels map[string]string) (visibility, credentialSource string) {

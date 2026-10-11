@@ -25,22 +25,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 const approverSentinel = "approver-sentinel@example.com"
 
 // governedSpec carries every field the governance exclusion touches, plus a require-approval override.
-func governedSpec() agentsv1alpha1.AgentDeploymentSpec {
-	return agentsv1alpha1.AgentDeploymentSpec{
+func governedSpec() agentsv1beta1.AgentDeploymentSpec {
+	return agentsv1beta1.AgentDeploymentSpec{
 		Image: "ghcr.io/ctxmesh/example-agent:v1",
-		Runtime: &agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{
+		Runtime: &agentsv1beta1.RuntimeSpec{ToolPolicy: &agentsv1beta1.ToolPolicySpec{
 			Default:   "allow",
-			Overrides: []agentsv1alpha1.ToolPolicyOverride{{Name: "db.delete", Rule: "require-approval"}},
-			Approvers: []agentsv1alpha1.Approver{{Kind: "User", Name: approverSentinel}},
+			Overrides: []agentsv1beta1.ToolPolicyOverride{{Name: "db.delete", Rule: "require-approval"}},
+			Approvers: []agentsv1beta1.Approver{{Kind: "User", Name: approverSentinel}},
 		}},
-		Feedback: &agentsv1alpha1.FeedbackSpec{Human: &agentsv1alpha1.HumanSource{
-			Scores: []agentsv1alpha1.ScoreDecl{{Name: "thumbs", DataType: agentsv1alpha1.ScoreBoolean}},
+		Feedback: &agentsv1beta1.FeedbackSpec{Human: &agentsv1beta1.HumanSource{
+			Scores: []agentsv1beta1.ScoreDecl{{Name: "thumbs", DataType: agentsv1beta1.ScoreBoolean}},
 		}},
 	}
 }
@@ -73,14 +73,14 @@ func TestSpecHash_GovernanceEditsDoNotMintAVersion(t *testing.T) {
 	require.NoError(t, err)
 
 	approvers := governedSpec()
-	approvers.Runtime.ToolPolicy.Approvers = []agentsv1alpha1.Approver{{Kind: "Group", Name: "dba"}}
+	approvers.Runtime.ToolPolicy.Approvers = []agentsv1beta1.Approver{{Kind: "Group", Name: "dba"}}
 	h1, err := specHash(approvers)
 	require.NoError(t, err)
 	assert.Equal(t, h0, h1, "changing only approvers keeps the version")
 
 	feedback := governedSpec()
 	feedback.Feedback.Human.Scores[0].Name = "stars"
-	feedback.Feedback.Mode = agentsv1alpha1.FeedbackMonitor
+	feedback.Feedback.Mode = agentsv1beta1.FeedbackMonitor
 	h2, err := specHash(feedback)
 	require.NoError(t, err)
 	assert.Equal(t, h0, h2, "changing only feedback keeps the version")
@@ -105,7 +105,7 @@ func TestApproversNeverReachThePod(t *testing.T) {
 	assert.NotContains(t, string(rt), approverSentinel, "AGENT_RUNTIME carries no approver")
 	assert.Contains(t, string(rt), "db.delete", "AGENT_RUNTIME still carries the policy")
 
-	rp, err := resolveToolPolicy(&agentsv1alpha1.AgentDeployment{Spec: spec})
+	rp, err := resolveToolPolicy(&agentsv1beta1.AgentDeployment{Spec: spec})
 	require.NoError(t, err)
 	assert.NotContains(t, rp.policyJSON, approverSentinel, "the sidecar's policy carries no approver")
 	assert.Equal(t, toolRuleRequireApproval, rp.ruleFor("db.delete"))
@@ -143,10 +143,10 @@ func TestVersionedSpec_SnapshotOmitsGovernance(t *testing.T) {
 	assert.Equal(t, h, hSnap, "a snapshot hashes to the version it is named after")
 	assert.Equal(t, "7ae51a3e", h, "the hash of a governed spec is unchanged from the previous release")
 
-	for _, s := range []agentsv1alpha1.AgentDeploymentSpec{
+	for _, s := range []agentsv1beta1.AgentDeploymentSpec{
 		{Image: "ghcr.io/ctxmesh/example-agent:v1"},
 		{Image: "ghcr.io/ctxmesh/example-agent:v1", Feedback: governedSpec().Feedback},
-		{Image: "ghcr.io/ctxmesh/example-agent:v1", Runtime: &agentsv1alpha1.RuntimeSpec{}},
+		{Image: "ghcr.io/ctxmesh/example-agent:v1", Runtime: &agentsv1beta1.RuntimeSpec{}},
 		governedSpec(),
 	} {
 		hs, err := specHash(s)

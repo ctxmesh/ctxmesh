@@ -17,14 +17,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 )
 
 // managedMCPBundle builds the four objects the register flow creates for a server
 // (all named <name>, plus the <name>-mcp-egress NetworkPolicy), labeled managed-by-MCP
 // with the given scope/owner — so a delete test can assert the whole bundle is gone.
-func managedMCPBundle(name, ns, scope, owner string) (*agentsv1alpha1.ToolRegistry, []client.Object) {
+func managedMCPBundle(name, ns, scope, owner string) (*agentsv1beta1.ToolRegistry, []client.Object) {
 	labels := map[string]string{labelManagedBy: managedByMCP}
 	if scope != "" {
 		labels[labelMCPScope] = scope
@@ -39,14 +39,14 @@ func managedMCPBundle(name, ns, scope, owner string) (*agentsv1alpha1.ToolRegist
 	}
 	// The ToolRegistry lives in the store (retired, ADR 0044); the rest are K8s
 	// objects seeded into the fake client.
-	tr := &agentsv1alpha1.ToolRegistry{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: cp()}}
+	tr := &agentsv1beta1.ToolRegistry{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: cp()}}
 	k8s := []client.Object{
 		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: cp()}},
-		&agentsv1alpha1.SecretBinding{
+		&agentsv1beta1.SecretBinding{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: cp()},
-			Spec: agentsv1alpha1.SecretBindingSpec{
+			Spec: agentsv1beta1.SecretBindingSpec{
 				Backend:   secretBackendKubernetes,
-				SecretRef: agentsv1alpha1.SecretKeyRef{Name: name, Key: secretKeyOAuthAccessToken},
+				SecretRef: agentsv1beta1.SecretKeyRef{Name: name, Key: secretKeyOAuthAccessToken},
 			},
 		},
 		&networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: name + networkPolicyMCPSuffix, Namespace: ns, Labels: cp()}},
@@ -105,7 +105,7 @@ func TestDeleteMCPServerOwnerTearsDownBundle(t *testing.T) {
 	_, trErr := store.Get(ctx, ns, server)
 	assert.ErrorIs(t, trErr, controlplane.ErrNotFound, "the store row is gone")
 	gone(t, c, &corev1.Secret{}, client.ObjectKey{Namespace: ns, Name: server})
-	gone(t, c, &agentsv1alpha1.SecretBinding{}, client.ObjectKey{Namespace: ns, Name: server})
+	gone(t, c, &agentsv1beta1.SecretBinding{}, client.ObjectKey{Namespace: ns, Name: server})
 	gone(t, c, &networkingv1.NetworkPolicy{}, client.ObjectKey{Namespace: ns, Name: server + networkPolicyMCPSuffix})
 }
 
@@ -152,9 +152,9 @@ func TestDeleteMCPServerReportsOrphanedBindings(t *testing.T) {
 	const server, ns = "dep-mcp", "prod"
 	owner := userGrantHash("user:alice-token")
 	tr, objs := managedMCPBundle(server, ns, scopePersonal, owner)
-	objs = append(objs, &agentsv1alpha1.MCPToolBinding{
+	objs = append(objs, &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent-x-tool", Namespace: ns},
-		Spec:       agentsv1alpha1.MCPToolBindingSpec{RegistryRef: server, AgentRef: "agent-x", ToolName: "t"},
+		Spec:       agentsv1beta1.MCPToolBindingSpec{RegistryRef: server, AgentRef: "agent-x", ToolName: "t"},
 	})
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
 	s, _ := newMCPServerWithIdentity(t, c)
@@ -165,7 +165,7 @@ func TestDeleteMCPServerReportsOrphanedBindings(t *testing.T) {
 	assert.Equal(t, []string{"agent-x-tool"}, resp.OrphanedBindings)
 
 	// The binding is left in place (now RegistryNotFound), not deleted by the server delete.
-	var b agentsv1alpha1.MCPToolBinding
+	var b agentsv1beta1.MCPToolBinding
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: "agent-x-tool"}, &b))
 }
 
@@ -175,13 +175,13 @@ func TestMCPServerReferencesListsDependentBindings(t *testing.T) {
 	const server, ns = "ref-mcp", "prod"
 	tr, objs := managedMCPBundle(server, ns, scopePersonal, userGrantHash("user:alice-token"))
 	objs = append(objs,
-		&agentsv1alpha1.MCPToolBinding{
+		&agentsv1beta1.MCPToolBinding{
 			ObjectMeta: metav1.ObjectMeta{Name: "a1-tool", Namespace: ns},
-			Spec:       agentsv1alpha1.MCPToolBindingSpec{RegistryRef: server, AgentRef: "a1", ToolName: "t"},
+			Spec:       agentsv1beta1.MCPToolBindingSpec{RegistryRef: server, AgentRef: "a1", ToolName: "t"},
 		},
-		&agentsv1alpha1.MCPToolBinding{ // a binding on a DIFFERENT registry — not a dependent
+		&agentsv1beta1.MCPToolBinding{ // a binding on a DIFFERENT registry — not a dependent
 			ObjectMeta: metav1.ObjectMeta{Name: "a2-other", Namespace: ns},
-			Spec:       agentsv1alpha1.MCPToolBindingSpec{RegistryRef: "some-other", AgentRef: "a2", ToolName: "t"},
+			Spec:       agentsv1beta1.MCPToolBindingSpec{RegistryRef: "some-other", AgentRef: "a2", ToolName: "t"},
 		},
 	)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
@@ -203,12 +203,12 @@ func TestMCPServerReferencesListsDependentBindings(t *testing.T) {
 // can show it + gate the org-credential action; an absent label grandfathers to org
 // (ADR 0029, visibility only).
 func TestMCPServerSummaryScope(t *testing.T) {
-	mk := func(scope string) *agentsv1alpha1.ToolRegistry {
+	mk := func(scope string) *agentsv1beta1.ToolRegistry {
 		labels := map[string]string{labelManagedBy: managedByMCP}
 		if scope != "" {
 			labels[labelMCPScope] = scope
 		}
-		return &agentsv1alpha1.ToolRegistry{ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: "prod", Labels: labels}}
+		return &agentsv1beta1.ToolRegistry{ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: "prod", Labels: labels}}
 	}
 	assert.Equal(t, scopeOrg, mcpServerSummaryFromRegistry(mk(scopeOrg)).Scope)
 	assert.Equal(t, scopePersonal, mcpServerSummaryFromRegistry(mk(scopePersonal)).Scope)
@@ -233,7 +233,7 @@ func TestDeleteMCPServerNonMCPRegistryIs404(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _ := newMCPServerWithIdentity(t, c)
 	// A ToolRegistry with NO managed-by label — not a deletable MCP server.
-	store := wireTRStore(t, s, nil, &agentsv1alpha1.ToolRegistry{ObjectMeta: metav1.ObjectMeta{Name: server, Namespace: ns}})
+	store := wireTRStore(t, s, nil, &agentsv1beta1.ToolRegistry{ObjectMeta: metav1.ObjectMeta{Name: server, Namespace: ns}})
 
 	rec, _ := deleteMCPServer(t, s, ns, server, "alice-token")
 	assert.Equal(t, http.StatusNotFound, rec.Code)

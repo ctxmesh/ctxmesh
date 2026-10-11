@@ -38,7 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // theTestKey is the secret the connect tests paste. It is DELIBERATELY a
@@ -211,14 +211,14 @@ func TestConnectCreatesAllThreeObjects(t *testing.T) {
 	assert.Equal(t, managedByConnect, secret.Labels[labelManagedBy])
 
 	// The SecretBinding points at the Secret/key (backend kubernetes).
-	var binding agentsv1alpha1.SecretBinding
+	var binding agentsv1beta1.SecretBinding
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "anthropic", Namespace: "prod"}, &binding))
 	assert.Equal(t, secretBackendKubernetes, binding.Spec.Backend)
 	assert.Equal(t, "anthropic", binding.Spec.SecretRef.Name)
 	assert.Equal(t, secretKeyAPIKey, binding.Spec.SecretRef.Key)
 
 	// The ModelRoute references the binding + carries the provider/model.
-	var route agentsv1alpha1.ModelRoute
+	var route agentsv1beta1.ModelRoute
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "anthropic", Namespace: "prod"}, &route))
 	require.Len(t, route.Spec.Providers, 1)
 	assert.Equal(t, "anthropic", route.Spec.Providers[0].Provider)
@@ -240,15 +240,15 @@ func TestConnectCreatesAllThreeObjects(t *testing.T) {
 // every connected model), falling back to the routed model(s) for older routes.
 func TestProviderSummaryModelsPreferAnnotation(t *testing.T) {
 	t.Run("annotation present → all discovered models", func(t *testing.T) {
-		mr := &agentsv1alpha1.ModelRoute{
+		mr := &agentsv1beta1.ModelRoute{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        "anthropic",
 				Namespace:   "default",
 				Labels:      map[string]string{labelProvider: "anthropic"},
 				Annotations: map[string]string{annProviderModels: "claude-fable-5,claude-sonnet-5,claude-opus-4-8"},
 			},
-			Spec: agentsv1alpha1.ModelRouteSpec{
-				Providers: []agentsv1alpha1.ProviderRef{{
+			Spec: agentsv1beta1.ModelRouteSpec{
+				Providers: []agentsv1beta1.ProviderRef{{
 					Provider: "anthropic", Model: "claude-fable-5", SecretBindingRef: "anthropic",
 				}},
 			},
@@ -259,14 +259,14 @@ func TestProviderSummaryModelsPreferAnnotation(t *testing.T) {
 	})
 
 	t.Run("no annotation → fall back to the routed model(s)", func(t *testing.T) {
-		mr := &agentsv1alpha1.ModelRoute{
+		mr := &agentsv1beta1.ModelRoute{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "openai",
 				Namespace: "default",
 				Labels:    map[string]string{labelProvider: "openai"},
 			},
-			Spec: agentsv1alpha1.ModelRouteSpec{
-				Providers: []agentsv1alpha1.ProviderRef{{
+			Spec: agentsv1beta1.ModelRouteSpec{
+				Providers: []agentsv1beta1.ProviderRef{{
 					Provider: "openai", Model: "gpt-4o", SecretBindingRef: "openai",
 				}},
 			},
@@ -458,24 +458,24 @@ func TestListProvidersEmpty(t *testing.T) {
 // TestListProvidersNoSecrets proves the list projects connect-managed routes onto
 // the flat summary WITHOUT any secret material — only the Secret NAME as a ref.
 func TestListProvidersNoSecrets(t *testing.T) {
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        "anthropic",
 			Namespace:   "prod",
 			Labels:      map[string]string{labelManagedBy: managedByConnect, labelProvider: "anthropic"},
 			Annotations: map[string]string{annDisplayName: "Anthropic"},
 		},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{
 				Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 1, SecretBindingRef: "anthropic",
 			}},
 		},
 	}
 	// A NON-connect route must be excluded from the list (no managed-by label).
-	other := &agentsv1alpha1.ModelRoute{
+	other := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "hand-made", Namespace: "prod"},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{Provider: "mock", Model: "mock-default", Priority: 1}},
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{Provider: "mock", Model: "mock-default", Priority: 1}},
 		},
 	}
 	// Also seed the backing Secret to prove the list NEVER reads/echoes its data.
@@ -530,7 +530,7 @@ func TestListProvidersForbiddenIs403(t *testing.T) {
 // model list with NO secret material.
 func TestProviderModelsProxiesLiveList(t *testing.T) {
 	prov := fakeProvider(t, "claude-3-5-haiku", "claude-sonnet-4-6")
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "anthropic",
 			Namespace: "prod",
@@ -539,17 +539,17 @@ func TestProviderModelsProxiesLiveList(t *testing.T) {
 			// re-probe reaches the SAME endpoint (the fake) it validated against.
 			Annotations: map[string]string{annBaseURL: prov.URL},
 		},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{
 				Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 1, SecretBindingRef: "anthropic",
 			}},
 		},
 	}
-	binding := &agentsv1alpha1.SecretBinding{
+	binding := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "prod"},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend:   secretBackendKubernetes,
-			SecretRef: agentsv1alpha1.SecretKeyRef{Name: "anthropic", Key: secretKeyAPIKey},
+			SecretRef: agentsv1beta1.SecretKeyRef{Name: "anthropic", Key: secretKeyAPIKey},
 		},
 	}
 	secret := &corev1.Secret{
@@ -589,21 +589,21 @@ func TestProviderModelsNotFoundIs404(t *testing.T) {
 // TestProviderModelsSecretForbiddenIs403 proves a viewer denied the Secret read
 // gets a 403 (the caller-scoped read denial surfaces, not a swallowed success).
 func TestProviderModelsSecretForbiddenIs403(t *testing.T) {
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "anthropic", Namespace: "prod",
 			Labels: map[string]string{labelManagedBy: managedByConnect, labelProvider: "anthropic"},
 		},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{
 				Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 1, SecretBindingRef: "anthropic",
 			}},
 		},
 	}
-	binding := &agentsv1alpha1.SecretBinding{
+	binding := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "prod"},
-		Spec: agentsv1alpha1.SecretBindingSpec{
-			Backend: secretBackendKubernetes, SecretRef: agentsv1alpha1.SecretKeyRef{Name: "anthropic", Key: secretKeyAPIKey},
+		Spec: agentsv1beta1.SecretBindingSpec{
+			Backend: secretBackendKubernetes, SecretRef: agentsv1beta1.SecretKeyRef{Name: "anthropic", Key: secretKeyAPIKey},
 		},
 	}
 	c := fake.NewClientBuilder().
@@ -710,23 +710,23 @@ func TestProviderModelsProbeUnsupported(t *testing.T) {
 // provider consists of (name "anthropic" in "prod"), with the route's baseURL
 // pointed at the fake provider so the rotation's re-probe reaches it.
 func seedConnectedProvider(baseURL, key string) []client.Object {
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "anthropic", Namespace: "prod",
 			Labels:      map[string]string{labelManagedBy: managedByConnect, labelProvider: "anthropic"},
 			Annotations: map[string]string{annBaseURL: baseURL, annDisplayName: "Anthropic"},
 		},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{
 				Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 1, SecretBindingRef: "anthropic",
 			}},
 		},
 	}
-	binding := &agentsv1alpha1.SecretBinding{
+	binding := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "prod", Labels: route.Labels},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend:   secretBackendKubernetes,
-			SecretRef: agentsv1alpha1.SecretKeyRef{Name: "anthropic", Key: secretKeyAPIKey},
+			SecretRef: agentsv1beta1.SecretKeyRef{Name: "anthropic", Key: secretKeyAPIKey},
 		},
 	}
 	secret := &corev1.Secret{
@@ -798,7 +798,7 @@ func TestDisconnectProviderDeletesAllThree(t *testing.T) {
 
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	for _, o := range []client.Object{
-		&agentsv1alpha1.ModelRoute{}, &agentsv1alpha1.SecretBinding{}, &corev1.Secret{},
+		&agentsv1beta1.ModelRoute{}, &agentsv1beta1.SecretBinding{}, &corev1.Secret{},
 	} {
 		err := c.Get(context.Background(), client.ObjectKey{Name: "anthropic", Namespace: "prod"}, o)
 		assert.True(t, apierrors.IsNotFound(err), "%T must be deleted", o)

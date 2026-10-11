@@ -56,7 +56,6 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 	"github.com/ctxmesh/ctxmesh/internal/workflow"
@@ -83,7 +82,7 @@ func (s *Server) resolveWorkflowNodeEndpoints(
 
 	endpoints := make(map[string]string, len(want))
 	for _, name := range want {
-		var deploy agentsv1alpha1.AgentDeployment
+		var deploy agentsv1beta1.AgentDeployment
 		if err := caller.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &deploy); err != nil {
 			switch {
 			case apierrors.IsForbidden(err):
@@ -370,7 +369,7 @@ func (s *Server) resolveWorkflowMembership(
 		ns = defaultCreateNamespace
 	}
 
-	var registry agentsv1alpha1.AgentRegistry
+	var registry agentsv1beta1.AgentRegistry
 	if err := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: spec.RegistryRef}, &registry); err != nil {
 		switch {
 		case apierrors.IsForbidden(err):
@@ -398,7 +397,7 @@ func (s *Server) resolveWorkflowMembership(
 	want = slices.Compact(want)
 
 	for _, name := range want {
-		var agent agentsv1alpha1.AgentDeployment
+		var agent agentsv1beta1.AgentDeployment
 		if err := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &agent); err != nil {
 			switch {
 			case apierrors.IsForbidden(err):

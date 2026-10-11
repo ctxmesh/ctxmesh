@@ -37,7 +37,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/alertstore"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
@@ -260,11 +259,11 @@ func (r *AlertPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 func (r *AlertPolicyReconciler) selectedAgents(
 	ctx context.Context,
 	ap *agentsv1beta1.AlertPolicy,
-) ([]agentsv1alpha1.AgentDeployment, error) {
+) ([]agentsv1beta1.AgentDeployment, error) {
 	sel := ap.Spec.Selector
 	empty := len(sel.MatchLabels) == 0 && len(sel.Names) == 0
 
-	var list agentsv1alpha1.AgentDeploymentList
+	var list agentsv1beta1.AgentDeploymentList
 	if err := r.List(ctx, &list, client.InNamespace(ap.Namespace)); err != nil {
 		return nil, fmt.Errorf("listing AgentDeployments: %w", err)
 	}
@@ -274,7 +273,7 @@ func (r *AlertPolicyReconciler) selectedAgents(
 		names[n] = struct{}{}
 	}
 
-	out := make([]agentsv1alpha1.AgentDeployment, 0, len(list.Items))
+	out := make([]agentsv1beta1.AgentDeployment, 0, len(list.Items))
 	for i := range list.Items {
 		d := list.Items[i]
 		if empty || matchesLabels(d.Labels, sel.MatchLabels) {
@@ -310,7 +309,7 @@ func (r *AlertPolicyReconciler) evaluateCondition(
 	ctx context.Context,
 	ap *agentsv1beta1.AlertPolicy,
 	cond agentsv1beta1.AlertCondition,
-	agents []agentsv1alpha1.AgentDeployment,
+	agents []agentsv1beta1.AgentDeployment,
 ) (bool, string) {
 	log := logf.FromContext(ctx)
 
@@ -352,7 +351,7 @@ func (r *AlertPolicyReconciler) evaluateCondition(
 
 // evalRegressionDetected fires when ANY selected agent carries a RegressionDetected=True status
 // condition. value lists the breaching agent name(s).
-func evalRegressionDetected(agents []agentsv1alpha1.AgentDeployment) (bool, string) {
+func evalRegressionDetected(agents []agentsv1beta1.AgentDeployment) (bool, string) {
 	breaching := make([]string, 0, len(agents))
 	for i := range agents {
 		c := apimeta.FindStatusCondition(agents[i].Status.Conditions, conditionRegressionDetected)
@@ -572,7 +571,7 @@ func (r *AlertPolicyReconciler) evalRunFailureRate(
 	ctx context.Context,
 	ap *agentsv1beta1.AlertPolicy,
 	cond agentsv1beta1.AlertCondition,
-	agents []agentsv1alpha1.AgentDeployment,
+	agents []agentsv1beta1.AgentDeployment,
 ) (bool, string) {
 	log := logf.FromContext(ctx)
 
@@ -797,7 +796,7 @@ func (r *AlertPolicyReconciler) resolveOpen(
 func (r *AlertPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	mapDeployToPolicies := handler.EnqueueRequestsFromMapFunc(
 		func(ctx context.Context, obj client.Object) []reconcile.Request {
-			deploy, ok := obj.(*agentsv1alpha1.AgentDeployment)
+			deploy, ok := obj.(*agentsv1beta1.AgentDeployment)
 			if !ok {
 				return nil
 			}
@@ -820,7 +819,7 @@ func (r *AlertPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1beta1.AlertPolicy{}).
-		Watches(&agentsv1alpha1.AgentDeployment{}, mapDeployToPolicies).
+		Watches(&agentsv1beta1.AgentDeployment{}, mapDeployToPolicies).
 		Named("alertpolicy").
 		Complete(r)
 }

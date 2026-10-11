@@ -33,7 +33,7 @@ import (
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
@@ -222,7 +222,7 @@ func createAgentFromYAML(
 			// agent; anything else — the primary AgentDeployment, or a binding targeting a
 			// DIFFERENT agent — is a real conflict and still fails.
 			if apierrors.IsAlreadyExists(cErr) && agentName != "" {
-				if _, isBinding := d.obj.(*agentsv1alpha1.MCPToolBinding); isBinding {
+				if _, isBinding := d.obj.(*agentsv1beta1.MCPToolBinding); isBinding {
 					ref, rErr := bindingAgentRef(d.obj.GetName())
 					if rErr != nil {
 						return created, rErr
@@ -256,9 +256,9 @@ func createAgentFromYAML(
 // serving the CREATE-time prompt (a wrong prompt, silently), so a bad-ref edit is rejected atomically
 // BEFORE the SSA apply — nothing changes, no stale annotation.
 func stampResolvedPrompt(ctx context.Context, promptStore promptversion.Store, objs []decodedObject, ns string) *createError {
-	var agent *agentsv1alpha1.AgentDeployment
+	var agent *agentsv1beta1.AgentDeployment
 	for _, d := range objs {
-		if o, ok := d.obj.(*agentsv1alpha1.AgentDeployment); ok {
+		if o, ok := d.obj.(*agentsv1beta1.AgentDeployment); ok {
 			agent = o
 		}
 	}
@@ -386,7 +386,7 @@ func createPromptVersionInStore(ctx context.Context, promptStore promptversion.S
 // MCPToolBinding of the SAME agent for idempotent create (m26.6).
 func agentDeploymentName(objs []decodedObject) string {
 	for _, d := range objs {
-		if ad, ok := d.obj.(*agentsv1alpha1.AgentDeployment); ok {
+		if ad, ok := d.obj.(*agentsv1beta1.AgentDeployment); ok {
 			return ad.Name
 		}
 	}
@@ -458,7 +458,7 @@ func toolRegistryIndex(ctx context.Context, store toolregistry.Store, ns string)
 // fail-closed). Public / org / grandfathered (no scope) servers are unrestricted.
 func checkBindingOwnership(objs []decodedObject, idx map[string]toolLoc, callerOwner string) *createError {
 	for _, d := range objs {
-		binding, ok := d.obj.(*agentsv1alpha1.MCPToolBinding)
+		binding, ok := d.obj.(*agentsv1beta1.MCPToolBinding)
 		if !ok {
 			continue
 		}
@@ -486,7 +486,7 @@ func rewriteBindingRegistries(objs []decodedObject, idx map[string]toolLoc) {
 		return
 	}
 	for _, d := range objs {
-		binding, ok := d.obj.(*agentsv1alpha1.MCPToolBinding)
+		binding, ok := d.obj.(*agentsv1beta1.MCPToolBinding)
 		if !ok {
 			continue
 		}

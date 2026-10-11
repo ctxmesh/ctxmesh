@@ -23,7 +23,7 @@ import (
 
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // The fixed registry key + tool name mkRegistrySchema registers. The
@@ -37,18 +37,18 @@ const (
 // mkRegistrySchema builds a one-entry ToolRegistry map keyed by schemaRegName
 // with entry name schemaToolName, its InputSchema set from raw (nil raw → no
 // InputSchema on the entry).
-func mkRegistrySchema(raw []byte) map[string]agentsv1alpha1.ToolRegistry {
-	entry := agentsv1alpha1.ToolEntry{Name: schemaToolName}
+func mkRegistrySchema(raw []byte) map[string]agentsv1beta1.ToolRegistry {
+	entry := agentsv1beta1.ToolEntry{Name: schemaToolName}
 	if raw != nil {
 		entry.InputSchema = &k8sruntime.RawExtension{Raw: raw}
 	}
-	return map[string]agentsv1alpha1.ToolRegistry{
-		schemaRegName: {Spec: agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{entry}}},
+	return map[string]agentsv1beta1.ToolRegistry{
+		schemaRegName: {Spec: agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{entry}}},
 	}
 }
 
-func mkSchemaBinding(regName, toolName string) *agentsv1alpha1.MCPToolBinding {
-	b := &agentsv1alpha1.MCPToolBinding{}
+func mkSchemaBinding(regName, toolName string) *agentsv1beta1.MCPToolBinding {
+	b := &agentsv1beta1.MCPToolBinding{}
 	b.Spec.RegistryRef = regName
 	b.Spec.ToolName = toolName
 	return b

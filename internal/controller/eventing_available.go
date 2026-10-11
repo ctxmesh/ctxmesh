@@ -9,7 +9,7 @@ import (
 	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/kedatypes"
 )
 
@@ -79,7 +79,7 @@ func eventingAvailableVia(rm meta.RESTMapper) bool {
 // points rather than the serving path that cleans up after them.
 //
 // There cannot be a stale Trigger on a cluster that has never been able to hold one.
-func (r *AgentDeploymentReconciler) deleteStaleTrigger(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment) error {
+func (r *AgentDeploymentReconciler) deleteStaleTrigger(ctx context.Context, deploy *agentsv1beta1.AgentDeployment) error {
 	if !r.EventingAvailable {
 		return nil
 	}

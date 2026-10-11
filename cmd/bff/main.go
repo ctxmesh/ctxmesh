@@ -48,7 +48,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
 	"github.com/ctxmesh/ctxmesh/internal/bff"
@@ -230,7 +229,7 @@ func runPreflight(ctx context.Context) int {
 func newPlatformScheme() (*runtime.Scheme, error) {
 	scheme := runtime.NewScheme()
 	for _, add := range []func(*runtime.Scheme) error{
-		clientgoscheme.AddToScheme, agentsv1alpha1.AddToScheme, agentsv1beta1.AddToScheme,
+		clientgoscheme.AddToScheme, agentsv1beta1.AddToScheme, agentsv1beta1.AddToScheme,
 	} {
 		if err := add(scheme); err != nil {
 			return nil, fmt.Errorf("building the platform scheme: %w", err)

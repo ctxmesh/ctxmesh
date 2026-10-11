@@ -19,43 +19,129 @@ package v1beta1
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/conversion"
-
-	v1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 )
+
+// ProviderRef describes one LiteLLM provider entry in a ModelRoute's provider
+// list. Providers are tried in ascending priority order (1 = first choice).
+type ProviderRef struct {
+	// provider is the LiteLLM provider prefix, e.g. "anthropic", "openai", or
+	// the special value "mock" which renders a deterministic mock response
+	// (MOCK_OK) without requiring a real API key. Required.
+	// +kubebuilder:validation:MinLength=1
+	Provider string `json:"provider"`
+
+	// model is the provider-specific model name, e.g. "claude-sonnet-4-6" for
+	// the anthropic provider or "mock-default" for the mock provider. Required.
+	// +kubebuilder:validation:MinLength=1
+	Model string `json:"model"`
+
+	// priority determines the order in which providers are tried; lower values
+	// are tried first. Must be ≥1 and unique within a single ModelRoute's
+	// provider list. Required.
+	// +kubebuilder:validation:Minimum=1
+	Priority int32 `json:"priority"`
+
+	// secretBindingRef names a SecretBinding resource in the same namespace
+	// whose resolved secret is injected into the gateway as
+	// SB_<binding-name>. Required for every non-mock provider unless apiBase is
+	// set (a keyless OpenAI-compatible upstream); ignored (and should be
+	// omitted) when provider == "mock".
+	// +optional
+	SecretBindingRef string `json:"secretBindingRef,omitempty"`
+
+	// apiBase optionally points this provider at an arbitrary OpenAI-compatible
+	// upstream base URL (e.g. "http://tool-mock.ns.svc.cluster.local:9099/v1").
+	// When set, the gateway proxies to that base with a dummy key and no
+	// SecretBinding is required — the seam that lets an in-cluster route target
+	// the deterministic tool-call mock, so a managed-agent run produces a
+	// provable tool span in CI (mock-first, no real key). It combines with
+	// provider (the LiteLLM client prefix, typically "openai") and model (an
+	// arbitrary id after the slash, since the real target is apiBase). Leave
+	// unset for a normal provider (real key via secretBindingRef) or mock.
+	// Must be an http(s) URL when set. Ignored when provider == "mock".
+	// +optional
+	// +kubebuilder:validation:Pattern=`^https?://.+`
+	APIBase string `json:"apiBase,omitempty"`
+}
+
+// RateLimit configures optional per-tenant rate limiting forwarded to LiteLLM.
+type RateLimit struct {
+	// tenantRPM is the maximum number of requests per minute this route accepts
+	// on behalf of the owning tenant. Must be ≥1. Maps directly to the LiteLLM
+	// rpm setting on every provider entry rendered for this route.
+	// +kubebuilder:validation:Minimum=1
+	TenantRPM int32 `json:"tenantRPM"`
+}
+
+// ModelRouteSpec defines the desired routing policy for a named LLM alias.
+// The route name (metadata.name) is the model alias that agents use when
+// calling the gateway (model="<alias>").
+//
+// Validation rules:
+//   - providers must have at least one entry (MinItems=1).
+//   - provider priorities must be unique across the list.
+//   - secretBindingRef is required for every non-mock provider.
+//
+// +kubebuilder:validation:XValidation:rule="self.providers.all(i, self.providers.filter(j, j.priority == i.priority).size() == 1)",message="provider priorities must be unique within a ModelRoute"
+type ModelRouteSpec struct {
+	// providers is the ordered list of LiteLLM provider entries for this route.
+	// Entries are tried in ascending priority order (priority 1 first; higher
+	// values are fallbacks). At least one entry is required; at most 10 entries
+	// are permitted (MaxItems bounds the CEL cost estimate for uniqueness and
+	// secretBindingRef validation).
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=10
+	// +kubebuilder:validation:XValidation:rule="self.all(p, p.provider == 'mock' || (has(p.apiBase) && p.apiBase != '') || (has(p.secretBindingRef) && p.secretBindingRef != ''))",message="secretBindingRef is required for every non-mock provider unless apiBase is set"
+	Providers []ProviderRef `json:"providers"`
+
+	// rateLimit optionally caps the per-tenant request rate forwarded to
+	// LiteLLM. When omitted, no rate limit is applied.
+	// +optional
+	RateLimit *RateLimit `json:"rateLimit,omitempty"`
+}
+
+// ModelRouteStatus defines the observed state of a ModelRoute.
+type ModelRouteStatus struct {
+	// observedGeneration is the .metadata.generation this status reflects — set by the
+	// controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// conditions reflect the current reconciliation state of the ModelRoute.
+	// The "Ready" condition is set to True once the route has been successfully
+	// rendered into the live gateway ConfigMap and all referenced SecretBindings
+	// are resolved.
+	// +listType=map
+	// +listMapKey=type
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
 
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Namespaced,shortName=mr,categories={agents}
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
-// ModelRoute is the v1beta1 schema — a field-identical graduation of the v1alpha1 ModelRoute (ADR 0037, M34),
-// reusing the v1alpha1 spec/status so conversion is a direct copy.
+// ModelRoute is the Schema for the modelroutes API.
+// Each ModelRoute represents a named LLM alias that agents use when calling
+// the in-cluster LiteLLM gateway. The controller renders all ModelRoutes from
+// all namespaces into a single LiteLLM config.yaml in the gateway ConfigMap.
 type ModelRoute struct {
-	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty"`
+	metav1.TypeMeta `json:",inline"`
 
-	Spec   v1alpha1.ModelRouteSpec   `json:"spec"`
-	Status v1alpha1.ModelRouteStatus `json:"status,omitempty"`
-}
+	// metadata is standard Kubernetes object metadata.
+	// +optional
+	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-// ConvertTo converts this v1beta1 ModelRoute to the v1alpha1 hub.
-func (src *ModelRoute) ConvertTo(dstRaw conversion.Hub) error {
-	dst := dstRaw.(*v1alpha1.ModelRoute)
-	dst.ObjectMeta = src.ObjectMeta
-	dst.Spec = src.Spec
-	dst.Status = src.Status
-	return nil
-}
+	// spec defines the desired routing policy for this model alias.
+	// +required
+	Spec ModelRouteSpec `json:"spec"`
 
-// ConvertFrom populates this v1beta1 ModelRoute from the v1alpha1 hub.
-func (dst *ModelRoute) ConvertFrom(srcRaw conversion.Hub) error {
-	src := srcRaw.(*v1alpha1.ModelRoute)
-	dst.ObjectMeta = src.ObjectMeta
-	dst.Spec = src.Spec
-	dst.Status = src.Status
-	return nil
+	// status defines the observed reconciliation state of this ModelRoute.
+	// +optional
+	Status ModelRouteStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
@@ -63,7 +149,7 @@ func (dst *ModelRoute) ConvertFrom(srcRaw conversion.Hub) error {
 // ModelRouteList contains a list of ModelRoute.
 type ModelRouteList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty"`
+	metav1.ListMeta `json:"metadata,omitzero"`
 	Items           []ModelRoute `json:"items"`
 }
 

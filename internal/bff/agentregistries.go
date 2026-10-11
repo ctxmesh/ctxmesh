@@ -27,7 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // agentRegistryKind is the CRD kind name for an AgentRegistry (used in error
@@ -154,8 +154,8 @@ type AgentRegistryUpdateRequest struct {
 // listAgentRegistriesForCRUD lists AgentRegistries via the reader (caller-scoped).
 // This is a dedicated list function for the CRUD handlers (distinct from the
 // topology helper in adapters.go which uses the AgentReader interface).
-func listAgentRegistriesForCRUD(ctx context.Context, r client.Client, opts ...client.ListOption) (*agentsv1alpha1.AgentRegistryList, error) {
-	var out agentsv1alpha1.AgentRegistryList
+func listAgentRegistriesForCRUD(ctx context.Context, r client.Client, opts ...client.ListOption) (*agentsv1beta1.AgentRegistryList, error) {
+	var out agentsv1beta1.AgentRegistryList
 	if err := r.List(ctx, &out, opts...); err != nil {
 		return nil, err
 	}
@@ -177,7 +177,7 @@ func newLabelSelectorDTO(sel metav1.LabelSelector) LabelSelectorDTO {
 }
 
 // newRegistryGuardsDTO projects a *RegistryGuards onto the DTO.
-func newRegistryGuardsDTO(g *agentsv1alpha1.RegistryGuards) *RegistryGuardsDTO {
+func newRegistryGuardsDTO(g *agentsv1beta1.RegistryGuards) *RegistryGuardsDTO {
 	if g == nil {
 		return nil
 	}
@@ -190,7 +190,7 @@ func newRegistryGuardsDTO(g *agentsv1alpha1.RegistryGuards) *RegistryGuardsDTO {
 // newAgentRegistrySummary projects an AgentRegistry onto the compact list DTO.
 // No egress/allowlist field is projected — the console cannot alter the egress
 // posture (controller-owned NetworkPolicy is not exposed through the API surface).
-func newAgentRegistrySummary(ar *agentsv1alpha1.AgentRegistry) AgentRegistrySummary {
+func newAgentRegistrySummary(ar *agentsv1beta1.AgentRegistry) AgentRegistrySummary {
 	ready, phase := phaseFromConditions(ar.Status.Conditions)
 	roles := ar.Spec.Roles
 	if roles == nil {
@@ -212,7 +212,7 @@ func newAgentRegistrySummary(ar *agentsv1alpha1.AgentRegistry) AgentRegistrySumm
 // for GET detail and POST/PUT success). Includes the controller-populated status
 // (members list, phase, ready). No egress/allowlist field — the controller-owned
 // NetworkPolicy is not surfaced through this API (console can't widen egress).
-func newAgentRegistryDetail(ar *agentsv1alpha1.AgentRegistry) AgentRegistryDetail {
+func newAgentRegistryDetail(ar *agentsv1beta1.AgentRegistry) AgentRegistryDetail {
 	ready, phase := phaseFromConditions(ar.Status.Conditions)
 	members := ar.Status.Members
 	if members == nil {
@@ -273,11 +273,11 @@ func buildLabelSelectorFromDTO(dto LabelSelectorDTO) metav1.LabelSelector {
 }
 
 // buildRegistryGuardsFromDTO converts the DTO to *RegistryGuards (nil if nil).
-func buildRegistryGuardsFromDTO(dto *RegistryGuardsDTO) *agentsv1alpha1.RegistryGuards {
+func buildRegistryGuardsFromDTO(dto *RegistryGuardsDTO) *agentsv1beta1.RegistryGuards {
 	if dto == nil {
 		return nil
 	}
-	return &agentsv1alpha1.RegistryGuards{
+	return &agentsv1beta1.RegistryGuards{
 		MaxDepth:  dto.MaxDepth,
 		HopBudget: dto.HopBudget,
 	}
@@ -371,7 +371,7 @@ func (s *Server) handleGetAgentRegistry(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var ar agentsv1alpha1.AgentRegistry
+	var ar agentsv1beta1.AgentRegistry
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &ar); err != nil {
 		s.writeGetError(w, err, "agent registry")
 		return
@@ -426,12 +426,12 @@ func (s *Server) handleCreateAgentRegistry(w http.ResponseWriter, r *http.Reques
 		ns = defaultCreateNamespace
 	}
 
-	ar := &agentsv1alpha1.AgentRegistry{
+	ar := &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      strings.TrimSpace(req.Name),
 			Namespace: ns,
 		},
-		Spec: agentsv1alpha1.AgentRegistrySpec{
+		Spec: agentsv1beta1.AgentRegistrySpec{
 			RegistryId:     strings.TrimSpace(req.RegistryId),
 			MemberSelector: buildLabelSelectorFromDTO(req.MemberSelector),
 			Guards:         buildRegistryGuardsFromDTO(req.Guards),
@@ -517,12 +517,12 @@ func (s *Server) handleUpdateAgentRegistry(w http.ResponseWriter, r *http.Reques
 	// owns exactly the fields it sends; the controller retains ownership of status /
 	// derived fields (NetworkPolicy). (classifyAgentRegistryWriteError still maps any
 	// unexpected API-server Invalid to 422 defensively.)
-	apply := &agentsv1alpha1.AgentRegistry{
+	apply := &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
 		},
-		Spec: agentsv1alpha1.AgentRegistrySpec{
+		Spec: agentsv1beta1.AgentRegistrySpec{
 			// registryId is NOT set here — it is immutable and must not be sent in SSA
 			// (sending an empty string would be a 422 since MinLength=1). The server-side
 			// object already has it; SSA merges only the fields we send.
@@ -539,7 +539,7 @@ func (s *Server) handleUpdateAgentRegistry(w http.ResponseWriter, r *http.Reques
 	// value in the SSA apply object. Fetch it from the live object so we never accept
 	// a caller-supplied registryId in the PUT body. The field comes from the cluster
 	// (authoritative), not from the request (untrusted for this field).
-	var live agentsv1alpha1.AgentRegistry
+	var live agentsv1beta1.AgentRegistry
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &live); err != nil {
 		s.writeGetError(w, err, "agent registry")
 		return
@@ -571,7 +571,7 @@ func (s *Server) handleUpdateAgentRegistry(w http.ResponseWriter, r *http.Reques
 	// Re-read the live object so the response reflects what the API server
 	// persisted (SSA may normalise or reject fields). A not-found here is
 	// unexpected (we just applied), so treat it as a server fault.
-	var updated agentsv1alpha1.AgentRegistry
+	var updated agentsv1beta1.AgentRegistry
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &updated); err != nil {
 		s.log.Error(err, "re-read AgentRegistry after apply failed", "name", name, "namespace", ns)
 		writeError(w, http.StatusInternalServerError, "agent registry updated but could not be re-read")
@@ -606,7 +606,7 @@ func (s *Server) handleDeleteAgentRegistry(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	ar := &agentsv1alpha1.AgentRegistry{
+	ar := &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
 	}
 	if err := caller.Delete(r.Context(), ar); err != nil {

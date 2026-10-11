@@ -32,7 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
@@ -71,20 +71,20 @@ func feedbackTestServer(t *testing.T, adapter LangfuseAdapter, objs ...client.Ob
 }
 
 // agentWithFeedback is the inspector test agent declaring the given spec.feedback (nil = no declaration).
-func agentWithFeedback(spec *agentsv1alpha1.FeedbackSpec) *agentsv1alpha1.AgentDeployment {
-	return &agentsv1alpha1.AgentDeployment{
+func agentWithFeedback(spec *agentsv1beta1.FeedbackSpec) *agentsv1beta1.AgentDeployment {
+	return &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: inspectorTestAgentName, Namespace: inspectorTestAgentNs},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Feedback: spec},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Feedback: spec},
 	}
 }
 
 // feedbackFixture declares a human "thumbs" score + an external "csat-webhook" channel writing "csat".
-func feedbackFixture(mode agentsv1alpha1.FeedbackMode) *agentsv1alpha1.FeedbackSpec {
-	return &agentsv1alpha1.FeedbackSpec{
+func feedbackFixture(mode agentsv1beta1.FeedbackMode) *agentsv1beta1.FeedbackSpec {
+	return &agentsv1beta1.FeedbackSpec{
 		Mode:  mode,
-		Human: &agentsv1alpha1.HumanSource{Scores: []agentsv1alpha1.ScoreDecl{{Name: "thumbs", DataType: agentsv1alpha1.ScoreBoolean}}},
-		External: []agentsv1alpha1.ExternalSource{
-			{Name: "csat-webhook", Score: agentsv1alpha1.ScoreDecl{Name: "csat", DataType: agentsv1alpha1.ScoreNumeric}},
+		Human: &agentsv1beta1.HumanSource{Scores: []agentsv1beta1.ScoreDecl{{Name: "thumbs", DataType: agentsv1beta1.ScoreBoolean}}},
+		External: []agentsv1beta1.ExternalSource{
+			{Name: "csat-webhook", Score: agentsv1beta1.ScoreDecl{Name: "csat", DataType: agentsv1beta1.ScoreNumeric}},
 		},
 	}
 }
@@ -102,7 +102,7 @@ func postFeedback(t *testing.T, s *Server, body SubmitFeedbackRequest) *httptest
 func TestSubmitFeedback_DeclaredName_Relayed(t *testing.T) {
 	created := &[]recordedScore{}
 	s := feedbackTestServer(t, recordingLangfuse{created: created},
-		agentWithFeedback(feedbackFixture(agentsv1alpha1.FeedbackEnforce)))
+		agentWithFeedback(feedbackFixture(agentsv1beta1.FeedbackEnforce)))
 	seedRunForTrace(t, s, "t1")
 
 	rec := postFeedback(t, s, SubmitFeedbackRequest{TraceID: "t1", Name: "thumbs", Value: 1, Comment: "great"})
@@ -117,7 +117,7 @@ func TestSubmitFeedback_DeclaredName_Relayed(t *testing.T) {
 func TestSubmitFeedback_UndeclaredName_EnforceRejected(t *testing.T) {
 	created := &[]recordedScore{}
 	s := feedbackTestServer(t, recordingLangfuse{created: created},
-		agentWithFeedback(feedbackFixture(agentsv1alpha1.FeedbackEnforce)))
+		agentWithFeedback(feedbackFixture(agentsv1beta1.FeedbackEnforce)))
 	seedRunForTrace(t, s, "t1")
 
 	rec := postFeedback(t, s, SubmitFeedbackRequest{TraceID: "t1", Name: "undeclared", Value: 1})
@@ -129,7 +129,7 @@ func TestSubmitFeedback_UndeclaredName_EnforceRejected(t *testing.T) {
 func TestSubmitFeedback_UndeclaredName_MonitorAccepted(t *testing.T) {
 	created := &[]recordedScore{}
 	s := feedbackTestServer(t, recordingLangfuse{created: created},
-		agentWithFeedback(feedbackFixture(agentsv1alpha1.FeedbackMonitor)))
+		agentWithFeedback(feedbackFixture(agentsv1beta1.FeedbackMonitor)))
 	seedRunForTrace(t, s, "t1")
 
 	rec := postFeedback(t, s, SubmitFeedbackRequest{TraceID: "t1", Name: "undeclared", Value: 0.5})
@@ -171,7 +171,7 @@ func TestFeedbackRead_AttributesSources(t *testing.T) {
 		}},
 	}
 	s := feedbackTestServer(t, adapter,
-		agentWithFeedback(feedbackFixture(agentsv1alpha1.FeedbackEnforce)))
+		agentWithFeedback(feedbackFixture(agentsv1beta1.FeedbackEnforce)))
 	seedRunForTrace(t, s, "t1")
 
 	rec := httptest.NewRecorder()
@@ -219,7 +219,7 @@ func TestSubmitFeedback_UnreadableAgent_Refused(t *testing.T) {
 	funcs := ssrInterceptor("alice@example.com", nil)
 	funcs.Get = forbidAgentGet
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(agentWithFeedback(feedbackFixture(agentsv1alpha1.FeedbackEnforce))).
+		WithObjects(agentWithFeedback(feedbackFixture(agentsv1beta1.FeedbackEnforce))).
 		WithInterceptorFuncs(funcs).
 		Build()
 	s := NewServer(Options{

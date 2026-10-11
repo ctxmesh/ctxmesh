@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // TestEditingSkillRefsReachesTheDeployGate. specHash covers the whole spec, so attaching or
@@ -16,7 +16,7 @@ import (
 func TestEditingSkillRefsReachesTheDeployGate(t *testing.T) {
 	t.Parallel()
 
-	base := agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"}
+	base := agentsv1beta1.AgentDeploymentSpec{Image: "img:1"}
 	withSkill := base
 	withSkill.SkillRefs = []string{"summarise@sha256:aaa"}
 	changed := base
@@ -48,7 +48,7 @@ func TestEditingSkillRefsReachesTheDeployGate(t *testing.T) {
 func TestAnAliasMoveDoesNotChangeTheSpecHash(t *testing.T) {
 	t.Parallel()
 
-	spec := agentsv1alpha1.AgentDeploymentSpec{
+	spec := agentsv1beta1.AgentDeploymentSpec{
 		Image:     "img:1",
 		SkillRefs: []string{"summarise@stable"},
 	}

@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Unit tests for AgentRegistry types (no build tag — runs in make test / tier0).
-package v1alpha1
+package v1beta1
 
 import (
 	"testing"

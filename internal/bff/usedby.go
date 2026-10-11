@@ -22,7 +22,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // UsedByRef is one resource that references the queried object.
@@ -65,7 +65,7 @@ func (s *Server) handleUsedBy(w http.ResponseWriter, r *http.Request) {
 	items := make([]UsedByRef, 0)
 	switch kind {
 	case "modelroute", "promptversion":
-		var agents agentsv1alpha1.AgentDeploymentList
+		var agents agentsv1beta1.AgentDeploymentList
 		if err := caller.List(r.Context(), &agents, client.InNamespace(ns)); err != nil {
 			if status, msg, isRBAC := classifyReadError(err); isRBAC {
 				writeError(w, status, msg)
@@ -84,7 +84,7 @@ func (s *Server) handleUsedBy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	case "secretbinding":
-		var routes agentsv1alpha1.ModelRouteList
+		var routes agentsv1beta1.ModelRouteList
 		if err := caller.List(r.Context(), &routes, client.InNamespace(ns)); err != nil {
 			if status, msg, isRBAC := classifyReadError(err); isRBAC {
 				writeError(w, status, msg)
@@ -112,7 +112,7 @@ func (s *Server) handleUsedBy(w http.ResponseWriter, r *http.Request) {
 }
 
 // agentModelRoute reads the agent's MODEL_ROUTE env (expand: model.route → env).
-func agentModelRoute(ad *agentsv1alpha1.AgentDeployment) string {
+func agentModelRoute(ad *agentsv1beta1.AgentDeployment) string {
 	for _, e := range ad.Spec.Env {
 		if e.Name == envModelRoute {
 			return e.Value

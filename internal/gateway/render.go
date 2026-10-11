@@ -30,7 +30,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 const (
@@ -203,15 +203,15 @@ const OTelHeadersKey = "headers"
 const OTelEnvPrefix = "OTEL_"
 
 func Render(
-	routes []agentsv1alpha1.ModelRoute,
-	bindings map[string]agentsv1alpha1.SecretBinding,
+	routes []agentsv1beta1.ModelRoute,
+	bindings map[string]agentsv1beta1.SecretBinding,
 	secretRVs map[string]string,
 	otel OTelConfig,
 ) Result {
 	// ── Sort routes deterministically ─────────────────────────────────────────
-	sorted := make([]agentsv1alpha1.ModelRoute, len(routes))
+	sorted := make([]agentsv1beta1.ModelRoute, len(routes))
 	copy(sorted, routes)
-	slices.SortFunc(sorted, func(a, b agentsv1alpha1.ModelRoute) int {
+	slices.SortFunc(sorted, func(a, b agentsv1beta1.ModelRoute) int {
 		ka := a.Namespace + "/" + a.Name
 		kb := b.Namespace + "/" + b.Name
 		return strings.Compare(ka, kb)
@@ -289,9 +289,9 @@ func Render(
 		}
 
 		// Sort this route's providers by ascending priority.
-		provs := make([]agentsv1alpha1.ProviderRef, len(r.Spec.Providers))
+		provs := make([]agentsv1beta1.ProviderRef, len(r.Spec.Providers))
 		copy(provs, r.Spec.Providers)
-		slices.SortFunc(provs, func(a, b agentsv1alpha1.ProviderRef) int {
+		slices.SortFunc(provs, func(a, b agentsv1beta1.ProviderRef) int {
 			return int(a.Priority) - int(b.Priority)
 		})
 

@@ -284,7 +284,7 @@ row m161 test internal/bff/skills_test.go TestABranchRefIs422 "the BFF refuses a
 row m161 test internal/bff/skills_test.go TestVersionAddIsIdempotent "adding a version is idempotent"
 # Implementation markers:
 row m161 has internal/controlplane/migrations/0026_skills.sql "digest      text        NOT NULL" "the schema keys skill versions by digest"
-row m161 has api/v1alpha1/agentdeployment_types.go "ResolvedSkills []string" "status carries resolvedSkills, so a snapshot never holds a movable alias"
+row m161 has api/v1beta1/agentdeployment_types.go "ResolvedSkills []string" "status carries resolvedSkills, so a snapshot never holds a movable alias"
 row m161 has internal/controller/agentdeployment_controller.go "deploy.Status.ResolvedSkills = resolvedSkills" "the controller records what the skill refs resolved to"
 row m161 has cmd/launcher/skills.go 'mux.HandleFunc("GET /skills"' "the launcher serves the skill list the SDKs call"
 row m161 has cmd/launcher/skills.go "is not attached to this agent" "/skills/load checks the injected roster"
@@ -299,7 +299,7 @@ row m161 has-re site:src/content/docs/guides/skills.md "not executables|instruct
 row m162 test internal/controller/hardening_test.go TestTheAgentContainerIsHardenedByDefault "the agent container carries a hardened securityContext by default"
 row m162 test internal/controller/hardening_test.go TestTheProfileOmitsWhatWouldBreakRealImages "the hardening profile omits what would break real images"
 row m162 test internal/controller/hardening_test.go TestUnconfinedIsByteIdenticalToThePreviousShape "an unconfined agent keeps the previous pod shape"
-row m162 has api/v1alpha1/agentdeployment_types.go "Unconfined bool" "a per-agent declared exception exists (no cluster-wide switch is the only escape)"
+row m162 has api/v1beta1/agentdeployment_types.go "Unconfined bool" "a per-agent declared exception exists (no cluster-wide switch is the only escape)"
 row m162 has internal/controller/agentdeployment_controller.go "func hardeningFold" "the hardening is folded into the revision digest, so it reaches running pods"
 row m162 has internal/controller/agentdeployment_controller_test.go "hardeningFold(combinedBindingDigest" "the tests share the production fold instead of reimplementing it"
 row m162 has cmd/launcher/memory.go "func loopbackAddr" "a loopback binding helper exists"

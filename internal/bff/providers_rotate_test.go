@@ -21,14 +21,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
 )
 
 // connectShapedCustomRoute is the ModelRoute connect writes for a custom (OpenAI-compatible)
 // provider named "gateway" in "prod".
-func connectShapedCustomRoute(baseURL string) *agentsv1alpha1.ModelRoute {
-	return &agentsv1alpha1.ModelRoute{
+func connectShapedCustomRoute(baseURL string) *agentsv1beta1.ModelRoute {
+	return &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "gateway", Namespace: "prod",
 			Labels: map[string]string{labelManagedBy: managedByConnect, labelProvider: providerCustom},
@@ -36,12 +36,12 @@ func connectShapedCustomRoute(baseURL string) *agentsv1alpha1.ModelRoute {
 				annDisplayName: "Team gateway", annBaseURL: baseURL, annProviderModels: "mock-large,mock-small",
 			},
 		},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{
 				Provider: providerOpenAI, Model: "mock-large", Priority: 1,
 				SecretBindingRef: "gateway", APIBase: baseURL,
 			}},
-			RateLimit: &agentsv1alpha1.RateLimit{TenantRPM: 600},
+			RateLimit: &agentsv1beta1.RateLimit{TenantRPM: 600},
 		},
 	}
 }
@@ -92,13 +92,13 @@ func TestRotateSpecFromRoute_UsesTheEndpointTheGatewayCalls(t *testing.T) {
 func TestRotateSpecFromRoute_RefusesARouteConnectDidNotWrite(t *testing.T) {
 	t.Parallel()
 
-	for name, edit := range map[string]func(*agentsv1alpha1.ModelRoute){
-		"hand-authored": func(mr *agentsv1alpha1.ModelRoute) { delete(mr.Labels, labelManagedBy) },
-		"model-picker":  func(mr *agentsv1alpha1.ModelRoute) { mr.Labels[labelManagedBy] = managedByModelPicker },
-		"no provider":   func(mr *agentsv1alpha1.ModelRoute) { delete(mr.Labels, labelProvider) },
-		"other binding": func(mr *agentsv1alpha1.ModelRoute) { mr.Spec.Providers[0].SecretBindingRef = "shared" },
-		"a fallback added": func(mr *agentsv1alpha1.ModelRoute) {
-			mr.Spec.Providers = append(mr.Spec.Providers, agentsv1alpha1.ProviderRef{
+	for name, edit := range map[string]func(*agentsv1beta1.ModelRoute){
+		"hand-authored": func(mr *agentsv1beta1.ModelRoute) { delete(mr.Labels, labelManagedBy) },
+		"model-picker":  func(mr *agentsv1beta1.ModelRoute) { mr.Labels[labelManagedBy] = managedByModelPicker },
+		"no provider":   func(mr *agentsv1beta1.ModelRoute) { delete(mr.Labels, labelProvider) },
+		"other binding": func(mr *agentsv1beta1.ModelRoute) { mr.Spec.Providers[0].SecretBindingRef = "shared" },
+		"a fallback added": func(mr *agentsv1beta1.ModelRoute) {
+			mr.Spec.Providers = append(mr.Spec.Providers, agentsv1beta1.ProviderRef{
 				Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 2, SecretBindingRef: "anthropic",
 			})
 		},
@@ -118,12 +118,12 @@ func TestRotateSpecFromRoute_RefusesARouteConnectDidNotWrite(t *testing.T) {
 func TestCheckConnectBinding(t *testing.T) {
 	t.Parallel()
 
-	binding := func(secret, key string) *agentsv1alpha1.SecretBinding {
-		return &agentsv1alpha1.SecretBinding{
+	binding := func(secret, key string) *agentsv1beta1.SecretBinding {
+		return &agentsv1beta1.SecretBinding{
 			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labelManagedBy: managedByConnect}},
-			Spec: agentsv1alpha1.SecretBindingSpec{
+			Spec: agentsv1beta1.SecretBindingSpec{
 				Backend:   secretBackendKubernetes,
-				SecretRef: agentsv1alpha1.SecretKeyRef{Name: secret, Key: key},
+				SecretRef: agentsv1beta1.SecretKeyRef{Name: secret, Key: key},
 			},
 		}
 	}
@@ -131,7 +131,7 @@ func TestCheckConnectBinding(t *testing.T) {
 
 	unlabeled := binding("gateway", secretKeyAPIKey)
 	unlabeled.Labels = map[string]string{"app.kubernetes.io/instance": "argocd-prod"}
-	for name, b := range map[string]*agentsv1alpha1.SecretBinding{
+	for name, b := range map[string]*agentsv1beta1.SecretBinding{
 		"another Secret":   binding("shared-keys", secretKeyAPIKey),
 		"another key":      binding("gateway", "token"),
 		"not from connect": unlabeled,
@@ -145,11 +145,11 @@ func TestCheckConnectBinding(t *testing.T) {
 // seedConnectedCustomProvider is the triple connect writes for connectShapedCustomRoute.
 func seedConnectedCustomProvider(baseURL string) []client.Object {
 	route := connectShapedCustomRoute(baseURL)
-	binding := &agentsv1alpha1.SecretBinding{
+	binding := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "gateway", Namespace: "prod", Labels: route.Labels},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend:   secretBackendKubernetes,
-			SecretRef: agentsv1alpha1.SecretKeyRef{Name: "gateway", Key: secretKeyAPIKey},
+			SecretRef: agentsv1beta1.SecretKeyRef{Name: "gateway", Key: secretKeyAPIKey},
 		},
 	}
 	secret := &corev1.Secret{
@@ -266,7 +266,7 @@ func TestRotateProviderKey_KeepsTheRoutesEndpointModelAndRateLimit(t *testing.T)
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &summary))
 	assert.Equal(t, []string{"mock-flagship-pro", "mock-large", "mock-small"}, summary.Models)
 
-	var route agentsv1alpha1.ModelRoute
+	var route agentsv1beta1.ModelRoute
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "gateway", Namespace: "prod"}, &route))
 	require.Len(t, route.Spec.Providers, 1)
 	p := route.Spec.Providers[0]
@@ -292,7 +292,7 @@ func TestRotateProviderKey_IncompleteProviderIsRefusedBeforeAnyWrite(t *testing.
 	seed := seedConnectedCustomProvider(prov.URL)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(seed[0], seed[1]).Build()
 	before := map[string]string{}
-	for _, o := range []client.Object{&agentsv1alpha1.ModelRoute{}, &agentsv1alpha1.SecretBinding{}} {
+	for _, o := range []client.Object{&agentsv1beta1.ModelRoute{}, &agentsv1beta1.SecretBinding{}} {
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "gateway", Namespace: "prod"}, o))
 		before[fmt.Sprintf("%T", o)] = o.GetResourceVersion()
 	}
@@ -304,7 +304,7 @@ func TestRotateProviderKey_IncompleteProviderIsRefusedBeforeAnyWrite(t *testing.
 
 	err := c.Get(context.Background(), client.ObjectKey{Name: "gateway", Namespace: "prod"}, &corev1.Secret{})
 	assert.True(t, apierrors.IsNotFound(err), "a rotate must not create the missing Secret; got %v", err)
-	for _, o := range []client.Object{&agentsv1alpha1.ModelRoute{}, &agentsv1alpha1.SecretBinding{}} {
+	for _, o := range []client.Object{&agentsv1beta1.ModelRoute{}, &agentsv1beta1.SecretBinding{}} {
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "gateway", Namespace: "prod"}, o))
 		assert.Equal(t, before[fmt.Sprintf("%T", o)], o.GetResourceVersion(),
 			"%T must be untouched by a refused rotate", o)
@@ -326,12 +326,12 @@ func TestRotateProviderKey_RefusesWithoutProbingOrWriting(t *testing.T) {
 	for name, seed := range map[string]func() []client.Object{
 		"hand-authored route": func() []client.Object {
 			objs := seedConnectedCustomProvider(prov.URL)
-			delete(objs[0].(*agentsv1alpha1.ModelRoute).Labels, labelManagedBy)
+			delete(objs[0].(*agentsv1beta1.ModelRoute).Labels, labelManagedBy)
 			return objs
 		},
 		"binding re-pointed": func() []client.Object {
 			objs := seedConnectedCustomProvider(prov.URL)
-			objs[1].(*agentsv1alpha1.SecretBinding).Spec.SecretRef.Name = "shared-keys"
+			objs[1].(*agentsv1beta1.SecretBinding).Spec.SecretRef.Name = "shared-keys"
 			return objs
 		},
 		"binding not from connect": func() []client.Object {
@@ -391,7 +391,7 @@ func TestRotateProviderKey_WritesAnAuditRow(t *testing.T) {
 				Update: func(ctx context.Context, w client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
 					uo := &client.UpdateOptions{}
 					uo.ApplyOptions(opts)
-					if _, isRoute := obj.(*agentsv1alpha1.ModelRoute); isRoute && len(uo.DryRun) == 0 {
+					if _, isRoute := obj.(*agentsv1beta1.ModelRoute); isRoute && len(uo.DryRun) == 0 {
 						return apierrors.NewInternalError(assert.AnError)
 					}
 					return w.Update(ctx, obj, opts...)
@@ -402,7 +402,7 @@ func TestRotateProviderKey_WritesAnAuditRow(t *testing.T) {
 		"route read denied": {
 			funcs: interceptor.Funcs{
 				Get: func(ctx context.Context, w client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-					if _, isRoute := obj.(*agentsv1alpha1.ModelRoute); isRoute {
+					if _, isRoute := obj.(*agentsv1beta1.ModelRoute); isRoute {
 						return forbidden(obj)
 					}
 					return w.Get(ctx, key, obj, opts...)
@@ -457,7 +457,7 @@ func TestRotateProviderKey_KeepsAnEditedEndpoint(t *testing.T) {
 	edited := fakeProvider(t, "mock-large", "mock-eu")
 
 	seed := seedConnectedCustomProvider(old.URL)
-	seed[0].(*agentsv1alpha1.ModelRoute).Spec.Providers[0].APIBase = edited.URL
+	seed[0].(*agentsv1beta1.ModelRoute).Spec.Providers[0].APIBase = edited.URL
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(seed...).Build()
 	s, _, _ := newConnectServer(t, c)
 
@@ -465,7 +465,7 @@ func TestRotateProviderKey_KeepsAnEditedEndpoint(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Zero(t, oldProbes.Load(), "the key is validated against the endpoint the gateway calls")
 
-	var route agentsv1alpha1.ModelRoute
+	var route agentsv1beta1.ModelRoute
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "gateway", Namespace: "prod"}, &route))
 	require.Len(t, route.Spec.Providers, 1)
 	assert.Equal(t, edited.URL, route.Spec.Providers[0].APIBase, "the edited endpoint is kept")
@@ -483,7 +483,7 @@ func TestRotateProviderKey_RefusesARouteEditedDuringTheProbe(t *testing.T) {
 	const repointed = "https://llm-eu.example.internal/v1"
 	var c client.Client
 	prov := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var route agentsv1alpha1.ModelRoute
+		var route agentsv1beta1.ModelRoute
 		if err := c.Get(r.Context(), client.ObjectKey{Name: "gateway", Namespace: "prod"}, &route); err == nil &&
 			route.Spec.Providers[0].APIBase != repointed {
 			route.Spec.Providers[0].APIBase = repointed
@@ -508,7 +508,7 @@ func TestRotateProviderKey_RefusesARouteEditedDuringTheProbe(t *testing.T) {
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), `its ModelRoute \"gateway\" was changed while the key was being rotated`)
 
-	var route agentsv1alpha1.ModelRoute
+	var route agentsv1beta1.ModelRoute
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "gateway", Namespace: "prod"}, &route))
 	assert.Equal(t, repointed, route.Spec.Providers[0].APIBase, "the re-point is kept")
 	var secret corev1.Secret

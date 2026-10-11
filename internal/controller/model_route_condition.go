@@ -10,7 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // conditionModelRouteReady says whether the model route an agent names in MODEL_ROUTE can be called
@@ -21,7 +21,7 @@ const conditionModelRouteReady = "ModelRouteReady"
 const envModelRoute = "MODEL_ROUTE"
 
 // modelRouteName is the route an agent names, or "" when it names none (or names it indirectly).
-func modelRouteName(deploy *agentsv1alpha1.AgentDeployment) string {
+func modelRouteName(deploy *agentsv1beta1.AgentDeployment) string {
 	for _, e := range deploy.Spec.Env {
 		if e.Name == envModelRoute && e.ValueFrom == nil {
 			return strings.TrimSpace(e.Value)
@@ -32,7 +32,7 @@ func modelRouteName(deploy *agentsv1alpha1.AgentDeployment) string {
 
 // syncModelRouteCondition mirrors the named route's Ready onto the agent. The route is looked up in the
 // agent's own namespace; a route of that name elsewhere is not one this agent may rely on.
-func (r *AgentDeploymentReconciler) syncModelRouteCondition(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment) error {
+func (r *AgentDeploymentReconciler) syncModelRouteCondition(ctx context.Context, deploy *agentsv1beta1.AgentDeployment) error {
 	route := modelRouteName(deploy)
 	if route == "" {
 		if apimeta.RemoveStatusCondition(&deploy.Status.Conditions, conditionModelRouteReady) {
@@ -43,7 +43,7 @@ func (r *AgentDeploymentReconciler) syncModelRouteCondition(ctx context.Context,
 		return nil
 	}
 	cond := metav1.Condition{Type: conditionModelRouteReady, ObservedGeneration: deploy.Generation}
-	var mr agentsv1alpha1.ModelRoute
+	var mr agentsv1beta1.ModelRoute
 	err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: route}, &mr)
 	switch {
 	case apierrors.IsNotFound(err):

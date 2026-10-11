@@ -36,7 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
@@ -123,11 +123,11 @@ func startTestRunWorkers(t *testing.T, s *Server) {
 
 // readyAgent is an AgentDeployment with an assigned endpoint (status.url) — the
 // happy-path fixture the Playground resolves and dispatches to.
-func readyAgent(name, namespace, url string) *agentsv1alpha1.AgentDeployment {
-	return &agentsv1alpha1.AgentDeployment{
+func readyAgent(name, namespace, url string) *agentsv1beta1.AgentDeployment {
+	return &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "echo:1"},
-		Status:     agentsv1alpha1.AgentDeploymentStatus{URL: url},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "echo:1"},
+		Status:     agentsv1beta1.AgentDeploymentStatus{URL: url},
 	}
 }
 

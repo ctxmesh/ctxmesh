@@ -29,7 +29,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 )
 
@@ -439,7 +439,7 @@ func (s *Server) authorizeAgentKey(w http.ResponseWriter, r *http.Request, calle
 		writeError(w, http.StatusBadRequest, "agent filter must be namespace/name")
 		return false
 	}
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &ad); err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
@@ -613,7 +613,7 @@ func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 	// gate — never serve a cluster-wide breakdown when tenant boundaries exist.
 	tenant := strings.TrimSpace(r.URL.Query().Get("tenant"))
 	if tenant == "" {
-		var tenants agentsv1alpha1.TenantList
+		var tenants agentsv1beta1.TenantList
 		if err := caller.List(r.Context(), &tenants); err != nil || len(tenants.Items) > 0 {
 			writeError(w, http.StatusBadRequest, "missing required query param: tenant")
 			return
@@ -690,7 +690,7 @@ func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 	// Tenant.spec.namespaces is the membership set) + recompute the page total over the kept rows —
 	// the tenant-isolation filter over the cluster-wide Langfuse breakdown. NB pagination is over the
 	// pre-filter list; a tenant's agent set is bounded (one page in practice — documented, ADR 0077).
-	var tnt agentsv1alpha1.Tenant
+	var tnt agentsv1beta1.Tenant
 	if err := caller.Get(r.Context(), client.ObjectKey{Name: tenant}, &tnt); err != nil {
 		s.writeGetError(w, err, "tenant")
 		return

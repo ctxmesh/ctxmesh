@@ -11,13 +11,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 )
 
 func TestLangfuseSecretRequests(t *testing.T) {
-	agent := func(ns, name string) *agentsv1alpha1.AgentDeployment {
-		return &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+	agent := func(ns, name string) *agentsv1beta1.AgentDeployment {
+		return &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
 	}
 	c := fake.NewClientBuilder().WithScheme(delegateScheme(t)).
 		WithObjects(agent("team-a", "one"), agent("team-a", "two"), agent("team-b", "other")).Build()

@@ -29,7 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/eval"
 )
 
@@ -71,9 +71,9 @@ func TestCanary_NoRollout_KsvcTrafficUnchanged(t *testing.T) {
 	)
 	es := mkEvalSuite(t, "canary-none-suite", namespace, "0.7", eval.GateBlock)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:        "ghcr.io/ctxmesh/example-agent:latest",
 			EvalSuiteRef: es.Name,
 			// NO Rollout block.
@@ -117,12 +117,12 @@ func TestCanary_Split_PromoteAndAbort(t *testing.T) {
 	)
 	es := mkEvalSuite(t, "canary-split-suite", namespace, "0.7", eval.GateBlock)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:        "ghcr.io/ctxmesh/example-agent:latest",
 			EvalSuiteRef: es.Name,
-			Rollout: &agentsv1alpha1.RolloutSpec{
+			Rollout: &agentsv1beta1.RolloutSpec{
 				Strategy:      "canary",
 				CanaryPercent: 10,
 			},
@@ -239,12 +239,12 @@ func TestCanary_Blocked_NoSplit(t *testing.T) {
 	)
 	es := mkEvalSuite(t, "canary-blocked-suite", namespace, "0.8", eval.GateBlock)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:        "ghcr.io/ctxmesh/example-agent:latest",
 			EvalSuiteRef: es.Name,
-			Rollout:      &agentsv1alpha1.RolloutSpec{Strategy: "canary", CanaryPercent: 10},
+			Rollout:      &agentsv1beta1.RolloutSpec{Strategy: "canary", CanaryPercent: 10},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
@@ -265,30 +265,30 @@ func TestCanary_Blocked_NoSplit(t *testing.T) {
 func TestCanary_RolloutRoundTrip(t *testing.T) {
 	const namespace = "default"
 
-	withRollout := &agentsv1alpha1.AgentDeployment{
+	withRollout := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "rollout-rt-agent", Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:   "ghcr.io/ctxmesh/example-agent:latest",
-			Rollout: &agentsv1alpha1.RolloutSpec{Strategy: "canary", CanaryPercent: 25},
+			Rollout: &agentsv1beta1.RolloutSpec{Strategy: "canary", CanaryPercent: 25},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, withRollout), "the CRD schema must accept the rollout block")
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, withRollout) })
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "rollout-rt-agent", Namespace: namespace}, &got))
 	require.NotNil(t, got.Spec.Rollout)
 	assert.Equal(t, "canary", got.Spec.Rollout.Strategy)
 	assert.Equal(t, int32(25), got.Spec.Rollout.CanaryPercent)
 
-	noRollout := &agentsv1alpha1.AgentDeployment{
+	noRollout := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "no-rollout-rt-agent", Namespace: namespace},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, noRollout))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, noRollout) })
 
-	var gotNo agentsv1alpha1.AgentDeployment
+	var gotNo agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "no-rollout-rt-agent", Namespace: namespace}, &gotNo))
 	assert.Nil(t, gotNo.Spec.Rollout, "an absent rollout block reads back nil (optional)")
 }
@@ -329,17 +329,17 @@ func TestCanary_AutoProgress(t *testing.T) {
 	)
 	es := mkEvalSuite(t, "canary-autoprogress-suite", namespace, "0.7", eval.GateBlock)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:        "ghcr.io/ctxmesh/example-agent:latest",
 			EvalSuiteRef: es.Name,
-			Rollout: &agentsv1alpha1.RolloutSpec{
+			Rollout: &agentsv1beta1.RolloutSpec{
 				Strategy:      "canary",
 				CanaryPercent: 10,
-				AutoProgress: &agentsv1alpha1.AutoProgressConfig{
+				AutoProgress: &agentsv1beta1.AutoProgressConfig{
 					Enabled:      true,
-					Steps:        []agentsv1alpha1.CanaryStep{{Percent: 50}, {Percent: 100}},
+					Steps:        []agentsv1beta1.CanaryStep{{Percent: 50}, {Percent: 100}},
 					DwellSeconds: 60,
 				},
 			},

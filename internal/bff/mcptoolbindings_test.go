@@ -36,7 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // mtbNS is the namespace used in MCPToolBinding tests.
@@ -45,15 +45,15 @@ const mtbNS = "team-bindings"
 // --- fixture helpers --------------------------------------------------------
 
 // mockMCPToolBinding builds a minimal MCPToolBinding (sidecar mode).
-func mockMCPToolBinding(name, ns, agentRef, toolName string) *agentsv1alpha1.MCPToolBinding {
-	return &agentsv1alpha1.MCPToolBinding{
+func mockMCPToolBinding(name, ns, agentRef, toolName string) *agentsv1beta1.MCPToolBinding {
+	return &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: agentsv1alpha1.MCPToolBindingSpec{
+		Spec: agentsv1beta1.MCPToolBindingSpec{
 			AgentRef:    agentRef,
 			RegistryRef: "default-registry",
 			ToolName:    toolName,
 			Mode:        "sidecar",
-			Server: agentsv1alpha1.ToolServer{
+			Server: agentsv1beta1.ToolServer{
 				Image: "ghcr.io/example/mcp-search:latest",
 			},
 		},
@@ -63,7 +63,7 @@ func mockMCPToolBinding(name, ns, agentRef, toolName string) *agentsv1alpha1.MCP
 // withReadyCondition sets Ready=True on an MCPToolBinding, simulating that the
 // controller has registered, pin-matched, rendered, and hot-updated the tool.
 // Ready=True IS the hot-update propagation signal.
-func withReadyCondition(b *agentsv1alpha1.MCPToolBinding) *agentsv1alpha1.MCPToolBinding {
+func withReadyCondition(b *agentsv1beta1.MCPToolBinding) *agentsv1beta1.MCPToolBinding {
 	b.Status.Conditions = []metav1.Condition{
 		{
 			Type:               "Ready",
@@ -78,7 +78,7 @@ func withReadyCondition(b *agentsv1alpha1.MCPToolBinding) *agentsv1alpha1.MCPToo
 
 // withFailedCondition sets Ready=False with a specific reason, simulating a
 // binding that failed controller reconciliation.
-func withFailedCondition(b *agentsv1alpha1.MCPToolBinding, reason string) *agentsv1alpha1.MCPToolBinding {
+func withFailedCondition(b *agentsv1beta1.MCPToolBinding, reason string) *agentsv1beta1.MCPToolBinding {
 	b.Status.Conditions = []metav1.Condition{
 		{
 			Type:               "Ready",
@@ -257,7 +257,7 @@ func TestListMCPToolBindingsNamespaceScoping(t *testing.T) {
 
 // TestListMCPToolBindingsLimitAndCursor proves limit/cursor paging works.
 func TestListMCPToolBindingsLimitAndCursor(t *testing.T) {
-	all := []*agentsv1alpha1.MCPToolBinding{
+	all := []*agentsv1beta1.MCPToolBinding{
 		mockMCPToolBinding("b-000", mtbNS, "agent-a", "search"),
 		mockMCPToolBinding("b-001", mtbNS, "agent-b", "search"),
 		mockMCPToolBinding("b-002", mtbNS, "agent-c", "search"),
@@ -281,7 +281,7 @@ func TestListMCPToolBindingsLimitAndCursor(t *testing.T) {
 			if lo.Limit > 0 && start+int(lo.Limit) < end {
 				end = start + int(lo.Limit)
 			}
-			bList, ok := list.(*agentsv1alpha1.MCPToolBindingList)
+			bList, ok := list.(*agentsv1beta1.MCPToolBindingList)
 			if !ok {
 				return fmt.Errorf("unexpected list type %T", list)
 			}
@@ -417,14 +417,14 @@ func TestGetMCPToolBindingPendingWhenConditionAbsent(t *testing.T) {
 // TestGetMCPToolBindingReturnsFullSpec proves the detail DTO includes all spec
 // fields (agentRef, registryRef, toolName, mode, server).
 func TestGetMCPToolBindingReturnsFullSpec(t *testing.T) {
-	b := &agentsv1alpha1.MCPToolBinding{
+	b := &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-binding", Namespace: mtbNS},
-		Spec: agentsv1alpha1.MCPToolBindingSpec{
+		Spec: agentsv1beta1.MCPToolBindingSpec{
 			AgentRef:    "my-agent",
 			RegistryRef: "my-registry",
 			ToolName:    "web-search",
 			Mode:        "sidecar",
-			Server:      agentsv1alpha1.ToolServer{Image: "ghcr.io/example/search:v1"},
+			Server:      agentsv1beta1.ToolServer{Image: "ghcr.io/example/search:v1"},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(b).Build()
@@ -503,7 +503,7 @@ func TestCreateMCPToolBindingSucceeds(t *testing.T) {
 	assert.False(t, detail.Ready)
 
 	// Confirm it landed in the fake store.
-	var got agentsv1alpha1.MCPToolBinding
+	var got agentsv1beta1.MCPToolBinding
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: mtbNS, Name: "new-binding"}, &got))
 	assert.Equal(t, "my-agent", got.Spec.AgentRef)
 	assert.Equal(t, "web-search", got.Spec.ToolName)
@@ -799,7 +799,7 @@ func TestDeleteMCPToolBindingRemovesObject(t *testing.T) {
 	rec := deleteMCPToolBinding(t, s, "my-binding")
 	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
 
-	var got agentsv1alpha1.MCPToolBinding
+	var got agentsv1beta1.MCPToolBinding
 	err := c.Get(context.Background(), client.ObjectKey{Namespace: mtbNS, Name: "my-binding"}, &got)
 	require.True(t, apierrors.IsNotFound(err), "MCPToolBinding must be gone after a successful DELETE")
 }

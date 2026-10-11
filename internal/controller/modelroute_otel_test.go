@@ -15,7 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/gateway"
 	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 )
@@ -25,10 +25,10 @@ import (
 
 func createOTelTestRoute(t *testing.T, name string) {
 	t.Helper()
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gwNS},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{Provider: "mock", Model: "mock-default", Priority: 1}},
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{Provider: "mock", Model: "mock-default", Priority: 1}},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, route))

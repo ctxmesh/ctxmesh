@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
 )
 
@@ -37,7 +37,7 @@ import (
 // (the auto-path resolves the prior of THIS version to roll back to).
 func setRegressionDetected(t *testing.T, name, namespace, serving string) {
 	t.Helper()
-	var d agentsv1alpha1.AgentDeployment
+	var d agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKey{Name: name, Namespace: namespace}, &d))
 	d.Status.LatestVersion = serving
 	apimeta.SetStatusCondition(&d.Status.Conditions, metav1.Condition{
@@ -51,15 +51,15 @@ func setRegressionDetected(t *testing.T, name, namespace, serving string) {
 // stored (after API-server defaulting): named <deployment>-<specHash>, snapshotting the versioned spec.
 // Auto-rollback judges only the version the stored spec hashes to (shouldAutoRollback), so a test's
 // serving version must be that one, created after its prior so priorVersionOf orders them.
-func mkServingVersion(t *testing.T, deploy *agentsv1alpha1.AgentDeployment) string {
+func mkServingVersion(t *testing.T, deploy *agentsv1beta1.AgentDeployment) string {
 	t.Helper()
-	var stored agentsv1alpha1.AgentDeployment
+	var stored agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &stored))
 	hash, err := specHash(stored.Spec)
 	require.NoError(t, err)
-	av := &agentsv1alpha1.AgentVersion{
+	av := &agentsv1beta1.AgentVersion{
 		ObjectMeta: metav1.ObjectMeta{Name: stored.Name + "-" + hash, Namespace: stored.Namespace},
-		Spec: agentsv1alpha1.AgentVersionSpec{
+		Spec: agentsv1beta1.AgentVersionSpec{
 			DeploymentName: stored.Name,
 			Snapshot:       versionedSpec(stored.Spec),
 		},
@@ -70,11 +70,11 @@ func mkServingVersion(t *testing.T, deploy *agentsv1alpha1.AgentDeployment) stri
 }
 
 // autoRollbackSpec is a serving AgentDeployment spec with OPT-IN auto-rollback set to `enabled`.
-func autoRollbackSpec(image string, enabled bool) agentsv1alpha1.AgentDeploymentSpec {
-	return agentsv1alpha1.AgentDeploymentSpec{
+func autoRollbackSpec(image string, enabled bool) agentsv1beta1.AgentDeploymentSpec {
+	return agentsv1beta1.AgentDeploymentSpec{
 		Image: image,
-		Rollout: &agentsv1alpha1.RolloutSpec{
-			AutoRollback: &agentsv1alpha1.AutoRollbackConfig{Enabled: enabled},
+		Rollout: &agentsv1beta1.RolloutSpec{
+			AutoRollback: &agentsv1beta1.AutoRollbackConfig{Enabled: enabled},
 		},
 	}
 }
@@ -95,7 +95,7 @@ func TestAutoRollback_HealthyPrior_RevertsAndFreezes(t *testing.T) {
 	mkVersionSnap(t, name, priorV, namespace, priorImg)
 	time.Sleep(1100 * time.Millisecond)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec:       autoRollbackSpec(servingImg, true),
 	}
@@ -109,7 +109,7 @@ func TestAutoRollback_HealthyPrior_RevertsAndFreezes(t *testing.T) {
 	// store: the prior is not the serving version and carries no regression evidence ⇒ healthy.
 	reconcileNN(t, rollbackReconciler(onlinescore.NewMemStore()), name, namespace)
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
 
 	assert.Equal(t, priorImg, got.Spec.Image, "spec must revert to the prior (healthy) version's snapshot image")
@@ -143,12 +143,12 @@ func TestAutoRollback_RevertedSpecRolls(t *testing.T) {
 	)
 	cases := []struct {
 		name, agent   string
-		servingPolicy *agentsv1alpha1.ToolPolicySpec // kept live by the rollback
+		servingPolicy *agentsv1beta1.ToolPolicySpec // kept live by the rollback
 	}{
 		{name: "the reverted spec is the prior version", agent: "ar-rolls-prior"},
 		{
 			name: "kept governance makes the reverted spec a new version", agent: "ar-rolls-newver",
-			servingPolicy: &agentsv1alpha1.ToolPolicySpec{MaxToolCallsPerRun: 5},
+			servingPolicy: &agentsv1beta1.ToolPolicySpec{MaxToolCallsPerRun: 5},
 		},
 	}
 	for _, tc := range cases {
@@ -157,7 +157,7 @@ func TestAutoRollback_RevertedSpecRolls(t *testing.T) {
 
 			// The versions come from the ordinary reconcile, as they do in a cluster: the prior spec
 			// first, then the regressed one.
-			deploy := &agentsv1alpha1.AgentDeployment{
+			deploy := &agentsv1beta1.AgentDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: tc.agent, Namespace: namespace},
 				Spec:       autoRollbackSpec(priorImg, true),
 			}
@@ -170,7 +170,7 @@ func TestAutoRollback_RevertedSpecRolls(t *testing.T) {
 			require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
 			deploy.Spec.Image = servingImg
 			if tc.servingPolicy != nil {
-				deploy.Spec.Runtime = &agentsv1alpha1.RuntimeSpec{ToolPolicy: tc.servingPolicy.DeepCopy()}
+				deploy.Spec.Runtime = &agentsv1beta1.RuntimeSpec{ToolPolicy: tc.servingPolicy.DeepCopy()}
 			}
 			require.NoError(t, k8sClient.Update(testCtx, deploy))
 			reconcileNN(t, r, tc.agent, namespace)
@@ -180,7 +180,7 @@ func TestAutoRollback_RevertedSpecRolls(t *testing.T) {
 			setRegressionDetected(t, tc.agent, namespace, servingV)
 			reconcileNN(t, r, tc.agent, namespace) // the revert
 
-			var reverted agentsv1alpha1.AgentDeployment
+			var reverted agentsv1beta1.AgentDeployment
 			require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &reverted))
 			require.Equal(t, priorImg, reverted.Spec.Image, "the spec reverts to the prior version's image")
 			require.NotNil(t, reverted.Status.Rollback)
@@ -195,10 +195,10 @@ func TestAutoRollback_RevertedSpecRolls(t *testing.T) {
 				reconcileNN(t, r, tc.agent, namespace)
 			}
 
-			var got agentsv1alpha1.AgentDeployment
+			var got agentsv1beta1.AgentDeployment
 			require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
 			assert.Equal(t, priorImg, got.Spec.Image, "the reverted spec stays")
-			var av agentsv1alpha1.AgentVersion
+			var av agentsv1beta1.AgentVersion
 			assert.NoError(t, k8sClient.Get(testCtx, client.ObjectKey{Namespace: namespace, Name: rolledBackTo}, &av),
 				"rolledBackTo must name an AgentVersion that exists")
 			assert.Equal(t, rolledBackTo, got.Status.LatestVersion, "the reverted version is the one serving")
@@ -221,7 +221,7 @@ func TestAutoRollback_RevertedSpecRolls(t *testing.T) {
 // latestVersionOf returns status.latestVersion of the named deployment.
 func latestVersionOf(t *testing.T, name, namespace string) string {
 	t.Helper()
-	var d agentsv1alpha1.AgentDeployment
+	var d agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKey{Name: name, Namespace: namespace}, &d))
 	require.NotEmpty(t, d.Status.LatestVersion)
 	return d.Status.LatestVersion
@@ -238,30 +238,30 @@ func TestAutoRollback_GovernanceOnlyPrior_NoFreeze(t *testing.T) {
 		priorV    = "ar-govonly-prior0000"
 		image     = "ghcr.io/ctxmesh/example-agent:v1"
 	)
-	withRule := func(rule string) agentsv1alpha1.AgentDeploymentSpec {
+	withRule := func(rule string) agentsv1beta1.AgentDeploymentSpec {
 		s := autoRollbackSpec(image, true)
-		s.Runtime = &agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{
-			Overrides: []agentsv1alpha1.ToolPolicyOverride{{Name: "db.delete", Rule: rule}},
+		s.Runtime = &agentsv1beta1.RuntimeSpec{ToolPolicy: &agentsv1beta1.ToolPolicySpec{
+			Overrides: []agentsv1beta1.ToolPolicyOverride{{Name: "db.delete", Rule: rule}},
 		}}
 		return s
 	}
 	mkVersionSpec(t, name, priorV, namespace, withRule("allow"))
 	time.Sleep(1100 * time.Millisecond)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec:       withRule("require-approval"),
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
 	servingV := mkServingVersion(t, deploy)
-	var live agentsv1alpha1.AgentDeployment
+	var live agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &live))
 
 	setRegressionDetected(t, name, namespace, servingV)
 	reconcileNN(t, rollbackReconciler(onlinescore.NewMemStore()), name, namespace)
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
 	assert.Equal(t, live.Spec, got.Spec, "the approval gate stays and nothing else changes")
 	assert.Nil(t, got.Status.Rollback, "no freeze, cooldown or history for a rollback that did not happen")
@@ -292,7 +292,7 @@ func TestAutoRollback_Frozen_NotEvaluated(t *testing.T) {
 	mkVersionSnap(t, name, priorV, namespace, priorImg)
 	time.Sleep(1100 * time.Millisecond)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec:       autoRollbackSpec(servingImg, true),
 	}
@@ -303,7 +303,7 @@ func TestAutoRollback_Frozen_NotEvaluated(t *testing.T) {
 	// Seed an outstanding freeze with the rollback that set it, AND the regression trigger.
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
 	deploy.Status.LatestVersion = servingV
-	deploy.Status.Rollback = &agentsv1alpha1.RollbackStatus{FrozenUntilAck: true}
+	deploy.Status.Rollback = &agentsv1beta1.RollbackStatus{FrozenUntilAck: true}
 	const frozeMsg = "reverted serving spec to AgentVersion \"an-earlier-one\""
 	apimeta.SetStatusCondition(&deploy.Status.Conditions, metav1.Condition{
 		Type: conditionRolledBack, Status: metav1.ConditionTrue, Reason: reasonRolledBack, Message: frozeMsg,
@@ -316,7 +316,7 @@ func TestAutoRollback_Frozen_NotEvaluated(t *testing.T) {
 
 	reconcileNN(t, rollbackReconciler(onlinescore.NewMemStore()), name, namespace)
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
 	assert.Equal(t, servingImg, got.Spec.Image, "a frozen deployment must not auto-roll-back")
 	require.NotNil(t, got.Status.Rollback)
@@ -347,9 +347,9 @@ func TestAutoRollback_OptOut_NoAction(t *testing.T) {
 	time.Sleep(1100 * time.Millisecond)
 
 	// A deployment WITHOUT any autoRollback block — the pre-auto (detection-only) behavior.
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: servingImg},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: servingImg},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
@@ -359,7 +359,7 @@ func TestAutoRollback_OptOut_NoAction(t *testing.T) {
 
 	reconcileNN(t, rollbackReconciler(onlinescore.NewMemStore()), name, namespace)
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
 	assert.Equal(t, servingImg, got.Spec.Image, "no opt-in ⇒ the auto-path must not change spec")
 
@@ -381,7 +381,7 @@ func TestAutoRollback_OptOutDisabled_NoAction(t *testing.T) {
 	mkVersionSnap(t, name, priorV, namespace, priorImg)
 	time.Sleep(1100 * time.Millisecond)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec:       autoRollbackSpec(servingImg, false),
 	}
@@ -393,7 +393,7 @@ func TestAutoRollback_OptOutDisabled_NoAction(t *testing.T) {
 
 	reconcileNN(t, rollbackReconciler(onlinescore.NewMemStore()), name, namespace)
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
 	assert.Equal(t, servingImg, got.Spec.Image, "enabled=false ⇒ the auto-path must not change spec")
 	assert.Nil(t, rolledBackCond(t, name, namespace), "enabled=false ⇒ no RolledBack condition")
@@ -424,7 +424,7 @@ func TestAutoRollback_UnhealthyPrior_Refused(t *testing.T) {
 	seedJudgeWindows(t, store, namespace, name, baseV, 200, []float64{0.90})
 	seedJudgeWindows(t, store, namespace, name, priorV, 100, []float64{0.70, 0.69, 0.71})
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec:       autoRollbackSpec(servingImg, true),
 	}
@@ -436,7 +436,7 @@ func TestAutoRollback_UnhealthyPrior_Refused(t *testing.T) {
 
 	reconcileNN(t, rollbackReconciler(store), name, namespace)
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), &got))
 	assert.Equal(t, servingImg, got.Spec.Image,
 		"an unhealthy prior must be refused by the healthy-target guard; spec unchanged")

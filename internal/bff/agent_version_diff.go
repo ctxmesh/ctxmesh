@@ -24,7 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // AgentVersionDiffResponse is returned by GET /api/agents/{ns}/{name}/versions/diff (V3, m101.7).
@@ -97,7 +97,7 @@ func (s *Server) handleAgentVersionDiff(w http.ResponseWriter, r *http.Request) 
 // a missing version → 404 (labeled from/to), an RBAC denial → the caller's real 403, a cross-agent
 // version → 400, a marshal failure → 500.
 func (s *Server) versionSnapshotYAML(w http.ResponseWriter, r *http.Request, caller client.Client, ns, agent, versionName, label string) (string, bool) {
-	var av agentsv1alpha1.AgentVersion
+	var av agentsv1beta1.AgentVersion
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: versionName}, &av); err != nil {
 		s.writeGetError(w, err, "the "+label+" version")
 		return "", false

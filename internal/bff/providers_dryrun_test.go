@@ -15,7 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 func dryRunSecret() *corev1.Secret {
@@ -155,13 +155,13 @@ func TestDryRunUpsertSurfacesAnUpdateDenial(t *testing.T) {
 		"create-but-not-update must be refused before the rotate overwrites a live key")
 }
 
-func existingRoute() *agentsv1alpha1.ModelRoute {
-	return &agentsv1alpha1.ModelRoute{
+func existingRoute() *agentsv1beta1.ModelRoute {
+	return &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "custom", Namespace: "team-a",
 			Labels: map[string]string{labelManagedBy: managedByConnect, labelProvider: providerCustom},
 		},
-		Spec: agentsv1alpha1.ModelRouteSpec{Providers: []agentsv1alpha1.ProviderRef{{
+		Spec: agentsv1beta1.ModelRouteSpec{Providers: []agentsv1beta1.ProviderRef{{
 			Provider: "openai", Model: "old-model", Priority: 1, SecretBindingRef: "custom",
 		}}},
 	}
@@ -194,7 +194,7 @@ func TestUpsertObject_CustomResourceUpdatesWithItsLiveResourceVersion(t *testing
 	require.Len(t, gets, 1, "one read, for the resourceVersion")
 	assert.IsType(t, &metav1.PartialObjectMetadata{}, gets[0], "the read is metadata-only")
 
-	var live agentsv1alpha1.ModelRoute
+	var live agentsv1beta1.ModelRoute
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(desired), &live))
 	assert.Equal(t, "new-model", live.Spec.Providers[0].Model, "the route is refreshed")
 }
@@ -292,21 +292,21 @@ func TestUpsertObject_RefusesACustomResourceConnectDidNotWrite(t *testing.T) {
 	t.Parallel()
 
 	handMade := map[string]client.Object{
-		modelRouteKind: &agentsv1alpha1.ModelRoute{
+		modelRouteKind: &agentsv1beta1.ModelRoute{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "prod-llm", Namespace: "team-a",
 				Labels: map[string]string{"app.kubernetes.io/instance": "argocd-prod"},
 			},
-			Spec: agentsv1alpha1.ModelRouteSpec{Providers: []agentsv1alpha1.ProviderRef{
+			Spec: agentsv1beta1.ModelRouteSpec{Providers: []agentsv1beta1.ProviderRef{
 				{Provider: "openai", Model: "gpt-5", Priority: 1, SecretBindingRef: "openai"},
 				{Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 2, SecretBindingRef: "anthropic"},
 			}},
 		},
-		secretBindingKind: &agentsv1alpha1.SecretBinding{
+		secretBindingKind: &agentsv1beta1.SecretBinding{
 			ObjectMeta: metav1.ObjectMeta{Name: "prod-llm", Namespace: "team-a"},
-			Spec: agentsv1alpha1.SecretBindingSpec{
+			Spec: agentsv1beta1.SecretBindingSpec{
 				Backend:   secretBackendKubernetes,
-				SecretRef: agentsv1alpha1.SecretKeyRef{Name: "vault-synced", Key: "token"},
+				SecretRef: agentsv1beta1.SecretKeyRef{Name: "vault-synced", Key: "token"},
 			},
 		},
 	}

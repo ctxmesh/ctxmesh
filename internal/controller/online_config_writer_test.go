@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
 )
@@ -56,13 +56,13 @@ func configStores(t *testing.T, fn func(t *testing.T, s onlinescore.Store)) {
 
 // mkOnlineSuite creates an EvalSuite with the given optional online block (m84.3). It carries the required
 // scorer/threshold so the suite is well-formed; only the online block varies across the assertions.
-func mkOnlineSuite(t *testing.T, name, namespace string, online *agentsv1alpha1.OnlineScoringSpec) *agentsv1alpha1.EvalSuite {
+func mkOnlineSuite(t *testing.T, name, namespace string, online *agentsv1beta1.OnlineScoringSpec) *agentsv1beta1.EvalSuite {
 	t.Helper()
-	es := &agentsv1alpha1.EvalSuite{
+	es := &agentsv1beta1.EvalSuite{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.EvalSuiteSpec{
-			Dataset:   agentsv1alpha1.DatasetRef{Ref: "golden-cases"},
-			Scorers:   []agentsv1alpha1.ScorerSpec{{Name: "accuracy", Type: "mock", Weight: 1}},
+		Spec: agentsv1beta1.EvalSuiteSpec{
+			Dataset:   agentsv1beta1.DatasetRef{Ref: "golden-cases"},
+			Scorers:   []agentsv1beta1.ScorerSpec{{Name: "accuracy", Type: "mock", Weight: 1}},
 			Threshold: "0.8",
 			Online:    online,
 		},
@@ -89,16 +89,16 @@ func TestOnlineConfig_ControllerPublishesAndClears(t *testing.T) {
 		ctx := context.Background()
 
 		// EvalSuite WITH an online block (judge ON: sampleRate + a daily cap + a window).
-		mkOnlineSuite(t, suiteName, namespace, &agentsv1alpha1.OnlineScoringSpec{
+		mkOnlineSuite(t, suiteName, namespace, &agentsv1beta1.OnlineScoringSpec{
 			SampleRate:      "0.05",
 			MaxScoredPerDay: 25,
 			Window:          "24h",
 			MinSamples:      10,
 		})
 
-		deploy := &agentsv1alpha1.AgentDeployment{
+		deploy := &agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-			Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Spec: agentsv1beta1.AgentDeploymentSpec{
 				Image:        "ghcr.io/ctxmesh/example-agent:latest",
 				EvalSuiteRef: suiteName,
 			},
@@ -122,7 +122,7 @@ func TestOnlineConfig_ControllerPublishesAndClears(t *testing.T) {
 		require.Equal(t, 10, got.MinSamples)
 
 		// (2) Remove the `.online` block from the suite ⇒ the controller CLEARS the row (judge OFF).
-		var es agentsv1alpha1.EvalSuite
+		var es agentsv1beta1.EvalSuite
 		require.NoError(t, k8sClient.Get(testCtx, client.ObjectKey{Namespace: namespace, Name: suiteName}, &es))
 		es.Spec.Online = nil
 		require.NoError(t, k8sClient.Update(testCtx, &es))
@@ -134,7 +134,7 @@ func TestOnlineConfig_ControllerPublishesAndClears(t *testing.T) {
 
 		// (3) Re-add the online block, then drop the evalSuiteRef entirely ⇒ still cleared.
 		require.NoError(t, k8sClient.Get(testCtx, client.ObjectKey{Namespace: namespace, Name: suiteName}, &es))
-		es.Spec.Online = &agentsv1alpha1.OnlineScoringSpec{SampleRate: "0.1", MaxScoredPerDay: 5}
+		es.Spec.Online = &agentsv1beta1.OnlineScoringSpec{SampleRate: "0.1", MaxScoredPerDay: 5}
 		require.NoError(t, k8sClient.Update(testCtx, &es))
 		r.reconcileOnlineScoreConfig(testCtx, deploy)
 		_, found, err = store.GetOnlineConfig(ctx, namespace, name)

@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // FixtureResolver is the deterministic, OFFLINE Resolver used in dev / envtest /
@@ -70,7 +70,7 @@ func NewFixtureResolver() *FixtureResolver {
 
 // Seed pins fixed content for an exact (repo, ref, path) pointer. Chainable.
 // Used by tests that assert on specific prompt text.
-func (f *FixtureResolver) Seed(src agentsv1alpha1.GitPromptSource, content string) *FixtureResolver {
+func (f *FixtureResolver) Seed(src agentsv1beta1.GitPromptSource, content string) *FixtureResolver {
 	f.seed[key(src)] = content
 	return f
 }
@@ -78,14 +78,14 @@ func (f *FixtureResolver) Seed(src agentsv1alpha1.GitPromptSource, content strin
 // SeedNotFound marks an exact pointer as unresolvable (Resolve returns
 // ErrNotFound) so the bad-ref → status-error path can be exercised offline.
 // Chainable.
-func (f *FixtureResolver) SeedNotFound(src agentsv1alpha1.GitPromptSource) *FixtureResolver {
+func (f *FixtureResolver) SeedNotFound(src agentsv1beta1.GitPromptSource) *FixtureResolver {
 	f.notFound[key(src)] = struct{}{}
 	return f
 }
 
 // Resolve implements Resolver. It is pure and deterministic: no I/O, no clock, no
 // randomness — the same pointer always yields the same Resolved.
-func (f *FixtureResolver) Resolve(_ context.Context, src agentsv1alpha1.GitPromptSource) (Resolved, error) {
+func (f *FixtureResolver) Resolve(_ context.Context, src agentsv1beta1.GitPromptSource) (Resolved, error) {
 	// A pointer with no ref or no path can never address a concrete artifact →
 	// treat as unresolved rather than fabricating content. (The CRD requires both
 	// non-empty; this guards a hand-built spec.)
@@ -113,6 +113,6 @@ func (f *FixtureResolver) Resolve(_ context.Context, src agentsv1alpha1.GitPromp
 }
 
 // key is the fully-qualified pointer identity used for the seed / not-found maps.
-func key(src agentsv1alpha1.GitPromptSource) string {
+func key(src agentsv1beta1.GitPromptSource) string {
 	return src.Repo + "\x00" + src.Ref + "\x00" + src.Path
 }

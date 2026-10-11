@@ -24,7 +24,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
@@ -35,7 +35,7 @@ import (
 // All reads are CALLER-SCOPED (ADR 0011). Empty approvers ⇒ proceed (RBAC-only). Read LIVE so the
 // current list governs.
 func (s *Server) enforceToolPolicyApprovers(w http.ResponseWriter, r *http.Request, caller client.Client, rn *run.Run) bool {
-	var agent agentsv1alpha1.AgentDeployment
+	var agent agentsv1beta1.AgentDeployment
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: rn.Namespace, Name: rn.Agent}, &agent); err != nil {
 		if apierrors.IsNotFound(err) {
 			return true // the agent is gone ⇒ no approvers to enforce (RBAC-only)
@@ -62,7 +62,7 @@ func (s *Server) enforceToolPolicyApprovers(w http.ResponseWriter, r *http.Reque
 }
 
 // toolPolicyApprovers returns the agent's spec.runtime.toolPolicy.approvers (nil when unset).
-func toolPolicyApprovers(agent *agentsv1alpha1.AgentDeployment) []agentsv1alpha1.Approver {
+func toolPolicyApprovers(agent *agentsv1beta1.AgentDeployment) []agentsv1beta1.Approver {
 	if rt := agent.Spec.Runtime; rt != nil && rt.ToolPolicy != nil {
 		return rt.ToolPolicy.Approvers
 	}
@@ -71,14 +71,14 @@ func toolPolicyApprovers(agent *agentsv1alpha1.AgentDeployment) []agentsv1alpha1
 
 // approverMatches reports whether the caller (username + groups) matches any approver. A User entry
 // matches the exact username; a Group entry matches any of the caller's groups.
-func approverMatches(approvers []agentsv1alpha1.Approver, username string, groups []string) bool {
+func approverMatches(approvers []agentsv1beta1.Approver, username string, groups []string) bool {
 	for i := range approvers {
 		switch approvers[i].Kind {
-		case agentsv1alpha1.ApproverKindUser:
+		case agentsv1beta1.ApproverKindUser:
 			if approvers[i].Name == username {
 				return true
 			}
-		case agentsv1alpha1.ApproverKindGroup:
+		case agentsv1beta1.ApproverKindGroup:
 			if slices.Contains(groups, approvers[i].Name) {
 				return true
 			}

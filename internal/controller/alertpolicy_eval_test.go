@@ -36,7 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/alertstore"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/costrollup"
@@ -147,11 +146,11 @@ func apEvalReconciler(alerts alertstore.Store, rollups costrollup.Store) *AlertP
 }
 
 // mkAgentDeployRegressed creates an AgentDeployment and stamps RegressionDetected=<status> on it.
-func mkAgentDeployRegressed(t *testing.T, name, namespace string, labels map[string]string, status metav1.ConditionStatus) *agentsv1alpha1.AgentDeployment {
+func mkAgentDeployRegressed(t *testing.T, name, namespace string, labels map[string]string, status metav1.ConditionStatus) *agentsv1beta1.AgentDeployment {
 	t.Helper()
-	d := &agentsv1alpha1.AgentDeployment{
+	d := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, d))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, d) })
@@ -161,7 +160,7 @@ func mkAgentDeployRegressed(t *testing.T, name, namespace string, labels map[str
 }
 
 // setRegressionStatus stamps/updates the RegressionDetected condition to the given status.
-func setRegressionStatus(t *testing.T, d *agentsv1alpha1.AgentDeployment, status metav1.ConditionStatus) {
+func setRegressionStatus(t *testing.T, d *agentsv1beta1.AgentDeployment, status metav1.ConditionStatus) {
 	t.Helper()
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(d), d))
 	apimeta.SetStatusCondition(&d.Status.Conditions, metav1.Condition{
@@ -253,17 +252,17 @@ func TestAlertPolicy_BudgetSoftFires(t *testing.T) {
 	// A namespace stamped with the authoritative tenant label (resolveTenantForNamespace reads it).
 	nsObj := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name:   ns,
-		Labels: map[string]string{agentsv1alpha1.TenantLabel: tenant},
+		Labels: map[string]string{agentsv1beta1.TenantLabel: tenant},
 	}}
 	require.NoError(t, k8sClient.Create(testCtx, nsObj))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, nsObj) })
 
 	// A Tenant with a $100 budget.
-	tnt := &agentsv1alpha1.Tenant{
+	tnt := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: tenant},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{ns},
-			Model:      &agentsv1alpha1.TenantModelQuota{BudgetUSD: "100.00"},
+			Model:      &agentsv1beta1.TenantModelQuota{BudgetUSD: "100.00"},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tnt))
@@ -318,16 +317,16 @@ func TestAlertPolicy_ForecastExceededFires(t *testing.T) {
 
 	nsObj := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name:   ns,
-		Labels: map[string]string{agentsv1alpha1.TenantLabel: tenant},
+		Labels: map[string]string{agentsv1beta1.TenantLabel: tenant},
 	}}
 	require.NoError(t, k8sClient.Create(testCtx, nsObj))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, nsObj) })
 
 	// forecastExceeded needs the tenant to exist (for its id) but NOT a budget — the cap is on the
 	// condition (a plain USD float), not the tenant.
-	tnt := &agentsv1alpha1.Tenant{
+	tnt := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: tenant},
-		Spec:       agentsv1alpha1.TenantSpec{Namespaces: []string{ns}},
+		Spec:       agentsv1beta1.TenantSpec{Namespaces: []string{ns}},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tnt))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tnt) })
@@ -400,9 +399,9 @@ func TestAlertPolicy_RunFailureRateFullReconcile(t *testing.T) {
 	labels := map[string]string{"app": "ap-eval-rfr"}
 
 	// The selected agent must exist for selectedAgents to match it by label.
-	d := &agentsv1alpha1.AgentDeployment{
+	d := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: agent, Namespace: ns, Labels: labels},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, d))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, d) })
@@ -485,9 +484,9 @@ func TestAlertPolicy_ErrorRateFullReconcile(t *testing.T) {
 	labels := map[string]string{"app": "ap-eval-err"}
 
 	// The selected agent must exist for selectedAgents to match it by label.
-	d := &agentsv1alpha1.AgentDeployment{
+	d := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: agent, Namespace: ns, Labels: labels},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, d))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, d) })
@@ -571,9 +570,9 @@ func TestAlertPolicy_ApprovalWaitingFullReconcile(t *testing.T) {
 	)
 
 	// The selected agent must exist for selectedAgents to match it by name.
-	d := &agentsv1alpha1.AgentDeployment{
+	d := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: agent, Namespace: ns},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, d))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, d) })

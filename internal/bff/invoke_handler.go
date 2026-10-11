@@ -27,7 +27,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
@@ -347,13 +347,13 @@ type InvokeErrorResponse struct {
 // resolved deployment + its status.url. It writes the right error response and returns ok=false on
 // any failure: a K8s Forbidden → 403, not-found → 404, and an agent with no url yet → 409.
 // The caller's RBAC — not the BFF — gates this read (ADR 0011).
-func (s *Server) resolveAgent(w http.ResponseWriter, r *http.Request, caller client.Client, name, namespace string) (*agentsv1alpha1.AgentDeployment, string, bool) {
+func (s *Server) resolveAgent(w http.ResponseWriter, r *http.Request, caller client.Client, name, namespace string) (*agentsv1beta1.AgentDeployment, string, bool) {
 	ns := namespace
 	if ns == "" {
 		ns = defaultCreateNamespace
 	}
 
-	var deploy agentsv1alpha1.AgentDeployment
+	var deploy agentsv1beta1.AgentDeployment
 	if err := caller.Get(r.Context(), client.ObjectKey{Name: name, Namespace: ns}, &deploy); err != nil {
 		switch {
 		case apierrors.IsForbidden(err):
@@ -399,5 +399,5 @@ func (s *Server) resolveAgentEndpoint(w http.ResponseWriter, r *http.Request, ca
 }
 
 // executionModelJob is the AgentDeployment executionModel that runs as a one-shot
-// Kubernetes Job (no serving endpoint) — see api/v1alpha1 AgentDeploymentSpec.
+// Kubernetes Job (no serving endpoint) — see api/v1beta1 AgentDeploymentSpec.
 const executionModelJob = "job"

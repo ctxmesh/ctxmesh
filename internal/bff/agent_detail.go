@@ -29,7 +29,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // knativeServiceLabel is the label Knative stamps on every pod serving an agent.
@@ -75,7 +75,7 @@ func (s *Server) handleAgentDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &ad); err != nil {
 		s.writeGetError(w, err, "agent")
 		return
@@ -88,7 +88,7 @@ func (s *Server) handleAgentDetail(w http.ResponseWriter, r *http.Request) {
 	// masked as "no bindings".
 	inNS := []client.ListOption{client.InNamespace(ns)}
 
-	toolBindings := []agentsv1alpha1.MCPToolBinding{}
+	toolBindings := []agentsv1beta1.MCPToolBinding{}
 	toolBindingsHidden := false
 	if list, err := listMCPToolBindings(r.Context(), caller, inNS...); err != nil {
 		if !apierrors.IsForbidden(err) {
@@ -101,7 +101,7 @@ func (s *Server) handleAgentDetail(w http.ResponseWriter, r *http.Request) {
 		toolBindings = list.Items
 	}
 
-	versions := []agentsv1alpha1.AgentVersion{}
+	versions := []agentsv1beta1.AgentVersion{}
 	if list, err := listAgentVersions(r.Context(), caller, inNS...); err != nil {
 		if !apierrors.IsForbidden(err) {
 			s.log.Error(err, "list AgentVersions for detail failed", "namespace", ns)
@@ -184,7 +184,7 @@ func (s *Server) handleAgentRuns(w http.ResponseWriter, r *http.Request) {
 	// Caller-scoped existence + authorization gate: verify the caller can `get` the
 	// agent BEFORE fetching any runs. A denial/absence surfaces honestly (403/404)
 	// and no run metadata is returned for an agent the caller may not see.
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &ad); err != nil {
 		s.writeGetError(w, err, "agent")
 		return

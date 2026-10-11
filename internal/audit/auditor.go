@@ -29,7 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // auditedTypes is one typed object per mutating-audited agent.ctxmesh.ai CRD.
@@ -40,14 +40,14 @@ import (
 // unrecorded). The human-readable Kind is resolved from the scheme at Start.
 func auditedTypes() []client.Object {
 	return []client.Object{
-		&agentsv1alpha1.AgentDeployment{},
-		&agentsv1alpha1.AgentVersion{},
-		&agentsv1alpha1.ModelRoute{},
-		&agentsv1alpha1.SecretBinding{},
-		&agentsv1alpha1.MCPToolBinding{},
-		&agentsv1alpha1.AgentRegistry{},
-		&agentsv1alpha1.AgentScalingPolicy{},
-		&agentsv1alpha1.EvalSuite{},
+		&agentsv1beta1.AgentDeployment{},
+		&agentsv1beta1.AgentVersion{},
+		&agentsv1beta1.ModelRoute{},
+		&agentsv1beta1.SecretBinding{},
+		&agentsv1beta1.MCPToolBinding{},
+		&agentsv1beta1.AgentRegistry{},
+		&agentsv1beta1.AgentScalingPolicy{},
+		&agentsv1beta1.EvalSuite{},
 		// PromptVersion + ToolRegistry retired to Postgres (ADR 0044); MemoryBinding
 		// folded into AgentDeployment.spec.sessionMemory + retired (ADR 0101) — no
 		// longer CRDs, so not watched here.

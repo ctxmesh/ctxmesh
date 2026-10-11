@@ -27,7 +27,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
@@ -105,8 +104,8 @@ type AgentDependency struct {
 func (s *Server) resolveAgentDependencies(
 	ctx context.Context,
 	caller client.Client,
-	ad *agentsv1alpha1.AgentDeployment,
-	toolBindings []agentsv1alpha1.MCPToolBinding,
+	ad *agentsv1beta1.AgentDeployment,
+	toolBindings []agentsv1beta1.MCPToolBinding,
 	toolBindingsHidden bool,
 ) []AgentDependency {
 	deps := make([]AgentDependency, 0, 8)
@@ -156,7 +155,7 @@ func fromCondition(d AgentDependency, c *metav1.Condition, pendingReason, pendin
 }
 
 // modelRouteEnv is the agent's MODEL_ROUTE variable, or nil when it sets none.
-func modelRouteEnv(ad *agentsv1alpha1.AgentDeployment) *corev1.EnvVar {
+func modelRouteEnv(ad *agentsv1beta1.AgentDeployment) *corev1.EnvVar {
 	for i := range ad.Spec.Env {
 		if ad.Spec.Env[i].Name == envModelRoute {
 			return &ad.Spec.Env[i]
@@ -167,7 +166,7 @@ func modelRouteEnv(ad *agentsv1alpha1.AgentDeployment) *corev1.EnvVar {
 
 // valueFromDependency describes a MODEL_ROUTE read from elsewhere when the pod starts. The console
 // cannot tell which route that is without reading the source, so it says where the name comes from.
-func valueFromDependency(ad *agentsv1alpha1.AgentDeployment, src *corev1.EnvVarSource) AgentDependency {
+func valueFromDependency(ad *agentsv1beta1.AgentDeployment, src *corev1.EnvVarSource) AgentDependency {
 	from := "a field of the pod"
 	switch {
 	case src.ConfigMapKeyRef != nil:
@@ -187,7 +186,7 @@ func valueFromDependency(ad *agentsv1alpha1.AgentDeployment, src *corev1.EnvVarS
 func (s *Server) modelRouteDependencies(
 	ctx context.Context,
 	caller client.Client,
-	ad *agentsv1alpha1.AgentDeployment,
+	ad *agentsv1beta1.AgentDeployment,
 ) []AgentDependency {
 	env := modelRouteEnv(ad)
 	if env == nil {
@@ -201,7 +200,7 @@ func (s *Server) modelRouteDependencies(
 		return nil
 	}
 	d := AgentDependency{Kind: depKindModelRoute, Name: name, Namespace: ad.Namespace}
-	var mr agentsv1alpha1.ModelRoute
+	var mr agentsv1beta1.ModelRoute
 	err := caller.Get(ctx, client.ObjectKey{Namespace: ad.Namespace, Name: name}, &mr)
 	switch {
 	case apierrors.IsNotFound(err):
@@ -254,7 +253,7 @@ func (s *Server) secretBindingDependency(
 	ns, name, route string,
 ) AgentDependency {
 	d := AgentDependency{Kind: depKindSecretBinding, Name: name, Namespace: ns, Via: route}
-	var sb agentsv1alpha1.SecretBinding
+	var sb agentsv1beta1.SecretBinding
 	if err := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &sb); err != nil {
 		if apierrors.IsNotFound(err) {
 			d.State, d.Reason = depMissing, "SecretBindingNotFound"
@@ -279,7 +278,7 @@ func (s *Server) secretBindingDependency(
 
 // secretUnreadableMessage says why a binding's Secret could not be checked: the caller's RBAC, or a
 // read that failed.
-func (s *Server) secretUnreadableMessage(sb *agentsv1alpha1.SecretBinding, readErr error) string {
+func (s *Server) secretUnreadableMessage(sb *agentsv1beta1.SecretBinding, readErr error) string {
 	switch {
 	case apierrors.IsForbidden(readErr) || apierrors.IsUnauthorized(readErr):
 		return fmt.Sprintf("Your account can't read Secrets in %s, so whether Secret %q holds key %q is not shown.",
@@ -300,7 +299,7 @@ func (s *Server) secretUnreadableMessage(sb *agentsv1alpha1.SecretBinding, readE
 func (s *Server) guardrailDependency(
 	ctx context.Context,
 	caller client.Client,
-	ad *agentsv1alpha1.AgentDeployment,
+	ad *agentsv1beta1.AgentDeployment,
 ) (AgentDependency, bool) {
 	name := strings.TrimSpace(ad.Spec.GuardrailPolicyRef)
 	if name == "" {
@@ -325,8 +324,8 @@ func (s *Server) guardrailDependency(
 
 // toolBindingDependencies lists the MCPToolBindings that target the agent, each with its Ready condition.
 func toolBindingDependencies(
-	ad *agentsv1alpha1.AgentDeployment,
-	bindings []agentsv1alpha1.MCPToolBinding,
+	ad *agentsv1beta1.AgentDeployment,
+	bindings []agentsv1beta1.MCPToolBinding,
 	hidden bool,
 ) []AgentDependency {
 	if hidden {
@@ -363,7 +362,7 @@ func toolBindingDependencies(
 func (s *Server) knowledgeBaseDependencies(
 	ctx context.Context,
 	caller client.Client,
-	ad *agentsv1alpha1.AgentDeployment,
+	ad *agentsv1beta1.AgentDeployment,
 ) []AgentDependency {
 	if len(ad.Spec.KnowledgeBases) == 0 {
 		return nil
@@ -440,7 +439,7 @@ func knowledgeBaseState(d AgentDependency, kb *agentsv1beta1.KnowledgeBase) Agen
 }
 
 // memoryDependencies lists the agent's memory. Both are spec fields with no object to resolve.
-func memoryDependencies(ad *agentsv1alpha1.AgentDeployment) []AgentDependency {
+func memoryDependencies(ad *agentsv1beta1.AgentDeployment) []AgentDependency {
 	var deps []AgentDependency
 	if sm := ad.Spec.SessionMemory; sm != nil {
 		scope := sm.Scope
@@ -470,7 +469,7 @@ func memoryDependencies(ad *agentsv1alpha1.AgentDeployment) []AgentDependency {
 
 // approvalDependencies lists the tool-policy rules that pause a run for approval and who may approve
 // (spec.runtime.toolPolicy, ADR 0152).
-func approvalDependencies(ad *agentsv1alpha1.AgentDeployment) []AgentDependency {
+func approvalDependencies(ad *agentsv1beta1.AgentDeployment) []AgentDependency {
 	if ad.Spec.Runtime == nil || ad.Spec.Runtime.ToolPolicy == nil {
 		return nil
 	}
@@ -493,13 +492,13 @@ func approvalDependencies(ad *agentsv1alpha1.AgentDeployment) []AgentDependency 
 }
 
 // feedbackDependencies lists the agent's declared feedback sources (spec.feedback, ADR 0152).
-func feedbackDependencies(ad *agentsv1alpha1.AgentDeployment) []AgentDependency {
+func feedbackDependencies(ad *agentsv1beta1.AgentDeployment) []AgentDependency {
 	fb := ad.Spec.Feedback
 	if fb == nil {
 		return nil
 	}
 	gate := "Enforce: a score whose name no source declares is rejected."
-	if fb.Mode == agentsv1alpha1.FeedbackMonitor {
+	if fb.Mode == agentsv1beta1.FeedbackMonitor {
 		gate = "Monitor: a score whose name no source declares is still accepted."
 	}
 	var deps []AgentDependency

@@ -12,7 +12,7 @@ import (
 	"k8s.io/utils/ptr"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // An agent run is a session, not a request (ADR 0147). Without a revision timeout Knative ends every run
@@ -22,7 +22,7 @@ func TestReconcile_RunSessionScaling(t *testing.T) {
 	const namespace = "default"
 	for _, tc := range []struct {
 		name        string
-		scaling     *agentsv1alpha1.ScalingSpec
+		scaling     *agentsv1beta1.ScalingSpec
 		wantCC      *int64
 		wantTimeout int64
 		wantTBC     string
@@ -31,17 +31,17 @@ func TestReconcile_RunSessionScaling(t *testing.T) {
 		// Bounded concurrency keeps the activator in the path unless told otherwise, or a burst beyond
 		// the replicas' slots is dropped instead of queued.
 		{
-			name: "session-bounded", scaling: &agentsv1alpha1.ScalingSpec{Max: 4, Concurrency: ptr.To(int32(2))},
+			name: "session-bounded", scaling: &agentsv1beta1.ScalingSpec{Max: 4, Concurrency: ptr.To(int32(2))},
 			wantCC: ptr.To(int64(2)), wantTimeout: 600, wantTBC: "-1",
 		},
-		{name: "session-explicit", scaling: &agentsv1alpha1.ScalingSpec{
+		{name: "session-explicit", scaling: &agentsv1beta1.ScalingSpec{
 			Max: 5, Concurrency: ptr.To(int32(1)), TimeoutSeconds: ptr.To(int64(900)), TargetBurstCapacity: ptr.To(int32(-1)),
 		}, wantCC: ptr.To(int64(1)), wantTimeout: 900, wantTBC: "-1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			deploy := &agentsv1alpha1.AgentDeployment{
+			deploy := &agentsv1beta1.AgentDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: tc.name, Namespace: namespace},
-				Spec: agentsv1alpha1.AgentDeploymentSpec{
+				Spec: agentsv1beta1.AgentDeploymentSpec{
 					Image: "ghcr.io/ctxmesh/example-agent:latest", Scaling: tc.scaling,
 				},
 			}

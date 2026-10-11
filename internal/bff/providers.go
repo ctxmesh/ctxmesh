@@ -35,7 +35,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
 )
 
@@ -274,7 +274,7 @@ type providerCreateSpec struct {
 	// model is the route's model. Empty picks primaryModel(models), as a first connect does.
 	model string
 	// rateLimit is the route's rate limit. Nil stamps the connect default.
-	rateLimit *agentsv1alpha1.RateLimit
+	rateLimit *agentsv1beta1.RateLimit
 	// mustExist makes every write an update of an object that already exists. A rotate replaces
 	// what connect wrote and never creates, so a provider missing one of its objects is refused
 	// by the pre-flight, before anything is written.
@@ -323,16 +323,16 @@ func createProviderObjects(ctx context.Context, w client.Client, spec providerCr
 
 	// (b) SecretBinding — logical name → Secret/key (backend kubernetes, matching
 	// the shape M2/expand produce).
-	binding := &agentsv1alpha1.SecretBinding{
+	binding := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        spec.name,
 			Namespace:   spec.namespace,
 			Labels:      labels,
 			Annotations: annotations,
 		},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend: secretBackendKubernetes,
-			SecretRef: agentsv1alpha1.SecretKeyRef{
+			SecretRef: agentsv1beta1.SecretKeyRef{
 				Name: spec.name,
 				Key:  secretKeyAPIKey,
 			},
@@ -350,22 +350,22 @@ func createProviderObjects(ctx context.Context, w client.Client, spec providerCr
 	}
 	rateLimit := spec.rateLimit
 	if rateLimit == nil {
-		rateLimit = &agentsv1alpha1.RateLimit{TenantRPM: defaultTenantRPM}
+		rateLimit = &agentsv1beta1.RateLimit{TenantRPM: defaultTenantRPM}
 	}
 	routeAnnotations := make(map[string]string, len(annotations)+1)
 	maps.Copy(routeAnnotations, annotations)
 	if len(spec.models) > 0 {
 		routeAnnotations[annProviderModels] = strings.Join(spec.models, ",")
 	}
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        spec.name,
 			Namespace:   spec.namespace,
 			Labels:      labels,
 			Annotations: routeAnnotations,
 		},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{
 				// The route's provider is the GATEWAY's word for the vendor (a LiteLLM
 				// prefix), which is not always the console's word for it. "custom" is a
 				// console identity — an OpenAI-compatible endpoint the operator named —
@@ -617,7 +617,7 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 		opts = append(opts, client.InNamespace(namespace))
 	}
 
-	var routes agentsv1alpha1.ModelRouteList
+	var routes agentsv1beta1.ModelRouteList
 	if err := caller.List(r.Context(), &routes, opts...); err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
@@ -642,7 +642,7 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 // ProviderSummary. It carries only NON-secret material: the route/provider names,
 // the models, the Secret NAME (a reference), and the Ready condition. The key is
 // never touched here — it lives in the Secret, which this read never opens.
-func providerSummaryFromRoute(mr *agentsv1alpha1.ModelRoute) ProviderSummary {
+func providerSummaryFromRoute(mr *agentsv1beta1.ModelRoute) ProviderSummary {
 	provider := mr.Labels[labelProvider]
 
 	// The full model list the connect probe discovered, persisted at connect time
@@ -710,7 +710,7 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read the route to learn the provider id + which SecretBinding holds the key.
-	var route agentsv1alpha1.ModelRoute
+	var route agentsv1beta1.ModelRoute
 	if err := caller.Get(r.Context(), client.ObjectKey{Name: name, Namespace: ns}, &route); err != nil {
 		s.writeGetError(w, err, providerNoun)
 		return
@@ -722,7 +722,7 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve the SecretBinding → Secret name/key (backend kubernetes).
-	var binding agentsv1alpha1.SecretBinding
+	var binding agentsv1beta1.SecretBinding
 	if err := caller.Get(r.Context(), client.ObjectKey{Name: secretName, Namespace: ns}, &binding); err != nil {
 		s.writeGetError(w, err, "secret binding")
 		return
@@ -762,7 +762,7 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 // routeProbeInputs pulls the provider id, the SecretBinding ref, and an optional
 // baseURL from a connect-managed ModelRoute for the re-probe. The provider id
 // comes from the route's first provider entry (falling back to the label).
-func routeProbeInputs(mr *agentsv1alpha1.ModelRoute) (provider, secretBindingRef, baseURL string) {
+func routeProbeInputs(mr *agentsv1beta1.ModelRoute) (provider, secretBindingRef, baseURL string) {
 	provider = mr.Labels[labelProvider]
 	for _, p := range mr.Spec.Providers {
 		if provider == "" {
@@ -848,7 +848,7 @@ func (s *Server) handleRotateProviderKey(w http.ResponseWriter, r *http.Request)
 		})
 	}
 
-	var route agentsv1alpha1.ModelRoute
+	var route agentsv1beta1.ModelRoute
 	if err := caller.Get(r.Context(), client.ObjectKey{Name: name, Namespace: ns}, &route); err != nil {
 		if apierrors.IsForbidden(err) {
 			audit("", auditOutcomeDenied)
@@ -861,7 +861,7 @@ func (s *Server) handleRotateProviderKey(w http.ResponseWriter, r *http.Request)
 		writeError(w, cErr.status, cErr.msg)
 		return
 	}
-	var binding agentsv1alpha1.SecretBinding
+	var binding agentsv1beta1.SecretBinding
 	if err := caller.Get(r.Context(), client.ObjectKey{Name: spec.name, Namespace: ns}, &binding); err != nil {
 		if apierrors.IsForbidden(err) {
 			audit(spec.provider, auditOutcomeDenied)
@@ -922,7 +922,7 @@ func (s *Server) handleRotateProviderKey(w http.ResponseWriter, r *http.Request)
 //
 // A route connect did not write, or one edited out of the shape connect writes, is refused rather
 // than rebuilt: the rewrite would overwrite whatever made it different.
-func rotateSpecFromRoute(mr *agentsv1alpha1.ModelRoute) (providerCreateSpec, *createError) {
+func rotateSpecFromRoute(mr *agentsv1beta1.ModelRoute) (providerCreateSpec, *createError) {
 	refuse := func(why string) (providerCreateSpec, *createError) {
 		return providerCreateSpec{}, &createError{
 			status: http.StatusConflict,
@@ -966,7 +966,7 @@ func rotateSpecFromRoute(mr *agentsv1alpha1.ModelRoute) (providerCreateSpec, *cr
 // checkConnectBinding refuses a SecretBinding that connect did not write, or that no longer points
 // where connect pointed it. A rotate writes the key into the Secret connect created; if the binding
 // names another Secret, that write would not change the key the provider uses.
-func checkConnectBinding(b *agentsv1alpha1.SecretBinding, name string) *createError {
+func checkConnectBinding(b *agentsv1beta1.SecretBinding, name string) *createError {
 	if b.Labels[labelManagedBy] != managedByConnect {
 		return &createError{
 			status: http.StatusConflict,
@@ -1009,8 +1009,8 @@ func (s *Server) handleDisconnectProvider(w http.ResponseWriter, r *http.Request
 		kind string
 		o    client.Object
 	}{
-		{modelRouteKind, &agentsv1alpha1.ModelRoute{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}},
-		{secretBindingKind, &agentsv1alpha1.SecretBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}},
+		{modelRouteKind, &agentsv1beta1.ModelRoute{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}},
+		{secretBindingKind, &agentsv1beta1.SecretBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}},
 		{secretKind, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}},
 	} {
 		if err := caller.Delete(r.Context(), obj.o); err != nil && !apierrors.IsNotFound(err) {

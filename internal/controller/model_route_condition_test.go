@@ -12,17 +12,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // An agent that names a model route says whether that route can be called now, without that ever
 // changing its own Ready; an agent that names none carries no such condition.
 func TestReconcile_ModelRouteReadyMirrorsTheNamedRoute(t *testing.T) {
 	const ns = "default"
-	mkAgent := func(name, route string) *agentsv1alpha1.AgentDeployment {
-		d := &agentsv1alpha1.AgentDeployment{
+	mkAgent := func(name, route string) *agentsv1beta1.AgentDeployment {
+		d := &agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-			Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Spec: agentsv1beta1.AgentDeploymentSpec{
 				Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080,
 			},
 		}
@@ -34,7 +34,7 @@ func TestReconcile_ModelRouteReadyMirrorsTheNamedRoute(t *testing.T) {
 		return d
 	}
 	routeCond := func(name string) *metav1.Condition {
-		var d agentsv1alpha1.AgentDeployment
+		var d agentsv1beta1.AgentDeployment
 		require.NoError(t, k8sClient.Get(testCtx, client.ObjectKey{Namespace: ns, Name: name}, &d))
 		return apimeta.FindStatusCondition(d.Status.Conditions, conditionModelRouteReady)
 	}
@@ -47,9 +47,9 @@ func TestReconcile_ModelRouteReadyMirrorsTheNamedRoute(t *testing.T) {
 	assert.Equal(t, metav1.ConditionFalse, c.Status)
 	assert.Equal(t, "RouteNotFound", c.Reason)
 
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "mrr-route", Namespace: ns},
-		Spec: agentsv1alpha1.ModelRouteSpec{Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{Providers: []agentsv1beta1.ProviderRef{
 			{Provider: "mock", Model: "mock-default", Priority: 1},
 		}},
 	}

@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 func tracePolicyServer(t *testing.T, objs ...client.Object) (*Server, client.Client) {
@@ -42,9 +42,9 @@ func tracePolicyServer(t *testing.T, objs ...client.Object) (*Server, client.Cli
 // with no policy reads []; a PUT sets the custom detectors on the CRD; and a PUT
 // with an empty list clears the policy block (m18.13).
 func TestTracePolicy_GetAndUpdate(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "team-a"},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "i:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "i:1"},
 	}
 	s, c := tracePolicyServer(t, ad)
 
@@ -65,7 +65,7 @@ func TestTracePolicy_GetAndUpdate(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
 	// The CRD now carries the detector.
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "echo", Namespace: "team-a"}, &got))
 	require.NotNil(t, got.Spec.TracePolicy)
 	require.Len(t, got.Spec.TracePolicy.CustomDetectors, 1)

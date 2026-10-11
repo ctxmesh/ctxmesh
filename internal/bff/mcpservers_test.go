@@ -37,7 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 )
 
@@ -153,7 +153,7 @@ func TestRegisterMCPDiscoversToolsAndCapturesInputSchema(t *testing.T) {
 	assert.Equal(t, "my-weather-mcp", resp.Server.Name)
 	assert.Equal(t, mcp.URL, resp.Server.URL)
 	assert.Equal(t, 2, resp.Server.ToolCount)
-	assert.Equal(t, agentsv1alpha1.ApprovalApproved, resp.Server.Status, "self-serve default")
+	assert.Equal(t, agentsv1beta1.ApprovalApproved, resp.Server.Status, "self-serve default")
 	assert.Equal(t, "my-weather-mcp", resp.Server.SecretName)
 
 	// The response carries the tools with their inputSchema.
@@ -167,7 +167,7 @@ func TestRegisterMCPDiscoversToolsAndCapturesInputSchema(t *testing.T) {
 	var parsedSchema map[string]any
 	require.NoError(t, json.Unmarshal(weather.InputSchema, &parsedSchema))
 	assert.Equal(t, "object", parsedSchema["type"])
-	assert.Equal(t, agentsv1alpha1.SourceUserAdded, weather.Source)
+	assert.Equal(t, agentsv1beta1.SourceUserAdded, weather.Source)
 
 	// Created objects: Secret, SecretBinding, ToolRegistry, NetworkPolicy.
 	require.Len(t, resp.Created, 4)
@@ -188,8 +188,8 @@ func TestRegisterMCPDiscoversToolsAndCapturesInputSchema(t *testing.T) {
 	require.Len(t, tr.Tools, 2)
 	for _, e := range tr.Tools {
 		require.NotEmpty(t, e.InputSchema, "ToolRegistry entry MUST store inputSchema for m14.6b")
-		assert.Equal(t, agentsv1alpha1.SourceUserAdded, e.Source)
-		assert.Equal(t, agentsv1alpha1.ApprovalApproved, e.ApprovalStatus)
+		assert.Equal(t, agentsv1beta1.SourceUserAdded, e.Source)
+		assert.Equal(t, agentsv1beta1.ApprovalApproved, e.ApprovalStatus)
 		assert.Equal(t, mcp.URL, e.URL)
 	}
 
@@ -256,13 +256,13 @@ func TestRegisterMCPHardenedIsPendingApprovalNoEgress(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	var resp RegisterMCPServerResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, agentsv1alpha1.ApprovalPending, resp.Server.Status, "hardened → pending-approval")
+	assert.Equal(t, agentsv1beta1.ApprovalPending, resp.Server.Status, "hardened → pending-approval")
 
 	// The catalog entry (store row) is pending.
 	tr, trErr := store.Get(context.Background(), "prod", "hardened-mcp")
 	require.NoError(t, trErr)
 	for _, e := range tr.Tools {
-		assert.Equal(t, agentsv1alpha1.ApprovalPending, e.ApprovalStatus)
+		assert.Equal(t, agentsv1beta1.ApprovalPending, e.ApprovalStatus)
 	}
 
 	// B1: NO NetworkPolicy is created for a pending server — the created list
@@ -371,9 +371,9 @@ func TestRegisterMCPViewerForbiddenIs403(t *testing.T) {
 // name) collides → a clean 409, never a silent overwrite.
 func TestRegisterMCPReconnectIs409(t *testing.T) {
 	mcp := fakeMCPServer(t, false)
-	existing := &agentsv1alpha1.ToolRegistry{
+	existing := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "dup-mcp", Namespace: "prod"},
-		Spec:       agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: "x"}}},
+		Spec:       agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{{Name: "x"}}},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _, _ := newMCPServer(t, c, false)
@@ -456,23 +456,23 @@ func TestListMCPServersEmpty(t *testing.T) {
 // TestListMCPServersProjectsNoSecrets proves the list projects register-managed
 // registries onto the summary WITHOUT any secret material — only the Secret NAME.
 func TestListMCPServersProjectsNoSecrets(t *testing.T) {
-	tr := &agentsv1alpha1.ToolRegistry{
+	tr := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "weather-mcp",
 			Namespace: "prod",
 			Labels:    map[string]string{labelManagedBy: managedByMCP},
 			Annotations: map[string]string{
 				annMCPURL:    "http://weather.example/mcp",
-				annMCPStatus: agentsv1alpha1.ApprovalApproved,
+				annMCPStatus: agentsv1beta1.ApprovalApproved,
 				annMCPSecret: "weather-mcp",
 			},
 		},
-		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: "get_weather"}}},
+		Spec: agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{{Name: "get_weather"}}},
 	}
 	// A curated (non-register) registry must be excluded (no managed-by=mcp label).
-	curated := &agentsv1alpha1.ToolRegistry{
+	curated := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "default-tools", Namespace: "prod"},
-		Spec:       agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: "curated_tool"}}},
+		Spec:       agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{{Name: "curated_tool"}}},
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "weather-mcp", Namespace: "prod"},
@@ -515,24 +515,24 @@ func TestListMCPServersForbiddenIs403(t *testing.T) {
 // TestListToolsMergesCuratedAndUserAdded proves GET /api/tools merges curated +
 // user-added tools, includes inputSchema, no secrets, [] not null.
 func TestListToolsMergesCuratedAndUserAdded(t *testing.T) {
-	curated := &agentsv1alpha1.ToolRegistry{
+	curated := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "default-tools", Namespace: "prod"},
-		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{
+		Spec: agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{
 			// A legacy curated entry with no explicit source/status/schema.
 			{Name: "curated_tool", Description: "an operator tool"},
 		}},
 	}
-	userAdded := &agentsv1alpha1.ToolRegistry{
+	userAdded := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "weather-mcp",
 			Namespace: "prod",
 			Labels:    map[string]string{labelManagedBy: managedByMCP},
 		},
-		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{
+		Spec: agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{{
 			Name:           "get_weather",
 			Description:    "Get the weather",
-			Source:         agentsv1alpha1.SourceUserAdded,
-			ApprovalStatus: agentsv1alpha1.ApprovalApproved,
+			Source:         agentsv1beta1.SourceUserAdded,
+			ApprovalStatus: agentsv1beta1.ApprovalApproved,
 			InputSchema:    rawExt(`{"type":"object","properties":{"city":{"type":"string"}}}`),
 		}}},
 	}
@@ -560,13 +560,13 @@ func TestListToolsMergesCuratedAndUserAdded(t *testing.T) {
 	}
 	// The curated legacy entry defaults to curated/approved; no schema.
 	cur := byName["curated_tool"]
-	assert.Equal(t, agentsv1alpha1.SourceCurated, cur.Source)
-	assert.Equal(t, agentsv1alpha1.ApprovalApproved, cur.ApprovalStatus)
+	assert.Equal(t, agentsv1beta1.SourceCurated, cur.Source)
+	assert.Equal(t, agentsv1beta1.ApprovalApproved, cur.ApprovalStatus)
 	// A legacy curated entry has no schema → the wire carries JSON null.
 	assert.Equal(t, "null", string(cur.InputSchema))
 	// The user-added entry carries its inputSchema + source.
 	wea := byName["get_weather"]
-	assert.Equal(t, agentsv1alpha1.SourceUserAdded, wea.Source)
+	assert.Equal(t, agentsv1beta1.SourceUserAdded, wea.Source)
 	require.NotNil(t, wea.InputSchema, "the merged catalog MUST include inputSchema")
 	var parsedSchema map[string]any
 	require.NoError(t, json.Unmarshal(wea.InputSchema, &parsedSchema))

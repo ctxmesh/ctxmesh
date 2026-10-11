@@ -27,7 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 )
 
@@ -224,7 +224,7 @@ func (s *Server) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) {
 		obj  client.Object
 	}{
 		{networkPolicyKind, &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name + networkPolicyMCPSuffix}}},
-		{secretBindingKind, &agentsv1alpha1.SecretBinding{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}},
+		{secretBindingKind, &agentsv1beta1.SecretBinding{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}},
 		{secretKind, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}},
 	} {
 		if err := caller.Delete(r.Context(), o.obj); err != nil {

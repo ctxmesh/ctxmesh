@@ -31,20 +31,20 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
 )
 
 // mkVersion creates an AgentVersion snapshot for `deployment` named `name`. The regression
 // detector orders versions by CreationTimestamp, so tests create the baseline first, then the
 // serving version, giving a deterministic "prior" resolution.
-func mkVersion(t *testing.T, deployment, name, namespace string) *agentsv1alpha1.AgentVersion {
+func mkVersion(t *testing.T, deployment, name, namespace string) *agentsv1beta1.AgentVersion {
 	t.Helper()
-	av := &agentsv1alpha1.AgentVersion{
+	av := &agentsv1beta1.AgentVersion{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentVersionSpec{
+		Spec: agentsv1beta1.AgentVersionSpec{
 			DeploymentName: deployment,
-			Snapshot:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+			Snapshot:       agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, av))
@@ -85,18 +85,18 @@ func reconcileRegression(t *testing.T, r *RegressionDetectorReconciler, name, na
 
 func regressionCond(t *testing.T, name, namespace string) *metav1.Condition {
 	t.Helper()
-	var d agentsv1alpha1.AgentDeployment
+	var d agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &d))
 	return apimeta.FindStatusCondition(d.Status.Conditions, conditionRegressionDetected)
 }
 
 // mkDeployWithVersion creates an AgentDeployment and stamps status.latestVersion = serving so the
 // detector treats `serving` as the serving version.
-func mkDeployWithVersion(t *testing.T, name, namespace, serving string) *agentsv1alpha1.AgentDeployment {
+func mkDeployWithVersion(t *testing.T, name, namespace, serving string) *agentsv1beta1.AgentDeployment {
 	t.Helper()
-	d := &agentsv1alpha1.AgentDeployment{
+	d := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, d))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, d) })

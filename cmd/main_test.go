@@ -22,7 +22,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
@@ -33,8 +32,8 @@ import (
 func TestSchemeRegistersManagerKinds(t *testing.T) {
 	for _, gvk := range []schema.GroupVersionKind{
 		agentsv1beta1.GroupVersion.WithKind("AgentTeam"),
-		agentsv1alpha1.GroupVersion.WithKind("AgentDeployment"),
-		agentsv1alpha1.GroupVersion.WithKind("AgentRegistry"),
+		agentsv1beta1.GroupVersion.WithKind("AgentDeployment"),
+		agentsv1beta1.GroupVersion.WithKind("AgentRegistry"),
 	} {
 		if !scheme.Recognizes(gvk) {
 			t.Errorf("manager scheme does not recognize %s — its controller will fail to construct", gvk)

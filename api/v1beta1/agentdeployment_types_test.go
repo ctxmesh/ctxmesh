@@ -17,7 +17,7 @@ limitations under the License.
 // Unit tests for AgentDeployment types (no build tag — runs in make test / tier0).
 // Proves the generated CRD carries the m65.1 spec.runtime schema with the expected
 // markers: outputSchema has x-kubernetes-preserve-unknown-fields, toolPolicy.default
-// has the allow/deny/require-approval enum, and both versions serve the field.
+// has the allow/deny/require-approval enum, on the one served version.
 package v1beta1
 
 import (
@@ -33,9 +33,6 @@ import (
 // carries the spec.runtime sub-tree with the load-bearing markers introduced in m65.1:
 //   - runtime.outputSchema: x-kubernetes-preserve-unknown-fields = true
 //   - runtime.toolPolicy.default: enum = [allow, deny, require-approval]
-//
-// Both served versions (v1alpha1 and v1beta1 storage) are checked since v1beta1
-// reuses v1alpha1.AgentDeploymentSpec — both schema copies must carry the field.
 func TestAgentDeployment_RuntimeCRDSchema(t *testing.T) {
 	path := filepath.Join("..", "..", "config", "crd", "bases", "agents.ctxmesh.ai_agentdeployments.yaml")
 	data, err := os.ReadFile(path)
@@ -51,9 +48,8 @@ func TestAgentDeployment_RuntimeCRDSchema(t *testing.T) {
 		t.Fatalf("unexpected CRD kind: %s", crd.Spec.Names.Kind)
 	}
 
-	// Both served versions must include the runtime field.
-	if len(crd.Spec.Versions) < 2 {
-		t.Fatalf("expected at least 2 served versions (v1alpha1 + v1beta1), got %d", len(crd.Spec.Versions))
+	if len(crd.Spec.Versions) != 1 || crd.Spec.Versions[0].Name != "v1beta1" || !crd.Spec.Versions[0].Storage {
+		t.Fatalf("expected exactly one version, v1beta1, served and stored (ADR 0100); got %d version(s)", len(crd.Spec.Versions))
 	}
 
 	for _, v := range crd.Spec.Versions {

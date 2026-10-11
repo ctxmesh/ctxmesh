@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
@@ -60,7 +60,7 @@ func TestCreateMCPObjects_RetireWritesStore(t *testing.T) {
 
 	created, cErr := s.createMCPObjects(ctx, c, mcpCreateSpec{
 		name: "byo-mcp", namespace: trNS, url: "http://10.0.0.5:8080/mcp",
-		status:   agentsv1alpha1.ApprovalPending, // pending ⇒ no egress NetworkPolicy (no DNS)
+		status:   agentsv1beta1.ApprovalPending, // pending ⇒ no egress NetworkPolicy (no DNS)
 		scope:    scopePersonal,
 		owner:    "owner-hash",
 		authType: oauthAuthType,
@@ -93,7 +93,7 @@ func TestCreateMCPObjects_RetireForbidden(t *testing.T) {
 
 	_, cErr := s.createMCPObjects(ctx, c, mcpCreateSpec{
 		name: "byo", namespace: trNS, url: "http://10.0.0.5:8080/mcp",
-		status: agentsv1alpha1.ApprovalPending,
+		status: agentsv1beta1.ApprovalPending,
 		tools:  []discoveredTool{{Name: "t"}},
 	})
 	require.NotNil(t, cErr)
@@ -110,7 +110,7 @@ func TestCreateMCPObjects_RetireInvalid422(t *testing.T) {
 
 	_, cErr := s.createMCPObjects(ctx, c, mcpCreateSpec{
 		name: "byo", namespace: trNS, url: "http://10.0.0.5:8080/mcp",
-		status: agentsv1alpha1.ApprovalPending,
+		status: agentsv1beta1.ApprovalPending,
 		tools:  nil, // MinItems=1 ⇒ Validate rejects
 	})
 	require.NotNil(t, cErr)
@@ -128,7 +128,7 @@ func TestCreateMCPObjects_RetireConflict409(t *testing.T) {
 
 	_, cErr := s.createMCPObjects(ctx, c, mcpCreateSpec{
 		name: "byo", namespace: trNS, url: "http://10.0.0.5:8080/mcp",
-		status: agentsv1alpha1.ApprovalPending,
+		status: agentsv1beta1.ApprovalPending,
 		tools:  []discoveredTool{{Name: "t"}},
 	})
 	require.NotNil(t, cErr)

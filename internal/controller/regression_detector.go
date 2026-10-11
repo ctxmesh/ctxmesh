@@ -32,7 +32,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
 )
 
@@ -122,7 +122,7 @@ type RegressionDetectorReconciler struct {
 func (r *RegressionDetectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	var deploy agentsv1alpha1.AgentDeployment
+	var deploy agentsv1beta1.AgentDeployment
 	if err := r.Get(ctx, req.NamespacedName, &deploy); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Deployment gone — drop the gauge series so a deleted agent does not linger at a
@@ -167,7 +167,7 @@ func (r *RegressionDetectorReconciler) Reconcile(ctx context.Context, req ctrl.R
 // ABSTAINS (Unknown) rather than fabricate whenever the data is insufficient.
 func (r *RegressionDetectorReconciler) evaluate(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	detector *onlinescore.RegressionDetector,
 ) (onlinescore.RegressionVerdict, metav1.ConditionStatus, string, string) {
 	if r.OnlineScore == nil {
@@ -232,15 +232,15 @@ func (r *RegressionDetectorReconciler) evaluate(
 // serving version is the natural baseline (ADR 0062 Fork 4).
 func (r *RegressionDetectorReconciler) priorVersion(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	serving string,
 ) (string, bool, error) {
-	var list agentsv1alpha1.AgentVersionList
+	var list agentsv1beta1.AgentVersionList
 	if err := r.List(ctx, &list, client.InNamespace(deploy.Namespace)); err != nil {
 		return "", false, fmt.Errorf("listing AgentVersions: %w", err)
 	}
 	// Keep only this deployment's versions.
-	mine := make([]agentsv1alpha1.AgentVersion, 0, len(list.Items))
+	mine := make([]agentsv1beta1.AgentVersion, 0, len(list.Items))
 	for i := range list.Items {
 		if list.Items[i].Spec.DeploymentName == deploy.Name {
 			mine = append(mine, list.Items[i])
@@ -268,8 +268,8 @@ func (r *RegressionDetectorReconciler) priorVersion(
 // tie-breaking on name for determinism (second-granularity timestamps collide often). Shared
 // by the regression detector's baseline resolution and the rollback actuator's healthy-target
 // check so both agree on version ordering.
-func sortVersionsByCreation(versions []agentsv1alpha1.AgentVersion) {
-	slices.SortFunc(versions, func(a, b agentsv1alpha1.AgentVersion) int {
+func sortVersionsByCreation(versions []agentsv1beta1.AgentVersion) {
+	slices.SortFunc(versions, func(a, b agentsv1beta1.AgentVersion) int {
 		ta, tb := a.CreationTimestamp.Time, b.CreationTimestamp.Time
 		if ta.Equal(tb) {
 			return strings.Compare(a.Name, b.Name)
@@ -302,7 +302,7 @@ func filterByVersion(all []onlinescore.Aggregate, version string) []onlinescore.
 // nothing changed) to avoid a status write-storm on the periodic requeue.
 func (r *RegressionDetectorReconciler) setRegressionCondition(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	status metav1.ConditionStatus,
 	reason, message string,
 ) error {
@@ -326,7 +326,7 @@ func (r *RegressionDetectorReconciler) setRegressionCondition(
 // re-evaluates on the periodic RequeueAfter (the online-score rows are off-cluster — no watch).
 func (r *RegressionDetectorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&agentsv1alpha1.AgentDeployment{}).
+		For(&agentsv1beta1.AgentDeployment{}).
 		Named("regressiondetector").
 		Complete(r)
 }

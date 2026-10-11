@@ -24,34 +24,34 @@ import (
 	"strings"
 	"testing"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 func TestRawContentURL(t *testing.T) {
 	cases := []struct {
 		name    string
-		src     agentsv1alpha1.GitPromptSource
+		src     agentsv1beta1.GitPromptSource
 		want    string
 		wantErr bool
 	}{
 		{
 			name: "github repo with .git suffix",
-			src:  agentsv1alpha1.GitPromptSource{Repo: "https://github.com/acme/prompts.git", Ref: "main", Path: "support/greeting-v1.md"},
+			src:  agentsv1beta1.GitPromptSource{Repo: "https://github.com/acme/prompts.git", Ref: "main", Path: "support/greeting-v1.md"},
 			want: "https://raw.githubusercontent.com/acme/prompts/main/support/greeting-v1.md",
 		},
 		{
 			name: "github repo, leading slash on path trimmed",
-			src:  agentsv1alpha1.GitPromptSource{Repo: "https://github.com/acme/prompts", Ref: "v2", Path: "/greeting.md"},
+			src:  agentsv1beta1.GitPromptSource{Repo: "https://github.com/acme/prompts", Ref: "v2", Path: "/greeting.md"},
 			want: "https://raw.githubusercontent.com/acme/prompts/v2/greeting.md",
 		},
 		{
 			name:    "non-github host unsupported",
-			src:     agentsv1alpha1.GitPromptSource{Repo: "https://gitlab.com/acme/prompts.git", Ref: "main", Path: "p.md"},
+			src:     agentsv1beta1.GitPromptSource{Repo: "https://gitlab.com/acme/prompts.git", Ref: "main", Path: "p.md"},
 			wantErr: true,
 		},
 		{
 			name:    "incomplete pointer",
-			src:     agentsv1alpha1.GitPromptSource{Repo: "https://github.com/acme/prompts", Ref: "", Path: "p.md"},
+			src:     agentsv1beta1.GitPromptSource{Repo: "https://github.com/acme/prompts", Ref: "", Path: "p.md"},
 			wantErr: true,
 		},
 	}
@@ -97,7 +97,7 @@ func newFakeResolver(status int, body, token string) *HTTPResolver {
 }
 
 func TestHTTPResolverResolve(t *testing.T) {
-	src := agentsv1alpha1.GitPromptSource{Repo: "https://github.com/acme/prompts.git", Ref: "main", Path: "support/greeting-v1.md"}
+	src := agentsv1beta1.GitPromptSource{Repo: "https://github.com/acme/prompts.git", Ref: "main", Path: "support/greeting-v1.md"}
 
 	t.Run("200 returns content + deterministic version", func(t *testing.T) {
 		content := "You are Acme Support. Greet the customer warmly."
@@ -132,7 +132,7 @@ func TestHTTPResolverResolve(t *testing.T) {
 
 	t.Run("unsupported host maps to ErrNotFound (pointer error)", func(t *testing.T) {
 		r := NewHTTPResolver("")
-		_, err := r.Resolve(context.Background(), agentsv1alpha1.GitPromptSource{
+		_, err := r.Resolve(context.Background(), agentsv1beta1.GitPromptSource{
 			Repo: "https://gitlab.com/acme/p.git", Ref: "main", Path: "p.md",
 		})
 		if !errors.Is(err, ErrNotFound) {

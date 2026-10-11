@@ -34,7 +34,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
@@ -45,39 +44,39 @@ func cond(typ string, status metav1.ConditionStatus, reason, msg string) metav1.
 }
 
 // depsAgent references one of everything the Bindings panel lists.
-func depsAgent() *agentsv1alpha1.AgentDeployment {
-	return &agentsv1alpha1.AgentDeployment{
+func depsAgent() *agentsv1beta1.AgentDeployment {
+	return &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:              "img:1",
 			Env:                []corev1.EnvVar{{Name: "MODEL_ROUTE", Value: "chat"}},
 			GuardrailPolicyRef: "pii",
-			KnowledgeBases: []agentsv1alpha1.KnowledgeBaseRef{
+			KnowledgeBases: []agentsv1beta1.KnowledgeBaseRef{
 				{Name: "handbook", AutoInject: true},
 			},
-			SessionMemory:  &agentsv1alpha1.SessionMemorySpec{Scope: "session", PerUser: true},
-			LongTermMemory: &agentsv1alpha1.LongTermMemorySpec{Enabled: true, EmbeddingRoute: "embed"},
-			Runtime: &agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{
+			SessionMemory:  &agentsv1beta1.SessionMemorySpec{Scope: "session", PerUser: true},
+			LongTermMemory: &agentsv1beta1.LongTermMemorySpec{Enabled: true, EmbeddingRoute: "embed"},
+			Runtime: &agentsv1beta1.RuntimeSpec{ToolPolicy: &agentsv1beta1.ToolPolicySpec{
 				Default:   "allow",
-				Overrides: []agentsv1alpha1.ToolPolicyOverride{{Name: "refund", Rule: "require-approval"}, {Name: "search", Rule: "allow"}},
-				Approvers: []agentsv1alpha1.Approver{{Kind: "Group", Name: "finance"}},
+				Overrides: []agentsv1beta1.ToolPolicyOverride{{Name: "refund", Rule: "require-approval"}, {Name: "search", Rule: "allow"}},
+				Approvers: []agentsv1beta1.Approver{{Kind: "Group", Name: "finance"}},
 			}},
-			Feedback: &agentsv1alpha1.FeedbackSpec{
-				Human:    &agentsv1alpha1.HumanSource{Scores: []agentsv1alpha1.ScoreDecl{{Name: "thumbs"}, {Name: "accuracy"}}},
-				External: []agentsv1alpha1.ExternalSource{{Name: "csat-webhook", Score: agentsv1alpha1.ScoreDecl{Name: "csat"}}},
+			Feedback: &agentsv1beta1.FeedbackSpec{
+				Human:    &agentsv1beta1.HumanSource{Scores: []agentsv1beta1.ScoreDecl{{Name: "thumbs"}, {Name: "accuracy"}}},
+				External: []agentsv1beta1.ExternalSource{{Name: "csat-webhook", Score: agentsv1beta1.ScoreDecl{Name: "csat"}}},
 			},
 		},
 	}
 }
 
-func servedRoute(secretRef string) *agentsv1alpha1.ModelRoute {
-	return &agentsv1alpha1.ModelRoute{
+func servedRoute(secretRef string) *agentsv1beta1.ModelRoute {
+	return &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "chat", Namespace: detailNS},
-		Spec: agentsv1alpha1.ModelRouteSpec{Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{Providers: []agentsv1beta1.ProviderRef{
 			{Provider: "openai", Model: "gpt", Priority: 1, SecretBindingRef: secretRef},
 			{Provider: "openai", Model: "gpt-mini", Priority: 2, SecretBindingRef: secretRef},
 		}},
-		Status: agentsv1alpha1.ModelRouteStatus{Conditions: []metav1.Condition{
+		Status: agentsv1beta1.ModelRouteStatus{Conditions: []metav1.Condition{
 			readyCondition(metav1.ConditionTrue, "Served", "the gateway serves this route"),
 		}},
 	}
@@ -109,9 +108,9 @@ func detailDeps(t *testing.T, c client.Client) []AgentDependency {
 // and its (deduplicated) secret binding, the guardrail, the tool binding, the knowledge base, and the
 // spec-only memory, approval and feedback declarations.
 func TestAgentDependenciesResolved(t *testing.T) {
-	sb := &agentsv1alpha1.SecretBinding{
+	sb := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "openai-key", Namespace: detailNS},
-		Spec:       agentsv1alpha1.SecretBindingSpec{SecretRef: agentsv1alpha1.SecretKeyRef{Name: "openai", Key: "api-key"}},
+		Spec:       agentsv1beta1.SecretBindingSpec{SecretRef: agentsv1beta1.SecretKeyRef{Name: "openai", Key: "api-key"}},
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "openai", Namespace: detailNS},
@@ -123,10 +122,10 @@ func TestAgentDependenciesResolved(t *testing.T) {
 			cond("Validated", metav1.ConditionTrue, "AllPatternsCompile", ""),
 		}},
 	}
-	tb := &agentsv1alpha1.MCPToolBinding{
+	tb := &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo-search", Namespace: detailNS},
-		Spec:       agentsv1alpha1.MCPToolBindingSpec{AgentRef: "echo", ToolName: "search", RegistryRef: "crm", Mode: "remote"},
-		Status:     agentsv1alpha1.MCPToolBindingStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Bound", "ok")}},
+		Spec:       agentsv1beta1.MCPToolBindingSpec{AgentRef: "echo", ToolName: "search", RegistryRef: "crm", Mode: "remote"},
+		Status:     agentsv1beta1.MCPToolBindingStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Bound", "ok")}},
 	}
 	kb := &agentsv1beta1.KnowledgeBase{
 		ObjectMeta: metav1.ObjectMeta{Name: "handbook", Namespace: detailNS},
@@ -222,10 +221,10 @@ func TestAgentDependenciesNotReadyCarryTheConditionsWords(t *testing.T) {
 			cond("Validated", metav1.ConditionFalse, "InvalidPattern", "pattern 0 does not compile"),
 		}},
 	}
-	tb := &agentsv1alpha1.MCPToolBinding{
+	tb := &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo-search", Namespace: detailNS},
-		Spec:       agentsv1alpha1.MCPToolBindingSpec{AgentRef: "echo", ToolName: "search", RegistryRef: "crm", Mode: "remote"},
-		Status: agentsv1alpha1.MCPToolBindingStatus{Conditions: []metav1.Condition{
+		Spec:       agentsv1beta1.MCPToolBindingSpec{AgentRef: "echo", ToolName: "search", RegistryRef: "crm", Mode: "remote"},
+		Status: agentsv1beta1.MCPToolBindingStatus{Conditions: []metav1.Condition{
 			readyCondition(metav1.ConditionFalse, "RegistryNotFound", "ToolRegistry crm not found"),
 		}},
 	}
@@ -278,7 +277,7 @@ func TestAgentDependenciesForbiddenReadsAreUnknown(t *testing.T) {
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 				switch obj.(type) {
-				case *agentsv1alpha1.ModelRoute:
+				case *agentsv1beta1.ModelRoute:
 					return denied("modelroutes")
 				case *agentsv1beta1.GuardrailPolicy:
 					return denied("guardrailpolicies")
@@ -288,7 +287,7 @@ func TestAgentDependenciesForbiddenReadsAreUnknown(t *testing.T) {
 				return cl.Get(ctx, key, obj, opts...)
 			},
 			List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-				if _, ok := list.(*agentsv1alpha1.MCPToolBindingList); ok {
+				if _, ok := list.(*agentsv1beta1.MCPToolBindingList); ok {
 					return denied("mcptoolbindings")
 				}
 				return cl.List(ctx, list, opts...)
@@ -316,9 +315,9 @@ func TestAgentDependenciesForbiddenReadsAreUnknown(t *testing.T) {
 
 // TestAgentDependenciesNoneIsEmptyList proves an agent that references nothing gets [] (not null).
 func TestAgentDependenciesNoneIsEmptyList(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	assert.Empty(t, detailDeps(t, c))
@@ -330,10 +329,10 @@ func deniedErr(group, resource string) error {
 }
 
 // boundSecretBinding is a kubernetes-backed SecretBinding naming Secret "openai", key "api-key".
-func boundSecretBinding() *agentsv1alpha1.SecretBinding {
-	return &agentsv1alpha1.SecretBinding{
+func boundSecretBinding() *agentsv1beta1.SecretBinding {
+	return &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "openai-key", Namespace: detailNS},
-		Spec:       agentsv1alpha1.SecretBindingSpec{SecretRef: agentsv1alpha1.SecretKeyRef{Name: "openai", Key: "api-key"}},
+		Spec:       agentsv1beta1.SecretBindingSpec{SecretRef: agentsv1beta1.SecretKeyRef{Name: "openai", Key: "api-key"}},
 	}
 }
 
@@ -408,12 +407,12 @@ func TestAgentDependenciesSecretAbsentOrKeyless(t *testing.T) {
 
 // routeDeniedClient serves the agent but refuses every ModelRoute read, as RBAC does for a caller
 // who may read agents and not routes.
-func routeDeniedClient(t *testing.T, ad *agentsv1alpha1.AgentDeployment) client.Client {
+func routeDeniedClient(t *testing.T, ad *agentsv1beta1.AgentDeployment) client.Client {
 	t.Helper()
 	return fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-				if _, ok := obj.(*agentsv1alpha1.ModelRoute); ok {
+				if _, ok := obj.(*agentsv1beta1.ModelRoute); ok {
 					return deniedErr("agents.ctxmesh.ai", "modelroutes")
 				}
 				return cl.Get(ctx, key, obj, opts...)
@@ -452,7 +451,7 @@ func TestAgentDetailWithoutDependencies(t *testing.T) {
 		WithObjects(depsAgent(), servedRoute("openai-key"), boundSecretBinding()).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-				if _, ok := obj.(*agentsv1alpha1.AgentDeployment); !ok {
+				if _, ok := obj.(*agentsv1beta1.AgentDeployment); !ok {
 					refReads++
 				}
 				return cl.Get(ctx, key, obj, opts...)
@@ -518,7 +517,7 @@ func TestAgentDependenciesModelRouteFromValueFrom(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-				if _, ok := obj.(*agentsv1alpha1.ModelRoute); ok {
+				if _, ok := obj.(*agentsv1beta1.ModelRoute); ok {
 					routeReads++
 				}
 				return cl.Get(ctx, key, obj, opts...)

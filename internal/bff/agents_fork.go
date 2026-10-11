@@ -51,7 +51,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/expand"
 )
 
@@ -180,7 +180,7 @@ func (s *Server) handleForkAgent(w http.ResponseWriter, r *http.Request) {
 	// already in the caller's namespace is only a benign re-fork when its fork-origin labels
 	// MATCH this origin. A name collision with NO fork labels / a DIFFERENT origin is a real
 	// conflict (a 200 there would silently lie about what the caller now owns) → 409.
-	var existing agentsv1alpha1.AgentDeployment
+	var existing agentsv1beta1.AgentDeployment
 	if gErr := caller.Get(r.Context(), client.ObjectKey{Namespace: callerNS, Name: localName}, &existing); gErr == nil {
 		if forkOriginMatches(&existing, prov) {
 			writeJSON(w, http.StatusOK, ForkAgentResponse{
@@ -221,7 +221,7 @@ func (s *Server) resolveForkOrigin(r *http.Request, caller client.Client, origin
 	// authorization (parity with `kubectl get`); a viewer's 403 / a missing agent's 404 surface
 	// honestly through writeGetError-shaped statuses.
 	if originNS == callerNS {
-		var ad agentsv1alpha1.AgentDeployment
+		var ad agentsv1beta1.AgentDeployment
 		if gErr := caller.Get(r.Context(), client.ObjectKey{Namespace: originNS, Name: originName}, &ad); gErr != nil {
 			return "", forkProvenance{}, getErrorToCreateError(gErr, kindAgent)
 		}
@@ -331,7 +331,7 @@ func (s *Server) forkFromSourceSpec(r *http.Request, caller client.Client, sourc
 
 	// Re-read the just-created (now labelled) agent for the summary — parity with what landed.
 	summary := AgentSummary{Name: localName, Namespace: callerNS}
-	var forked agentsv1alpha1.AgentDeployment
+	var forked agentsv1beta1.AgentDeployment
 	if gErr := caller.Get(ctx, client.ObjectKey{Namespace: callerNS, Name: localName}, &forked); gErr == nil {
 		summary = newAgentSummary(&forked)
 	}
@@ -351,7 +351,7 @@ func (s *Server) forkFromSourceSpec(r *http.Request, caller client.Client, sourc
 // Empty version/contentHash (a duplicate-in-place) are stamped as empty-string labels so the
 // origin identity is always recorded and the staleness compare has a defined "unpinned" value.
 func (s *Server) stampForkProvenance(ctx context.Context, caller client.Client, ns, name string, prov forkProvenance) *createError {
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	if gErr := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &ad); gErr != nil {
 		return getErrorToCreateError(gErr, kindAgent)
 	}
@@ -386,7 +386,7 @@ const annForkUnresolvedRefs = "agents.ctxmesh.ai/fork-unresolved-refs"
 // surface a needs-attention state + list exactly what dangles. Errors are returned (not swallowed)
 // for the caller to log; a stamp failure does not fail the fork.
 func (s *Server) stampForkNeedsRebinding(ctx context.Context, caller client.Client, ns, name string, refs []string) error {
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	if gErr := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &ad); gErr != nil {
 		return gErr
 	}
@@ -417,7 +417,7 @@ func (s *Server) stampForkNeedsRebinding(ctx context.Context, caller client.Clie
 // prov — the provenance-matched idempotency test (ADR 0068 §4). A matching origin (same
 // namespace + name) makes a re-fork a benign 200 already-forked; anything else (no fork
 // labels, or a DIFFERENT origin) is a name collision that must NOT silently 200-lie.
-func forkOriginMatches(ad *agentsv1alpha1.AgentDeployment, prov forkProvenance) bool {
+func forkOriginMatches(ad *agentsv1beta1.AgentDeployment, prov forkProvenance) bool {
 	lbls := ad.GetLabels()
 	if lbls == nil {
 		return false
@@ -441,7 +441,7 @@ func forkOriginKey(ns, name string) string {
 // FIRST — any existing fork is enough to mark + link. A list error is returned so the caller can
 // degrade to an unmarked gallery, never a 500.
 func (s *Server) callerForkOrigins(ctx context.Context, caller client.Client, callerNS string) (map[string]ForkRef, error) {
-	var list agentsv1alpha1.AgentDeploymentList
+	var list agentsv1beta1.AgentDeploymentList
 	if err := caller.List(ctx, &list, client.InNamespace(callerNS), client.HasLabels{labelForkOriginName}); err != nil {
 		return nil, err
 	}

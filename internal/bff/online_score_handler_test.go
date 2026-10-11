@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
 )
 
@@ -185,7 +185,7 @@ func TestHandleAgentRollback_SetsAnnotationViaCaller(t *testing.T) {
 
 	// Assert the annotation was actually written on the patched object in the
 	// fake client (the caller's RBAC governs, and the fake client records the write).
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(),
 		client.ObjectKey{Namespace: "prod", Name: "asst"}, &got))
 	assert.Equal(t, "asst-v0", got.Annotations[rollbackAnnotation],

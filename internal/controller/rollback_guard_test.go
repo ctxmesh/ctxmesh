@@ -24,7 +24,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // The automatic path judges only the spec that is serving. A stored spec the ordinary reconcile has
@@ -32,13 +32,13 @@ import (
 // the regressed version; acting on either reverts a spec nobody has measured.
 func TestShouldAutoRollback_OnlyJudgesTheServedSpec(t *testing.T) {
 	r := &AgentDeploymentReconciler{}
-	spec := agentsv1alpha1.AgentDeploymentSpec{
+	spec := agentsv1beta1.AgentDeploymentSpec{
 		Image:   "ghcr.io/ctxmesh/example-agent:v2-regressed",
-		Rollout: &agentsv1alpha1.RolloutSpec{AutoRollback: &agentsv1alpha1.AutoRollbackConfig{Enabled: true}},
+		Rollout: &agentsv1beta1.RolloutSpec{AutoRollback: &agentsv1beta1.AutoRollbackConfig{Enabled: true}},
 	}
 	hash, err := specHash(spec)
 	require.NoError(t, err)
-	served := &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "guarded"}, Spec: spec}
+	served := &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "guarded"}, Spec: spec}
 	served.Status.LatestVersion = "guarded-" + hash
 	apimeta.SetStatusCondition(&served.Status.Conditions, metav1.Condition{
 		Type: conditionRegressionDetected, Status: metav1.ConditionTrue, Reason: reasonRegressionDetected,
@@ -50,6 +50,6 @@ func TestShouldAutoRollback_OnlyJudgesTheServedSpec(t *testing.T) {
 	assert.False(t, r.shouldAutoRollback(edited), "a stored spec not yet served is not judged")
 
 	frozen := served.DeepCopy()
-	frozen.Status.Rollback = &agentsv1alpha1.RollbackStatus{FrozenUntilAck: true}
+	frozen.Status.Rollback = &agentsv1beta1.RollbackStatus{FrozenUntilAck: true}
 	assert.False(t, r.shouldAutoRollback(frozen), "a frozen deployment is not judged")
 }

@@ -35,7 +35,7 @@ import (
 	"gopkg.in/yaml.v3"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // CheckRequirementsRequest is the POST /api/agents/check-requirements body: the
@@ -157,7 +157,7 @@ func requirementsModelCheck(ctx context.Context, caller client.Client, ns string
 		route = strings.TrimSpace(cand.Model.Route)
 	}
 
-	var routes agentsv1alpha1.ModelRouteList
+	var routes agentsv1beta1.ModelRouteList
 	if err := caller.List(ctx, &routes,
 		client.InNamespace(ns),
 		client.MatchingLabels{labelManagedBy: managedByConnect},
@@ -233,7 +233,7 @@ func (s *Server) requirementsToolCheck(ctx context.Context, caller client.Client
 		for _, tool := range tr.Spec.Tools {
 			status := tool.ApprovalStatus
 			if status == "" {
-				status = agentsv1alpha1.ApprovalApproved
+				status = agentsv1beta1.ApprovalApproved
 			}
 			catalog[tool.Name] = catalogEntry{
 				approvalStatus: status,
@@ -254,7 +254,7 @@ func (s *Server) requirementsToolCheck(ctx context.Context, caller client.Client
 			// OAuth consent is required before the tool is usable — the user must
 			// grant access via the per-user consent flow (ADR 0031).
 			out[i] = ToolRequirement{Name: name, Status: toolStatusNeedsConsent}
-		case entry.approvalStatus != agentsv1alpha1.ApprovalApproved:
+		case entry.approvalStatus != agentsv1beta1.ApprovalApproved:
 			// Pending operator approval (hardened install, ADR 0016).
 			out[i] = ToolRequirement{Name: name, Status: toolStatusNeedsApproval}
 		default:

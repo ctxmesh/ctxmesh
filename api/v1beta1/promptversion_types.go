@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package v1alpha1
+package v1beta1
 
 // PromptVersion has been RETIRED as a CRD (ADR 0044) — it lives only in Postgres, managed via the BFF API.
 // The PromptVersion / PromptVersionSpec / PromptVersionStatus / PromptVersionList types + their scheme

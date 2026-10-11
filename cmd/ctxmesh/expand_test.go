@@ -89,7 +89,7 @@ func TestExpand_Minimal(t *testing.T) {
 	checkGolden(t, "minimal", got)
 
 	// Structural assertions independent of the golden file.
-	if !strings.Contains(got, "apiVersion: agents.ctxmesh.ai/v1alpha1") {
+	if !strings.Contains(got, "apiVersion: agents.ctxmesh.ai/v1beta1") {
 		t.Error("output missing apiVersion")
 	}
 	if !strings.Contains(got, "kind: AgentDeployment") {

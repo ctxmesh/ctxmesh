@@ -29,12 +29,12 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // tenantLabel is the controller-managed namespace→tenant membership label (one source of truth with the
 // Tenant controller + the state-layer tenant resolver).
-const tenantLabel = agentsv1alpha1.TenantLabel
+const tenantLabel = agentsv1beta1.TenantLabel
 
 // TenantLabelValidator is a ValidatingWebhook on namespaces: it DENIES a create/update that changes the
 // tenant label — set, change, OR remove — unless the request comes from the Tenant controller's

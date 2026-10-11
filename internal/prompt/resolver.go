@@ -33,7 +33,7 @@ import (
 	"errors"
 	"fmt"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // ErrNotFound is returned by a Resolver when the (repo, ref, path) pointer does
@@ -66,14 +66,14 @@ type Resolver interface {
 	// git pointer. It returns ErrNotFound when the pointer does not resolve (bad
 	// ref / missing path) so the caller can surface a user error without
 	// requeueing, and any other error for a transient/infra failure.
-	Resolve(ctx context.Context, src agentsv1alpha1.GitPromptSource) (Resolved, error)
+	Resolve(ctx context.Context, src agentsv1beta1.GitPromptSource) (Resolved, error)
 }
 
 // Version computes the deterministic display version for a resolved prompt: the
 // first 12 hex chars of sha256 over the full pointer and content. Exposed so any
 // Resolver impl (fixture or real) derives the identical prompt.version for the
 // same inputs, and so the controller can recompute it for the digest component.
-func Version(src agentsv1alpha1.GitPromptSource, content string) string {
+func Version(src agentsv1beta1.GitPromptSource, content string) string {
 	payload := fmt.Sprintf("repo=%s;ref=%s;path=%s;content=%s",
 		src.Repo, src.Ref, src.Path, content)
 	h := sha256.Sum256([]byte(payload))

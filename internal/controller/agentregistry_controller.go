@@ -39,7 +39,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 const (
@@ -235,7 +235,7 @@ type AgentRegistryReconciler struct {
 func (r *AgentRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	var registry agentsv1alpha1.AgentRegistry
+	var registry agentsv1beta1.AgentRegistry
 	if err := r.Get(ctx, req.NamespacedName, &registry); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Registry deleted — its owned NetworkPolicy is GC'd by Kubernetes and
@@ -296,8 +296,8 @@ func (r *AgentRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 // matchLabels entry or matchExpressions to select members.
 func (r *AgentRegistryReconciler) resolveMembers(
 	ctx context.Context,
-	registry *agentsv1alpha1.AgentRegistry,
-) ([]agentsv1alpha1.AgentDeployment, error) {
+	registry *agentsv1beta1.AgentRegistry,
+) ([]agentsv1beta1.AgentDeployment, error) {
 	selector, err := metav1.LabelSelectorAsSelector(&registry.Spec.MemberSelector)
 	if err != nil {
 		return nil, fmt.Errorf("parsing memberSelector: %w", err)
@@ -307,11 +307,11 @@ func (r *AgentRegistryReconciler) resolveMembers(
 		return nil, nil
 	}
 
-	var all agentsv1alpha1.AgentDeploymentList
+	var all agentsv1beta1.AgentDeploymentList
 	if err := r.List(ctx, &all, client.InNamespace(registry.Namespace)); err != nil {
 		return nil, fmt.Errorf("listing AgentDeployments: %w", err)
 	}
-	out := make([]agentsv1alpha1.AgentDeployment, 0, len(all.Items))
+	out := make([]agentsv1beta1.AgentDeployment, 0, len(all.Items))
 	for i := range all.Items {
 		if selector.Matches(labels.Set(all.Items[i].Labels)) {
 			out = append(out, all.Items[i])
@@ -357,7 +357,7 @@ func (r *AgentRegistryReconciler) resolveMembers(
 // WITHOUT re-severing the collector→Langfuse export that made M6 ship ingress-only.
 func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 	ctx context.Context,
-	registry *agentsv1alpha1.AgentRegistry,
+	registry *agentsv1beta1.AgentRegistry,
 ) error {
 	np := &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
@@ -541,7 +541,7 @@ func intstrPtr(port int) *intstr.IntOrString {
 // Knative's create-time revision defaults intact on re-reconcile.
 func (r *AgentRegistryReconciler) reconcileDLQSink(
 	ctx context.Context,
-	registry *agentsv1alpha1.AgentRegistry,
+	registry *agentsv1beta1.AgentRegistry,
 ) error {
 	dlq := &servingv1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -595,7 +595,7 @@ func (r *AgentRegistryReconciler) reconcileDLQSink(
 // addressable URL. Owned by the registry so it GCs on delete.
 func (r *AgentRegistryReconciler) reconcileBroker(
 	ctx context.Context,
-	registry *agentsv1alpha1.AgentRegistry,
+	registry *agentsv1beta1.AgentRegistry,
 ) error {
 	// Fail LOUDLY, never silently (ADR 0141). A registry whose Broker was quietly skipped looks
 	// reconciled while every eventing agent bound to it will never receive an event.
@@ -644,7 +644,7 @@ func (r *AgentRegistryReconciler) reconcileBroker(
 // when something actually changed (avoids resourceVersion churn / watch storms).
 func (r *AgentRegistryReconciler) setStatus(
 	ctx context.Context,
-	registry *agentsv1alpha1.AgentRegistry,
+	registry *agentsv1beta1.AgentRegistry,
 	members []string,
 	status metav1.ConditionStatus,
 	reason, message string,
@@ -706,15 +706,15 @@ type registryMembership struct {
 func resolveAgentRegistry(
 	ctx context.Context,
 	c client.Client,
-	agent *agentsv1alpha1.AgentDeployment,
+	agent *agentsv1beta1.AgentDeployment,
 ) (registryMembership, error) {
-	var all agentsv1alpha1.AgentRegistryList
+	var all agentsv1beta1.AgentRegistryList
 	if err := c.List(ctx, &all, client.InNamespace(agent.Namespace)); err != nil {
 		return registryMembership{}, fmt.Errorf("listing AgentRegistries: %w", err)
 	}
 
 	agentLabels := labels.Set(agent.Labels)
-	var matches []agentsv1alpha1.AgentRegistry
+	var matches []agentsv1beta1.AgentRegistry
 	for i := range all.Items {
 		reg := &all.Items[i]
 		if !reg.DeletionTimestamp.IsZero() {
@@ -774,11 +774,11 @@ func resolveAgentRegistry(
 func (r *AgentRegistryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	mapAgentToRegistries := handler.EnqueueRequestsFromMapFunc(
 		func(ctx context.Context, obj client.Object) []reconcile.Request {
-			agent, ok := obj.(*agentsv1alpha1.AgentDeployment)
+			agent, ok := obj.(*agentsv1beta1.AgentDeployment)
 			if !ok {
 				return nil
 			}
-			var list agentsv1alpha1.AgentRegistryList
+			var list agentsv1beta1.AgentRegistryList
 			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(agent.Namespace)); err != nil {
 				return nil
 			}
@@ -796,14 +796,14 @@ func (r *AgentRegistryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// manager from starting, which made eventing a hard prerequisite for everyone -- including
 	// users who never send an event.
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&agentsv1alpha1.AgentRegistry{}).
+		For(&agentsv1beta1.AgentRegistry{}).
 		Owns(&networkingv1.NetworkPolicy{})
 	if r.EventingAvailable {
 		b = b.Owns(&eventingv1.Broker{})
 	}
 	return b.
 		Owns(&servingv1.Service{}).
-		Watches(&agentsv1alpha1.AgentDeployment{}, mapAgentToRegistries).
+		Watches(&agentsv1beta1.AgentDeployment{}, mapAgentToRegistries).
 		Named("agentregistry").
 		Complete(r)
 }

@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
@@ -37,7 +37,7 @@ import (
 // no CRD, ADR 0044), seeded with regs, and sets the SSAR authorizer (permissive by
 // default; a RBAC-denial case passes a denying one). Shared by the MCP test files
 // that used to seed ToolRegistries into a fake client.
-func wireTRStore(t *testing.T, s *Server, auth authz.Authorizer, regs ...*agentsv1alpha1.ToolRegistry) toolregistry.Store {
+func wireTRStore(t *testing.T, s *Server, auth authz.Authorizer, regs ...*agentsv1beta1.ToolRegistry) toolregistry.Store {
 	t.Helper()
 	store := toolregistry.NewMemStore()
 	s.toolRegistryStore = store
@@ -54,7 +54,7 @@ func wireTRStore(t *testing.T, s *Server, auth authz.Authorizer, regs ...*agents
 }
 
 // scopedRegistry builds a register-managed ToolRegistry with a scope + owner label.
-func scopedRegistry(name, scope, owner string) *agentsv1alpha1.ToolRegistry {
+func scopedRegistry(name, scope, owner string) *agentsv1beta1.ToolRegistry {
 	labels := map[string]string{labelManagedBy: managedByMCP}
 	if scope != "" {
 		labels[labelMCPScope] = scope
@@ -62,9 +62,9 @@ func scopedRegistry(name, scope, owner string) *agentsv1alpha1.ToolRegistry {
 	if owner != "" {
 		labels[labelMCPOwner] = owner
 	}
-	return &agentsv1alpha1.ToolRegistry{
+	return &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "prod", Labels: labels},
-		Spec:       agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: name + "-tool"}}},
+		Spec:       agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{{Name: name + "-tool"}}},
 	}
 }
 
@@ -87,7 +87,7 @@ func TestMCPScopeVisibleTo(t *testing.T) {
 
 // listServersAs issues GET /api/mcpservers as the given username (via the SSR interceptor)
 // and returns the server names in the response.
-func listServersAs(t *testing.T, objs []*agentsv1alpha1.ToolRegistry, username string) []string {
+func listServersAs(t *testing.T, objs []*agentsv1beta1.ToolRegistry, username string) []string {
 	t.Helper()
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithInterceptorFuncs(ssrInterceptor(username, nil)).Build()
 	s, _, _ := newMCPServer(t, c, false)
@@ -117,7 +117,7 @@ func TestCheckBindingOwnership(t *testing.T) {
 		"org_tool":    {registry: "shared-mcp", scope: scopeOrg},
 	}
 	bind := func(tool string) []decodedObject {
-		return []decodedObject{{obj: &agentsv1alpha1.MCPToolBinding{Spec: agentsv1alpha1.MCPToolBindingSpec{ToolName: tool}}}}
+		return []decodedObject{{obj: &agentsv1beta1.MCPToolBinding{Spec: agentsv1beta1.MCPToolBindingSpec{ToolName: tool}}}}
 	}
 
 	// The owner may bind their personal server's tool.
@@ -136,7 +136,7 @@ func TestCheckBindingOwnership(t *testing.T) {
 
 func TestListMCPServersOwnerFiltered(t *testing.T) {
 	aliceHash := userGrantHash("alice@example.com")
-	objs := []*agentsv1alpha1.ToolRegistry{
+	objs := []*agentsv1beta1.ToolRegistry{
 		scopedRegistry("alice-personal", scopePersonal, aliceHash),
 		scopedRegistry("open-public", scopePublic, ""),
 		scopedRegistry("shared-org", scopeOrg, ""),
@@ -156,7 +156,7 @@ func TestListMCPServersOwnerFiltered(t *testing.T) {
 
 // visibilityRegistry builds a ToolRegistry with the ADR 0067 new-axis labels
 // (labelMCPVisibility + labelMCPCredentialSource) and optionally a legacy scope label.
-func visibilityRegistry(name, visibility, credSrc, owner string) *agentsv1alpha1.ToolRegistry {
+func visibilityRegistry(name, visibility, credSrc, owner string) *agentsv1beta1.ToolRegistry {
 	labels := map[string]string{labelManagedBy: managedByMCP}
 	if visibility != "" {
 		labels[labelMCPVisibility] = visibility
@@ -167,9 +167,9 @@ func visibilityRegistry(name, visibility, credSrc, owner string) *agentsv1alpha1
 	if owner != "" {
 		labels[labelMCPOwner] = owner
 	}
-	return &agentsv1alpha1.ToolRegistry{
+	return &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "prod", Labels: labels},
-		Spec:       agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: name + "-tool"}}},
+		Spec:       agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{{Name: name + "-tool"}}},
 	}
 }
 
@@ -179,7 +179,7 @@ func visibilityRegistry(name, visibility, credSrc, owner string) *agentsv1alpha1
 func TestMCPVisibilityDerivation(t *testing.T) {
 	cases := []struct {
 		name     string
-		tr       *agentsv1alpha1.ToolRegistry
+		tr       *agentsv1beta1.ToolRegistry
 		wantVis  string
 		wantCred string
 	}{

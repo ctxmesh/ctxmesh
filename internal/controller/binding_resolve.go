@@ -25,7 +25,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
@@ -79,7 +79,7 @@ type bindingValidation struct {
 //
 // registries maps registry name → ToolRegistry (same namespace as the binding).
 // An empty pin field on the entry means "any value allowed" for that field.
-func validateBinding(b *agentsv1alpha1.MCPToolBinding, registries map[string]agentsv1alpha1.ToolRegistry) bindingValidation {
+func validateBinding(b *agentsv1beta1.MCPToolBinding, registries map[string]agentsv1beta1.ToolRegistry) bindingValidation {
 	reg, ok := registries[b.Spec.RegistryRef]
 	if !ok {
 		return bindingValidation{
@@ -88,7 +88,7 @@ func validateBinding(b *agentsv1alpha1.MCPToolBinding, registries map[string]age
 		}
 	}
 
-	var entry *agentsv1alpha1.ToolEntry
+	var entry *agentsv1beta1.ToolEntry
 	for i := range reg.Spec.Tools {
 		if reg.Spec.Tools[i].Name == b.Spec.ToolName {
 			entry = &reg.Spec.Tools[i]
@@ -133,8 +133,8 @@ func validateBinding(b *agentsv1alpha1.MCPToolBinding, registries map[string]age
 // already admitted, so the lookups are expected to hit — the nil returns are the
 // graceful-absence path, not an error.
 func registryInputSchema(
-	b *agentsv1alpha1.MCPToolBinding,
-	registries map[string]agentsv1alpha1.ToolRegistry,
+	b *agentsv1beta1.MCPToolBinding,
+	registries map[string]agentsv1beta1.ToolRegistry,
 ) []byte {
 	reg, ok := registries[b.Spec.RegistryRef]
 	if !ok {
@@ -156,8 +156,8 @@ func registryInputSchema(
 // manifest omits it and the SDK falls back to a generic description. Mirrors
 // registryInputSchema: same registry/entry lookup, a different field.
 func registryDescription(
-	b *agentsv1alpha1.MCPToolBinding,
-	registries map[string]agentsv1alpha1.ToolRegistry,
+	b *agentsv1beta1.MCPToolBinding,
+	registries map[string]agentsv1beta1.ToolRegistry,
 ) string {
 	reg, ok := registries[b.Spec.RegistryRef]
 	if !ok {
@@ -187,18 +187,18 @@ func listAgentBindings(
 	ctx context.Context,
 	c client.Client,
 	namespace, agentName string,
-) ([]agentsv1alpha1.MCPToolBinding, error) {
-	var all agentsv1alpha1.MCPToolBindingList
+) ([]agentsv1beta1.MCPToolBinding, error) {
+	var all agentsv1beta1.MCPToolBindingList
 	if err := c.List(ctx, &all, client.InNamespace(namespace)); err != nil {
 		return nil, err
 	}
-	out := make([]agentsv1alpha1.MCPToolBinding, 0, len(all.Items))
+	out := make([]agentsv1beta1.MCPToolBinding, 0, len(all.Items))
 	for i := range all.Items {
 		if all.Items[i].Spec.AgentRef == agentName && all.Items[i].DeletionTimestamp.IsZero() {
 			out = append(out, all.Items[i])
 		}
 	}
-	slices.SortFunc(out, func(a, b agentsv1alpha1.MCPToolBinding) int {
+	slices.SortFunc(out, func(a, b agentsv1beta1.MCPToolBinding) int {
 		return strings.Compare(a.Name, b.Name)
 	})
 	return out, nil
@@ -229,7 +229,7 @@ func resolveAgentBindings(
 	}
 
 	// Load each referenced registry once.
-	registries := map[string]agentsv1alpha1.ToolRegistry{}
+	registries := map[string]agentsv1beta1.ToolRegistry{}
 	for i := range bindings {
 		ref := bindings[i].Spec.RegistryRef
 		if _, seen := registries[ref]; seen {

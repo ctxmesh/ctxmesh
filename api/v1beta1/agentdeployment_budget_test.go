@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Unit tests for AgentDeployment BudgetSpec field: deepcopy round-trip.
-package v1alpha1
+package v1beta1
 
 import (
 	"testing"

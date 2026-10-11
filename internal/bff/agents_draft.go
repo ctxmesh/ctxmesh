@@ -24,7 +24,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // stageLabel is the well-known label key that marks an AgentDeployment's
@@ -123,7 +123,7 @@ func (s *Server) handlePublishAgent(w http.ResponseWriter, r *http.Request) {
 // label is deleted from the mutated copy, and the diff is applied — so only the
 // label key changes and all other labels are preserved intact.
 func publishAgent(ctx context.Context, patcher AgentPatcher, ns, name string) error {
-	var live agentsv1alpha1.AgentDeployment
+	var live agentsv1beta1.AgentDeployment
 	if err := patcher.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &live); err != nil {
 		if apierrors.IsNotFound(err) {
 			return &createError{status: 404, msg: "agent not found"}
@@ -191,7 +191,7 @@ func stampDraftLabel(objs []decodedObject) {
 }
 
 // isDraftAgent reports whether an AgentDeployment carries the stage=draft label.
-func isDraftAgent(ad *agentsv1alpha1.AgentDeployment) bool {
+func isDraftAgent(ad *agentsv1beta1.AgentDeployment) bool {
 	return ad.Labels[stageLabel] == stageDraft
 }
 

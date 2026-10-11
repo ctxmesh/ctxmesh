@@ -14,12 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package v1beta1 is the graduated API version of the agents.ctxmesh.ai group (ADR 0037, M34). It
-// is served alongside v1alpha1 during the deprecation window; v1alpha1 is the conversion HUB (this
-// version is a spoke). No fields change at graduation — the only schema evolution (folding
-// MemoryBinding into AgentDeployment.spec.sessionMemory, m34.2) is already a field present in both
-// versions — so each root type REUSES the v1alpha1 spec/status types and conversion is a direct
-// assignment (no duplication, no import cycle: v1beta1 imports v1alpha1, never the reverse).
+// Package v1beta1 contains the API Schema definitions for the agents.ctxmesh.ai group. It is the
+// only served version and the storage version of every kind (ADR 0100).
 // +kubebuilder:object:generate=true
 // +groupName=agents.ctxmesh.ai
 package v1beta1

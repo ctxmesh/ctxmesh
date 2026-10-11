@@ -24,7 +24,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
 )
 
@@ -99,7 +99,7 @@ func (s *Server) handleAgentMemory(w http.ResponseWriter, r *http.Request) {
 
 	// Caller-scoped existence + authz gate: verify the caller can `get` the agent BEFORE any store read,
 	// so no memory is returned for an agent the caller may not see.
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &ad); err != nil {
 		s.writeGetError(w, err, "agent")
 		return

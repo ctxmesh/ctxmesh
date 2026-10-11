@@ -30,14 +30,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 func delegateScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
-	require.NoError(t, agentsv1alpha1.AddToScheme(s))
 	require.NoError(t, agentsv1beta1.AddToScheme(s))
 	return s
 }
@@ -96,20 +94,20 @@ func TestResolveSupervisedTeam(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(delegateScheme(t)).WithObjects(team).Build()
 
 	// The supervisor resolves its team.
-	planner := &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "planner", Namespace: "ns1"}}
+	planner := &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "planner", Namespace: "ns1"}}
 	got, err := resolveSupervisedTeam(ctx, c, planner)
 	require.NoError(t, err)
 	require.NotNil(t, got, "the supervisor agent resolves the team it supervises")
 	assert.Equal(t, "research", got.Name)
 
 	// A roster MEMBER (not the supervisor) supervises nothing → nil (it doesn't get delegate_to).
-	worker := &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "web-researcher", Namespace: "ns1"}}
+	worker := &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "web-researcher", Namespace: "ns1"}}
 	got2, err := resolveSupervisedTeam(ctx, c, worker)
 	require.NoError(t, err)
 	assert.Nil(t, got2, "a roster member is not a supervisor")
 
 	// A plain agent in another namespace → nil.
-	other := &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "planner", Namespace: "other"}}
+	other := &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "planner", Namespace: "other"}}
 	got3, err := resolveSupervisedTeam(ctx, c, other)
 	require.NoError(t, err)
 	assert.Nil(t, got3, "team resolution is namespace-scoped")

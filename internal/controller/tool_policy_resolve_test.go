@@ -22,13 +22,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/egress"
 )
 
-func agentWithToolPolicy(tp *agentsv1alpha1.ToolPolicySpec) *agentsv1alpha1.AgentDeployment {
-	return &agentsv1alpha1.AgentDeployment{Spec: agentsv1alpha1.AgentDeploymentSpec{
-		Runtime: &agentsv1alpha1.RuntimeSpec{ToolPolicy: tp},
+func agentWithToolPolicy(tp *agentsv1beta1.ToolPolicySpec) *agentsv1beta1.AgentDeployment {
+	return &agentsv1beta1.AgentDeployment{Spec: agentsv1beta1.AgentDeploymentSpec{
+		Runtime: &agentsv1beta1.RuntimeSpec{ToolPolicy: tp},
 	}}
 }
 
@@ -36,10 +36,10 @@ func agentWithToolPolicy(tp *agentsv1alpha1.ToolPolicySpec) *agentsv1alpha1.Agen
 // to add is now written inline as default / overrides (ADR 0152 §2), and the resolved policy the sidecar
 // reads carries it.
 func TestResolveToolPolicy_InlineApproval(t *testing.T) {
-	rp, err := resolveToolPolicy(agentWithToolPolicy(&agentsv1alpha1.ToolPolicySpec{
+	rp, err := resolveToolPolicy(agentWithToolPolicy(&agentsv1beta1.ToolPolicySpec{
 		Default:   "allow",
-		Overrides: []agentsv1alpha1.ToolPolicyOverride{{Name: "db.delete", Rule: "require-approval"}},
-		Approvers: []agentsv1alpha1.Approver{{Kind: "Group", Name: "dba"}},
+		Overrides: []agentsv1beta1.ToolPolicyOverride{{Name: "db.delete", Rule: "require-approval"}},
+		Approvers: []agentsv1beta1.Approver{{Kind: "Group", Name: "dba"}},
 	}))
 	require.NoError(t, err)
 	require.True(t, rp.referenced, "a toolPolicy is delivered to the sidecar")
@@ -57,9 +57,9 @@ func TestResolveToolPolicy_InlineApproval(t *testing.T) {
 // §2: with a single author there is no max-strictness merge, so an explicit allow override beats
 // default require-approval (an allTools approval rule used to tighten it to require-approval).
 func TestResolveToolPolicy_InlineAllowOverrideWinsOverDefault(t *testing.T) {
-	rp, err := resolveToolPolicy(agentWithToolPolicy(&agentsv1alpha1.ToolPolicySpec{
+	rp, err := resolveToolPolicy(agentWithToolPolicy(&agentsv1beta1.ToolPolicySpec{
 		Default:   "require-approval",
-		Overrides: []agentsv1alpha1.ToolPolicyOverride{{Name: "read_docs", Rule: "allow"}},
+		Overrides: []agentsv1beta1.ToolPolicyOverride{{Name: "read_docs", Rule: "allow"}},
 	}))
 	require.NoError(t, err)
 	assert.Equal(t, "require-approval", rp.ruleFor("send_email"), "the default requires approval")
@@ -69,8 +69,8 @@ func TestResolveToolPolicy_InlineAllowOverrideWinsOverDefault(t *testing.T) {
 // TestResolveToolPolicy_ApproversOnly: approvers without default/overrides still deliver a policy
 // (the agent declared one), and every tool stays allowed.
 func TestResolveToolPolicy_ApproversOnly(t *testing.T) {
-	rp, err := resolveToolPolicy(agentWithToolPolicy(&agentsv1alpha1.ToolPolicySpec{
-		Approvers: []agentsv1alpha1.Approver{{Kind: "User", Name: "alice"}},
+	rp, err := resolveToolPolicy(agentWithToolPolicy(&agentsv1beta1.ToolPolicySpec{
+		Approvers: []agentsv1beta1.Approver{{Kind: "User", Name: "alice"}},
 	}))
 	require.NoError(t, err)
 	assert.True(t, rp.referenced)
@@ -79,12 +79,12 @@ func TestResolveToolPolicy_ApproversOnly(t *testing.T) {
 
 // TestResolveToolPolicy_NoPolicy: no runtime or no toolPolicy stays permissive (nothing delivered).
 func TestResolveToolPolicy_NoPolicy(t *testing.T) {
-	rp, err := resolveToolPolicy(&agentsv1alpha1.AgentDeployment{})
+	rp, err := resolveToolPolicy(&agentsv1beta1.AgentDeployment{})
 	require.NoError(t, err)
 	assert.False(t, rp.referenced, "no runtime ⇒ permissive")
 
-	rp, err = resolveToolPolicy(&agentsv1alpha1.AgentDeployment{Spec: agentsv1alpha1.AgentDeploymentSpec{
-		Runtime: &agentsv1alpha1.RuntimeSpec{},
+	rp, err = resolveToolPolicy(&agentsv1beta1.AgentDeployment{Spec: agentsv1beta1.AgentDeploymentSpec{
+		Runtime: &agentsv1beta1.RuntimeSpec{},
 	}})
 	require.NoError(t, err)
 	assert.False(t, rp.referenced, "a runtime without toolPolicy ⇒ permissive")

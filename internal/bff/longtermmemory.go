@@ -24,7 +24,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // LongTermMemoryConfig is the agent's long-term-memory capability (M46's folded AgentDeployment field). This
@@ -37,7 +37,7 @@ type LongTermMemoryConfig struct {
 	EmbeddingRoute string `json:"embeddingRoute,omitempty"`
 }
 
-func longTermMemoryConfigOf(ad *agentsv1alpha1.AgentDeployment) LongTermMemoryConfig {
+func longTermMemoryConfigOf(ad *agentsv1beta1.AgentDeployment) LongTermMemoryConfig {
 	if lt := ad.Spec.LongTermMemory; lt != nil {
 		return LongTermMemoryConfig{Enabled: lt.Enabled, PerUser: lt.PerUser, EmbeddingRoute: lt.EmbeddingRoute}
 	}
@@ -51,7 +51,7 @@ func (s *Server) handleGetLongTermMemoryConfig(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	if err := caller.Get(r.Context(),
 		client.ObjectKey{Namespace: r.PathValue("ns"), Name: r.PathValue("name")}, &ad); err != nil {
 		s.writeGetError(w, err, "agent")
@@ -78,7 +78,7 @@ func (s *Server) handleUpdateLongTermMemory(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	if err := caller.Get(r.Context(),
 		client.ObjectKey{Namespace: r.PathValue("ns"), Name: r.PathValue("name")}, &ad); err != nil {
 		s.writeGetError(w, err, "agent")
@@ -89,7 +89,7 @@ func (s *Server) handleUpdateLongTermMemory(w http.ResponseWriter, r *http.Reque
 	if !req.Enabled {
 		ad.Spec.LongTermMemory = nil
 	} else {
-		ad.Spec.LongTermMemory = &agentsv1alpha1.LongTermMemorySpec{
+		ad.Spec.LongTermMemory = &agentsv1beta1.LongTermMemorySpec{
 			Enabled:        true,
 			PerUser:        req.PerUser,
 			EmbeddingRoute: strings.TrimSpace(req.EmbeddingRoute),

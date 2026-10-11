@@ -32,7 +32,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/sharedrun"
@@ -264,7 +263,7 @@ func (s *Server) callerCanReadRunBacking(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusNotFound, "run not found")
 		return false
 	default:
-		obj = &agentsv1alpha1.AgentDeployment{}
+		obj = &agentsv1beta1.AgentDeployment{}
 	}
 	if gErr := caller.Get(r.Context(), client.ObjectKey{Name: name, Namespace: rn.Namespace}, obj); gErr != nil {
 		switch {

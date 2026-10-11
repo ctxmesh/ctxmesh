@@ -30,7 +30,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/prompt"
 )
 
@@ -134,7 +134,7 @@ func (r *AgentDeploymentReconciler) promptResolver() prompt.Resolver {
 // prompt-only-deploy invariant relies on. The image is never touched here.
 func (r *AgentDeploymentReconciler) resolvePrompt(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 ) (resolvedPrompt, error) {
 	if deploy.Spec.PromptRef == "" {
 		return resolvedPrompt{}, nil
@@ -174,11 +174,11 @@ func (r *AgentDeploymentReconciler) resolvePrompt(
 // status error rather than reading a store the controller intentionally doesn't depend on.
 func (r *AgentDeploymentReconciler) promptPointer(
 	_ context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
-) (agentsv1alpha1.GitPromptSource, string, error) {
+	deploy *agentsv1beta1.AgentDeployment,
+) (agentsv1beta1.GitPromptSource, string, error) {
 	raw := deploy.Annotations[prompt.ResolvedPromptAnnotation]
 	if raw == "" {
-		return agentsv1alpha1.GitPromptSource{}, "", &promptResolveError{
+		return agentsv1beta1.GitPromptSource{}, "", &promptResolveError{
 			reason: "PromptPointerMissing",
 			msg: fmt.Sprintf("agent %q has no resolved prompt pointer (annotation %s) for promptRef %q — create or edit the agent via the API so its PromptVersion pointer is resolved (PromptVersion is no longer a CRD, ADR 0044)",
 				deploy.Name, prompt.ResolvedPromptAnnotation, deploy.Spec.PromptRef),
@@ -187,7 +187,7 @@ func (r *AgentDeploymentReconciler) promptPointer(
 	var p prompt.ResolvedPointer
 	if err := json.Unmarshal([]byte(raw), &p); err != nil {
 		// A corrupt stamp is a platform error, not user input — surface it on status.
-		return agentsv1alpha1.GitPromptSource{}, "", &promptResolveError{
+		return agentsv1beta1.GitPromptSource{}, "", &promptResolveError{
 			reason: "PromptPointerInvalid",
 			msg:    fmt.Sprintf("the %s annotation on agent %q is not valid JSON: %v", prompt.ResolvedPromptAnnotation, deploy.Name, err),
 		}
@@ -202,7 +202,7 @@ func (r *AgentDeploymentReconciler) promptPointer(
 // image — which lives in spec.Image and is never touched by the prompt path —
 // keeps an UNCHANGED digest. Returns "" for the empty inputs (no prompt),
 // symmetric with the tool/memory/registry/budget components.
-func promptDigest(src agentsv1alpha1.GitPromptSource, version string) string {
+func promptDigest(src agentsv1beta1.GitPromptSource, version string) string {
 	if version == "" {
 		return ""
 	}
@@ -222,7 +222,7 @@ func promptDigest(src agentsv1alpha1.GitPromptSource, version string) string {
 // display VERSION — both static (no valueFrom; the m5.7 Knative ksvc landmine).
 func (r *AgentDeploymentReconciler) reconcilePromptConfigMap(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	rp resolvedPrompt,
 ) (vol *corev1.Volume, mount *corev1.VolumeMount, env []corev1.EnvVar, err error) {
 	if !rp.hasPrompt {
@@ -278,7 +278,7 @@ func (r *AgentDeploymentReconciler) reconcilePromptConfigMap(
 // rollback target). Best-effort within the reconcile: a prune failure surfaces so the
 // reconcile requeues, but the correctness (no prompt overwrite) is the content-addressing,
 // not the GC.
-func (r *AgentDeploymentReconciler) pruneOldPromptConfigMaps(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment, currentCM string) error {
+func (r *AgentDeploymentReconciler) pruneOldPromptConfigMaps(ctx context.Context, deploy *agentsv1beta1.AgentDeployment, currentCM string) error {
 	var cms corev1.ConfigMapList
 	if err := r.List(ctx, &cms,
 		client.InNamespace(deploy.Namespace),
@@ -307,7 +307,7 @@ func (r *AgentDeploymentReconciler) pruneOldPromptConfigMaps(ctx context.Context
 
 // promptConfigMapsInUse returns the set of prompt-ConfigMap names still mounted by a live
 // Revision of the agent's ksvc, so they are never pruned.
-func (r *AgentDeploymentReconciler) promptConfigMapsInUse(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment) (map[string]bool, error) {
+func (r *AgentDeploymentReconciler) promptConfigMapsInUse(ctx context.Context, deploy *agentsv1beta1.AgentDeployment) (map[string]bool, error) {
 	inUse := map[string]bool{}
 	var revs servingv1.RevisionList
 	if err := r.List(ctx, &revs,

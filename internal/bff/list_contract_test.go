@@ -34,7 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // This file exercises the list contract on GET /api/agents (ui-foundation §4):
@@ -84,11 +84,11 @@ func captureListInterceptor(rec *capturedListOpts) interceptor.Funcs {
 // is set to the next offset (empty when the page reaches the end). Namespace
 // scoping is applied first. This is the only faithful way to exercise the
 // handler's paging plumbing, since the fake store ignores Limit/Continue.
-func pagingListInterceptor(all []*agentsv1alpha1.AgentDeployment) interceptor.Funcs {
+func pagingListInterceptor(all []*agentsv1beta1.AgentDeployment) interceptor.Funcs {
 	// Sort by (namespace, name) for a stable, API-server-like order.
-	sorted := make([]*agentsv1alpha1.AgentDeployment, len(all))
+	sorted := make([]*agentsv1beta1.AgentDeployment, len(all))
 	copy(sorted, all)
-	slices.SortFunc(sorted, func(a, b *agentsv1alpha1.AgentDeployment) int {
+	slices.SortFunc(sorted, func(a, b *agentsv1beta1.AgentDeployment) int {
 		if a.Namespace != b.Namespace {
 			return strings.Compare(a.Namespace, b.Namespace)
 		}
@@ -101,7 +101,7 @@ func pagingListInterceptor(all []*agentsv1alpha1.AgentDeployment) interceptor.Fu
 			lo.ApplyOptions(opts)
 
 			// Namespace scope first (empty = all namespaces).
-			scoped := make([]*agentsv1alpha1.AgentDeployment, 0, len(sorted))
+			scoped := make([]*agentsv1beta1.AgentDeployment, 0, len(sorted))
 			for _, ad := range sorted {
 				if lo.Namespace == "" || ad.Namespace == lo.Namespace {
 					scoped = append(scoped, ad)
@@ -127,11 +127,11 @@ func pagingListInterceptor(all []*agentsv1alpha1.AgentDeployment) interceptor.Fu
 			}
 
 			page := scoped[start:end]
-			out := make([]agentsv1alpha1.AgentDeployment, 0, len(page))
+			out := make([]agentsv1beta1.AgentDeployment, 0, len(page))
 			for _, ad := range page {
 				out = append(out, *ad)
 			}
-			adList, ok := list.(*agentsv1alpha1.AgentDeploymentList)
+			adList, ok := list.(*agentsv1beta1.AgentDeploymentList)
 			if !ok {
 				return fmt.Errorf("pagingListInterceptor: unexpected list type %T", list)
 			}
@@ -149,7 +149,7 @@ func pagingListInterceptor(all []*agentsv1alpha1.AgentDeployment) interceptor.Fu
 
 // pagingServer builds a caller-scoped Server whose AgentDeployment List honors
 // limit/continue paging over the given fixtures (via pagingListInterceptor).
-func pagingServer(t *testing.T, all ...*agentsv1alpha1.AgentDeployment) *Server {
+func pagingServer(t *testing.T, all ...*agentsv1beta1.AgentDeployment) *Server {
 	t.Helper()
 	c := fake.NewClientBuilder().
 		WithScheme(testScheme(t)).
@@ -159,16 +159,16 @@ func pagingServer(t *testing.T, all ...*agentsv1alpha1.AgentDeployment) *Server 
 }
 
 // agent is a terse AgentDeployment fixture constructor for the paging tests.
-func agent(namespace, name string) *agentsv1alpha1.AgentDeployment {
-	return &agentsv1alpha1.AgentDeployment{
+func agent(namespace, name string) *agentsv1beta1.AgentDeployment {
+	return &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 }
 
 // makeAgentPtrs builds n AgentDeployment pointers named agent-000..agent-(n-1).
-func makeAgentPtrs(namespace string, n int) []*agentsv1alpha1.AgentDeployment {
-	out := make([]*agentsv1alpha1.AgentDeployment, 0, n)
+func makeAgentPtrs(namespace string, n int) []*agentsv1beta1.AgentDeployment {
+	out := make([]*agentsv1beta1.AgentDeployment, 0, n)
 	for i := range n {
 		out = append(out, agent(namespace, fmt.Sprintf("agent-%03d", i)))
 	}
@@ -310,9 +310,9 @@ func TestEmptyCursorNotForwarded(t *testing.T) {
 // on the name, applied to the FETCHED WINDOW only (it never widens the K8s page).
 func TestQWindowedSubstringFilter(t *testing.T) {
 	objs := []client.Object{
-		&agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "echo-prod", Namespace: "prod"}},
-		&agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "ECHO-staging", Namespace: "prod"}},
-		&agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "summarizer", Namespace: "prod"}},
+		&agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "echo-prod", Namespace: "prod"}},
+		&agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "ECHO-staging", Namespace: "prod"}},
+		&agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "summarizer", Namespace: "prod"}},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})

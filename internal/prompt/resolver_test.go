@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // FixtureResolver satisfies the Resolver interface — the seam the controller
@@ -32,8 +32,8 @@ import (
 // drift) is caught here.
 var _ Resolver = (*FixtureResolver)(nil)
 
-func src(ref string) agentsv1alpha1.GitPromptSource {
-	return agentsv1alpha1.GitPromptSource{
+func src(ref string) agentsv1beta1.GitPromptSource {
+	return agentsv1beta1.GitPromptSource{
 		Repo: "https://github.com/example/prompts.git",
 		Ref:  ref,
 		Path: "agents/echo/system.txt",
@@ -96,10 +96,10 @@ func TestFixtureResolve_BadPointer(t *testing.T) {
 	_, err := r.Resolve(ctx, src("gone"))
 	assert.ErrorIs(t, err, ErrNotFound, "explicit not-found pointer")
 
-	_, err = r.Resolve(ctx, agentsv1alpha1.GitPromptSource{Repo: "r", Ref: "", Path: "p"})
+	_, err = r.Resolve(ctx, agentsv1beta1.GitPromptSource{Repo: "r", Ref: "", Path: "p"})
 	assert.ErrorIs(t, err, ErrNotFound, "empty ref never resolves")
 
-	_, err = r.Resolve(ctx, agentsv1alpha1.GitPromptSource{Repo: "r", Ref: "x", Path: ""})
+	_, err = r.Resolve(ctx, agentsv1beta1.GitPromptSource{Repo: "r", Ref: "x", Path: ""})
 	assert.ErrorIs(t, err, ErrNotFound, "empty path never resolves")
 }
 

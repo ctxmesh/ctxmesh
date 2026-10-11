@@ -27,7 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // managedByModelPicker marks a ModelRoute auto-created by the create-agent model
@@ -85,7 +85,7 @@ func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runt
 	// A custom (OpenAI-compatible) connection's endpoint. Without it the route sent the request, and
 	// the connection's key, to the provider type's default host: api.openai.com for "openai".
 	apiBase := ""
-	var connRoute agentsv1alpha1.ModelRoute
+	var connRoute agentsv1beta1.ModelRoute
 	switch gerr := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: providerRouteName(connection)}, &connRoute); {
 	case gerr == nil:
 		if len(connRoute.Spec.Providers) > 0 {
@@ -108,7 +108,7 @@ func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runt
 	name := routeNameForModel(connection, model)
 
 	// Reuse if the route already exists (idempotent — the common repeat case).
-	var existing agentsv1alpha1.ModelRoute
+	var existing agentsv1beta1.ModelRoute
 	err := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &existing)
 	switch {
 	case err == nil:
@@ -130,7 +130,7 @@ func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runt
 		return "", &createError{status: 502, msg: fmt.Sprintf("failed to check ModelRoute %q: %v", name, err)}
 	}
 
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
@@ -139,15 +139,15 @@ func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runt
 				labelProvider:  providerType,
 			},
 		},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{
 				Provider:         providerType,
 				Model:            model,
 				Priority:         1,
 				SecretBindingRef: bindingRef,
 				APIBase:          apiBase,
 			}},
-			RateLimit: &agentsv1alpha1.RateLimit{TenantRPM: defaultTenantRPM},
+			RateLimit: &agentsv1beta1.RateLimit{TenantRPM: defaultTenantRPM},
 		},
 	}
 	if gerr := ensureGVK(route, scheme); gerr != nil {

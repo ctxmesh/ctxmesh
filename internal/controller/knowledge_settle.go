@@ -12,7 +12,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
@@ -57,7 +56,7 @@ const (
 // in-memory state to lose.
 func (r *AgentDeploymentReconciler) awaitKnowledgeSettle(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 ) (time.Duration, error) {
 	if len(deploy.Spec.KnowledgeBases) == 0 {
 		return 0, nil
@@ -133,7 +132,7 @@ func (r *AgentDeploymentReconciler) knowledgeSettleWindow() time.Duration {
 // knowledgeSettleElapsed reports whether the wait for the dangling refs is over. The clock starts at
 // the condition's LastTransitionTime; with no condition yet this is the FIRST observation, so the
 // wait has just begun (unless the window is non-positive).
-func (r *AgentDeploymentReconciler) knowledgeSettleElapsed(deploy *agentsv1alpha1.AgentDeployment) bool {
+func (r *AgentDeploymentReconciler) knowledgeSettleElapsed(deploy *agentsv1beta1.AgentDeployment) bool {
 	window := r.knowledgeSettleWindow()
 	if window <= 0 {
 		return true
@@ -151,7 +150,7 @@ func (r *AgentDeploymentReconciler) knowledgeSettleElapsed(deploy *agentsv1alpha
 // That self-feeding burst is the other half of G12's "three generations in one second".
 func (r *AgentDeploymentReconciler) setKnowledgeResolved(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	cond metav1.Condition,
 ) error {
 	cond.ObservedGeneration = deploy.Generation

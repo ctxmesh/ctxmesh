@@ -25,7 +25,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // buildTopology reads the three topology CRDs via the client-go seam and folds
@@ -170,7 +170,7 @@ func addToRollup(h *HealthRollup, health string) {
 
 // agentNode projects an AgentDeployment onto the topology node + the health it
 // contributes to its group's rollup (derived once, reused for both).
-func agentNode(ad *agentsv1alpha1.AgentDeployment) groupedAgent {
+func agentNode(ad *agentsv1beta1.AgentDeployment) groupedAgent {
 	health := healthFromConditions(ad.Status.Conditions)
 	return groupedAgent{
 		node: TopologyNode{
@@ -301,7 +301,7 @@ func buildGroupedTopology(ctx context.Context, r AgentReader, spec topologyGroup
 	// toolsByAgent indexes tool bindings by their agent key so an expanded/matched
 	// agent can pull in its bound tool nodes + edges (only when the agent itself
 	// is emitted — tools never appear for a collapsed group).
-	toolsByAgent := map[string][]*agentsv1alpha1.MCPToolBinding{}
+	toolsByAgent := map[string][]*agentsv1beta1.MCPToolBinding{}
 	for i := range bindings.Items {
 		b := &bindings.Items[i]
 		toolsByAgent[nsName(b.Namespace, b.Spec.AgentRef)] = append(toolsByAgent[nsName(b.Namespace, b.Spec.AgentRef)], b)
@@ -384,7 +384,7 @@ const unrootedLabel = "(unrooted)"
 // the registry group id that owns it, under the registry axis. First registry to
 // claim an agent wins so an agent listed by two registries counts once — the
 // grouping stays a partition. Returns an empty (non-nil) map off the registry axis.
-func resolveRegistryMembership(registries *agentsv1alpha1.AgentRegistryList, group string) map[string]string {
+func resolveRegistryMembership(registries *agentsv1beta1.AgentRegistryList, group string) map[string]string {
 	out := map[string]string{}
 	if group != groupKindRegistry {
 		return out
@@ -404,13 +404,13 @@ func resolveRegistryMembership(registries *agentsv1alpha1.AgentRegistryList, gro
 // registryForID resolves a registry group id back to its registry so the group's
 // label/namespace use the registry's real name. Falls back to a zero registry
 // (the id is always well-formed here, so this only guards a logic slip).
-func registryForID(list *agentsv1alpha1.AgentRegistryList, id string) *agentsv1alpha1.AgentRegistry {
+func registryForID(list *agentsv1beta1.AgentRegistryList, id string) *agentsv1beta1.AgentRegistry {
 	for i := range list.Items {
 		if registryGroupID(list.Items[i].Namespace, list.Items[i].Name) == id {
 			return &list.Items[i]
 		}
 	}
-	return &agentsv1alpha1.AgentRegistry{}
+	return &agentsv1beta1.AgentRegistry{}
 }
 
 // nodeID builds the stable, unique id for a topology node.

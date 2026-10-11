@@ -18,7 +18,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controller"
 )
@@ -54,7 +53,6 @@ func TestControllerStartsWithoutKnativeEventing(t *testing.T) {
 
 	scheme := runtime.NewScheme()
 	require.NoError(t, clientgoscheme.AddToScheme(scheme))
-	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
 	require.NoError(t, agentsv1beta1.AddToScheme(scheme))
 	require.NoError(t, servingv1.AddToScheme(scheme))
 	// The eventing TYPES stay registered in the scheme even though the cluster serves no eventing

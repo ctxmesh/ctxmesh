@@ -36,7 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // newRegistryReconciler builds an AgentRegistryReconciler on the envtest client.
@@ -63,11 +63,11 @@ func reconcileRegistry(t *testing.T, r *AgentRegistryReconciler, name, namespace
 
 // mkRegistryMesh creates an AgentRegistry with the given registryId and a
 // memberSelector matching {registry: <selectorVal>}.
-func mkRegistryMesh(t *testing.T, name, namespace, registryID, selectorVal string) *agentsv1alpha1.AgentRegistry {
+func mkRegistryMesh(t *testing.T, name, namespace, registryID, selectorVal string) *agentsv1beta1.AgentRegistry {
 	t.Helper()
-	reg := &agentsv1alpha1.AgentRegistry{
+	reg := &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentRegistrySpec{
+		Spec: agentsv1beta1.AgentRegistrySpec{
 			RegistryId: registryID,
 			MemberSelector: metav1.LabelSelector{
 				MatchLabels: map[string]string{"registry": selectorVal},
@@ -82,11 +82,11 @@ func mkRegistryMesh(t *testing.T, name, namespace, registryID, selectorVal strin
 
 // mkLabeledAgent creates an AgentDeployment carrying the given labels (used to
 // join a registry via its memberSelector).
-func mkLabeledAgent(t *testing.T, name, namespace string, lbls map[string]string) *agentsv1alpha1.AgentDeployment {
+func mkLabeledAgent(t *testing.T, name, namespace string, lbls map[string]string) *agentsv1beta1.AgentDeployment {
 	t.Helper()
-	a := &agentsv1alpha1.AgentDeployment{
+	a := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: lbls},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: "serving",
 			Port:           8080,
@@ -278,13 +278,13 @@ func TestRegistry_MemberEnvInjected(t *testing.T) {
 
 	mkRegistryMesh(t, regName, namespace, registryID, registryID)
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      agentName,
 			Namespace: namespace,
 			Labels:    map[string]string{"registry": registryID},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: "serving",
 			Port:           8080,
@@ -365,18 +365,18 @@ func TestRegistry_MemberWithMemory_AgentNameOnce(t *testing.T) {
 	// Session memory is the folded spec field (ADR 0101 — MemoryBinding retired):
 	// the memory path injects AGENT_NAME (but not POD_NAMESPACE); the registry path
 	// must then dedupe AGENT_NAME and add POD_NAMESPACE.
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      agentName,
 			Namespace: namespace,
 			Labels:    map[string]string{"registry": registryID},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: "serving",
 			Port:           8080,
 			Role:           "worker",
-			SessionMemory:  &agentsv1alpha1.SessionMemorySpec{Scope: "session", Backend: &agentsv1alpha1.MemoryBackend{Addr: "valkey.mem.svc:6379"}},
+			SessionMemory:  &agentsv1beta1.SessionMemorySpec{Scope: "session", Backend: &agentsv1beta1.MemoryBackend{Addr: "valkey.mem.svc:6379"}},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, agent))
@@ -421,18 +421,18 @@ func TestRegistry_MemberWithMemory_ProxyTokenInjected(t *testing.T) {
 		proxyURL   = "http://ctxmesh-statelayer-proxy.ctxmesh.svc:8080"
 	)
 	mkRegistryMesh(t, regName, namespace, registryID, registryID)
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      agentName,
 			Namespace: namespace,
 			Labels:    map[string]string{"registry": registryID},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: "serving",
 			Port:           8080,
 			Role:           "worker",
-			SessionMemory:  &agentsv1alpha1.SessionMemorySpec{Scope: "session", Backend: &agentsv1alpha1.MemoryBackend{Addr: "valkey.mem.svc:6379"}},
+			SessionMemory:  &agentsv1beta1.SessionMemorySpec{Scope: "session", Backend: &agentsv1beta1.MemoryBackend{Addr: "valkey.mem.svc:6379"}},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, agent))
@@ -478,11 +478,11 @@ func TestRegistry_MemberWithMemory_ProxyTokenInjected(t *testing.T) {
 // so resolveMemory sees the agent as memory-enabled. addr "" ⇒ cluster-default backend.
 func setAgentSessionMemory(t *testing.T, namespace, agentName, scope, addr string) {
 	t.Helper()
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKey{Namespace: namespace, Name: agentName}, &ad))
-	sm := &agentsv1alpha1.SessionMemorySpec{Scope: scope}
+	sm := &agentsv1beta1.SessionMemorySpec{Scope: scope}
 	if addr != "" {
-		sm.Backend = &agentsv1alpha1.MemoryBackend{Addr: addr}
+		sm.Backend = &agentsv1beta1.MemoryBackend{Addr: addr}
 	}
 	ad.Spec.SessionMemory = sm
 	require.NoError(t, k8sClient.Update(testCtx, &ad))
@@ -499,12 +499,12 @@ func TestMemory_SharedScopeInjectedForMember(t *testing.T) {
 	)
 	mkRegistryMesh(t, registryID, namespace, registryID, registryID)
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: agentName, Namespace: namespace,
 			Labels: map[string]string{"registry": registryID},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080, Role: "worker",
 		},
 	}
@@ -527,9 +527,9 @@ func TestMemory_SharedScopeNotInjectedForNonMember(t *testing.T) {
 	const namespace = "default"
 	const agentName = "lonely-shared-agent"
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: namespace}, // no registry label
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080,
 		},
 	}
@@ -550,13 +550,13 @@ func TestMemory_FoldedSessionMemoryField(t *testing.T) {
 	const namespace = "default"
 	const agentName = "folded-mem-agent"
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080,
-			SessionMemory: &agentsv1alpha1.SessionMemorySpec{
+			SessionMemory: &agentsv1beta1.SessionMemorySpec{
 				Scope:   "session",
-				Backend: &agentsv1alpha1.MemoryBackend{Addr: "valkey.folded.svc:6379"},
+				Backend: &agentsv1beta1.MemoryBackend{Addr: "valkey.folded.svc:6379"},
 			},
 		},
 	}
@@ -581,16 +581,16 @@ func TestMemory_PerUserSessionInjectsEnv(t *testing.T) {
 	const namespace = "default"
 	const proxyURL = "http://statelayer-proxy.ctxmesh.svc:8080"
 
-	mkAgent := func(name string, sm *agentsv1alpha1.SessionMemorySpec) *agentsv1alpha1.AgentDeployment {
-		return &agentsv1alpha1.AgentDeployment{
+	mkAgent := func(name string, sm *agentsv1beta1.SessionMemorySpec) *agentsv1beta1.AgentDeployment {
+		return &agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-			Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Spec: agentsv1beta1.AgentDeploymentSpec{
 				Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080, Role: "worker",
 				SessionMemory: sm,
 			},
 		}
 	}
-	envFor := func(t *testing.T, agent *agentsv1alpha1.AgentDeployment, proxy string) map[string]string {
+	envFor := func(t *testing.T, agent *agentsv1beta1.AgentDeployment, proxy string) map[string]string {
 		t.Helper()
 		require.NoError(t, k8sClient.Create(testCtx, agent))
 		t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
@@ -599,10 +599,10 @@ func TestMemory_PerUserSessionInjectsEnv(t *testing.T) {
 		reconcileNN(t, r, agent.Name, namespace)
 		return envByName(getKsvc(t, agent.Name, namespace).Spec.Template.Spec.Containers[0].Env)
 	}
-	backend := &agentsv1alpha1.MemoryBackend{Addr: "valkey.svc:6379"}
+	backend := &agentsv1beta1.MemoryBackend{Addr: "valkey.svc:6379"}
 
 	t.Run("private+perUser+proxy injects MEMORY_PER_USER", func(t *testing.T) {
-		env := envFor(t, mkAgent("peruser-on", &agentsv1alpha1.SessionMemorySpec{
+		env := envFor(t, mkAgent("peruser-on", &agentsv1beta1.SessionMemorySpec{
 			Scope: "session", PerUser: true, Backend: backend,
 		}), proxyURL)
 		assert.Equal(t, "true", env["MEMORY_PER_USER"],
@@ -611,14 +611,14 @@ func TestMemory_PerUserSessionInjectsEnv(t *testing.T) {
 	})
 
 	t.Run("perUser off is inert", func(t *testing.T) {
-		env := envFor(t, mkAgent("peruser-off", &agentsv1alpha1.SessionMemorySpec{
+		env := envFor(t, mkAgent("peruser-off", &agentsv1beta1.SessionMemorySpec{
 			Scope: "session", Backend: backend,
 		}), proxyURL)
 		assert.NotContains(t, env, "MEMORY_PER_USER", "default (perUser off) injects nothing")
 	})
 
 	t.Run("proxy-less install does not inject", func(t *testing.T) {
-		env := envFor(t, mkAgent("peruser-noproxy", &agentsv1alpha1.SessionMemorySpec{
+		env := envFor(t, mkAgent("peruser-noproxy", &agentsv1beta1.SessionMemorySpec{
 			Scope: "session", PerUser: true, Backend: backend,
 		}), "")
 		assert.NotContains(t, env, "MEMORY_PER_USER",
@@ -626,7 +626,7 @@ func TestMemory_PerUserSessionInjectsEnv(t *testing.T) {
 	})
 
 	t.Run("shared scope never gets per-user", func(t *testing.T) {
-		env := envFor(t, mkAgent("peruser-shared", &agentsv1alpha1.SessionMemorySpec{
+		env := envFor(t, mkAgent("peruser-shared", &agentsv1beta1.SessionMemorySpec{
 			Scope: "shared", PerUser: true, Backend: backend,
 		}), proxyURL)
 		assert.NotContains(t, env, "MEMORY_PER_USER",
@@ -640,11 +640,11 @@ func TestMemory_LongTermFoldedField(t *testing.T) {
 	const namespace = "default"
 	const agentName = "longterm-mem-agent"
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080,
-			LongTermMemory: &agentsv1alpha1.LongTermMemorySpec{
+			LongTermMemory: &agentsv1beta1.LongTermMemorySpec{
 				Enabled: true, PerUser: true, EmbeddingRoute: "embed-v1",
 			},
 		},
@@ -669,15 +669,15 @@ func TestMemory_FoldedSharedScopeForMember(t *testing.T) {
 	const agentName = "folded-shared-member"
 	mkRegistryMesh(t, registryID, namespace, registryID, registryID)
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: agentName, Namespace: namespace, Labels: map[string]string{"registry": registryID},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080, Role: "worker",
-			SessionMemory: &agentsv1alpha1.SessionMemorySpec{
+			SessionMemory: &agentsv1beta1.SessionMemorySpec{
 				Scope:   "shared",
-				Backend: &agentsv1alpha1.MemoryBackend{Addr: "valkey.folded.svc:6379"},
+				Backend: &agentsv1beta1.MemoryBackend{Addr: "valkey.folded.svc:6379"},
 			},
 		},
 	}
@@ -744,7 +744,7 @@ func TestRegistry_MemberRemoved(t *testing.T) {
 	r := newRegistryReconciler()
 	reconcileRegistry(t, r, regName, namespace)
 
-	var reg agentsv1alpha1.AgentRegistry
+	var reg agentsv1beta1.AgentRegistry
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: regName, Namespace: namespace}, &reg))
 	assert.ElementsMatch(t, []string{"churn-stay", "churn-leave"}, reg.Status.Members,
 		"both agents are members initially")
@@ -779,9 +779,9 @@ func TestRegistry_EmptySelectorNoMembers(t *testing.T) {
 		registryID = "empty-sel-mesh"
 	)
 
-	reg := &agentsv1alpha1.AgentRegistry{
+	reg := &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: regName, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentRegistrySpec{
+		Spec: agentsv1beta1.AgentRegistrySpec{
 			RegistryId:     registryID,
 			MemberSelector: metav1.LabelSelector{}, // empty
 		},
@@ -812,12 +812,12 @@ func TestRegistry_CustomGuardsInjected(t *testing.T) {
 		agentName  = "guarded-member"
 	)
 
-	reg := &agentsv1alpha1.AgentRegistry{
+	reg := &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: regName, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentRegistrySpec{
+		Spec: agentsv1beta1.AgentRegistrySpec{
 			RegistryId:     registryID,
 			MemberSelector: metav1.LabelSelector{MatchLabels: map[string]string{"registry": registryID}},
-			Guards:         &agentsv1alpha1.RegistryGuards{MaxDepth: 3, HopBudget: 5},
+			Guards:         &agentsv1beta1.RegistryGuards{MaxDepth: 3, HopBudget: 5},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, reg))
@@ -844,13 +844,13 @@ func TestRegistry_UserRoleEnvWins(t *testing.T) {
 
 	mkRegistryMesh(t, regName, namespace, registryID, registryID)
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      agentName,
 			Namespace: namespace,
 			Labels:    map[string]string{"registry": registryID},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: "serving",
 			Port:           8080,
