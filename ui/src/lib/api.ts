@@ -534,6 +534,19 @@ export interface TraceDetailResponse {
   rollup: TraceRollup;
   spans: SpanSummary[];
   rootSpanId?: string;
+  // run is present when a run maps the trace; a direct /api/invoke trace has none.
+  run?: TraceRunSteps;
+}
+
+// TraceRunSteps is what the run behind a trace recorded, so a reader can tell a complete trace
+// from one whose spans are still arriving (the backend ingests generation and tool spans after
+// the root). The counts are 0 until the run is terminal, and endedAt is set only then.
+export interface TraceRunSteps {
+  runId: string;
+  status: string;
+  endedAt?: string; // RFC3339
+  modelSteps: number;
+  toolSteps: number;
 }
 
 // --- Feedback (GET /api/feedback?traceId=<id>, m16.4) ------------------------

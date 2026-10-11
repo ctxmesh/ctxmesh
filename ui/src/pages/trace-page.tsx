@@ -25,6 +25,7 @@ import { FixtureStepper } from "@/components/dashboard/fixture-stepper";
 import { FeedbackPanel } from "@/components/dashboard/feedback-panel";
 import { api, ApiError, type SpanSummary, type TraceDetailResponse } from "@/lib/api";
 import { formatDateTime, formatLatency, formatUSD } from "@/lib/format";
+import { settleNotice, useSettlingTrace } from "@/lib/trace-settle";
 import { ShareRunDialog } from "@/components/dashboard/share-run-dialog";
 
 // TracePage — the forensic run reader (m16.7; M151 §6.1 archetype A5, trace
@@ -281,6 +282,10 @@ export function TracePage() {
     return () => controller.abort();
   }, [id, attempt]);
 
+  // A fresh run's trace lands in pieces, so the loaded trace is re-read, bounded, until it matches
+  // what the run recorded (lib/trace-settle).
+  const settling = useSettlingTrace(id, state.kind === "ready" ? state.detail : null);
+
   // ── Pending: the trace is real, its spans have not landed yet ───────────────
   // Rendered for the silent re-check too (pendingTries > 0 while the effect refetches), or the
   // panel would blink to a spinner every few seconds. A new user reaches this page seconds after
@@ -378,7 +383,8 @@ export function TracePage() {
   }
 
   // ── Ready ───────────────────────────────────────────────────────────────────
-  const { rollup, spans } = state.detail;
+  const { rollup, spans } = settling.detail ?? state.detail;
+  const notice = settleNotice(settling.status);
   const failed = failedSpans(spans);
   // Zero is not a measurement here — see the header note. `undefined` routes the
   // row to KeyValueList's stated-absence branch instead of a formatted nought.
@@ -510,6 +516,16 @@ export function TracePage() {
               title="What happened"
               lede={spanLede}
             />
+            {settling.status?.kind === "settling" && (
+              <p className="mb-3 text-sm text-muted-foreground" role="status" data-testid="trace-settling">
+                Spans are still arriving from the trace backend — this page updates as they land.
+              </p>
+            )}
+            {notice && (
+              <div className="mb-3" data-testid="trace-incomplete">
+                <QuietNote title="This trace may not be complete yet.">{notice}</QuietNote>
+              </div>
+            )}
             {/* §4.6: the wide artifact scrolls inside its own container, and the
                 floor keeps the waterfall legible instead of letting the grid
                 crush it. The page body never scrolls sideways. */}

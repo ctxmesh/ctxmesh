@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 import { ForbiddenInline } from "@/components/kit";
 import { api, ApiError, type SpanSummary, type TraceDetailResponse } from "@/lib/api";
+import { settleNotice, useSettlingTrace } from "@/lib/trace-settle";
 
 // RunInspector — the NATIVE, on-theme run summary for one trace (first-agent-flow
 // §5, m14.11). It reads GET /api/traces/{id}/detail (a FLAT span list + rollup)
@@ -196,19 +197,24 @@ export function RunInspector({ traceId }: { traceId: string }) {
     return () => controller.abort();
   }, [traceId]);
 
-  const nodes = React.useMemo(
-    () => (state.kind === "ready" ? buildTree(state.detail.spans) : []),
-    [state],
-  );
+  // A fresh run's trace lands in pieces (the root first, the generation and tool spans seconds
+  // later), so the loaded trace is re-read, bounded, until it matches what the run recorded.
+  const settling = useSettlingTrace(traceId, state.kind === "ready" ? state.detail : null);
+  const detail = settling.detail;
+  const notice = settleNotice(settling.status);
+
+  const nodes = React.useMemo(() => (detail ? buildTree(detail.spans) : []), [detail]);
   const window = React.useMemo(
-    () => (state.kind === "ready" ? traceWindow(state.detail.spans) : { start: 0, span: 1 }),
-    [state],
+    () => (detail ? traceWindow(detail.spans) : { start: 0, span: 1 }),
+    [detail],
   );
 
   // Default selection: the first real tool call (TOOL), else the first span the
-  // SPAN fallback calls a tool, else the root, else the first node.
+  // SPAN fallback calls a tool, else the root, else the first node. It is recomputed as
+  // spans arrive, so a tool span that lands after the first read becomes the selection;
+  // a span the user picked stays picked for as long as it is in the trace.
   const effectiveSelected = React.useMemo(() => {
-    if (selectedId) return selectedId;
+    if (selectedId && nodes.some((n) => n.span.id === selectedId)) return selectedId;
     const tool =
       nodes.find((n) => n.kind === "tool" && n.span.type === "TOOL") ??
       nodes.find((n) => n.kind === "tool");
@@ -274,11 +280,25 @@ export function RunInspector({ traceId }: { traceId: string }) {
     );
   }
 
-  const { rollup } = state.detail;
+  const { rollup } = detail ?? state.detail;
   const active = nodes.find((n) => n.span.id === effectiveSelected) ?? null;
 
   return (
     <div className="space-y-3" data-testid="run-inspector">
+      {settling.status?.kind === "settling" && (
+        <p className="text-xs text-muted-foreground" role="status" data-testid="run-inspector-settling">
+          Spans are still arriving from the trace backend — this view updates as they land.
+        </p>
+      )}
+      {notice && (
+        <p
+          className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-muted-foreground"
+          role="status"
+          data-testid="run-inspector-incomplete"
+        >
+          {notice}
+        </p>
+      )}
       <div className="grid gap-4 lg:grid-cols-[1fr_20rem]">
         {/* ── Span tree + waterfall ─────────────────────────────────────── */}
         <div className="overflow-hidden rounded-lg border bg-card shadow-card">

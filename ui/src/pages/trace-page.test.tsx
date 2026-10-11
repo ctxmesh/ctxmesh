@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { TracePage } from "@/pages/trace-page";
 import { ToastProvider } from "@/components/kit";
-import type { SpanSummary } from "@/lib/api";
+import type { SpanSummary, TraceDetailResponse } from "@/lib/api";
+import { SETTLE_POLL_MS, SETTLE_WINDOW_MS } from "@/lib/trace-settle";
 
 // TracePage — m16.7 tests.
 //
@@ -289,5 +290,71 @@ describe("TracePage (m16.7)", () => {
 
     await screen.findByTestId("trace-page");
     expect(await screen.findByTestId("feedback-panel")).toBeInTheDocument();
+  });
+});
+
+// The trace page reads the same still-arriving trace the run inspector does, so it re-reads it under
+// the same bound (lib/trace-settle) instead of presenting the first, partial read as the whole run.
+describe("TracePage — a trace that is still arriving", () => {
+  const TOOL = span({ id: "tool", parentId: "gen", type: "TOOL", name: "echo", startMs: 560, durationMs: 5, nestingDepth: 2 });
+
+  function stubReads(reads: TraceDetailResponse[]) {
+    const count = { detail: 0 };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/detail")) {
+          const body = reads[Math.min(count.detail, reads.length - 1)];
+          count.detail += 1;
+          return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response);
+        }
+        if (url.includes("/feedback")) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => ({ scores: [] }) } as Response);
+        }
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ traceId: "t1", url: "https://lf/trace/t1" }) } as Response);
+      }),
+    );
+    return count;
+  }
+
+  const advance = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("re-reads until the tool span lands, then stops", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const run = { runId: "r1", status: "succeeded", endedAt: new Date(Date.now() - 1_000).toISOString(), modelSteps: 1, toolSteps: 1 };
+    const count = stubReads([
+      { rollup: ROLLUP, spans: SPANS, run },
+      { rollup: ROLLUP, spans: [...SPANS, TOOL], run },
+    ]);
+    renderPage();
+
+    await screen.findByTestId("trace-page");
+    expect(await screen.findByTestId("trace-settling")).toBeInTheDocument();
+    await advance(SETTLE_POLL_MS);
+    await screen.findByTestId("span-row-tool");
+    expect(screen.queryByTestId("trace-settling")).toBeNull();
+    await advance(5 * SETTLE_POLL_MS);
+    expect(count.detail).toBe(2);
+  });
+
+  it("says the trace may not be complete when the bound runs out short", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const run = { runId: "r1", status: "succeeded", endedAt: new Date(Date.now() - 1_000).toISOString(), modelSteps: 1, toolSteps: 1 };
+    stubReads([{ rollup: ROLLUP, spans: SPANS, run }]);
+    renderPage();
+
+    await screen.findByTestId("trace-page");
+    expect(screen.queryByTestId("trace-incomplete")).toBeNull();
+    await advance(SETTLE_WINDOW_MS);
+    const notice = await screen.findByTestId("trace-incomplete");
+    expect(notice).toHaveTextContent("1 of the 2 model and tool steps the run recorded");
   });
 });
