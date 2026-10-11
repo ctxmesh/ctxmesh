@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Play, Rocket } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 
@@ -8,9 +8,12 @@ import { Card, CardContent, PanelHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { ChatPanel } from "@/components/agent-chat";
+import { RunInspector } from "@/components/dashboard/run-inspector";
 import {
   ClosingNote,
   ComboSelect,
+  DetailDrawer,
   ForbiddenInline,
   KeyValueList,
   NextStepLink,
@@ -26,10 +29,12 @@ import { FormField } from "@/components/config/form-field";
 import {
   api,
   ApiError,
+  type AgentDetailResponse,
   type CreatedObject,
   type RunDetail,
   type WorkflowNodeStatus,
 } from "@/lib/api";
+import { formatLatency } from "@/lib/format";
 import { markRunCompleted } from "@/lib/first-run";
 import { useDurableRun } from "@/lib/use-durable-run";
 import {
@@ -50,6 +55,17 @@ import {
 
 // PlaygroundPage — define on the left, run and its story on the right (M151
 // §6.1 archetype A8, the workbench). Route: /playground
+//
+// ── PLAIN TEXT FIRST (m184.15) ──────────────────────────────────────────────
+// A first run is a sentence, not a JSON document. By default the right column
+// is the console ChatPanel for the picked agent: type, press Enter, read the
+// answer. It sends {"input": "<text>"}, exactly as the agent page's chat does,
+// and holds Send while the agent's model route is still loading (ADR 0151) —
+// which is why the page reads the agent's detail and re-reads it until the
+// agent has settled. "JSON request" is the advanced mode for an agent whose
+// input is a structured object: the original define/run/story workbench below,
+// unchanged. Both keep the record (run id, trace, how long it took) and the
+// link to the full trace. ?mode=json opens the advanced mode directly.
 //
 // ── THE PAGE'S ONE IDEA: THE RUN IS A STORY, NOT A STATUS FIELD ─────────────
 // A model reply, a consent gate, an approval, a workflow suspending between
@@ -91,6 +107,9 @@ import {
 //
 // data-testid contract:
 //   playground-namespace / playground-agent — the identity pickers
+//   playground-mode-chat / playground-mode-json — plain text (default) or a JSON request
+//   playground-chat-empty / -loading / -missing / -invalid / -error — the chat column before a chat
+//   chat-panel and its own chat-* ids — the chat itself (agent-chat.tsx)
 //   playground-advanced      — the define-and-export fields disclosure
 //   run-readonly-note        — the viewer's read-only explanation (no Run button)
 //   chat-transcript          — the run's story panel
@@ -98,6 +117,7 @@ import {
 //   cancel-run               — stop a streaming run
 //   trace-building           — the run panel while no trace id exists yet
 //   trace-id                 — the trace id, whole
+//   run-took                 — how long the run took, from the run store's own timestamps
 //   view-full-trace          — the link to the native trace explorer
 //   approval-request         — the approve/deny decision panel
 //   connect-{server}         — one inline consent button per server
@@ -123,6 +143,8 @@ type Run =
       runStatus: string;
       consentRequired?: string[];
       approval?: Approval;
+      /** Milliseconds from created to finished, as the run store recorded them; absent until finished. */
+      took?: number;
       // Workflow instance fields (m67.9): present when the run is a workflow instance.
       workflowRef?: string;
       currentNode?: string;
@@ -282,6 +304,96 @@ function buildStory(input: string, run: Run): TimelineStep[] {
   return steps;
 }
 
+/** How the Playground talks to the agent: a chat (plain text) or one JSON request. */
+type Mode = "chat" | "json";
+
+/** An agent the picker offers, with the namespace it lives in. */
+type AgentOption = { name: string; namespace: string };
+
+/** The agent the chat talks to, read from its detail endpoint. */
+type ChatAgent =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "ready"; detail: AgentDetailResponse }
+  | { kind: "missing" }
+  | { kind: "error"; message: string; forbidden: boolean };
+
+/** The namespace the BFF runs an agent in when none is named (defaultCreateNamespace). */
+const BFF_DEFAULT_NAMESPACE = "default";
+
+/** Typing a custom name should not fetch on every keystroke. */
+const PICK_DEBOUNCE_MS = 250;
+
+/** How often an agent that has not settled is re-read, as on the agent page. */
+const SETTLE_POLL_MS = 4_000;
+
+/** Ready, and its model route (if any) is served — the state the chat needs to stop polling. */
+function agentSettled(d: AgentDetailResponse): boolean {
+  return (
+    d.ready &&
+    !(d.conditions ?? []).some(
+      (c) => c.type === "ModelRouteReady" && c.status === "False" && c.reason === "NotYetServed",
+    )
+  );
+}
+
+/**
+ * Reads the agent the chat will talk to, and re-reads it while it settles: a freshly created
+ * agent is not Ready yet and its new model route takes the gateway a minute to serve, and the
+ * ChatPanel holds Send until it is (ADR 0151). Without the re-read the hold would never lift.
+ */
+function useChatAgent(ns: string, name: string, enabled: boolean): ChatAgent {
+  const [state, setState] = useState<ChatAgent>({ kind: "idle" });
+  useEffect(() => {
+    if (!enabled || !name) {
+      setState({ kind: "idle" });
+      return;
+    }
+    const ctrl = new AbortController();
+    let timer = 0;
+    const read = (silent: boolean) => {
+      if (silent && document.visibilityState === "hidden") {
+        timer = window.setTimeout(() => read(true), SETTLE_POLL_MS);
+        return;
+      }
+      if (!silent) setState({ kind: "loading" });
+      api
+        .agentDetail(ns, name, ctrl.signal)
+        .then((detail) => {
+          if (ctrl.signal.aborted) return;
+          setState({ kind: "ready", detail });
+          if (!agentSettled(detail)) timer = window.setTimeout(() => read(true), SETTLE_POLL_MS);
+        })
+        .catch((err: unknown) => {
+          if (ctrl.signal.aborted) return;
+          if (err instanceof ApiError && err.status === 404) {
+            setState({ kind: "missing" });
+            return;
+          }
+          setState({
+            kind: "error",
+            message: err instanceof Error ? err.message : "couldn't read the agent",
+            forbidden: err instanceof ApiError && err.isForbidden,
+          });
+        });
+    };
+    timer = window.setTimeout(() => read(false), PICK_DEBOUNCE_MS);
+    return () => {
+      ctrl.abort();
+      window.clearTimeout(timer);
+    };
+  }, [ns, name, enabled]);
+  return state;
+}
+
+/** Milliseconds from a finished run's creation to its last state change, or undefined. */
+function runDuration(detail: RunDetail): number | undefined {
+  if (!["succeeded", "completed", "failed", "cancelled"].includes(detail.status)) return undefined;
+  if (!detail.createdAt || !detail.updatedAt) return undefined;
+  const ms = Date.parse(detail.updatedAt) - Date.parse(detail.createdAt);
+  return Number.isFinite(ms) && ms >= 0 ? ms : undefined;
+}
+
 export function PlaygroundPage() {
   const [form, setForm] = useState<ConfigForm>(emptyForm);
   const [errors, setErrors] = useState<FieldErrors>({});
@@ -303,6 +415,38 @@ export function PlaygroundPage() {
   // clear them even if the user navigates away with the popup still open (they'd leak otherwise).
   const connectCleanupRef = useRef<(() => void) | null>(null);
 
+  // Identity pickers + deep link (DX-5): the checklist "Run" step and create→run land here
+  // with ?agent=<name>&ns=<namespace>; pre-fill so the user never re-types. The namespace +
+  // agent fields are PICKERS over the caller's known set (listNamespaces / listAgents — the
+  // console's "finite set → Select" principle) while still allowing a new name (define+export).
+  const [searchParams] = useSearchParams();
+  const [mode, setMode] = useState<Mode>(() =>
+    searchParams.get("mode") === "json" ? "json" : "chat",
+  );
+  const [namespaceOptions, setNamespaceOptions] = useState<string[]>([]);
+  const [agentOptions, setAgentOptions] = useState<AgentOption[]>([]);
+  const didInitRef = useRef(false);
+  // A same-tab (popup-blocked) MCP OAuth return the boot handler stashed (DX-6) — surfaced as
+  // a notice so consent-on-a-blocked-popup no longer ends in silence.
+  const [oauthReturn, setOauthReturn] = useState<McpOAuthPopupMessage | null>(null);
+  // The chat's latest finished turn, for the record; and the trace a turn asked to open.
+  const [lastChatRun, setLastChatRun] = useState<RunDetail | null>(null);
+  const [inspectTrace, setInspectTrace] = useState<string | null>(null);
+
+  // With no namespace picked, the agent list spans every namespace the caller can read, so a
+  // picked agent runs in ITS namespace — not the BFF's default, where it does not exist.
+  const agentName = form.name.trim();
+  const agentNames = useMemo(() => [...new Set(agentOptions.map((o) => o.name))], [agentOptions]);
+  const pickedNamespace = agentOptions.find((o) => o.name === agentName)?.namespace ?? "";
+  const runNamespace = namespace.trim() || pickedNamespace;
+  const chatNamespace = runNamespace || BFF_DEFAULT_NAMESPACE;
+  const nameError = agentName ? validate(form).name : undefined;
+  const chatAgent = useChatAgent(
+    chatNamespace,
+    agentName,
+    mode === "chat" && canRun && agentName !== "" && !nameError,
+  );
+
   // The durable run engine (ADR 0093) — the SAME create-or-resume → stream → finalize engine the
   // console ChatPanel uses (this page previously duplicated it in onRun + onApprove). It owns the
   // SSE stream lifecycle (aborted on New-run / cancel / unmount); the callbacks project its
@@ -315,7 +459,7 @@ export function PlaygroundPage() {
       // EMPTY on a default install, so it never checked off for a user who had just watched a run
       // finish. Record what the browser saw. Any terminal result counts: the step asks the user to
       // send a message and watch the trace, which a failed run also satisfies.
-      markRunCompleted(namespace);
+      markRunCompleted(runNamespace);
       setRun(finalizedRun(detail));
     },
     onFinalizeError: (err) => setRun(errorRun(err)),
@@ -339,21 +483,14 @@ export function PlaygroundPage() {
     // Only react to the durable-run transitions; `done` is handled by onFinalized.
   }, [runEngine.status, runEngine.responseText, runEngine.step, runEngine.error, runEngine.runId]);
 
-  // Identity pickers + deep link (DX-5): the checklist "Run" step and create→run land here
-  // with ?agent=<name>&ns=<namespace>; pre-fill so the user never re-types. The namespace +
-  // agent fields are PICKERS over the caller's known set (listNamespaces / listAgents — the
-  // console's "finite set → Select" principle) while still allowing a new name (define+export).
-  const [searchParams] = useSearchParams();
-  const [namespaceOptions, setNamespaceOptions] = useState<string[]>([]);
-  const [agentOptions, setAgentOptions] = useState<string[]>([]);
-  const didInitRef = useRef(false);
-  // A same-tab (popup-blocked) MCP OAuth return the boot handler stashed (DX-6) — surfaced as
-  // a notice so consent-on-a-blocked-popup no longer ends in silence.
-  const [oauthReturn, setOauthReturn] = useState<McpOAuthPopupMessage | null>(null);
-
   function set<K extends keyof ConfigForm>(key: K, value: ConfigForm[K]) {
     setForm((f) => ({ ...f, [key]: value }));
   }
+
+  // A new agent or workspace is a new conversation, so the record of the old one goes too.
+  useEffect(() => {
+    setLastChatRun(null);
+  }, [chatNamespace, agentName]);
 
   // Deep-link pre-fill + namespace load, ONCE on mount (a ref guards against re-applying the
   // pre-fill over the user's later edits). A 403/failure just leaves the picker empty — the
@@ -381,7 +518,9 @@ export function PlaygroundPage() {
     const ctrl = new AbortController();
     api
       .listAgents({ namespace: namespace.trim() || undefined, limit: 100 }, ctrl.signal)
-      .then((res) => setAgentOptions(res.agents.map((a) => a.name)))
+      .then((res) =>
+        setAgentOptions(res.agents.map((a) => ({ name: a.name, namespace: a.namespace }))),
+      )
       .catch(() => setAgentOptions([]));
     return () => ctrl.abort();
   }, [namespace]);
@@ -407,10 +546,10 @@ export function PlaygroundPage() {
     // fields validated by "Export to CRD"; requiring them here wrongly BLOCKED invoking a
     // live agent (the run silently never fired → no response, no consent CTA). Validate the
     // name only for a run.
-    const nameError = validate(form).name;
-    if (nameError) {
-      setErrors({ name: nameError });
-      setRun({ kind: "error", message: nameError });
+    const runNameError = validate(form).name;
+    if (runNameError) {
+      setErrors({ name: runNameError });
+      setRun({ kind: "error", message: runNameError });
       return;
     }
     setErrors({});
@@ -422,8 +561,8 @@ export function PlaygroundPage() {
       return;
     }
     await runEngine.start({
-      agent: form.name.trim(),
-      namespace: namespace.trim(),
+      agent: agentName,
+      namespace: runNamespace,
       input: parsedInput,
     });
   }
@@ -472,7 +611,7 @@ export function PlaygroundPage() {
     try {
       const res = await api.beginMcpGrant({
         server,
-        namespace: namespace.trim(),
+        namespace: runNamespace,
         // The console's OAuth callback — needed for a legacy server the BFF must re-discover.
         redirectUri: `${window.location.origin}/api/mcp/oauth/callback`,
       });
@@ -572,23 +711,44 @@ export function PlaygroundPage() {
   const story = started ? buildStory(input, run) : [];
   const runId =
     run.kind === "running" || run.kind === "done" ? run.runId : "";
-  const traceId = run.kind === "done" ? run.traceId : "";
+  const runTraceId = run.kind === "done" ? run.traceId : "";
   const consent = run.kind === "done" ? (run.consentRequired ?? []) : [];
   const approval = run.kind === "done" ? run.approval : undefined;
   const response = run.kind === "running" || run.kind === "done" ? run.response : "";
   const manifest =
     exp.kind === "preview" || exp.kind === "applying" ? exp.manifest : "";
 
+  // In chat mode the record is the latest finished turn; in JSON mode, the run on screen.
+  const record =
+    mode === "chat"
+      ? {
+          runId: lastChatRun?.id ?? "",
+          traceId: lastChatRun?.traceId ?? "",
+          took: lastChatRun ? runDuration(lastChatRun) : undefined,
+          started: lastChatRun !== null,
+        }
+      : {
+          runId,
+          traceId: runTraceId,
+          took: run.kind === "done" ? run.took : undefined,
+          started,
+        };
+  const traceId = record.traceId;
+
   // The record, as the run endpoints actually answer it (§7.1). Absences are
   // stated in words; nothing here is inferred.
   const facts: KeyValueItem[] = [
-    { key: "Agent", value: form.name.trim() || undefined, absent: "not chosen yet" },
-    { key: "Workspace", value: namespace.trim() || undefined, absent: "default" },
+    { key: "Agent", value: agentName || undefined, absent: "not chosen yet" },
+    {
+      key: "Workspace",
+      value: (mode === "chat" && agentName ? chatNamespace : runNamespace) || undefined,
+      absent: "default",
+    },
     {
       key: "Run id",
-      value: runId ? <span title={runId}>{truncateId(runId)}</span> : undefined,
+      value: record.runId ? <span title={record.runId}>{truncateId(record.runId)}</span> : undefined,
       absent: "not started",
-      title: runId ? undefined : "No run has been created from this form yet.",
+      title: record.runId ? undefined : "No run has been created from this page yet.",
     },
     {
       key: "Trace",
@@ -600,13 +760,98 @@ export function PlaygroundPage() {
       absent: "not linked",
       title: traceId ? undefined : "No trace was recorded for this run.",
     },
+    {
+      key: "Took",
+      value:
+        record.took !== undefined ? (
+          <span data-testid="run-took">{formatLatency(record.took)}</span>
+        ) : undefined,
+      absent: record.started ? "not finished" : "not started",
+      title: "From when the run was created to when it finished, as the run store recorded both.",
+    },
   ];
+
+  // The chat column: the ChatPanel once the picked agent has been read, and an
+  // honest note for every state before that.
+  function chatPlaceholder(testId: string, title: string, body: React.ReactNode) {
+    return (
+      <Card className="min-w-0" data-testid={testId}>
+        <PanelHeader title="Chat" />
+        <CardContent>
+          <QuietNote title={title}>{body}</QuietNote>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  let chatColumn: React.ReactNode = null;
+  if (!canRun) {
+    // The read-only note under the form says why; there is no composer to offer.
+    chatColumn = null;
+  } else if (!agentName) {
+    chatColumn = chatPlaceholder(
+      "playground-chat-empty",
+      "Pick an agent to talk to it.",
+      "Type a sentence and press Enter. The answer appears here, and every message is a traced run.",
+    );
+  } else if (nameError) {
+    chatColumn = chatPlaceholder("playground-chat-invalid", "That isn't an agent name.", nameError);
+  } else if (chatAgent.kind === "missing") {
+    chatColumn = chatPlaceholder(
+      "playground-chat-missing",
+      `No agent named ${agentName} in ${chatNamespace}.`,
+      "Pick one from the list, or define it under Advanced and export it to a CRD below.",
+    );
+  } else if (chatAgent.kind === "error") {
+    chatColumn = chatAgent.forbidden ? (
+      <div data-testid="playground-chat-error">
+        <ForbiddenInline
+          title={`Not allowed to read ${agentName}`}
+          description="Your account can't read this agent, so the console can't open a chat with it."
+          detail={chatAgent.message}
+        />
+      </div>
+    ) : (
+      chatPlaceholder(
+        "playground-chat-error",
+        `${agentName} could not be read.`,
+        <>
+          The chat opens once the agent has been read. A JSON request does not
+          need it.{" "}
+          <span className="font-mono text-xs">{chatAgent.message}</span>
+        </>,
+      )
+    );
+  } else if (chatAgent.kind === "ready") {
+    const d = chatAgent.detail;
+    chatColumn = (
+      <ChatPanel
+        key={`${chatNamespace}/${agentName}`}
+        ns={chatNamespace}
+        name={agentName}
+        ready={d.ready}
+        memoryBound={d.bindings.some((b) => b.kind === "memory")}
+        modelRoute={(d.conditions ?? []).find((c) => c.type === "ModelRouteReady")}
+        onTraced={(id) => setInspectTrace(id)}
+        onRunFinalized={setLastChatRun}
+      />
+    );
+  } else {
+    chatColumn = (
+      <Card className="min-w-0" data-testid="playground-chat-loading">
+        <PanelHeader title="Chat" />
+        <CardContent>
+          <SkeletonText lines={4} />
+        </CardContent>
+      </Card>
+    );
+  }
 
   return (
     <div className="min-w-0 space-y-6">
       <PageHeader
         title="Playground"
-        lede="Pick a deployed agent and send it a message. Its story builds on the right as the run makes it — then open the full trace, or export the definition to a CRD."
+        lede="Pick a deployed agent and talk to it in plain text. Every message is a traced run — open its trace, switch to a JSON request for an agent that takes structured input, or export the definition to a CRD."
       />
 
       {/* §4.7: two equal columns above `lg`, one below it — with explicit grid
@@ -670,7 +915,7 @@ export function PlaygroundPage() {
                 <ComboSelect
                   id="name"
                   value={form.name}
-                  options={agentOptions}
+                  options={agentNames}
                   onChange={(v) => set("name", v)}
                   placeholder="— pick an agent —"
                   customPlaceholder="new agent name"
@@ -678,18 +923,58 @@ export function PlaygroundPage() {
                 />
               </FormField>
 
-              <FormField
-                id="input"
-                label="Message (JSON)"
-                hint="Posted verbatim to the agent's /invoke."
-              >
-                <Textarea
+              <div className="space-y-2">
+                <p className="text-sm font-medium" id="playground-mode-label">
+                  How to talk to it
+                </p>
+                <div
+                  role="group"
+                  aria-labelledby="playground-mode-label"
+                  className="inline-flex rounded-md border border-border bg-surface-2 p-0.5"
+                >
+                  {(
+                    [
+                      ["chat", "Plain text"],
+                      ["json", "JSON request"],
+                    ] as const
+                  ).map(([m, label]) => (
+                    <button
+                      key={m}
+                      type="button"
+                      aria-pressed={mode === m}
+                      data-testid={`playground-mode-${m}`}
+                      onClick={() => setMode(m)}
+                      className={
+                        mode === m
+                          ? "rounded-sm bg-card px-3 py-1.5 text-sm font-medium text-foreground shadow-sm"
+                          : "rounded-sm px-3 py-1.5 text-sm text-secondary-foreground hover:text-foreground"
+                      }
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-faint">
+                  {mode === "chat"
+                    ? 'Each message is sent as {"input": "…"}, the shape a chat agent reads. Use a JSON request for an agent that takes a structured object.'
+                    : "The object below is posted verbatim to the agent. Switch back to plain text to chat."}
+                </p>
+              </div>
+
+              {mode === "json" && (
+                <FormField
                   id="input"
-                  className="min-h-[6rem] font-mono text-xs"
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                />
-              </FormField>
+                  label="Message (JSON)"
+                  hint="Posted verbatim to the agent's /invoke."
+                >
+                  <Textarea
+                    id="input"
+                    className="min-h-[6rem] font-mono text-xs"
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                  />
+                </FormField>
+              )}
 
               {/* Advanced — the CRD-authoring fields, needed only to define + export a
                   new agent (a deployed agent runs from just its name). Collapsed by
@@ -752,30 +1037,33 @@ export function PlaygroundPage() {
           <div className="space-y-3">
             <div className="flex flex-wrap items-center gap-3">
               {canRun ? (
-                <>
-                  <Button onClick={onRun} disabled={running}>
-                    <Play className="h-4 w-4" />
-                    {running ? "Running…" : "Run agent"}
-                  </Button>
-                  {run.kind === "running" && (
-                    <Button
-                      variant="outline"
-                      onClick={() => void onCancel(run.runId)}
-                      data-testid="cancel-run"
-                    >
-                      Cancel
+                // In chat mode the composer is the action; the Run button is the JSON request's.
+                mode === "json" && (
+                  <>
+                    <Button onClick={onRun} disabled={running}>
+                      <Play className="h-4 w-4" />
+                      {running ? "Running…" : "Run agent"}
                     </Button>
-                  )}
-                  {started && (
-                    <a
-                      href="#run-story"
-                      className="whitespace-nowrap border-b border-accent text-sm font-semibold text-primary hover:border-primary lg:hidden"
-                    >
-                      Jump to the run
-                      <span aria-hidden="true"> ↓</span>
-                    </a>
-                  )}
-                </>
+                    {run.kind === "running" && (
+                      <Button
+                        variant="outline"
+                        onClick={() => void onCancel(run.runId)}
+                        data-testid="cancel-run"
+                      >
+                        Cancel
+                      </Button>
+                    )}
+                    {started && (
+                      <a
+                        href="#run-story"
+                        className="whitespace-nowrap border-b border-accent text-sm font-semibold text-primary hover:border-primary lg:hidden"
+                      >
+                        Jump to the run
+                        <span aria-hidden="true"> ↓</span>
+                      </a>
+                    )}
+                  </>
+                )
               ) : (
                 // RBAC-aware chrome: a viewer has no Run affordance (running is
                 // a write-shaped op). They can still Preview/Export below.
@@ -788,13 +1076,13 @@ export function PlaygroundPage() {
                 </div>
               )}
             </div>
-            {run.kind === "error" && !run.forbidden && (
+            {mode === "json" && run.kind === "error" && !run.forbidden && (
               <p className="font-mono text-xs text-destructive" role="alert">
                 {run.message}
                 {run.status ? ` (${run.status})` : ""}
               </p>
             )}
-            {run.kind === "error" && run.forbidden && (
+            {mode === "json" && run.kind === "error" && run.forbidden && (
               // A surface-level 403 → the explain-and-suggest 403 primitive.
               <ForbiddenInline
                 title="Not allowed to run this agent"
@@ -810,167 +1098,173 @@ export function PlaygroundPage() {
           id="run-story"
           className="min-w-0 space-y-5 lg:col-start-2 lg:row-start-1"
         >
-          <Card className="min-w-0" data-testid="chat-transcript">
-            <PanelHeader
-              title="What happened"
-              meta={
-                story.length > 0 ? (
-                  <span className="tabular-nums">
-                    {story.length} step{story.length === 1 ? "" : "s"}
-                  </span>
-                ) : undefined
-              }
-            >
-              {tag ? <Badge variant={tag.variant}>{tag.label}</Badge> : null}
-            </PanelHeader>
-            <CardContent>
-              {story.length === 0 ? (
-                <QuietNote title="Nothing has run yet.">
-                  Pick an agent, write the message it should receive, and press{" "}
-                  <span className="font-medium">Run agent</span>. Every step the
-                  run takes appears here in order, and the full trace is one link
-                  from it.
-                </QuietNote>
-              ) : (
-                <>
-                  <Timeline steps={story} label="Steps in this run" />
-                  {closing && <ClosingNote>{closing}</ClosingNote>}
-                </>
-              )}
-            </CardContent>
-          </Card>
-
-          {started && (
-            <Card className="min-w-0">
-              <PanelHeader title="What it produced">
-                {run.kind === "running" && (
-                  <>
-                    <span className="text-xs text-faint" data-testid="run-streaming">
-                      Streaming…
-                    </span>
-                    {run.step && (
-                      <Badge
-                        variant="progressing"
-                        className="max-w-[12rem] overflow-hidden"
-                        data-testid="run-step"
-                      >
-                        <span className="block truncate">{run.step}</span>
-                      </Badge>
-                    )}
-                  </>
-                )}
-              </PanelHeader>
-              <CardContent>
-                {/* The agent's answer is prose as often as it is JSON, so this
-                    well wraps (`pre-wrap` + `break-words`, never `break-all`)
-                    rather than scrolling like the YAML well below — a paragraph
-                    on a horizontal scrollbar is unreadable. It still owns its
-                    own height. */}
-                <div
-                  role="region"
-                  aria-label="Agent response"
-                  tabIndex={0}
-                  className="max-h-[24rem] overflow-auto rounded-md bg-surface-3 p-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          {mode === "chat" ? (
+            chatColumn
+          ) : (
+            <>
+              <Card className="min-w-0" data-testid="chat-transcript">
+                <PanelHeader
+                  title="What happened"
+                  meta={
+                    story.length > 0 ? (
+                      <span className="tabular-nums">
+                        {story.length} step{story.length === 1 ? "" : "s"}
+                      </span>
+                    ) : undefined
+                  }
                 >
-                  {response ? (
-                    <p className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
-                      {response}
-                    </p>
+                  {tag ? <Badge variant={tag.variant}>{tag.label}</Badge> : null}
+                </PanelHeader>
+                <CardContent>
+                  {story.length === 0 ? (
+                    <QuietNote title="Nothing has run yet.">
+                      Pick an agent, write the message it should receive, and press{" "}
+                      <span className="font-medium">Run agent</span>. Every step the
+                      run takes appears here in order, and the full trace is one link
+                      from it.
+                    </QuietNote>
                   ) : (
-                    <p className="font-mono text-xs text-ghost">
-                      {run.kind === "running"
-                        ? "waiting for the first token…"
-                        : "the run returned no content"}
-                    </p>
+                    <>
+                      <Timeline steps={story} label="Steps in this run" />
+                      {closing && <ClosingNote>{closing}</ClosingNote>}
+                    </>
                   )}
-                </div>
-              </CardContent>
-            </Card>
-          )}
+                </CardContent>
+              </Card>
 
-          {consent.length > 0 && (
-            // A 2px hold rule, not a hold fill: §2.2 allows exactly two
-            // full-bleed semantic surfaces console-wide and this is not one.
-            <Card className="min-w-0 border-l-2 border-l-hold">
-              <PanelHeader title="Connect your account to continue" />
-              <CardContent className="space-y-3">
-                <p className="text-sm text-secondary-foreground">
-                  This run needs your own credentials, not the platform's.
-                  Connect and it re-runs automatically — nothing has been lost.
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  {consent.map((server) => (
-                    <Button
-                      key={server}
-                      size="sm"
-                      variant="outline"
-                      disabled={connecting !== null}
-                      onClick={() => void onConnect(server)}
-                      data-testid={`connect-${server}`}
+              {started && (
+                <Card className="min-w-0">
+                  <PanelHeader title="What it produced">
+                    {run.kind === "running" && (
+                      <>
+                        <span className="text-xs text-faint" data-testid="run-streaming">
+                          Streaming…
+                        </span>
+                        {run.step && (
+                          <Badge
+                            variant="progressing"
+                            className="max-w-[12rem] overflow-hidden"
+                            data-testid="run-step"
+                          >
+                            <span className="block truncate">{run.step}</span>
+                          </Badge>
+                        )}
+                      </>
+                    )}
+                  </PanelHeader>
+                  <CardContent>
+                    {/* The agent's answer is prose as often as it is JSON, so this
+                        well wraps (`pre-wrap` + `break-words`, never `break-all`)
+                        rather than scrolling like the YAML well below — a paragraph
+                        on a horizontal scrollbar is unreadable. It still owns its
+                        own height. */}
+                    <div
+                      role="region"
+                      aria-label="Agent response"
+                      tabIndex={0}
+                      className="max-h-[24rem] overflow-auto rounded-md bg-surface-3 p-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
-                      {connecting === server ? "Connecting…" : `Connect ${server}`}
-                    </Button>
-                  ))}
-                </div>
-                {connectError && (
-                  <p
-                    className="font-mono text-xs text-destructive"
-                    role="alert"
-                    data-testid="connect-error"
-                  >
-                    {connectError}
-                  </p>
-                )}
-              </CardContent>
-            </Card>
-          )}
+                      {response ? (
+                        <p className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
+                          {response}
+                        </p>
+                      ) : (
+                        <p className="font-mono text-xs text-ghost">
+                          {run.kind === "running"
+                            ? "waiting for the first token…"
+                            : "the run returned no content"}
+                        </p>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
 
-          {approval && (
-            <Card
-              className="min-w-0 border-l-2 border-l-hold"
-              data-testid="approval-request"
-            >
-              <PanelHeader title="Your decision" />
-              <CardContent className="space-y-4">
-                <p className="text-sm text-secondary-foreground">
-                  This run is holding on one step. Approving lets it continue;
-                  denying stops it for good. It is held, not failed — the tool
-                  has not been called.
-                </p>
-                {approval.summary && (
-                  <p className="border-l-2 border-l-hold bg-surface-2 px-4 py-3 font-serif text-md italic">
-                    {approval.summary}
-                  </p>
-                )}
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    size="sm"
-                    disabled={running}
-                    onClick={() => void onApprove(approval.runId)}
-                    data-testid="approve-run"
-                  >
-                    Approve
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={running}
-                    onClick={() => void onDeny(approval.runId)}
-                    data-testid="deny-run"
-                  >
-                    Deny
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          )}
+              {consent.length > 0 && (
+                // A 2px hold rule, not a hold fill: §2.2 allows exactly two
+                // full-bleed semantic surfaces console-wide and this is not one.
+                <Card className="min-w-0 border-l-2 border-l-hold">
+                  <PanelHeader title="Connect your account to continue" />
+                  <CardContent className="space-y-3">
+                    <p className="text-sm text-secondary-foreground">
+                      This run needs your own credentials, not the platform's.
+                      Connect and it re-runs automatically — nothing has been lost.
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {consent.map((server) => (
+                        <Button
+                          key={server}
+                          size="sm"
+                          variant="outline"
+                          disabled={connecting !== null}
+                          onClick={() => void onConnect(server)}
+                          data-testid={`connect-${server}`}
+                        >
+                          {connecting === server ? "Connecting…" : `Connect ${server}`}
+                        </Button>
+                      ))}
+                    </div>
+                    {connectError && (
+                      <p
+                        className="font-mono text-xs text-destructive"
+                        role="alert"
+                        data-testid="connect-error"
+                      >
+                        {connectError}
+                      </p>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
 
-          {run.kind === "done" && run.nodes && run.nodes.length > 0 && (
-            <WorkflowGraphSection
-              nodes={run.nodes}
-              currentNode={run.currentNode}
-              runStatus={run.runStatus}
-            />
+              {approval && (
+                <Card
+                  className="min-w-0 border-l-2 border-l-hold"
+                  data-testid="approval-request"
+                >
+                  <PanelHeader title="Your decision" />
+                  <CardContent className="space-y-4">
+                    <p className="text-sm text-secondary-foreground">
+                      This run is holding on one step. Approving lets it continue;
+                      denying stops it for good. It is held, not failed — the tool
+                      has not been called.
+                    </p>
+                    {approval.summary && (
+                      <p className="border-l-2 border-l-hold bg-surface-2 px-4 py-3 font-serif text-md italic">
+                        {approval.summary}
+                      </p>
+                    )}
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        size="sm"
+                        disabled={running}
+                        onClick={() => void onApprove(approval.runId)}
+                        data-testid="approve-run"
+                      >
+                        Approve
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={running}
+                        onClick={() => void onDeny(approval.runId)}
+                        data-testid="deny-run"
+                      >
+                        Deny
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+
+              {run.kind === "done" && run.nodes && run.nodes.length > 0 && (
+                <WorkflowGraphSection
+                  nodes={run.nodes}
+                  currentNode={run.currentNode}
+                  runStatus={run.runStatus}
+                />
+              )}
+            </>
           )}
 
           <Card className="min-w-0">
@@ -987,7 +1281,7 @@ export function PlaygroundPage() {
               ) : (
                 <div data-testid="trace-building">
                   <QuietNote>
-                    {started
+                    {record.started
                       ? "No trace id has come back yet. It appears the moment the run reports one; per-step timing and token counts live there, not here."
                       : "Per-step timing, token counts and spend are span-level facts — they live in the trace backend. A trace id appears here once a run reports one."}
                   </QuietNote>
@@ -1113,6 +1407,18 @@ export function PlaygroundPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* A chat turn's trace opens over the page, so the conversation is still
+          there when it closes (the agent page does the same). */}
+      <DetailDrawer
+        open={inspectTrace !== null}
+        onClose={() => setInspectTrace(null)}
+        title="Run inspector"
+        subtitle={inspectTrace ?? undefined}
+        size="lg"
+      >
+        {inspectTrace && <RunInspector traceId={inspectTrace} />}
+      </DetailDrawer>
     </div>
   );
 }
@@ -1261,6 +1567,7 @@ function finalizedRun(detail: RunDetail): Run {
       ra?.kind === "approval"
         ? { runId: detail.id, key: ra.key ?? "", summary: ra.message ?? "" }
         : undefined,
+    took: runDuration(detail),
     workflowRef: detail.workflowRef,
     currentNode: detail.currentNode,
     nodes,

@@ -53,6 +53,11 @@ function recordingFetch(opts: {
   expand?: (body: string) => { ok: boolean; status?: number; text: string };
   create?: (body: string) => { ok: boolean; status?: number; json: unknown };
   traceUrl?: string;
+  // The deployed agents the picker lists (GET /api/agents), and the detail of each by
+  // "<ns>/<name>" (GET /api/agents/{ns}/{name}) — the chat reads it before it opens. An
+  // agent with no detail here answers 404.
+  agents?: { name: string; namespace: string }[];
+  agentDetails?: Record<string, unknown>;
 }) {
   const run = opts.run ?? {};
   const calls: Captured[] = [];
@@ -135,7 +140,17 @@ function recordingFetch(opts: {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ agents: [] }),
+          json: async () => ({ agents: opts.agents ?? [] }),
+        } as Response);
+      }
+      const detailMatch = /^\/api\/agents\/([^/]+)\/([^/]+)$/.exec(path);
+      if (detailMatch && method === "GET") {
+        const detail = opts.agentDetails?.[`${detailMatch[1]}/${detailMatch[2]}`];
+        return Promise.resolve({
+          ok: detail !== undefined,
+          status: detail !== undefined ? 200 : 404,
+          json: async () => detail ?? { error: "agent not found" },
+          text: async () => JSON.stringify(detail ?? { error: "agent not found" }),
         } as Response);
       }
       if (path === "/api/namespaces") {
@@ -192,7 +207,9 @@ function fillNamespace(name: string) {
 
 // PlaygroundPage uses <Link> (react-router-dom); wrap in MemoryRouter so tests
 // don't need the full app router (the pattern mirrors agents-page.test.tsx).
-function renderPage(initialEntry = "/playground") {
+// The page opens in plain-text chat (m184.15); the workbench tests below exercise the
+// JSON-request mode, so they open it directly with ?mode=json.
+function renderPage(initialEntry = "/playground?mode=json") {
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <PlaygroundPage />
@@ -209,7 +226,7 @@ describe("PlaygroundPage", () => {
     const calls = recordingFetch({ run: {} });
 
     // create→run / the checklist "Run" step deep-link here — the identity is pre-filled.
-    renderPage("/playground?agent=deployed-agent&ns=prod");
+    renderPage("/playground?agent=deployed-agent&ns=prod&mode=json");
     fill("Message (JSON)", '{"prompt":"hi"}');
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
@@ -823,6 +840,8 @@ describe("PlaygroundPage — RBAC-gated Run/Apply", () => {
   it("shows Run + Apply for an operator (create allowed)", async () => {
     installFetch(true);
     renderGated();
+    // Chat is the default; the Run button belongs to the JSON request.
+    fireEvent.click(await screen.findByTestId("playground-mode-json"));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /Run agent/ })).toBeInTheDocument(),
     );
@@ -836,5 +855,160 @@ describe("PlaygroundPage — RBAC-gated Run/Apply", () => {
       expect(screen.getByRole("button", { name: /Apply to cluster/ })).toBeInTheDocument(),
     );
     expect(screen.queryByTestId("run-readonly-note")).toBeNull();
+  });
+});
+
+// ── m184.15: the first run speaks plain text ────────────────────────────────
+// The page opens in chat: pick an agent, type a sentence, read the answer. The JSON request
+// stays one click away for an agent whose input is structured.
+describe("PlaygroundPage — plain-text chat by default (m184.15)", () => {
+  const readyDetail = (ns: string, name: string, conditions: unknown[] = []) => ({
+    name,
+    namespace: ns,
+    image: "img:1",
+    executionModel: "serving",
+    role: "",
+    promptRef: "",
+    modelRoute: "",
+    scaling: { min: 0, max: 3 },
+    phase: "Ready",
+    ready: true,
+    url: `http://${name}.${ns}.svc.cluster.local`,
+    latestVersion: `${name}-v1`,
+    conditions: [
+      { type: "Ready", status: "True", reason: "Deployed", message: "", lastTransitionTime: "" },
+      ...conditions,
+    ],
+    bindings: [],
+    versions: [],
+    dependencies: [],
+  });
+
+  const finished = {
+    id: "run-1",
+    status: "succeeded",
+    traceId: "trace-xyz",
+    createdAt: "2026-10-11T10:00:00.000Z",
+    updatedAt: "2026-10-11T10:00:01.250Z",
+    messages: [{ role: "assistant", content: '{"answer":"MOCK_OK"}' }],
+  };
+
+  afterEach(() => {
+    window.localStorage.clear();
+  });
+
+  it("opens in chat, sends a typed sentence as plain text, and renders the answer", async () => {
+    const calls = recordingFetch({
+      run: { detail: finished },
+      agents: [{ name: "echo", namespace: "prod" }],
+      agentDetails: { "prod/echo": readyDetail("prod", "echo") },
+    });
+
+    renderPage("/playground?agent=echo&ns=prod");
+    // No JSON to write: the message field is the chat composer.
+    expect(screen.queryByLabelText("Message (JSON)")).toBeNull();
+    expect(screen.getByTestId("playground-mode-chat")).toHaveAttribute("aria-pressed", "true");
+
+    const composer = await screen.findByTestId("chat-input");
+    fireEvent.change(composer, { target: { value: "hello there" } });
+    fireEvent.click(screen.getByTestId("chat-send"));
+
+    const answer = await screen.findByTestId("chat-turn-agent");
+    await waitFor(() => expect(answer).toHaveTextContent("MOCK_OK"));
+    expect(screen.getByTestId("chat-turn-user")).toHaveTextContent("hello there");
+
+    // The sentence went out as {"input": "<text>"}, to the picked agent in its namespace.
+    const createCall = calls.find((c) => c.url === "/api/runs" && c.method === "POST");
+    expect(JSON.parse(createCall!.body)).toMatchObject({
+      agent: "echo",
+      namespace: "prod",
+      input: { input: "hello there" },
+    });
+
+    // The record keeps the trace link and how long the run took.
+    expect(await screen.findByTestId("view-full-trace")).toHaveAttribute("href", "/traces/trace-xyz");
+    expect(screen.getByTestId("trace-id")).toHaveTextContent("trace-xyz");
+    expect(screen.getByTestId("run-took")).toHaveTextContent("1.25s");
+    // Home's "Run your agent" step checks off for this workspace.
+    expect(window.localStorage.getItem("ctxmesh.firstRun.ranAgent:prod")).toBe("1");
+  });
+
+  it("keeps the JSON request one click away, and it still posts the object verbatim", async () => {
+    const calls = recordingFetch({
+      run: { detail: finished },
+      agents: [{ name: "echo", namespace: "prod" }],
+      agentDetails: { "prod/echo": readyDetail("prod", "echo") },
+    });
+
+    renderPage("/playground?agent=echo&ns=prod");
+    fireEvent.click(screen.getByTestId("playground-mode-json"));
+    expect(screen.queryByTestId("chat-panel")).toBeNull();
+    fill("Message (JSON)", '{"prompt":"hi","limit":3}');
+    fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
+
+    expect(await screen.findByText(/Traced run complete/)).toBeInTheDocument();
+    const createCall = calls.find((c) => c.url === "/api/runs" && c.method === "POST");
+    expect(JSON.parse(createCall!.body).input).toEqual({ prompt: "hi", limit: 3 });
+    expect(screen.getByTestId("view-full-trace")).toHaveAttribute("href", "/traces/trace-xyz");
+    expect(screen.getByTestId("run-took")).toHaveTextContent("1.25s");
+  });
+
+  it("holds Send while the agent's model route is still loading (ADR 0151)", async () => {
+    recordingFetch({
+      agentDetails: {
+        "prod/echo": readyDetail("prod", "echo", [
+          {
+            type: "ModelRouteReady",
+            status: "False",
+            reason: "NotYetServed",
+            message: "ModelRoute chat: not served yet",
+            lastTransitionTime: "",
+          },
+        ]),
+      },
+    });
+
+    renderPage("/playground?agent=echo&ns=prod");
+    const composer = await screen.findByTestId("chat-input");
+    fireEvent.change(composer, { target: { value: "hello" } });
+    expect(screen.getByTestId("chat-send")).toBeDisabled();
+    expect(screen.getByTestId("chat-route-note")).toHaveTextContent(/loading this agent's model/);
+  });
+
+  it("runs an agent picked from an all-workspaces list in its own namespace", async () => {
+    const calls = recordingFetch({
+      run: { detail: finished },
+      agents: [{ name: "echo", namespace: "team-b" }],
+      agentDetails: { "team-b/echo": readyDetail("team-b", "echo") },
+    });
+
+    renderPage("/playground");
+    await waitFor(() =>
+      expect(screen.getByLabelText("Agent").querySelectorAll("option").length).toBeGreaterThan(1),
+    );
+    fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "echo" } });
+    const composer = await screen.findByTestId("chat-input");
+    fireEvent.change(composer, { target: { value: "hi" } });
+    fireEvent.click(screen.getByTestId("chat-send"));
+
+    await screen.findByTestId("chat-turn-agent");
+    const createCall = await waitFor(() => {
+      const c = calls.find((x) => x.url === "/api/runs" && x.method === "POST");
+      expect(c).toBeDefined();
+      return c!;
+    });
+    expect(JSON.parse(createCall.body).namespace).toBe("team-b");
+  });
+
+  it("says what to do before an agent is picked, and when the named agent does not exist", async () => {
+    recordingFetch({});
+    renderPage("/playground");
+    expect(await screen.findByTestId("playground-chat-empty")).toHaveTextContent("Pick an agent");
+
+    fillAgent("ghost");
+    expect(await screen.findByTestId("playground-chat-missing")).toHaveTextContent(
+      "No agent named ghost in default.",
+    );
+    expect(screen.queryByTestId("chat-input")).toBeNull();
   });
 });

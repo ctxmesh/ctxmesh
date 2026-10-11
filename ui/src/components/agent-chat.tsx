@@ -12,8 +12,9 @@ import {
   Timeline,
   type TimelineStep,
 } from "@/components/kit";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, type RunDetail } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
+import { markRunCompleted } from "@/lib/first-run";
 import { useDevMode } from "@/lib/dev-mode";
 import { useDurableRun } from "@/lib/use-durable-run";
 import { RES_AGENTS } from "@/lib/nav";
@@ -162,6 +163,7 @@ export function ChatPanel({
   memoryBound,
   onTraced,
   modelRoute,
+  onRunFinalized,
   audience = "operator",
   frame = "panel",
 }: {
@@ -172,6 +174,8 @@ export function ChatPanel({
   onTraced: (traceId: string) => void;
   /** The agent's ModelRouteReady condition, when it names a model route (ADR 0151). */
   modelRoute?: { status: string; reason: string; message: string };
+  /** Each turn's finalized run, for a surface that keeps a record of the latest one (the Playground). */
+  onRunFinalized?: (detail: RunDetail) => void;
   audience?: ChatAudience;
   frame?: ChatFrame;
 }) {
@@ -207,6 +211,10 @@ export function ChatPanel({
   const run = useDurableRun({
     onForbidden: () => reprobe(),
     onFinalized: (detail) => {
+      // A finished turn is a run the person watched happen, which is what Home's "Run your agent"
+      // step asks for (see first-run.ts).
+      markRunCompleted(ns);
+      onRunFinalized?.(detail);
       const turnId = activeTurnRef.current;
       if (turnId === null) return;
       const ra = detail.requiresAction;

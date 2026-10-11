@@ -127,6 +127,12 @@ panel shows the model route and the secret bindings it uses, the guardrail polic
 knowledge bases, memory, the tool calls that wait for approval and who may approve them, and the
 feedback sources, each looked up as you. A reference that does not exist is shown as missing.
 
+**The Playground is a chat.** It used to ask for the message as JSON. Pick an agent, type a
+sentence and read the answer; the message is sent as `{"input": "..."}`, as on the agent's own
+page, and Send waits while the agent's model route is still loading. A JSON request is one click
+away for an agent that takes structured input. Both keep the trace link and now show how long the
+run took. An agent picked under All workspaces runs in its own namespace, not in `default`.
+
 **Breaking:** with a state layer present (the default), the BFF refuses unbound capabilities.
 - **Older agents:** an agent built on an older base image has a launcher that cannot bind, so those
   calls fail until it is rebuilt. To run older agents meanwhile, set
