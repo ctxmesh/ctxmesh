@@ -91,7 +91,7 @@ import {
 const LABEL_FORK_ORIGIN_NS = "agents.ctxmesh.ai/fork-origin-namespace";
 const LABEL_FORK_ORIGIN_NAME = "agents.ctxmesh.ai/fork-origin-name";
 const LABEL_FORK_ORIGIN_VERSION = "agents.ctxmesh.ai/fork-origin-version";
-import { useCapabilities } from "@/lib/capabilities";
+import { useCapabilitiesIn } from "@/lib/capabilities";
 import { formatDateTime, formatLatency, formatUSD } from "@/lib/format";
 import { navRoute, RES_AGENTS, RES_LOGS, RES_SCALING } from "@/lib/nav";
 
@@ -196,7 +196,7 @@ export function AgentDetailPage() {
   // `?tab=Logs`: a denied persona must land on Overview rather than on a Runs
   // tab whose log panel silently isn't there. The flag clears the moment the
   // reader picks a tab themselves, so it can never strand them.
-  const { can } = useCapabilities();
+  const { can } = useCapabilitiesIn(ns);
   const { toast } = useToast();
   const canLogs = can(RES_LOGS, "get");
   const [viaLogsLink, setViaLogsLink] = React.useState(
@@ -599,7 +599,7 @@ function AgentBand({
   publishedState: { version: string; visibility: string } | null;
   onUnpublish: () => void;
 }) {
-  const { can } = useCapabilities();
+  const { can } = useCapabilitiesIn(detail.namespace);
   const canEdit = can(RES_AGENTS, "update");
   const canDelete = can(RES_AGENTS, "delete");
   // Publish-as-template is gated on agent update rights (the publisher must own
@@ -1329,7 +1329,7 @@ function EditWizard({
   onSaved: () => void;
 }) {
   const { toast } = useToast();
-  const { reprobe } = useCapabilities();
+  const { reprobe } = useCapabilitiesIn(detail.namespace);
   const isManaged = !detail.managedOutsideUI;
   const hasDrift = detail.drift ?? false;
 
@@ -1626,7 +1626,7 @@ function DeleteDialog({
   onDeleted: () => void;
 }) {
   const { toast } = useToast();
-  const { reprobe } = useCapabilities();
+  const { reprobe } = useCapabilitiesIn(detail.namespace);
   const [refs, setRefs] = React.useState<RefsLoad>({ kind: "loading" });
   const [deleting, setDeleting] = React.useState(false);
   // U4: when this agent is published, offer to ALSO unpublish its template — pre-checked (the common
@@ -2852,7 +2852,7 @@ type LongTermLoad =
 // states the three caveats: it isolates memory per end-user, is PRODUCT-grade (not security-grade), and it
 // BREAKS conversation handoff + share-links for the agent.
 function SessionMemoryConfigPanel({ ns, agentName }: { ns: string; agentName: string }) {
-  const { can } = useCapabilities();
+  const { can } = useCapabilitiesIn(ns);
   const canUpdate = can(RES_AGENTS, "update");
   const [config, setConfig] = React.useState<SessionMemoryConfig | null>(null);
   const [perUser, setPerUser] = React.useState(false);
@@ -2963,7 +2963,7 @@ function SessionMemoryConfigPanel({ ns, agentName }: { ns: string; agentName: st
 // CAPABILITY ON (the m49.1 capability pocket). Patches spec.longTermMemory via the BFF (the tracepolicy
 // pattern). Read-only for viewers (the form is gated on the agent-update capability); hides if unreadable.
 function LongTermMemoryConfigPanel({ ns, agentName }: { ns: string; agentName: string }) {
-  const { can } = useCapabilities();
+  const { can } = useCapabilitiesIn(ns);
   const canUpdate = can(RES_AGENTS, "update");
   const [config, setConfig] = React.useState<LongTermMemoryConfig | null>(null);
   const [route, setRoute] = React.useState("");
@@ -3218,7 +3218,7 @@ type ScalingPanelLoad =
   | { kind: "error"; message: string; forbidden: boolean };
 
 function ScalingPanel({ ns, agentName }: { ns: string; agentName: string }) {
-  const { can, reprobe } = useCapabilities();
+  const { can, reprobe } = useCapabilitiesIn(ns);
   const { toast } = useToast();
   const canCreate = can(RES_SCALING, "create");
   const canUpdate = can(RES_SCALING, "update");
@@ -3612,7 +3612,7 @@ type RedactionLoad =
   | { kind: "error"; message: string; forbidden: boolean };
 
 function RedactionPanel({ ns, agentName }: { ns: string; agentName: string }) {
-  const { can } = useCapabilities();
+  const { can } = useCapabilitiesIn(ns);
   const canEdit = can(RES_AGENTS, "update");
   const { toast } = useToast();
   const [load, setLoad] = React.useState<RedactionLoad>({ kind: "loading" });

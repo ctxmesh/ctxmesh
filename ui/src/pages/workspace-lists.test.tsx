@@ -11,6 +11,16 @@ import { GuardrailPoliciesPage } from "@/pages/guardrail-policies-page";
 import { KBDetailPage, KnowledgeBasesPage } from "@/pages/knowledge-bases-page";
 import { McpApprovalsPage } from "@/pages/mcp-approvals-page";
 import { McpServersPage } from "@/pages/mcp-servers-page";
+import { AgentRegistriesPage } from "@/pages/agent-registries-page";
+import { AgentRegistryDetailPage } from "@/pages/agent-registry-detail-page";
+import { AgentDetailPage } from "@/pages/agent-detail-page";
+import { AgentsPage } from "@/pages/agents-page";
+import { EvalsPage } from "@/pages/evals-page";
+import { ModelRouteDetailPage } from "@/pages/model-route-detail-page";
+import { ModelRoutesPage } from "@/pages/model-routes-page";
+import { PromptsPage } from "@/pages/prompts-page";
+import { SecretBindingDetailPage } from "@/pages/secret-binding-detail-page";
+import { SecretBindingsPage } from "@/pages/secret-bindings-page";
 import { TeamDetailPage } from "@/pages/team-detail-page";
 import { TeamsPage } from "@/pages/teams-page";
 import { TemplateGalleryPage } from "@/pages/template-gallery-page";
@@ -211,4 +221,248 @@ describe("write gates ask about the resource's namespace", () => {
     );
     expect(duplicateKey).toBe(false);
   });
+});
+
+// Under "All workspaces" a row's Edit, Delete, Share or Approve acts in the row's namespace, so it
+// is offered by that namespace's answer. The working namespace is team-a, the first workspace.
+describe("row controls follow the row's namespace under All workspaces", () => {
+  const operator = (resource: string) => ({
+    [resource]: { get: true, list: true, create: true, update: true, delete: true },
+  });
+  const viewer = (resource: string) => ({
+    [resource]: { get: true, list: true, create: false, update: false, delete: false },
+  });
+
+  interface RowCase {
+    page: string;
+    list: string;
+    element: () => React.ReactElement;
+    resource: string;
+    rows: (ns: string) => Record<string, unknown>;
+    // The controls a row in ns offers to someone who may change it.
+    controls: (ns: string) => string[];
+  }
+
+  const name = (ns: string) => `x-${ns}`;
+  const CASES: RowCase[] = [
+    {
+      page: "MCP approvals",
+      list: "/api/mcp/approvals",
+      element: () => <McpApprovalsPage />,
+      resource: "agentregistries",
+      rows: (ns) => ({ namespace: ns, name: name(ns), toolCount: 1 }),
+      controls: (ns) => [`mcp-approve-${ns}-${name(ns)}`, `mcp-reject-${ns}-${name(ns)}`],
+    },
+    {
+      page: "MCP servers",
+      list: "/api/mcpservers",
+      element: () => <McpServersPage />,
+      resource: "agentregistries",
+      rows: (ns) => ({ namespace: ns, name: name(ns), url: "https://mcp.example/", toolCount: 1, status: "approved" }),
+      controls: (ns) => [`share-mcp-${name(ns)}`, `delete-mcp-${name(ns)}`],
+    },
+    {
+      page: "Agents",
+      list: "/api/agents",
+      element: () => <AgentsPage />,
+      resource: "agentdeployments",
+      rows: (ns) => ({ namespace: ns, name: name(ns), image: "img:1", phase: "Ready", ready: true }),
+      controls: (ns) => [`edit-${name(ns)}`, `delete-${name(ns)}`],
+    },
+    {
+      page: "Model routes",
+      list: "/api/modelroutes",
+      element: () => <ModelRoutesPage />,
+      resource: "modelroutes",
+      rows: (ns) => ({
+        namespace: ns,
+        name: name(ns),
+        phase: "Ready",
+        ready: true,
+        providers: [{ provider: "openai", model: "gpt-4o", priority: 1, secretBindingRef: "k" }],
+      }),
+      controls: (ns) => [`edit-${name(ns)}`, `delete-${name(ns)}`],
+    },
+    {
+      page: "Secret bindings",
+      list: "/api/secretbindings",
+      element: () => <SecretBindingsPage />,
+      resource: "secretbindings",
+      rows: (ns) => ({
+        namespace: ns,
+        name: name(ns),
+        backend: "kubernetes",
+        secretRef: { name: "s", key: "k" },
+        phase: "Resolved",
+        ready: true,
+      }),
+      controls: (ns) => [`edit-${name(ns)}`, `delete-${name(ns)}`],
+    },
+    {
+      page: "Agent registries",
+      list: "/api/agentregistries",
+      element: () => <AgentRegistriesPage />,
+      resource: "agentregistries",
+      rows: (ns) => ({
+        namespace: ns,
+        name: name(ns),
+        registryId: `reg-${ns}`,
+        memberSelector: { matchLabels: {} },
+        guards: { maxDepth: 5, hopBudget: 20 },
+        roles: [],
+        members: [],
+        phase: "Ready",
+        ready: true,
+      }),
+      controls: (ns) => [`edit-${name(ns)}`, `delete-${name(ns)}`],
+    },
+    {
+      page: "Evals",
+      list: "/api/evalsuites",
+      element: () => <EvalsPage />,
+      resource: "evalsuites",
+      rows: (ns) => ({ namespace: ns, name: name(ns), datasetRef: "d", scorers: ["exact-match"], ready: true }),
+      controls: (ns) => [`eval-delete-${name(ns)}`],
+    },
+    {
+      page: "Prompts",
+      list: "/api/promptversions",
+      element: () => <PromptsPage />,
+      resource: "promptversions",
+      rows: (ns) => ({ namespace: ns, name: name(ns), ref: "abc1234", promptName: `p-${ns}`, createdAt: "2026-07-01T00:00:00Z" }),
+      controls: (ns) => [`prompt-delete-${name(ns)}`],
+    },
+  ];
+
+  for (const c of CASES) {
+    for (const [may, mayNot] of [
+      ["team-a", "team-b"],
+      ["team-b", "team-a"],
+    ] as const) {
+      it(`${c.page}: an operator in ${may} and a viewer in ${mayNot} gets controls on ${may}'s rows only`, async () => {
+        selectWorkspace("");
+        installFetch({
+          caps: { [may]: operator(c.resource), [mayNot]: viewer(c.resource) },
+          bodies: {
+            [c.list]: {
+              items: [c.rows("team-a"), c.rows("team-b")],
+              servers: [c.rows("team-a"), c.rows("team-b")],
+              nextCursor: "",
+            },
+          },
+        });
+        renderAt("/page", "/page", c.element());
+        expect((await screen.findAllByText(name(mayNot))).length).toBeGreaterThan(0);
+        await waitFor(() => {
+          for (const id of c.controls(may)) expect(screen.queryByTestId(id)).not.toBeNull();
+          for (const id of c.controls(mayNot)) expect(screen.queryByTestId(id)).toBeNull();
+        });
+      });
+    }
+  }
+});
+
+// A detail page opened from an "All workspaces" row gates its writes on the item's namespace.
+describe("a detail page gates on the item's namespace", () => {
+  const CASES: [string, string, string, string, string, string, () => React.ReactElement, Record<string, unknown>][] = [
+    [
+      "model route",
+      "/routes/:ns/:name",
+      "/api/modelroutes",
+      "modelroutes",
+      "edit-route-button",
+      "route-detail-page",
+      () => <ModelRouteDetailPage />,
+      { phase: "Ready", ready: true, providers: [] },
+    ],
+    [
+      "secret binding",
+      "/secrets/:ns/:name",
+      "/api/secretbindings",
+      "secretbindings",
+      "edit-secret-button",
+      "secret-detail-page",
+      () => <SecretBindingDetailPage />,
+      { backend: "kubernetes", secretRef: { name: "s", key: "k" }, phase: "Resolved", ready: true },
+    ],
+    [
+      "agent registry",
+      "/registries/:ns/:name",
+      "/api/agentregistries",
+      "agentregistries",
+      "edit-registry-button",
+      "registry-detail-page",
+      () => <AgentRegistryDetailPage />,
+      {
+        registryId: "r",
+        memberSelector: { matchLabels: {} },
+        roles: [],
+        status: { members: [], phase: "Ready", ready: true },
+      },
+    ],
+  ];
+
+  for (const [kind, route, endpoint, resource, edit, root, element, body] of CASES) {
+    const prefix = route.split("/:")[0];
+    for (const mayEdit of [true, false]) {
+      it(`a ${kind} in team-b ${mayEdit ? "offers" : "does not offer"} Edit by team-b's answer while the shell is in team-a`, async () => {
+        selectWorkspace("team-a");
+        const write = { get: true, list: true, update: true, delete: true };
+        const read = { get: true, list: true, update: false, delete: false };
+        installFetch({
+          // The shell's namespace answers the opposite of team-b, so only team-b's answer can pass.
+          caps: {
+            "team-a": { [resource]: mayEdit ? read : write },
+            "team-b": { [resource]: mayEdit ? write : read },
+          },
+          bodies: { [`${endpoint}/team-b/item`]: { name: "item", namespace: "team-b", ...body } },
+        });
+        renderAt(`${prefix}/team-b/item`, route, element());
+        if (mayEdit) {
+          expect(await screen.findByTestId(edit)).toBeInTheDocument();
+        } else {
+          expect(await screen.findByTestId(root)).toBeInTheDocument();
+          await waitFor(() => expect(screen.queryByTestId(edit)).not.toBeInTheDocument());
+        }
+      });
+    }
+  }
+
+  for (const mayEdit of [true, false]) {
+    it(`an agent in team-b ${mayEdit ? "offers" : "does not offer"} Edit by team-b's answer while the shell is in team-a`, async () => {
+      selectWorkspace("team-a");
+      const write = { get: true, list: true, create: true, update: true, delete: true };
+      const read = { get: true, list: true, create: false, update: false, delete: false };
+      installFetch({
+        caps: {
+          "team-a": { agentdeployments: mayEdit ? read : write },
+          "team-b": { agentdeployments: mayEdit ? write : read },
+        },
+        bodies: {
+          "/api/agents/team-b/item": {
+            name: "item",
+            namespace: "team-b",
+            image: "img:1",
+            executionModel: "serving",
+            role: "assistant",
+            scaling: { min: 0, max: 1 },
+            phase: "Ready",
+            ready: true,
+            conditions: [],
+            bindings: [],
+            versions: [],
+            managedOutsideUI: false,
+            drift: false,
+          },
+        },
+      });
+      renderAt("/agents/team-b/item", "/agents/:ns/:name", <AgentDetailPage />);
+      if (mayEdit) {
+        expect(await screen.findByRole("button", { name: "Edit" })).toBeInTheDocument();
+      } else {
+        expect(await screen.findByTestId("agent-detail-page")).toBeInTheDocument();
+        await waitFor(() => expect(screen.queryByRole("button", { name: "Edit" })).toBeNull());
+      }
+    });
+  }
 });

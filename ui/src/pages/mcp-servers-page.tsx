@@ -29,7 +29,7 @@ import {
   type NextStepTone,
   type StatusTone,
 } from "@/components/kit";
-import { useCapabilities } from "@/lib/capabilities";
+import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_REGISTRIES } from "@/lib/nav";
 import { cn } from "@/lib/utils";
@@ -154,9 +154,6 @@ export function McpServersPage() {
   const location = useLocation();
   const { can } = useCapabilities();
   const canAdd = can(RES_REGISTRIES, "create");
-  const canDelete = can(RES_REGISTRIES, "delete");
-  // Promoting a server to org scope UPDATES its ToolRegistry — the RBAC admin gate.
-  const canPromote = can(RES_REGISTRIES, "update");
   const [page, setPage] = React.useState<PageState>({ kind: "loading" });
   const [query, setQuery] = React.useState("");
   const [view, setView] = React.useState<View>("all");
@@ -442,38 +439,15 @@ export function McpServersPage() {
         ariaLabel="MCP servers"
         onRowClick={(s) => setInspect(s)}
         rowActions={
-          canPromote || canDelete
+          // Under "All workspaces" each row decides for its own namespace; one workspace decides
+          // for every row, so a caller with no action there gets no actions column.
+          namespace === "" || can(RES_REGISTRIES, "update") || can(RES_REGISTRIES, "delete")
             ? (s) => (
-                <div
-                  className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  {canPromote && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7"
-                      onClick={() => setToShare(s)}
-                      data-testid={`share-mcp-${s.name}`}
-                      aria-label={`Share ${s.name}`}
-                      title="Share"
-                    >
-                      <Share2 className="h-3.5 w-3.5" />
-                    </Button>
-                  )}
-                  {canDelete && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-destructive hover:text-destructive"
-                      onClick={() => setToDelete(s)}
-                      data-testid={`delete-mcp-${s.name}`}
-                      aria-label={`Delete ${s.name}`}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  )}
-                </div>
+                <ServerRowActions
+                  server={s}
+                  onShare={() => setToShare(s)}
+                  onDelete={() => setToDelete(s)}
+                />
               )
             : undefined
         }
@@ -569,6 +543,55 @@ export function McpServersPage() {
             load();
           }}
         />
+      )}
+    </div>
+  );
+}
+
+// ServerRowActions offers Share and Delete by the server's own namespace, where both act.
+// Promoting a server to org scope updates its ToolRegistry, the RBAC admin gate.
+function ServerRowActions({
+  server,
+  onShare,
+  onDelete,
+}: {
+  server: McpServerSummary;
+  onShare: () => void;
+  onDelete: () => void;
+}) {
+  const { can } = useCapabilitiesIn(server.namespace);
+  const canPromote = can(RES_REGISTRIES, "update");
+  const canDelete = can(RES_REGISTRIES, "delete");
+  if (!canPromote && !canDelete) return null;
+  return (
+    <div
+      className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
+      onClick={(e) => e.stopPropagation()}
+    >
+      {canPromote && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          onClick={onShare}
+          data-testid={`share-mcp-${server.name}`}
+          aria-label={`Share ${server.name}`}
+          title="Share"
+        >
+          <Share2 className="h-3.5 w-3.5" />
+        </Button>
+      )}
+      {canDelete && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 text-destructive hover:text-destructive"
+          onClick={onDelete}
+          data-testid={`delete-mcp-${server.name}`}
+          aria-label={`Delete ${server.name}`}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
       )}
     </div>
   );

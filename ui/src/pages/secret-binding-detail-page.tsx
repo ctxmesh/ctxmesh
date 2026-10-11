@@ -27,7 +27,7 @@ import {
 } from "@/components/kit";
 import { FormField } from "@/components/config/form-field";
 import { api, ApiError, type SecretBindingDetail } from "@/lib/api";
-import { useCapabilities } from "@/lib/capabilities";
+import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { RES_SECRETS } from "@/lib/nav";
 
 // SecretBindingDetailPage — the binding reader + its edit form (M151 §6.1
@@ -246,7 +246,8 @@ function SecretBindingDetailContent({
   onDeleted: () => void;
   onSaved: () => void;
 }) {
-  const { can } = useCapabilities();
+  // Edit and Delete act in the binding's namespace, whatever the shell has selected.
+  const { can } = useCapabilitiesIn(detail.namespace);
   const canEdit = can(RES_SECRETS, "update");
   const canDelete = can(RES_SECRETS, "delete");
 
@@ -448,7 +449,7 @@ function SecretBindingEditWizard({
   onSaved: () => void;
 }) {
   const { toast } = useToast();
-  const { reprobe } = useCapabilities();
+  const { reprobe } = useCapabilitiesIn(detail.namespace);
 
   const [form, setForm] = React.useState<EditForm>({
     backend: detail.backend,
@@ -690,7 +691,7 @@ function SecretBindingDeleteDialog({
   onDeleted: () => void;
 }) {
   const { toast } = useToast();
-  const { reprobe } = useCapabilities();
+  const { reprobe } = useCapabilitiesIn(detail.namespace);
   const [deleting, setDeleting] = React.useState(false);
 
   async function onConfirm() {

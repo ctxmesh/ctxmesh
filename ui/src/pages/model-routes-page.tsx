@@ -24,7 +24,7 @@ import {
   type StatusTone,
 } from "@/components/kit";
 import { api, ApiError, type ModelRouteSummary } from "@/lib/api";
-import { useCapabilities } from "@/lib/capabilities";
+import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_ROUTES } from "@/lib/nav";
 
@@ -195,17 +195,18 @@ export function closingLine(rows: Triaged[], complete: boolean): string | null {
 // (faint icons that firm up on hover) instead of hidden.
 function RowActions({
   route,
-  canEdit,
-  canDelete,
   onEdit,
   onDelete,
 }: {
   route: ModelRouteSummary;
-  canEdit: boolean;
-  canDelete: boolean;
   onEdit: (r: ModelRouteSummary) => void;
   onDelete: (r: ModelRouteSummary) => void;
 }) {
+  // Edit and Delete act in the route's own namespace, which under "All workspaces" is not the
+  // shell's.
+  const { can } = useCapabilitiesIn(route.namespace);
+  const canEdit = can(RES_ROUTES, "update");
+  const canDelete = can(RES_ROUTES, "delete");
   if (!canEdit && !canDelete) return null;
   return (
     <div
@@ -552,15 +553,14 @@ export function ModelRoutesPage() {
         rangeLabel={`Page ${pageNumber}`}
         ariaLabel="Model routes"
         onRowClick={(t) => navigate(routePath(t.route))}
-        // The actions column only appears when the caller can edit or delete.
-        // A viewer sees a clean table with no dead or greyed-out buttons.
+        // The actions column only appears when the caller can edit or delete in the selected
+        // workspace; under "All workspaces" each row decides by its own namespace. A viewer sees
+        // a clean table with no dead or greyed-out buttons.
         rowActions={
-          canEdit || canDelete
+          namespace === "" || canEdit || canDelete
             ? (t) => (
                 <RowActions
                   route={t.route}
-                  canEdit={canEdit}
-                  canDelete={canDelete}
                   onEdit={(r) => navigate(routePath(r, "?edit=1"))}
                   onDelete={(r) => navigate(routePath(r, "?delete=1"))}
                 />

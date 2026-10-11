@@ -35,7 +35,7 @@ import {
   type NextStepTone,
   type WizardStep,
 } from "@/components/kit";
-import { useCapabilities } from "@/lib/capabilities";
+import { CanIn, useCapabilities } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { cn } from "@/lib/utils";
 import {
@@ -718,18 +718,22 @@ export function EvalsPage() {
         ariaLabel="Eval suites"
         tableClassName="min-w-[52rem]"
         onRowClick={(t) => openSuite(t.suite)}
+        // Under "All workspaces" each row decides by its own namespace; one workspace decides for
+        // every row, so a caller who may not delete there gets no actions column.
         rowActions={
-          canDelete
+          shellNs === "" || canDelete
             ? (t) => (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="text-faint hover:text-destructive"
-                  onClick={() => setDeleteTarget(t.suite)}
-                  data-testid={`eval-delete-${t.suite.name}`}
-                >
-                  Delete
-                </Button>
+                <CanIn namespace={t.suite.namespace} resource={RES_EVALSUITES} verb="delete">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-faint hover:text-destructive"
+                    onClick={() => setDeleteTarget(t.suite)}
+                    data-testid={`eval-delete-${t.suite.name}`}
+                  >
+                    Delete
+                  </Button>
+                </CanIn>
               )
             : undefined
         }

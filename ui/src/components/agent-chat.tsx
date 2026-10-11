@@ -13,7 +13,7 @@ import {
   type TimelineStep,
 } from "@/components/kit";
 import { api, ApiError, type RunDetail } from "@/lib/api";
-import { useCapabilities } from "@/lib/capabilities";
+import { useCapabilitiesIn } from "@/lib/capabilities";
 import { markRunCompleted } from "@/lib/first-run";
 import { useDevMode } from "@/lib/dev-mode";
 import { useDurableRun } from "@/lib/use-durable-run";
@@ -200,7 +200,7 @@ export function ChatPanel({
   audience?: ChatAudience;
   frame?: ChatFrame;
 }) {
-  const { can, reprobe } = useCapabilities();
+  const { can, reprobe } = useCapabilitiesIn(ns);
   const canRun = can(RES_AGENTS, "create");
   const endUser = audience === "end-user";
   const bare = frame === "bare";

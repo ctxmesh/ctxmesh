@@ -30,7 +30,7 @@ import {
 } from "@/components/kit";
 import { api, ApiError, type AgentSummary } from "@/lib/api";
 import { BUCKETS, HALTED, type Bucket, bucketOf } from "@/lib/lifecycle";
-import { useCapabilities } from "@/lib/capabilities";
+import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_AGENTS } from "@/lib/nav";
 
@@ -287,17 +287,18 @@ export function closingLine(rows: Triaged[], complete: boolean): string | null {
 // quiet instead (faint icons that firm up on hover).
 function RowActions({
   agent,
-  canEdit,
-  canDelete,
   onEdit,
   onDelete,
 }: {
   agent: AgentSummary;
-  canEdit: boolean;
-  canDelete: boolean;
   onEdit: (a: AgentSummary) => void;
   onDelete: (a: AgentSummary) => void;
 }) {
+  // Edit and Delete act in the agent's own namespace, which under "All workspaces" is not the
+  // shell's.
+  const { can } = useCapabilitiesIn(agent.namespace);
+  const canEdit = can(RES_AGENTS, "update");
+  const canDelete = can(RES_AGENTS, "delete");
   if (!canEdit && !canDelete) return null;
   return (
     <div
@@ -774,15 +775,14 @@ export function AgentsPage() {
             `/agents/${encodeURIComponent(t.agent.namespace)}/${encodeURIComponent(t.agent.name)}`,
           )
         }
-        // The actions column only appears when the caller can edit or delete.
-        // A viewer sees a clean table with no dead or greyed-out buttons.
+        // The actions column only appears when the caller can edit or delete in the selected
+        // workspace; under "All workspaces" each row decides by its own namespace. A viewer sees
+        // a clean table with no dead or greyed-out buttons.
         rowActions={
-          canEdit || canDelete
+          namespace === "" || canEdit || canDelete
             ? (t) => (
                 <RowActions
                   agent={t.agent}
-                  canEdit={canEdit}
-                  canDelete={canDelete}
                   onEdit={(agent) =>
                     navigate(
                       `/agents/${encodeURIComponent(agent.namespace)}/${encodeURIComponent(agent.name)}?edit=1`,

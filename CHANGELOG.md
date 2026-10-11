@@ -207,13 +207,15 @@ create in. The template gallery and MCP catalog read the working namespace, and 
 create there; before, all four used `default`, which a person bound to another namespace may not
 read.
 
-**Fixed: Upload, Ingest and Bind followed the wrong namespace's permissions.** A knowledge base's
-Upload and Ingest, and the tool catalog's Bind, were offered or hidden by what the caller may do in
-the shell's working namespace, not in the namespace the knowledge base or tool is in. Under "All
-workspaces", or on a knowledge base opened from another namespace, a person could be offered a
-write they would be refused, or not offered one they may make. Each now asks about the
-resource's own namespace. Two tools of the same name and server in different namespaces now show
-as two cards.
+**Fixed: write controls followed the wrong namespace's permissions.** A knowledge base's Upload
+and Ingest, the tool catalog's Bind, the Edit, Delete, Share, Approve and Reject on the rows of the
+agent, model route, secret binding, agent registry, eval suite, prompt version, MCP server and MCP
+approval lists, the same controls on the agent, model route, secret binding and agent registry
+pages, and an agent's chat were offered or hidden by what the caller may do in the shell's working
+namespace, not in the namespace the resource is in. Under "All workspaces", or on a page opened
+from another namespace, a person could be offered a write they would be refused, or not offered one
+they may make. Each now asks about the resource's own namespace. Two tools of the same name and
+server in different namespaces now show as two cards.
 
 **Security: a tool binding could name a server its author may not use.** A
 `POST /api/mcptoolbindings` that gave `registryRef`, `mode` and `server`, and every

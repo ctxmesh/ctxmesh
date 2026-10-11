@@ -24,7 +24,7 @@ import {
   type StatusTone,
 } from "@/components/kit";
 import { api, ApiError, type SecretBindingSummary } from "@/lib/api";
-import { useCapabilities } from "@/lib/capabilities";
+import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_SECRETS } from "@/lib/nav";
 
@@ -229,17 +229,18 @@ export function closingLine(
 // (faint icons that firm up on hover) instead of hidden.
 function RowActions({
   binding,
-  canEdit,
-  canDelete,
   onEdit,
   onDelete,
 }: {
   binding: SecretBindingSummary;
-  canEdit: boolean;
-  canDelete: boolean;
   onEdit: (s: SecretBindingSummary) => void;
   onDelete: (s: SecretBindingSummary) => void;
 }) {
+  // Edit and Delete act in the binding's own namespace, which under "All workspaces" is not the
+  // shell's.
+  const { can } = useCapabilitiesIn(binding.namespace);
+  const canEdit = can(RES_SECRETS, "update");
+  const canDelete = can(RES_SECRETS, "delete");
   if (!canEdit && !canDelete) return null;
   return (
     <div
@@ -603,15 +604,14 @@ export function SecretBindingsPage() {
         rangeLabel={`Page ${pageNumber}`}
         ariaLabel="Secret bindings"
         onRowClick={(t) => navigate(bindingPath(t.binding))}
-        // The actions column only appears when the caller can edit or delete.
-        // A viewer sees a clean table with no dead or greyed-out buttons.
+        // The actions column only appears when the caller can edit or delete in the selected
+        // workspace; under "All workspaces" each row decides by its own namespace. A viewer sees
+        // a clean table with no dead or greyed-out buttons.
         rowActions={
-          canEdit || canDelete
+          namespace === "" || canEdit || canDelete
             ? (t) => (
                 <RowActions
                   binding={t.binding}
-                  canEdit={canEdit}
-                  canDelete={canDelete}
                   onEdit={(s) => navigate(bindingPath(s, "?edit=1"))}
                   onDelete={(s) => navigate(bindingPath(s, "?delete=1"))}
                 />

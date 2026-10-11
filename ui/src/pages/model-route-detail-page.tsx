@@ -45,7 +45,7 @@ import {
   type ModelRouteProviderDTO,
   type ProviderSummary,
 } from "@/lib/api";
-import { useCapabilities } from "@/lib/capabilities";
+import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_ROUTES } from "@/lib/nav";
 
@@ -109,7 +109,8 @@ export function ModelRouteDetailPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [state, setState] = React.useState<Load>({ kind: "loading" });
-  const { can } = useCapabilities();
+  // Edit and Delete act in the route's namespace, whatever the shell has selected.
+  const { can } = useCapabilitiesIn(ns);
 
   const editOpen = searchParams.get("edit") === "1";
   const deleteOpen = searchParams.get("delete") === "1";
@@ -654,7 +655,7 @@ function RouteEditWizard({
   onSaved: () => void;
 }) {
   const { toast } = useToast();
-  const { reprobe } = useCapabilities();
+  const { reprobe } = useCapabilitiesIn(detail.namespace);
   const { providerNames, modelsForProvider, secretBindingNames } =
     useConnectedModels(detail.namespace);
   const [providers, setProviders] = React.useState<ProviderForm[]>(
@@ -1035,7 +1036,7 @@ function RouteDeleteDialog({
   onDeleted: () => void;
 }) {
   const { toast } = useToast();
-  const { reprobe } = useCapabilities();
+  const { reprobe } = useCapabilitiesIn(detail.namespace);
   const [deleting, setDeleting] = React.useState(false);
 
   async function onConfirm() {

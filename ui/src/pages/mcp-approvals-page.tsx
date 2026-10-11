@@ -23,7 +23,7 @@ import {
   type KeyValueItem,
   type Quantity,
 } from "@/components/kit";
-import { useCapabilities } from "@/lib/capabilities";
+import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_REGISTRIES } from "@/lib/nav";
 import { api, ApiError, type McpApproval } from "@/lib/api";
@@ -59,9 +59,10 @@ import { formatDateTime, formatRelativeTime } from "@/lib/format";
 // the budget drops at 1280/1024/768 ("dropped ≠ lost", §4.4).
 //
 // RBAC: approve/reject are OPERATOR-ONLY. The UI gates the controls on
-// `can(RES_REGISTRIES, "update")` — operators have update, a viewer does not and
-// gets the read-only "Review the ask" next step instead of a dead button. The
-// REAL gate is the API: a forced attempt gets a 403 surfaced honestly.
+// `can(RES_REGISTRIES, "update")` in the row's own namespace — operators have
+// update, a viewer does not and gets the read-only "Review the ask" next step
+// instead of a dead button. The REAL gate is the API: a forced attempt gets a
+// 403 surfaced honestly.
 //
 // data-testid contract:
 //   mcp-approvals              — root container
@@ -173,11 +174,14 @@ export function McpApprovalsPage() {
   const [reviewing, setReviewing] = React.useState<McpApproval | null>(null);
   const abortRef = React.useRef<AbortController | null>(null);
 
-  const { can, reprobe } = useCapabilities();
-  // Operator gate: only update permission holders see approve/reject actions.
-  // A viewer sees the queue (list) but not the action buttons — the real gate
-  // is the API 403 if they somehow invoke the action.
-  const canApprove = can(RES_REGISTRIES, "update");
+  // Operator gate: only update permission holders see approve/reject actions, asked of the
+  // submission's own namespace, which under "All workspaces" is not the shell's. A viewer sees the
+  // queue but not the action buttons; the real gate is the API 403 if they invoke the action.
+  const { reprobeIn } = useCapabilities();
+  const canApproveReviewing = useCapabilitiesIn(reviewing?.namespace ?? "").can(
+    RES_REGISTRIES,
+    "update",
+  );
 
   const { toast } = useToast();
   // The shell's selection; "" ("All workspaces") reads every namespace the caller works in.
@@ -251,7 +255,7 @@ export function McpApprovalsPage() {
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.isForbidden) {
-          reprobe();
+          reprobeIn(ns);
           setAction({ kind: "idle", ns: "", name: "", error: `Not allowed to approve: ${err.message}` });
           return;
         }
@@ -273,7 +277,7 @@ export function McpApprovalsPage() {
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.isForbidden) {
-          reprobe();
+          reprobeIn(ns);
           setAction({ kind: "idle", ns: "", name: "", error: `Not allowed to reject: ${err.message}` });
           return;
         }
@@ -409,7 +413,6 @@ export function McpApprovalsPage() {
       cell: (a) => (
         <DecideCell
           approval={a}
-          canApprove={canApprove}
           busy={rowBusy(a)}
           onApprove={() => void onApprove(a.namespace, a.name)}
           onRejectRequest={() =>
@@ -509,7 +512,7 @@ export function McpApprovalsPage() {
         footer={
           reviewing ? (
             <div className="flex items-center gap-3">
-              {canApprove ? (
+              {canApproveReviewing ? (
                 <>
                   <Button
                     variant="outline"
@@ -628,19 +631,18 @@ function recordItems(a: McpApproval): KeyValueItem[] {
  */
 function DecideCell({
   approval,
-  canApprove,
   busy,
   onApprove,
   onRejectRequest,
   onReview,
 }: {
   approval: McpApproval;
-  canApprove: boolean;
   busy: boolean;
   onApprove: () => void;
   onRejectRequest: () => void;
   onReview: () => void;
 }) {
+  const canApprove = useCapabilitiesIn(approval.namespace).can(RES_REGISTRIES, "update");
   const base = rowKey(approval);
   const review = (
     <NextStepLink

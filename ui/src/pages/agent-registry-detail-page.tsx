@@ -27,7 +27,7 @@ import {
   type LabelSelectorDTO,
   type RegistryGuardsDTO,
 } from "@/lib/api";
-import { useCapabilities } from "@/lib/capabilities";
+import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { RES_REGISTRIES } from "@/lib/nav";
 
 // AgentRegistryDetailPage — detail + edit wizard + typed-name delete.
@@ -172,7 +172,8 @@ function RegistryDetailContent({
   onDeleted: () => void;
   onSaved: () => void;
 }) {
-  const { can } = useCapabilities();
+  // Edit and Delete act in the registry's namespace, whatever the shell has selected.
+  const { can } = useCapabilitiesIn(detail.namespace);
   const canEdit = can(RES_REGISTRIES, "update");
   const canDelete = can(RES_REGISTRIES, "delete");
 
@@ -402,7 +403,7 @@ function RegistryEditWizard({
   onSaved: () => void;
 }) {
   const { toast } = useToast();
-  const { reprobe } = useCapabilities();
+  const { reprobe } = useCapabilitiesIn(detail.namespace);
 
   const [matchLabels, setMatchLabels] = React.useState<Record<string, string>>(
     detail.memberSelector.matchLabels ?? {},
@@ -601,7 +602,7 @@ function RegistryDeleteDialog({
   onDeleted: () => void;
 }) {
   const { toast } = useToast();
-  const { reprobe } = useCapabilities();
+  const { reprobe } = useCapabilitiesIn(detail.namespace);
   const [deleting, setDeleting] = React.useState(false);
 
   async function onConfirm() {

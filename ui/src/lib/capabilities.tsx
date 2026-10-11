@@ -315,3 +315,22 @@ export function Can({
   const allowed = useCan(resource, verb);
   return <>{allowed ? children : fallback}</>;
 }
+
+// CanIn is Can for a resource in another namespace: a control on an "All workspaces" row or an
+// item opened from one, which acts where the item lives, not where the shell is.
+export function CanIn({
+  namespace,
+  resource,
+  verb,
+  children,
+  fallback = null,
+}: {
+  namespace: string;
+  resource: string;
+  verb: string;
+  children: React.ReactNode;
+  fallback?: React.ReactNode;
+}): React.ReactElement | null {
+  const allowed = useCapabilitiesIn(namespace).can(resource, verb);
+  return <>{allowed ? children : fallback}</>;
+}

@@ -26,7 +26,7 @@ import {
   type FilterChip,
   type NextStepTone,
 } from "@/components/kit";
-import { useCapabilities } from "@/lib/capabilities";
+import { CanIn, useCapabilities } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { cn } from "@/lib/utils";
 import {
@@ -683,18 +683,22 @@ export function PromptsPage() {
         ariaLabel="Prompt versions"
         tableClassName="min-w-[52rem]"
         onRowClick={(d) => (d.previous ? reviewChange(d) : undefined)}
+        // Under "All workspaces" each row decides by its own namespace; one workspace decides for
+        // every row, so a caller who may not delete there gets no actions column.
         rowActions={
-          canDelete
+          shellNs === "" || canDelete
             ? (d) => (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="text-faint hover:text-destructive"
-                  onClick={() => setDeleteTarget(d.version)}
-                  data-testid={`prompt-delete-${d.version.name}`}
-                >
-                  Delete
-                </Button>
+                <CanIn namespace={d.version.namespace} resource={RES_PROMPTVERSIONS} verb="delete">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-faint hover:text-destructive"
+                    onClick={() => setDeleteTarget(d.version)}
+                    data-testid={`prompt-delete-${d.version.name}`}
+                  >
+                    Delete
+                  </Button>
+                </CanIn>
               )
             : undefined
         }
