@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -146,6 +147,10 @@ func (s *Server) beginMCPGrantConsent(w http.ResponseWriter, r *http.Request) {
 	cfg, serverURL, cErr := s.recoverRegisteredOAuth(r.Context(), caller, ns, server)
 	if cErr != nil {
 		writeError(w, cErr.status, cErr.msg)
+		return
+	}
+	if oErr := refuseEndpointOverride(cfg, req.Auth); oErr != nil {
+		writeError(w, oErr.status, oErr.msg)
 		return
 	}
 	cfg = overlayOAuthConfig(cfg, req.Auth)
@@ -485,6 +490,32 @@ func (s *Server) recoverRegisteredOAuth(ctx context.Context, caller client.Clien
 		RedirectURI:           tr.Annotations[annMCPOAuthRedirectURI],
 	}
 	return cfg, tr.Annotations[annMCPURL], nil
+}
+
+// refuseEndpointOverride refuses a consent request that would change an OAuth endpoint the
+// server's registration persisted. The callback sends the authorization code and the PKCE
+// verifier to the token endpoint, so a request able to repoint it could send them anywhere,
+// and anyone who can read the server could ask. An endpoint the registration did not persist
+// (a server registered before config persistence) may still be supplied; repeating the
+// registered value is not a change.
+func refuseEndpointOverride(registered mcpOAuthConfig, auth *MCPAuthRequest) *createError {
+	if auth == nil {
+		return nil
+	}
+	for _, f := range []struct{ field, registered, requested string }{
+		{"auth.authorizationEndpoint", registered.AuthorizationEndpoint, auth.AuthorizationEndpoint},
+		{"auth.tokenEndpoint", registered.TokenEndpoint, auth.TokenEndpoint},
+	} {
+		reg, asked := strings.TrimSpace(f.registered), strings.TrimSpace(f.requested)
+		if reg != "" && asked != "" && asked != reg {
+			return &createError{
+				status: http.StatusBadRequest,
+				msg: fmt.Sprintf("%s cannot be changed: this MCP server's OAuth endpoints were set when it was registered — omit the field to use them",
+					f.field),
+			}
+		}
+	}
+	return nil
 }
 
 // overlayOAuthConfig overlays any non-empty fields of an explicitly-supplied auth block

@@ -40,6 +40,13 @@ the error whether it answered. Both now check the caller's permission first: a r
 403 (401 for a token the API server rejects) and nothing is contacted. Registration without the
 control-plane store is refused with 501 instead of failing after the probe.
 
+**Security: connecting to an OAuth MCP server could send the authorization code to any address.**
+The request that starts a user's OAuth consent could name its own token endpoint, and the BFF
+then sent the authorization code and PKCE verifier there. Anyone who could see the server could
+use it. A server whose OAuth endpoints were saved when it was registered now keeps them: a request
+naming a different `authorizationEndpoint` or `tokenEndpoint` is refused with HTTP 400. Servers
+registered before those endpoints were saved can still be given them.
+
 **Fixed: the console never recognised a real tool call in a trace.** Langfuse records the
 platform's tool calls as `TOOL` observations, and the run inspector and trace explorer only
 treated `SPAN`s as tools. A tool call showed as an internal step, and the run inspector opened on

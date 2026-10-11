@@ -382,6 +382,66 @@ func TestMCPGrantConsentRecoversConfigFromRegistration(t *testing.T) {
 	assert.Contains(t, pending.AuthorizationURL, "recovered-client-id", "authorize URL carries the recovered client id")
 }
 
+// TestMCPGrantConsentRefusesChangingRegisteredEndpoints: the callback sends the authorization
+// code and PKCE verifier to the token endpoint. A server whose registration persisted its
+// endpoints keeps them: a consent request naming a different one is refused with 400 naming
+// the field, no flow starts, and the endpoint it named is never contacted.
+func TestMCPGrantConsentRefusesChangingRegisteredEndpoints(t *testing.T) {
+	oauth := newFakeOAuthServer(t)
+	attacker, hits := countingServer(t, oauth.srv.Config.Handler)
+	const server = "registered-mcp"
+
+	for _, tc := range []struct {
+		field string
+		auth  *MCPAuthRequest
+	}{
+		{"auth.tokenEndpoint", &MCPAuthRequest{Type: "oauth", TokenEndpoint: attacker.URL + "/token"}},
+		{"auth.authorizationEndpoint", &MCPAuthRequest{Type: "oauth", AuthorizationEndpoint: attacker.URL + "/authorize"}},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			s, _ := newGrantServer(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build())
+			wireTRStore(t, s, nil, oauthToolRegistryWithConfig(server, "http://registered/mcp", oauth))
+
+			rec, pending := beginGrant(t, s, server, "mallory-token", tc.auth)
+
+			require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+			assert.Contains(t, rec.Body.String(), tc.field)
+			assert.Empty(t, pending.State, "no consent flow starts")
+			// Completing the consent with whatever state the response carried cannot reach
+			// the named endpoint either.
+			callback(t, s, oauth.validCode, pending.State)
+			assert.Zero(t, hits.Load(), "the endpoint the request named is never contacted")
+		})
+	}
+
+	// Repeating the registered endpoints is not a change.
+	s, _ := newGrantServer(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build())
+	wireTRStore(t, s, nil, oauthToolRegistryWithConfig(server, "http://registered/mcp", oauth))
+	rec, pending := beginGrant(t, s, server, "bob-token", &MCPAuthRequest{
+		Type: "oauth", AuthorizationEndpoint: oauth.authorizeURL(), TokenEndpoint: " " + oauth.tokenURL() + " ",
+	})
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, pending.AuthorizationURL, oauth.authorizeURL())
+}
+
+// TestMCPGrantConsentLegacyServerAcceptsSuppliedEndpoints: a server registered before config
+// persistence has no endpoints to protect, so a consent request may still supply them, and the
+// flow uses what it supplied.
+func TestMCPGrantConsentLegacyServerAcceptsSuppliedEndpoints(t *testing.T) {
+	oauth := newFakeOAuthServer(t)
+	const server = "legacy-supplied-mcp"
+	s, _ := newGrantServer(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build())
+	wireTRStore(t, s, nil, oauthToolRegistry(server, "http://legacy/mcp"))
+
+	rec, pending := beginGrant(t, s, server, "alice-token", grantAuth(oauth))
+
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, pending.AuthorizationURL, oauth.authorizeURL(), "the supplied authorization endpoint is used")
+	oauth.expectChallenge = ""
+	assertCallbackRedirect(t, callback(t, s, oauth.validCode, pending.State), "/tools/catalog")
+	assert.Equal(t, "authorization_code", oauth.gotGrant, "the code went to the supplied token endpoint")
+}
+
 // TestMCPGrantConsentLegacyServerDiscoveryFails (m26.1b): a legacy OAuth server with no
 // stored config triggers a discovery/DCR backfill; when discovery can't complete (here the
 // server URL is unreachable), the connect fails HONESTLY (422, ADR 0027) rather than a 500
