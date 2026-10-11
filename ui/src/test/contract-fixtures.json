@@ -65,7 +65,41 @@
         }
       }
     },
-    "guardrailPolicyRef": "pii-and-jailbreak"
+    "guardrailPolicyRef": "pii-and-jailbreak",
+    "dependencies": [
+      {
+        "kind": "modelRoute",
+        "name": "anthropic",
+        "namespace": "default",
+        "state": "ready",
+        "reason": "Served"
+      },
+      {
+        "kind": "secretBinding",
+        "name": "anthropic",
+        "namespace": "default",
+        "via": "anthropic",
+        "state": "ready",
+        "reason": "Resolved"
+      },
+      {
+        "kind": "guardrailPolicy",
+        "name": "pii-and-jailbreak",
+        "namespace": "default",
+        "state": "missing",
+        "reason": "GuardrailPolicyNotFound",
+        "message": "There is no GuardrailPolicy named \"pii-and-jailbreak\" in default."
+      },
+      {
+        "kind": "toolBinding",
+        "name": "echo-search",
+        "namespace": "default",
+        "detail": "search",
+        "via": "acme-mcp",
+        "state": "ready",
+        "reason": "Bound"
+      }
+    ]
   },
   "ConnectProviderResponse": {
     "provider": {

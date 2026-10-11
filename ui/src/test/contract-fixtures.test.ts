@@ -43,4 +43,15 @@ describe("BFF contract fixtures", () => {
     expect(r).toHaveProperty("modelRoute");
     expect(r).toHaveProperty("role");
   });
+
+  it("AgentDetailResponse carries resolved dependencies (kind, name, state) for the Bindings panel", () => {
+    const deps = fixtures.AgentDetailResponse.dependencies;
+    expect(Array.isArray(deps)).toBe(true);
+    for (const d of deps) {
+      expect(typeof d.kind).toBe("string");
+      expect(typeof d.name).toBe("string");
+      expect(["ready", "notReady", "missing", "unknown", "declared"]).toContain(d.state);
+    }
+    expect(deps.some((d) => d.state === "missing")).toBe(true);
+  });
 });

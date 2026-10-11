@@ -86,12 +86,14 @@ func (s *Server) handleAgentDetail(w http.ResponseWriter, r *http.Request) {
 	inNS := []client.ListOption{client.InNamespace(ns)}
 
 	toolBindings := []agentsv1alpha1.MCPToolBinding{}
+	toolBindingsHidden := false
 	if list, err := listMCPToolBindings(r.Context(), caller, inNS...); err != nil {
 		if !apierrors.IsForbidden(err) {
 			s.log.Error(err, "list MCPToolBindings for detail failed", "namespace", ns)
 			writeError(w, http.StatusInternalServerError, "failed to read agent bindings")
 			return
 		}
+		toolBindingsHidden = true
 	} else {
 		toolBindings = list.Items
 	}
@@ -117,6 +119,7 @@ func (s *Server) handleAgentDetail(w http.ResponseWriter, r *http.Request) {
 	managedOutsideUI, drift := s.editModeFlags(&ad)
 
 	detail := newAgentDetail(&ad, toolBindings, versions, managedOutsideUI, drift)
+	detail.Dependencies = s.resolveAgentDependencies(r.Context(), caller, &ad, toolBindings, toolBindingsHidden)
 
 	// U13: read the agent's DURABLE published-template state so the "Published" badge + Unpublish
 	// survive a reload (they were in-session only). A store read on the BFF's own cpDB (the same

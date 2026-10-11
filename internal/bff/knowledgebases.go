@@ -564,10 +564,10 @@ func (s *Server) handleIngestKB(w http.ResponseWriter, r *http.Request) {
 // best-effort: a conflict/failure is logged, not returned — the controller's reconcile is the authoritative
 // projector of the terminal phase, so a missed Ingesting flip only delays the console's in-flight indicator.
 func setKBIngesting(ctx context.Context, caller client.Client, kb *agentsv1beta1.KnowledgeBase, runID string) {
-	if kb.Status.Phase == "Ingesting" && kb.Status.IngestionRunRef == runID {
+	if kb.Status.Phase == kbPhaseIngesting && kb.Status.IngestionRunRef == runID {
 		return // already reflecting this run — no write.
 	}
-	kb.Status.Phase = "Ingesting"
+	kb.Status.Phase = kbPhaseIngesting
 	kb.Status.IngestionRunRef = runID
 	if err := caller.Status().Update(ctx, kb); err != nil {
 		logf.FromContext(ctx).Info("ingest: could not mark KB Ingesting (non-fatal; the controller projects the terminal phase)",

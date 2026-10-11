@@ -62,6 +62,7 @@ import {
 } from "@/components/kit";
 import { FormField } from "@/components/config/form-field";
 import { ChatPanel } from "@/components/agent-chat";
+import { AgentBindingsPanel } from "@/components/agent-bindings-panel";
 import { RunInspector } from "@/components/dashboard/run-inspector";
 import { UseAgentPanel } from "@/components/dashboard/use-agent-panel";
 import {
@@ -1726,8 +1727,9 @@ function DeleteDialog({
 
 // ── Overview: what it reaches, how it came up, and a way to try it ──────────
 // The reach panel leads because it is the question the page exists to answer.
-// The condition story follows (why it is or is not serving), then the two ways
-// to actually exercise it — from here, or from code.
+// The Bindings panel follows with everything else it depends on, then the
+// condition story (why it is or is not serving), then the two ways to actually
+// exercise it — from here, or from code.
 function OverviewTab({
   detail,
   onTraced,
@@ -1740,6 +1742,8 @@ function OverviewTab({
   return (
     <>
       <ReachPanel detail={detail} onSeeAll={onGoEquipment} />
+
+      <AgentBindingsPanel detail={detail} />
 
       <ConditionsPanel
         conditions={detail.conditions}

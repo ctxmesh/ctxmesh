@@ -2623,3 +2623,32 @@ describe("AgentDetailPage — lifecycle stage (M151 §5.20)", () => {
     expect(lit[0]).toHaveTextContent("serving billing-v2");
   });
 });
+
+// ── m184.15: the Bindings panel on Overview ─────────────────────────────────
+describe("AgentDetailPage — the Bindings panel (m184.15)", () => {
+  it("lists what the agent references on Overview, missing ones included", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        modelRoute: "chat",
+        guardrailPolicyRef: "pii",
+        dependencies: [
+          { kind: "modelRoute", name: "chat", namespace: "prod", state: "notReady", reason: "NotYetServed", message: "not served yet" },
+          {
+            kind: "guardrailPolicy",
+            name: "pii",
+            namespace: "prod",
+            state: "missing",
+            reason: "GuardrailPolicyNotFound",
+            message: 'There is no GuardrailPolicy named "pii" in prod.',
+          },
+        ],
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    const panel = await screen.findByTestId("agent-bindings-panel");
+    expect(within(panel).getByTestId("dep-state-guardrailPolicy-pii")).toHaveTextContent("missing");
+    expect(within(panel).getByTestId("dep-state-modelRoute-chat")).toHaveTextContent("model loading");
+  });
+});

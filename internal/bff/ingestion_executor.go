@@ -105,6 +105,7 @@ const (
 	kbPhasePartiallyIngested = "PartiallyIngested"
 	kbPhaseFailed            = "Failed"
 	kbPhaseBudgetExceeded    = "BudgetExceeded"
+	kbPhaseIngesting         = "Ingesting"
 )
 
 // ingestionReasonToPhase maps a coded terminal reason to the KnowledgeBase.status.phase the controller reflects.

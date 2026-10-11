@@ -135,6 +135,23 @@ func buildContractFixtures() map[string]any {
 			// m66.10: guardrailPolicyRef is included in the fixture so the UI
 			// mock-drift guard covers agents that reference a GuardrailPolicy.
 			GuardrailPolicyRef: "pii-and-jailbreak",
+			// m184.15: the resolved references the Bindings panel renders.
+			Dependencies: []AgentDependency{
+				{Kind: depKindModelRoute, Name: "anthropic", Namespace: "default", State: depReady, Reason: "Served"},
+				{
+					Kind: depKindSecretBinding, Name: "anthropic", Namespace: "default", Via: "anthropic",
+					State: depReady, Reason: "Resolved",
+				},
+				{
+					Kind: depKindGuardrailPolicy, Name: "pii-and-jailbreak", Namespace: "default", State: depMissing,
+					Reason:  "GuardrailPolicyNotFound",
+					Message: "There is no GuardrailPolicy named \"pii-and-jailbreak\" in default.",
+				},
+				{
+					Kind: depKindToolBinding, Name: "echo-search", Namespace: "default", Detail: "search", Via: "acme-mcp",
+					State: depReady, Reason: "Bound",
+				},
+			},
 		},
 	}
 }

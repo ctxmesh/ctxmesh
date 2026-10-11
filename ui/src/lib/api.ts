@@ -264,6 +264,44 @@ export interface AgentDetailResponse {
   // latest published_artifacts release, read server-side — so the "Published" badge + Unpublish
   // survive a reload (they were in-session only). Absent when the agent is not published.
   published?: { visibility: string; version: number };
+  // dependencies is everything the agent references, each resolved as the caller: the model route
+  // and the secret bindings its providers use, the guardrail policy, tool bindings, knowledge bases,
+  // memory, approval rules and approvers, and feedback sources. A reference that does not resolve is
+  // listed as `missing`, never dropped. Absent from a BFF older than the Bindings panel.
+  dependencies?: AgentDependency[];
+}
+
+export type AgentDependencyKind =
+  | "modelRoute"
+  | "secretBinding"
+  | "guardrailPolicy"
+  | "toolBinding"
+  | "knowledgeBase"
+  | "sessionMemory"
+  | "longTermMemory"
+  | "approvalRule"
+  | "approver"
+  | "feedbackSource";
+
+/**
+ * ready — found, and its own status says it works. notReady — found, not working yet (reason +
+ * message are the condition's words). missing — nothing of that name exists. unknown — the caller
+ * may not read it, or the read failed; nothing is claimed. declared — a spec field with nothing
+ * behind it to resolve.
+ */
+export type AgentDependencyState = "ready" | "notReady" | "missing" | "unknown" | "declared";
+
+export interface AgentDependency {
+  kind: AgentDependencyKind;
+  name: string;
+  namespace?: string;
+  /** The subject: a tool name, a memory scope, an approver's kind, a score list. */
+  detail?: string;
+  /** What it is reached through: the route a secret binding serves, a tool binding's MCP server. */
+  via?: string;
+  state: AgentDependencyState;
+  reason?: string;
+  message?: string;
 }
 
 // AgentVersionDiffResponse (V3) — a read-only TEXTUAL diff of two agent-version snapshots (deployed

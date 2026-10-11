@@ -229,6 +229,11 @@ type AgentDetailResponse struct {
 	// the badge vanished on reload). nil when the agent is not published (or the store is unavailable
 	// — a best-effort read that degrades to no-badge, never a 500).
 	Published *PublishedRef `json:"published,omitempty"`
+	// Dependencies is everything the agent references (model route, the secret bindings its route
+	// uses, guardrail policy, tool bindings, knowledge bases, memory, approval rules and approvers,
+	// feedback sources), each resolved as the caller. A reference that does not resolve is listed
+	// as missing. Non-nil on the wire.
+	Dependencies []AgentDependency `json:"dependencies"`
 }
 
 // PublishedRef is the durable published-template state on the agent detail (U13): the visibility +
@@ -1518,6 +1523,7 @@ func newAgentDetail(
 		Gate:               newAgentGateDetail(ad.Status.Gate),
 		NeedsRebinding:     needsRebinding,
 		ForkUnresolvedRefs: forkUnresolvedRefs,
+		Dependencies:       []AgentDependency{},
 	}
 }
 
