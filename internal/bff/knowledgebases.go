@@ -45,6 +45,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/ingestion"
 	"github.com/ctxmesh/ctxmesh/internal/objectstore"
 	"github.com/ctxmesh/ctxmesh/internal/run"
@@ -82,12 +83,13 @@ type DocumentUploadResponse struct {
 // use case typically streams one document at a time and multipart adds framing
 // overhead without value.
 //
-// Auth: caller-scoped bearer token (ADR 0011). The BFF looks up the named
-// KnowledgeBase in the caller's namespace via the caller-scoped client, so K8s
-// RBAC governs who can upload documents to a KB.
+// Auth: caller-scoped bearer token (ADR 0011). Adding a document changes the corpus, so the
+// caller needs update on the KnowledgeBase (authorizeKBWrite) before it is read through the
+// caller-scoped client.
 //
 // Error responses (honest 4xx, ADR 0027):
 //   - 400 — missing ?filename, filename sanitizes to empty, or no namespace
+//   - 403 — no update on the KnowledgeBase
 //   - 404 — KB does not exist in caller's namespace
 //   - 413 — body exceeds maxDocumentUploadBytes
 //   - 501 — object store not configured (OBJECT_STORE_ADDR not set)
@@ -135,6 +137,10 @@ func (s *Server) handleUploadKBDocument(w http.ResponseWriter, r *http.Request) 
 	// --- object store gate -------------------------------------------------------
 	if s.docStore == nil {
 		writeError(w, http.StatusNotImplemented, "document store not configured: set OBJECT_STORE_ADDR to enable KB uploads")
+		return
+	}
+
+	if !s.authorizeKBWrite(w, r, caller, ns, kbName, "add documents to KnowledgeBase "+kbName) {
 		return
 	}
 
@@ -382,9 +388,23 @@ type IngestResponse struct {
 	DocumentCount int `json:"documentCount"`
 }
 
+// authorizeKBWrite asks, as the caller, for update on the KnowledgeBase: uploading a document and
+// starting an ingestion change the corpus (and an ingestion spends the embedder), which a read grant
+// must not do. It is checked before the KnowledgeBase is read. On refusal it writes the response — 403
+// for a denial, 401 for a token the API server rejects, 500 otherwise — and returns false.
+func (s *Server) authorizeKBWrite(w http.ResponseWriter, r *http.Request, caller client.Client, ns, kbName, action string) bool {
+	if cErr := s.authzRefusal(
+		s.authorizeStore(r.Context(), caller, authz.VerbUpdate, resKnowledgeBases, ns, kbName), action,
+	); cErr != nil {
+		writeError(w, cErr.status, cErr.msg)
+		return false
+	}
+	return true
+}
+
 // handleIngestKB serves POST /api/knowledgebases/{name}/ingest (m68.6, ADR 0061 Fork 2). It is what the console
 // (m68.13) and a user call to (re-)ingest a corpus. Caller-scoped (ADR 0011): it resolves the KB through the
-// caller's own client (K8s RBAC gates who can trigger ingestion), resolves the document list from the source,
+// caller's own client after checking the caller may update it (authorizeKBWrite), resolves the document list from the source,
 // PINS an IngestionSpec (source/embeddingRoute/chunking/doc-keys — the snapshot the off-request executor drives),
 // and creates a durable ingestion Run (queued for the worker pool in dispatch mode, or executed in-process in
 // dev — the workflows_handler create-path precedent). Returns 202 + the run id.
@@ -429,7 +449,11 @@ func (s *Server) handleIngestKB(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve the KB (caller-scoped, 404 if absent) — the same RBAC gate as the upload endpoint.
+	if !s.authorizeKBWrite(w, r, caller, ns, kbName, "ingest KnowledgeBase "+kbName) {
+		return
+	}
+
+	// Resolve the KB (caller-scoped, 404 if absent).
 	var kb agentsv1beta1.KnowledgeBase
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: kbName}, &kb); err != nil {
 		switch {

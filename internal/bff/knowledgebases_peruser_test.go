@@ -76,6 +76,7 @@ func serverWithIdentity(t *testing.T, username string, kb *agentsv1beta1.Knowled
 		Embedder:       newMockEmbedder(),
 		RunStore:       run.NewMemStore(),
 	})
+	s.authorizer = &recordingAuthorizer{}
 	// One run path since M143.1: an ingestion run only progresses when the pool executes it.
 	startTestRunWorkers(t, s)
 	return s, docStore, ks
@@ -268,6 +269,7 @@ func TestSearchKB_PerUser_ScopesToCallerSubject(t *testing.T) {
 		Log:             logr.Discard(),
 		TokenServiceURL: ts.URL,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	code, body := searchKB(t, s, "my-kb", kbNS, []byte(`{"query":"my notes"}`))
 	require.Equal(t, http.StatusOK, code, "body: %s", string(body))
@@ -305,6 +307,7 @@ func TestSearchKB_OrgWide_SubjectEmpty(t *testing.T) {
 		Log:             logr.Discard(),
 		TokenServiceURL: ts.URL,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	code, body := searchKB(t, s, "my-kb", kbNS, []byte(`{"query":"anything"}`))
 	require.Equal(t, http.StatusOK, code, "body: %s", string(body))
@@ -344,7 +347,7 @@ func serverWithSharedStores(t *testing.T, username string, kb *agentsv1beta1.Kno
 	sc := testScheme(t)
 	fc := fake.NewClientBuilder().WithScheme(sc).WithObjects(kb).
 		WithInterceptorFuncs(ssrInterceptor(username, nil)).Build()
-	return NewServer(Options{
+	s := NewServer(Options{
 		CallerClients:  newFakeFactory(fc),
 		Scheme:         sc,
 		Auth:           AllowAll{},
@@ -353,6 +356,8 @@ func serverWithSharedStores(t *testing.T, username string, kb *agentsv1beta1.Kno
 		KnowledgeStore: ks,
 		Embedder:       newMockEmbedder(),
 	})
+	s.authorizer = &recordingAuthorizer{}
+	return s
 }
 
 // waitForRun blocks until the in-process ingestion run reaches a terminal state (the dev path runs the

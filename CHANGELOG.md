@@ -98,6 +98,12 @@ if its creator could open it on the trace page: they made that run, or the run b
 being exported. A trace shared through a workflow or a handoff belongs to the run that started it,
 so it is withheld, and the export's result counts what it withheld.
 
+**Security: reading a knowledge base was enough to change it.** Uploading a document to a
+KnowledgeBase and starting its ingestion checked only that the caller could read it, so the shipped
+`viewer` role could add documents to a corpus other people's agents retrieve from, and start
+ingestions that spend the embedder. Both now need `update` on that KnowledgeBase (403 otherwise),
+checked before it is read; the `developer` and `operator` roles have it.
+
 **Security: anyone who could read an agent named like a knowledge base could read or cancel its
 ingestion.** An ingestion run was created without a creator, so the person who started one got a
 404 reading it, and access to the run was decided by an AgentDeployment of the knowledge base's

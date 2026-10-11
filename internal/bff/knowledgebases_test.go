@@ -110,6 +110,7 @@ func TestUploadKBDocument_HappyPath(t *testing.T) {
 		Log:           logr.Discard(),
 		DocStore:      docStore,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	content := []byte("This is a test document.")
 	code, body := postUpload(t, s, "my-kb", kbNS, "guide.md", "text/markdown", content)
@@ -153,6 +154,7 @@ func TestUploadKBDocument_StorageHardCapRejects413(t *testing.T) {
 		DocStore:             docStore,
 		NamespaceTenantStore: nsStore,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	code, body := postUpload(t, s, "my-kb", kbNS, "guide.md", "text/markdown", []byte("blocked content"))
 	require.Equal(t, http.StatusRequestEntityTooLarge, code, "an at-cap upload must be 413; body: %s", string(body))
@@ -186,6 +188,7 @@ func TestUploadKBDocument_StorageHardCapUnsetAllows(t *testing.T) {
 		DocStore:             docStore,
 		NamespaceTenantStore: nsStore,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	content := []byte("allowed content")
 	code, body := postUpload(t, s, "my-kb", kbNS, "guide.md", "text/markdown", content)
@@ -211,6 +214,7 @@ func TestUploadKBDocument_UnknownKB_Returns404(t *testing.T) {
 		Log:           logr.Discard(),
 		DocStore:      docStore,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	code, body := postUpload(t, s, "ghost-kb", kbNS, "doc.txt", "text/plain", []byte("hello"))
 	assert.Equal(t, http.StatusNotFound, code, "expected 404 for missing KB; body: %s", string(body))
@@ -234,6 +238,7 @@ func TestUploadKBDocument_OverLimit_Returns413(t *testing.T) {
 		Log:           logr.Discard(),
 		DocStore:      docStore,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	// Build a body that is 1 byte over the limit.
 	oversized := make([]byte, maxDocumentUploadBytes+1)
@@ -258,6 +263,7 @@ func TestUploadKBDocument_UnconfiguredStore_Returns501(t *testing.T) {
 		Log:           logr.Discard(),
 		DocStore:      nil,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	code, body := postUpload(t, s, "my-kb", kbNS, "doc.txt", "text/plain", []byte("hello"))
 	assert.Equal(t, http.StatusNotImplemented, code, "expected 501 when store is unconfigured; body: %s", string(body))
@@ -276,6 +282,7 @@ func TestUploadKBDocument_MissingFilename_Returns400(t *testing.T) {
 		Log:           logr.Discard(),
 		DocStore:      docStore,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	// No ?filename in the URL, no Content-Disposition.
 	req := httptest.NewRequest(http.MethodPost, "/api/knowledgebases/my-kb/documents?namespace="+kbNS,
@@ -300,6 +307,7 @@ func TestUploadKBDocument_ContentDispositionFilename(t *testing.T) {
 		Log:           logr.Discard(),
 		DocStore:      docStore,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	// No ?filename but Content-Disposition carries the filename.
 	req := httptest.NewRequest(http.MethodPost, "/api/knowledgebases/my-kb/documents?namespace="+kbNS,
@@ -335,6 +343,7 @@ func TestUploadKBDocument_CrossNamespace(t *testing.T) {
 		Log:           logr.Discard(),
 		DocStore:      docStore,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	content := []byte("cross-namespace content")
 	code, body := postUpload(t, s, "alt-kb", altNS, "report.pdf", "application/pdf", content)
@@ -473,6 +482,7 @@ func newIngestEndpointServer(t *testing.T, kb *agentsv1beta1.KnowledgeBase) (*Se
 		// The run routes (an ingestion's status and cancel) are served only with an invoke adapter.
 		Adapters: Adapters{Invoke: &fakeInvokeAdapter{}},
 	})
+	s.authorizer = &recordingAuthorizer{}
 	return s, docStore
 }
 
@@ -616,6 +626,7 @@ func TestIngestKB_Unwired_Returns501(t *testing.T) {
 		Auth:          AllowAll{},
 		Log:           logr.Discard(),
 	})
+	s.authorizer = &recordingAuthorizer{}
 	code, body := postIngest(t, s, "my-kb", kbNS)
 	assert.Equal(t, http.StatusNotImplemented, code, "expected 501 when ingestion is unwired; body: %s", string(body))
 }
@@ -687,6 +698,7 @@ func TestListKBs_ReturnsSummaries(t *testing.T) {
 		Auth:          AllowAll{},
 		Log:           logr.Discard(),
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	code, body := listKBs(t, s, kbNS)
 	require.Equal(t, http.StatusOK, code, "expected 200; body: %s", string(body))
@@ -722,6 +734,7 @@ func TestGetKB_ReturnsDetail(t *testing.T) {
 		Auth:          AllowAll{},
 		Log:           logr.Discard(),
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	code, body := getKB(t, s, "detail-kb", kbNS)
 	require.Equal(t, http.StatusOK, code, "expected 200; body: %s", string(body))
@@ -748,6 +761,7 @@ func TestGetKB_AbsentKB_Returns404(t *testing.T) {
 		Auth:          AllowAll{},
 		Log:           logr.Discard(),
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	code, body := getKB(t, s, "ghost-kb", kbNS)
 	assert.Equal(t, http.StatusNotFound, code, "expected 404 for absent KB; body: %s", string(body))
@@ -799,6 +813,7 @@ func TestSearchKB_ForwardsToTokenServiceAndReturnsResults(t *testing.T) {
 		Log:             logr.Discard(),
 		TokenServiceURL: ts.URL,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	reqBody, _ := json.Marshal(map[string]any{"query": "how to configure", "topK": 5})
 	code, body := searchKB(t, s, "search-kb", kbNS, reqBody)
@@ -825,6 +840,7 @@ func TestSearchKB_Unconfigured_Returns501(t *testing.T) {
 		Auth:          AllowAll{},
 		Log:           logr.Discard(),
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	reqBody, _ := json.Marshal(map[string]any{"query": "test"})
 	code, body := searchKB(t, s, "search-kb", kbNS, reqBody)
@@ -842,6 +858,7 @@ func TestSearchKB_AbsentKB_Returns404(t *testing.T) {
 		Log:             logr.Discard(),
 		TokenServiceURL: "http://token-service:8443",
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	reqBody, _ := json.Marshal(map[string]any{"query": "test"})
 	code, body := searchKB(t, s, "ghost-kb", kbNS, reqBody)
@@ -894,4 +911,36 @@ func TestIngestKB_TheConflictIsScopedToTheKnowledgeBase(t *testing.T) {
 	code2, body2 := postIngest(t, s, "kb-b", kbNS)
 	assert.NotEqual(t, http.StatusConflict, code2,
 		"the in-flight conflict must be scoped to the KB being ingested; body: %s", string(body2))
+}
+
+// TestKBWrites_AuthorizeUpdateOnTheKnowledgeBase: uploading a document and starting an ingestion ask
+// for update on that KnowledgeBase, and a refusal is a 403 that leaves the corpus untouched.
+func TestKBWrites_AuthorizeUpdateOnTheKnowledgeBase(t *testing.T) {
+	want := authz.Action{Verb: authz.VerbUpdate, Group: agentsAPIGroup, Resource: resKnowledgeBases, Namespace: kbNS, Name: "my-kb"}
+	for _, tc := range []struct {
+		name string
+		send func(*Server) (int, []byte)
+	}{
+		{"upload", func(s *Server) (int, []byte) {
+			return postUpload(t, s, "my-kb", kbNS, "notes.md", "text/markdown", []byte("text"))
+		}},
+		{"ingest", func(s *Server) (int, []byte) { return postIngest(t, s, "my-kb", kbNS) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, docStore := newIngestEndpointServer(t, mockKnowledgeBase("my-kb", kbNS))
+			require.NoError(t, docStore.Put(context.Background(), objectstore.KnowledgeKey(kbNS, "my-kb", "guide.md"),
+				bytes.NewReader([]byte("some text")), -1, "text/markdown"))
+			auth := &recordingAuthorizer{err: authz.ErrForbidden}
+			s.authorizer = auth
+			code, body := tc.send(s)
+			assert.Equal(t, http.StatusForbidden, code, string(body))
+			assert.Equal(t, want, auth.last)
+			keys, err := docStore.List(context.Background(), objectstore.KnowledgePrefix(kbNS, "my-kb"))
+			require.NoError(t, err)
+			assert.Len(t, keys, 1, "nothing was uploaded")
+			active, err := s.runStore.ActiveIngestion(kbNS, "my-kb")
+			require.NoError(t, err)
+			assert.Empty(t, active, "no ingestion was started")
+		})
+	}
 }
