@@ -76,6 +76,14 @@ func (s *pgStore) EnsureDataset(ctx context.Context, namespace, name string) (*D
 	return s.getDataset(ctx, namespace, name)
 }
 
+func (s *pgStore) GetDataset(ctx context.Context, namespace, name string) (*Dataset, error) {
+	namespace, name = strings.TrimSpace(namespace), strings.TrimSpace(name)
+	if namespace == "" || name == "" {
+		return nil, fmt.Errorf("dataset: %w: namespace and name are required", controlplane.ErrInvalid)
+	}
+	return s.getDataset(ctx, namespace, name)
+}
+
 func (s *pgStore) getDataset(ctx context.Context, namespace, name string) (*Dataset, error) {
 	var d Dataset
 	err := s.db.QueryRowContext(ctx, `

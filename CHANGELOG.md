@@ -78,6 +78,17 @@ a base domain that can never be delegated (`localhost`, `internal`, `test`, `inv
 `local`) is where the agents live, not a public suffix. Any other single label is treated as a
 public suffix, so a console at `console.corp` has its agents under `console.corp`.
 
+**Security: the dataset API checked only that a token was valid.** Any authenticated caller could
+list and read the datasets of any namespace, label or pin them, and start an export that copied any
+agent's traces into a dataset of their choosing. A label named only its case, so a writer could
+label a case in another namespace. Every dataset request is now authorized as the caller on
+`evalsuites` in the dataset's namespace, before anything is read: reading needs `list`, and
+exporting, labeling, adding a run and pinning need `update`. An export also needs read access to
+the agent whose traces it copies. A label's case must belong to the dataset in the path. Refusals
+are 403, or 401 for a token the API server rejects. Reading or pinning a dataset that does not
+exist is a 404 and no longer creates it. The shipped viewer role can read datasets in the
+namespaces it is bound in, and the developer and operator roles can also change them.
+
 **Fixed: the chat streamed raw event JSON and never showed an approval or consent prompt
 mid-run.** The run event stream (`GET /api/runs/{id}/events`) put each event in its `data:` line as
 a JSON envelope, while the console and the SDKs read that line as the payload itself. The chat

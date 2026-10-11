@@ -449,7 +449,7 @@ func (s *Server) authorizeAgentKey(w http.ResponseWriter, r *http.Request, calle
 			writeError(w, http.StatusNotFound, "agent not found")
 			return false
 		}
-		s.log.Error(err, "runs list: authorize agent failed", "agent", key)
+		s.log.Error(err, "authorize agent read failed", "agent", key)
 		writeError(w, http.StatusInternalServerError, "failed to authorize agent")
 		return false
 	}

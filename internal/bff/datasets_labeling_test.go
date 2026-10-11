@@ -80,6 +80,8 @@ func newLabelingServer(t *testing.T, username string, lf LangfuseAdapter) (*Serv
 		DatasetStore:  ds,
 		Adapters:      Adapters{Langfuse: lf},
 	})
+	// The caller may read and write datasets in every namespace; datasets_authz_test.go covers the refusals.
+	s.authorizer = &recordingAuthorizer{}
 	return s, ds
 }
 

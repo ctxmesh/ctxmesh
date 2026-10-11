@@ -108,6 +108,11 @@ type Store interface {
 	// and name are required; a blank one is controlplane.ErrInvalid.
 	EnsureDataset(ctx context.Context, namespace, name string) (*Dataset, error)
 
+	// GetDataset returns the dataset (namespace, name) without creating it: controlplane.ErrNotFound when there
+	// is none, controlplane.ErrInvalid for a blank namespace or name. A read path uses this, so reading a
+	// dataset that does not exist never creates one.
+	GetDataset(ctx context.Context, namespace, name string) (*Dataset, error)
+
 	// AppendCase adds a case to the dataset's DRAFT HEAD, returning the assigned case ID. datasetID must refer to
 	// an existing dataset (else controlplane.ErrNotFound); Input is required (controlplane.ErrInvalid otherwise).
 	// The case is NOT part of any pinned version until a later PinVersion snapshots it.
