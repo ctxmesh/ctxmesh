@@ -195,7 +195,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 			// Log server-side faults (5xx) with the underlying detail; client faults
 			// (4xx) are the caller's input/permission and need no error log.
 			if ce.status >= 500 {
-				s.log.Error(err, "create agent failed")
+				s.log.Error(ce.logged(), "create agent failed")
 			}
 			writeError(w, ce.status, ce.msg)
 			return

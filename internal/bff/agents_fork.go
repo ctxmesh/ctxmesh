@@ -205,6 +205,9 @@ func (s *Server) handleForkAgent(w http.ResponseWriter, r *http.Request) {
 	// 3. Fork via the shared helper (the ONE create path), caller-scoped, in the caller's ns.
 	resp, fErr := s.forkFromSourceSpec(r, caller, sourceSpec, prov, callerNS, localName)
 	if fErr != nil {
+		if fErr.status >= 500 {
+			s.log.Error(fErr.logged(), "fork agent failed")
+		}
 		writeError(w, fErr.status, fErr.msg)
 		return
 	}
@@ -300,7 +303,7 @@ func (s *Server) forkFromSourceSpec(r *http.Request, caller client.Client, sourc
 		if isCreateError(cErr, &ce) {
 			return ForkAgentResponse{}, ce
 		}
-		return ForkAgentResponse{}, &createError{status: http.StatusInternalServerError, msg: "failed to fork the agent"}
+		return ForkAgentResponse{}, &createError{status: http.StatusInternalServerError, msg: "failed to fork the agent", cause: cErr}
 	}
 
 	// Stamp the provenance labels on the created AgentDeployment (caller-scoped label patch —

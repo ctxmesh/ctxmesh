@@ -815,7 +815,7 @@ func (s *Server) writeEditError(w http.ResponseWriter, err error) {
 	var ce *createError
 	if errors.As(err, &ce) {
 		if ce.status >= 500 {
-			s.log.Error(err, "update agent failed")
+			s.log.Error(ce.logged(), "update agent failed")
 		}
 		writeError(w, ce.status, ce.msg)
 		return

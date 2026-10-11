@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	authnv1 "k8s.io/api/authentication/v1"
@@ -223,6 +224,51 @@ func TestCreateAgentWithToolsNeedsTheStore(t *testing.T) {
 	c := identityClient(t, operatorUser)
 	rec := createAgentAs(t, c, nil, "name: plain\nruntime: managed\nsystemPrompt: hi\n")
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestToolStoreFailureIsLoggedNotSent: a failed read of the MCP servers is a server fault. The
+// client gets a generic 500 naming what failed; the store's own error text, which can carry
+// database detail, goes only to the log. Create and edit share the path.
+func TestToolStoreFailureIsLoggedNotSent(t *testing.T) {
+	const cause = "connection refused"
+	captureLog := func(s *Server) *logBuffer {
+		lb := &logBuffer{}
+		s.log = funcr.New(func(prefix, args string) { lb.write(prefix, args) }, funcr.Options{})
+		return lb
+	}
+
+	t.Run("create", func(t *testing.T) {
+		c := identityClient(t, operatorUser)
+		s := newConfigServer(t, c)
+		s.toolRegistryStore = failingListStore{}
+		lb := captureLog(s)
+		body, err := json.Marshal(CreateAgentRequest{AgentYAML: managedEchoAgent("store-down"), Namespace: "prod"})
+		require.NoError(t, err)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer caller-token")
+		s.Handler().ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusInternalServerError, rec.Code, "body: %s", rec.Body.String())
+		assert.Contains(t, rec.Body.String(), `failed to read the MCP servers in namespace \"prod\"`)
+		assert.NotContains(t, rec.Body.String(), cause)
+		assert.Contains(t, lb.String(), cause, "the cause is logged")
+	})
+
+	t.Run("edit", func(t *testing.T) {
+		src := managedEchoAgent("echo")
+		ad := consoleAgent(t, "echo", src, agentsv1beta1.AgentDeploymentSpec{})
+		c := identityClient(t, operatorUser, ad)
+		s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+		s.toolRegistryStore = failingListStore{}
+		lb := captureLog(s)
+
+		rec := putAgent(t, s, "echo", src+"image: img:2\n")
+
+		require.Equal(t, http.StatusInternalServerError, rec.Code, "body: %s", rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), cause)
+		assert.Contains(t, lb.String(), cause, "the cause is logged")
+	})
 }
 
 // TestEditAgentRefusesAToolNoServerProvides: the edit path shares the create's binding, so an

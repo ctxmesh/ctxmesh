@@ -62,9 +62,20 @@ type createError struct {
 	status int
 	// msg is the client-safe message.
 	msg string
+	// cause is the underlying failure behind a server fault: logged, never sent to the client.
+	cause error
 }
 
 func (e *createError) Error() string { return e.msg }
+
+// logged is what a handler logs for this error: the client message and, when there is one,
+// the cause the client is not shown.
+func (e *createError) logged() error {
+	if e.cause == nil {
+		return e
+	}
+	return fmt.Errorf("%s: %w", e.msg, e.cause)
+}
 
 // createdObject is the flat identity DTO returned for one created CRD object.
 type createdObject struct {
@@ -426,7 +437,7 @@ func bindAgentTools(ctx context.Context, regStore toolregistry.Store, objs []dec
 	case errors.Is(err, errNoToolRegistryStore):
 		return &createError{status: 501, msg: msgToolRegistryStoreRequired}
 	default:
-		return &createError{status: 500, msg: fmt.Sprintf("reading the MCP servers in namespace %q: %v", ns, err)}
+		return &createError{status: 500, msg: fmt.Sprintf("failed to read the MCP servers in namespace %q", ns), cause: err}
 	}
 	if !allowUnresolved {
 		for _, d := range objs {
