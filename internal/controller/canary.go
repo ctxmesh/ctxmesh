@@ -40,9 +40,11 @@ import (
 //	offline gate passes + spec.rollout.strategy == "canary" (and a distinct OLD
 //	serving revision exists) → the Knative Service serves a NAMED-revision traffic
 //	split {old: 100-canaryPercent, candidate: canaryPercent}; gate phase = canary.
-//	Both arms accumulate online scores for free — each Knative revision serves its
-//	own AgentVersion, so the m69.5 `version:<agentVersion>` trace tag already
-//	separates the arms' traces. The human then:
+//	The arms are scored apart because each revision's pod carries the AGENT_VERSION
+//	of the spec it was built from (buildPodTemplate), which the launcher stamps on
+//	every trace as `version:<agentVersion>`. A revision created before the
+//	controller set AGENT_VERSION has no version tag, so its traces score under no
+//	version until it is replaced. The human then:
 //	  - promote=<candidate> → traffic 100% candidate (phase promoted); or
 //	  - agents.ctxmesh.ai/rollout-abort → traffic 100% old (phase aborted).
 //

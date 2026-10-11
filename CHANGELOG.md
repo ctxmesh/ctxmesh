@@ -101,6 +101,17 @@ created the reverted version, so the regressed version kept serving and `status.
 could name a version that did not exist. A frozen agent is no longer evaluated for auto-rollback, and
 an automatic rollback that is refused records why and lets the reconcile continue.
 
+**Fixed: per-version online scores were never recorded.** The launcher labels each trace with
+the agent version from `AGENT_VERSION`, and the controller never set it, so every online score was
+recorded under no version. Regression detection compares the serving version's scores with the
+previous version's, so it never reached a verdict; automatic rollback could not fire on
+live data; a canary's two arms were not scored apart; and the console's per-version windows were
+empty. Every agent's pod now carries the version it serves, the name in `status.latestVersion`.
+Every agent rolls one new revision on upgrade, so an agent behind an approval gate waits for
+promotion. A revision created before the upgrade, such as the old arm of a canary in progress,
+still records no version until it is replaced. An `AGENT_VERSION` set in `spec.env` still wins, and
+leaves that agent out of per-version scoring.
+
 **Fixed: connecting a provider that was already connected failed with HTTP 400.** Every release
 updated the provider's SecretBinding and ModelRoute without a `resourceVersion`, which the API
 server refuses for a custom resource, so connecting a provider again to change its key or endpoint

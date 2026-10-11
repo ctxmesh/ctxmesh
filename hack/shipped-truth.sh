@@ -39,7 +39,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # The number of rows the table holds. Raise it with the rows; lowering it is a visible edit to a claim.
-FLOOR=149
+FLOOR=152
 
 SITE="${CTXMESH_SITE:-../ctxmesh.github.io}"
 SITE_OK=0
@@ -351,6 +351,12 @@ row m165 has site:src/content/docs/getting-started/installation.md "oci://ghcr.i
 row m165 has site:src/content/docs/getting-started/installation.md "Knative Eventing" "installation.md lists Knative Eventing"
 row m165 exists site:src/content/docs/reference/compatibility.md - "a compatibility page is published"
 row m165 has site:src/content/docs/reference/compatibility.md "no independent semver signal" "the compatibility page says what matched versioning does not promise"
+
+# Per-version scoring: every agent pod carries the version it serves, and the contract bump that put it
+# there rolls existing agents rather than being dropped under an unchanged revision name.
+row m184.40 has internal/controller/agentdeployment_controller.go 'Name: envAgentVersion, Value: agentVersionName(deploy.Name, hash)' "the controller sets AGENT_VERSION on every agent pod"
+row m184.40 test internal/controller/agent_version_integration_test.go TestAnAgentRevisionedBeforeAgentVersionRollsOnce "an agent revisioned before AGENT_VERSION rolls to a new revision name"
+row m184.40 test internal/controller/agent_version_integration_test.go TestTheDetectorFindsTheVersionsThePodsCarry "the regression detector finds the versions the pods carry"
 
 # ── verdict ───────────────────────────────────────────────────────────────────
 if [ "$total" -eq 0 ]; then

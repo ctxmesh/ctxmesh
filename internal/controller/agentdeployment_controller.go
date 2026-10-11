@@ -169,6 +169,11 @@ const (
 	// memory, registry, and budget paths (each guards against double-inject).
 	envAgentName = "AGENT_NAME"
 
+	// envAgentVersion is the AGENT_VERSION env var: the AgentVersion the pod serves. The launcher tags
+	// every trace version:<AGENT_VERSION>, and online scores, regression detection, auto-rollback and
+	// canary scoring all key on it matching status.latestVersion.
+	envAgentVersion = "AGENT_VERSION"
+
 	// envPodNamespace is the POD_NAMESPACE env var — the agent's namespace. Injected
 	// unconditionally in the base env so the launcher can form the UNAMBIGUOUS
 	// `<namespace>/<name>` trace identity; also consumed by the AMP path (cluster
@@ -476,7 +481,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("computing spec hash: %w", err)
 	}
-	versionName := deploy.Name + "-" + hash
+	versionName := agentVersionName(deploy.Name, hash)
 	log.Info("Ensuring AgentVersion", "version", versionName)
 
 	if err = r.ensureAgentVersion(ctx, &deploy, versionName); err != nil {
@@ -888,6 +893,12 @@ func specHash(spec agentsv1beta1.AgentDeploymentSpec) (string, error) {
 	return fmt.Sprintf("%x", sum[:])[:8], nil
 }
 
+// agentVersionName is the AgentVersion a spec is served as: status.latestVersion, the AGENT_VERSION its
+// pods carry, and the prefix of its revision name.
+func agentVersionName(deployName, hash string) string {
+	return deployName + "-" + hash
+}
+
 // versionedSpec is the part of the spec an AgentVersion identifies and snapshots. spec.feedback
 // and spec.runtime.toolPolicy.approvers are left out: only the BFF enforces them, so editing them
 // changes nothing that runs and must not mint a version, and a rollback never restores them, so a
@@ -1126,6 +1137,16 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	}
 	if !envVarPresent(env, envPodNamespace) && !envVarPresent(deploy.Spec.Env, envPodNamespace) {
 		env = append(env, corev1.EnvVar{Name: envPodNamespace, Value: deploy.Namespace})
+	}
+	// Derived from the spec this pod is built from, so every revision, each canary arm included, carries
+	// the version it actually serves. Static, user-override-wins like AGENT_NAME; an override takes the
+	// agent out of per-version scoring, since no spec can name its own hash.
+	if !envVarPresent(env, envAgentVersion) && !envVarPresent(deploy.Spec.Env, envAgentVersion) {
+		hash, err := specHash(deploy.Spec)
+		if err != nil {
+			return podTemplate{}, fmt.Errorf("computing spec hash for %s: %w", envAgentVersion, err)
+		}
+		env = append(env, corev1.EnvVar{Name: envAgentVersion, Value: agentVersionName(deploy.Name, hash)})
 	}
 
 	var resources corev1.ResourceRequirements
@@ -2086,7 +2107,8 @@ func langfuseSecretRequests(ctx context.Context, c client.Reader, obj client.Obj
 //   - v2: every Langfuse credential became an optional secretKeyRef (ADR 0148).
 //   - v3: every agent gets BFF_INTERNAL_URL, so its launcher can bind the run capability (ADR 0124).
 //   - v4: every revision carries a run timeout and a target-burst-capacity (ADR 0147).
-const podContractVersion = "v4"
+//   - v5: every agent carries AGENT_VERSION, the version its online scores are keyed by.
+const podContractVersion = "v5"
 
 // traceExportFold folds the pod contract into the revision digest. Whether export is on
 // is part of it so that creating, completing or deleting a namespace's langfuse-otlp Secret reaches
@@ -2095,7 +2117,13 @@ const podContractVersion = "v4"
 //
 // Shared with the tests, like hardeningFold.
 func traceExportFold(digest string, exporting bool) string {
-	sum := sha256.Sum256([]byte(digest + "|pod-contract:" + podContractVersion + ":" + strconv.FormatBool(exporting)))
+	return podContractFold(digest, podContractVersion, exporting)
+}
+
+// podContractFold is traceExportFold at a given contract version, so a test can name the revision an
+// older controller produced. It never returns "", so every revision name carries the -h suffix.
+func podContractFold(digest, contract string, exporting bool) string {
+	sum := sha256.Sum256([]byte(digest + "|pod-contract:" + contract + ":" + strconv.FormatBool(exporting)))
 	return fmt.Sprintf("%x", sum[:])[:8]
 }
 
