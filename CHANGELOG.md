@@ -84,8 +84,9 @@ container with no credential. An agent's author could serve a page there that op
 consent page with a ticket minted for the author, so the visitor's upstream tokens were stored as
 the author's grant. The edge now sets `Content-Security-Policy: sandbox` and
 `X-Content-Type-Options: nosniff` on every response from an agent, replacing any the agent sent,
-so nothing an agent returns runs as a page at its address; clients reading `/invoke` with `fetch`
-or SSE are unaffected. The consent page names the account, server and agent and waits for
+and removes the agent's `Set-Cookie`, so nothing an agent returns through the edge runs as a page
+at its address or plants a cookie there, such as a forged OAuth binding cookie; clients reading
+`/invoke` with `fetch` or SSE are unaffected. The consent page names the account, server and agent and waits for
 Continue, and a ticket is minted only for an agent that exists and that the caller can read
 (HTTP 404 or 403 otherwise). **Behaviour change:** connecting from an agent's chat takes one more
 click. Re-install the `platform-edge` chart to get the sandbox.

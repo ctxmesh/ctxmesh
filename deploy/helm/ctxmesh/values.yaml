@@ -601,8 +601,8 @@ bff:
   # itself for an apex domain; console.localhost has its agents under localhost) — the
   # platform edge's layout — or, for a loopback console,
   # <agent>.<namespace>.127.0.0.1.sslip.io / .nip.io / .localhost. That check relies on the
-  # edge sandboxing every agent response (deploy/edge); /connect also names the account and
-  # waits for the user to continue.
+  # edge sandboxing every agent response and dropping its Set-Cookie (deploy/edge); /connect
+  # also names the account and waits for the user to continue.
   consoleURL: ""
   # BFF replica count (ADR 0051, M55). Default 1 == kustomize (no-drift). Scaling >1
   # REQUIRES runStore.enabled (dispatch) — else in-process runs split across pods and

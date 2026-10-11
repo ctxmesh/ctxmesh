@@ -34,6 +34,9 @@ spec:
         # hostname (ADR 0040 amendment). A sandboxed document has an opaque origin and runs no
         # script. `set` replaces whatever the agent sent. Callers read /invoke with fetch or SSE,
         # which a response CSP does not affect. Never on agents-app: the chatbox needs its scripts.
+        # A sandbox does not stop the browser storing a cookie, and the OAuth binding cookie is
+        # set on this host (consoleURL empty) or a sibling (Domain=<base> over plain HTTP), so the
+        # agent's Set-Cookie is dropped: /invoke is a machine API with no use for one.
         - type: ResponseHeaderModifier
           responseHeaderModifier:
             set:
@@ -41,6 +44,8 @@ spec:
                 value: sandbox
               - name: X-Content-Type-Options
                 value: nosniff
+            remove:
+              - Set-Cookie
       backendRefs:
         - name: {{ .agent.service }}
           port: {{ .agent.port }}

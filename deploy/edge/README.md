@@ -14,7 +14,7 @@ config differs, not shape (ADR 0038 — the code never branches on environment).
 |----------------------|------|---------|
 | `console.127.0.0.1.sslip.io` | all | `ctxmesh-bff` (BFF) |
 | `langfuse.127.0.0.1.sslip.io` | all | `langfuse-web` |
-| `*.default.127.0.0.1.sslip.io` | `/invoke` (Exact) | `kourier-internal` → Knative routes by Host to the agent (ext-auth guarded, responses sandboxed) |
+| `*.default.127.0.0.1.sslip.io` | `/invoke` (Exact) | `kourier-internal` → Knative routes by Host to the agent (ext-auth guarded, responses sandboxed, cookies dropped) |
 | `*.default.127.0.0.1.sslip.io` | everything else | `ctxmesh-bff` (BFF) — the per-agent **chatbox** SPA + `/api/*` |
 
 The agent host is **path-split** across two `HTTPRoute`s (m37.3, `agentEdge` values): the machine
@@ -56,15 +56,18 @@ sandboxed (below).
 
 ## Agent responses are sandboxed (ADR 0040)
 
-The `agents` route sets `Content-Security-Policy: sandbox` and `X-Content-Type-Options: nosniff` on
-every response from an agent, replacing any the agent sent. Whatever an agent's container returns at
-its own hostname, a browser treats it as a document with an opaque origin that runs no script. The
-console's MCP consent page (`/connect`) accepts a consent ticket only from a page at the hostname of
-the agent it names, so this is what stops a tenant's own code from posing as that page, including with
-`extAuth.enabled: false`, where `/invoke` takes no credential. Clients read `/invoke` with `fetch` or
-SSE, which the header does not affect. The `agents-app` route (the chatbox) is not sandboxed: the SPA
-needs its scripts, and the BFF sets its own CSP there. `make edge-truth` lints this chart and asserts
-both.
+On every response that reaches a browser through the `agents` route (`/invoke`), the edge sets
+`Content-Security-Policy: sandbox` and `X-Content-Type-Options: nosniff`, replacing any the agent
+sent, and removes any `Set-Cookie`. A browser treats such a response as a document with an opaque
+origin that runs no script, and stores no cookie from it. That matters because the console's MCP
+consent page (`/connect`) accepts a consent ticket only from a page at the hostname of the agent it
+names, and because the OAuth browser-binding cookie lives on the agent host when `bff.consoleURL` is
+empty, or can be shadowed from a sibling host over plain HTTP. It holds with `extAuth.enabled: false`,
+where `/invoke` takes no credential. Clients read `/invoke` with `fetch` or SSE, which these headers do
+not affect. It covers only traffic through this edge: an agent reachable another way (Knative's own
+domain exposed directly) is not covered, and there `/connect`'s confirmation step is the remaining
+defence. The `agents-app` route (the chatbox) is not sandboxed: the SPA needs its scripts, and the BFF
+sets its own CSP there. `make edge-truth` lints this chart and asserts all of this.
 
 > **Envoy `path_prefix` gotcha:** Envoy's HTTP ext_authz *prepends* the configured `path` to the original
 > request path, so a client `POST /invoke` reaches the BFF as `POST /api/extauth/invoke`. The BFF matches
