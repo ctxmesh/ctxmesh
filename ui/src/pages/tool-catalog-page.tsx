@@ -29,7 +29,7 @@ import {
   type FilterChip,
   type WizardStep,
 } from "@/components/kit";
-import { useCapabilities } from "@/lib/capabilities";
+import { useCapabilitiesIn } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import {
   api,
@@ -191,10 +191,6 @@ export function ToolCatalogPage() {
   const [q, setQ] = React.useState("");
   const [wizard, setWizard] = React.useState<WizardState>({ kind: "closed" });
 
-  const { can } = useCapabilities();
-  // Binding is a write op — gated on mcptoolbindings/create. Display-only;
-  // real gate is the API 403 if the caller somehow submits without the right.
-  const canBind = can("mcptoolbindings", "create");
   // The shell's selection: one workspace, or "" for every namespace the caller may list.
   const { namespace } = useNamespace();
 
@@ -377,9 +373,8 @@ export function ToolCatalogPage() {
             >
               {displayedTools.map((tool) => (
                 <ToolCard
-                  key={`${tool.registry ?? ""}/${tool.name}`}
+                  key={`${tool.namespace ?? ""}/${tool.registry ?? ""}/${tool.name}`}
                   tool={tool}
-                  canBind={canBind}
                   onBind={() => setWizard({ kind: "open", tool })}
                 />
               ))}
@@ -413,11 +408,13 @@ export function ToolCatalogPage() {
 
 interface ToolCardProps {
   tool: CatalogTool;
-  canBind: boolean;
   onBind: () => void;
 }
 
-function ToolCard({ tool, canBind, onBind }: ToolCardProps) {
+function ToolCard({ tool, onBind }: ToolCardProps) {
+  // Binding is a write in the tool's namespace (the binding sits beside the server it names), so
+  // the gate asks about that namespace, not the shell's. Display-only; the API is the real gate.
+  const canBind = useCapabilitiesIn(tool.namespace ?? "").can("mcptoolbindings", "create");
   const state = toolState(tool);
   const isPending = state === "pending-approval";
   const hasSchema = tool.inputSchema !== undefined && tool.inputSchema !== null;
@@ -597,11 +594,11 @@ function BindWizard({ tool, onClose }: BindWizardProps) {
   const [bindName, setBindName] = React.useState("");
   const [bindState, setBindState] = React.useState<BindState>({ kind: "idle" });
   const { namespace: shellNs } = useNamespace();
-  const { can, reprobe } = useCapabilities();
   const { toast } = useToast();
   // A binding names its agent and its MCP server in one namespace, so only agents where the tool's
-  // server is registered can take it.
+  // server is registered can take it, and the binding is created there.
   const agentNs = tool.namespace || shellNs;
+  const { can, reprobe } = useCapabilitiesIn(agentNs);
 
   // Load agents for the select step
   React.useEffect(() => {

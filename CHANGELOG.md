@@ -207,6 +207,14 @@ create in. The template gallery and MCP catalog read the working namespace, and 
 create there; before, all four used `default`, which a person bound to another namespace may not
 read.
 
+**Fixed: Upload, Ingest and Bind followed the wrong namespace's permissions.** A knowledge base's
+Upload and Ingest, and the tool catalog's Bind, were offered or hidden by what the caller may do in
+the shell's working namespace, not in the namespace the knowledge base or tool is in. Under "All
+workspaces", or on a knowledge base opened from another namespace, a person could be offered a
+write they would be refused, or not offered one they may make. Each now asks about the
+resource's own namespace. Two tools of the same name and server in different namespaces now show
+as two cards.
+
 **Security: a tool binding could name a server its author may not use.** A
 `POST /api/mcptoolbindings` that gave `registryRef`, `mode` and `server`, and every
 `PUT /api/mcptoolbindings/{ns}/{name}`, were written as sent, so a binding could name another

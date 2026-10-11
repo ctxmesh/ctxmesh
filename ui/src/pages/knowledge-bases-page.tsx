@@ -40,7 +40,7 @@ import {
   type KBDetail,
   type KBSearchHit,
 } from "@/lib/api";
-import { useCapabilities } from "@/lib/capabilities";
+import { useCapabilitiesIn } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_KNOWLEDGEBASES } from "@/lib/nav";
 
@@ -529,8 +529,9 @@ export function KBDetailPage() {
   const [searchState, setSearchState] = useState<SearchState>({ kind: "idle" });
   const abortRef = useRef<AbortController | null>(null);
   // Adding a document and starting an ingestion change the corpus, which takes update on the
-  // KnowledgeBase. Display-only: the API refuses the caller without it (ADR 0011).
-  const { can } = useCapabilities();
+  // KnowledgeBase in its own namespace, the route's, whatever the shell has selected.
+  // Display-only: the API refuses the caller without it (ADR 0011).
+  const { can } = useCapabilitiesIn(ns ?? "");
   const canWrite = can(RES_KNOWLEDGEBASES, "update");
 
   const load = useCallback(() => {
