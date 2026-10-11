@@ -141,9 +141,9 @@ func (s *Server) beginMCPGrantConsent(w http.ResponseWriter, r *http.Request) {
 	// Recover the server's OAuth client config from the registration (ADR 0031) — the
 	// caller (e.g. the Playground) need not, and cannot, supply it. This also confirms the
 	// server is a registered OAuth server (caller-scoped): a non-OAuth / absent /
-	// unreadable server → an honest 4xx. A caller MAY still pass an explicit auth block (a
-	// legacy server registered before config persistence, or an override its own origin's
-	// redirect); non-empty request fields overlay the recovered base.
+	// unreadable server → an honest 4xx. A caller who may update the server's registration MAY
+	// still pass an explicit auth block for a legacy server registered before config
+	// persistence; non-empty request fields overlay the recovered base.
 	cfg, serverURL, cErr := s.recoverRegisteredOAuth(r.Context(), caller, ns, server)
 	if cErr != nil {
 		writeError(w, cErr.status, cErr.msg)
@@ -153,7 +153,12 @@ func (s *Server) beginMCPGrantConsent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, oErr.status, oErr.msg)
 		return
 	}
-	cfg = overlayOAuthConfig(cfg, req.Auth)
+	auth, aErr := s.consentClientConfigOverlay(r.Context(), caller, ns, server, req.Auth)
+	if aErr != nil {
+		writeError(w, aErr.status, aErr.msg)
+		return
+	}
+	cfg = overlayOAuthConfig(cfg, auth)
 
 	// The redirect_uri is SERVER-controlled (ADR 0040): one canonical, pre-registered callback for
 	// every consent regardless of the initiating origin. Consent opened from an agent's own hostname
@@ -496,8 +501,9 @@ func (s *Server) recoverRegisteredOAuth(ctx context.Context, caller client.Clien
 // server's registration persisted. The callback sends the authorization code and the PKCE
 // verifier to the token endpoint, so a request able to repoint it could send them anywhere,
 // and anyone who can read the server could ask. An endpoint the registration did not persist
-// (a server registered before config persistence) may still be supplied; repeating the
-// registered value is not a change.
+// (a server registered before config persistence) may be supplied only by a caller who may
+// update the registration (consentClientConfigOverlay); repeating the registered value is not a
+// change.
 func refuseEndpointOverride(registered mcpOAuthConfig, auth *MCPAuthRequest) *createError {
 	if auth == nil {
 		return nil
@@ -516,6 +522,38 @@ func refuseEndpointOverride(registered mcpOAuthConfig, auth *MCPAuthRequest) *cr
 		}
 	}
 	return nil
+}
+
+// consentClientConfigOverlay returns the part of a consent request's auth block the caller may
+// apply. Supplying the OAuth client config (endpoints, client id, scope) for a server whose
+// registration did not persist it chooses where the callback sends the authorization code and
+// the PKCE verifier, so it takes the authority that persisting it takes: update on the server's
+// ToolRegistry, the check backfillMCPOAuthConfig makes. A caller without it keeps only the
+// redirect hint, and the config is discovered from the stored server URL. A failed check is
+// never an allow.
+func (s *Server) consentClientConfigOverlay(ctx context.Context, caller client.Client, ns, server string, auth *MCPAuthRequest) (*MCPAuthRequest, *createError) {
+	if auth == nil || !suppliesOAuthClientConfig(auth) {
+		return auth, nil
+	}
+	err := s.authorizeStore(ctx, caller, authz.VerbUpdate, resourceToolRegistries, ns, server)
+	if err == nil {
+		return auth, nil
+	}
+	if errors.Is(err, authz.ErrForbidden) || apierrors.IsForbidden(err) {
+		return &MCPAuthRequest{Type: auth.Type, RedirectURI: auth.RedirectURI}, nil
+	}
+	return nil, s.authzRefusal(err, "set this MCP server's OAuth configuration")
+}
+
+// suppliesOAuthClientConfig reports whether a consent auth block names any of the server's OAuth
+// client config, as opposed to only the type and the redirect hint the console sends.
+func suppliesOAuthClientConfig(auth *MCPAuthRequest) bool {
+	for _, v := range []string{auth.AuthorizationEndpoint, auth.TokenEndpoint, auth.ClientID, auth.Scope} {
+		if strings.TrimSpace(v) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // overlayOAuthConfig overlays any non-empty fields of an explicitly-supplied auth block

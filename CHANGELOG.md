@@ -47,6 +47,13 @@ use it. A server whose OAuth endpoints were saved when it was registered now kee
 naming a different `authorizationEndpoint` or `tokenEndpoint` is refused with HTTP 400. Servers
 registered before those endpoints were saved can still be given them.
 
+**Security: anyone who could see an older OAuth MCP server could still choose its token endpoint.**
+For a server registered before its OAuth endpoints were saved, the request that starts consent
+could name them, and the BFF sent requests there, the authorization code and PKCE verifier
+included. A viewer could use it to reach internal addresses. Naming those endpoints now takes
+permission to update the server, the permission saving them takes. Anyone else gets the endpoints
+discovered from the server's own URL.
+
 **Fixed: the console never recognised a real tool call in a trace.** Langfuse records the
 platform's tool calls as `TOOL` observations, and the run inspector and trace explorer only
 treated `SPAN`s as tools. A tool call showed as an internal step, and the run inspector opened on

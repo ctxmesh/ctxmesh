@@ -20,8 +20,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
@@ -424,22 +427,89 @@ func TestMCPGrantConsentRefusesChangingRegisteredEndpoints(t *testing.T) {
 	assert.Contains(t, pending.AuthorizationURL, oauth.authorizeURL())
 }
 
-// TestMCPGrantConsentLegacyServerAcceptsSuppliedEndpoints: a server registered before config
-// persistence has no endpoints to protect, so a consent request may still supply them, and the
-// flow uses what it supplied.
-func TestMCPGrantConsentLegacyServerAcceptsSuppliedEndpoints(t *testing.T) {
-	oauth := newFakeOAuthServer(t)
+// TestMCPGrantConsentLegacyServerSuppliedEndpointsNeedUpdate: a server registered before config
+// persistence has no endpoints to protect, and the callback sends the authorization code and the
+// PKCE verifier to whatever token endpoint the flow holds. Supplying them is therefore the same
+// authority as persisting them: a caller who may update the server's registration may name them
+// and the flow uses them; a caller who can only read the server gets the config discovered from
+// the stored server URL, and the endpoints it named are never contacted.
+func TestMCPGrantConsentLegacyServerSuppliedEndpointsNeedUpdate(t *testing.T) {
 	const server = "legacy-supplied-mcp"
-	s, _ := newGrantServer(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build())
-	wireTRStore(t, s, nil, oauthToolRegistry(server, "http://legacy/mcp"))
+	updateOfServer := func(a authz.Action) bool {
+		return a.Verb == authz.VerbUpdate && a.Resource == resourceToolRegistries && a.Name == server
+	}
 
-	rec, pending := beginGrant(t, s, server, "alice-token", grantAuth(oauth))
+	t.Run("a caller who may update the registration supplies them", func(t *testing.T) {
+		oauth := newFakeOAuthServer(t)
+		auth := &actionsAuthorizer{}
+		s, _ := newGrantServer(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build())
+		wireTRStore(t, s, auth, oauthToolRegistry(server, "http://legacy/mcp"))
 
-	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
-	assert.Contains(t, pending.AuthorizationURL, oauth.authorizeURL(), "the supplied authorization endpoint is used")
-	oauth.expectChallenge = ""
-	assertCallbackRedirect(t, callback(t, s, oauth.validCode, pending.State), "/tools/catalog")
-	assert.Equal(t, "authorization_code", oauth.gotGrant, "the code went to the supplied token endpoint")
+		rec, pending := beginGrant(t, s, server, "alice-token", grantAuth(oauth))
+
+		require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+		assert.Contains(t, pending.AuthorizationURL, oauth.authorizeURL(), "the supplied authorization endpoint is used")
+		assert.True(t, slices.ContainsFunc(auth.asked(), updateOfServer), "supplying endpoints asks for update on the server")
+		oauth.expectChallenge = ""
+		assertCallbackRedirect(t, callback(t, s, oauth.validCode, pending.State), "/tools/catalog")
+		assert.Equal(t, "authorization_code", oauth.gotGrant, "the code went to the supplied token endpoint")
+	})
+
+	t.Run("a caller who can only read the server cannot point the flow at them", func(t *testing.T) {
+		oauth := newFakeOAuthServer(t)
+		attacker, hits := countingServer(t, oauth.srv.Config.Handler)
+		disco, _ := oauthDiscoveryStub(t, false, false)
+		auth := &actionsAuthorizer{deny: func(a authz.Action) error {
+			if updateOfServer(a) {
+				return authz.ErrForbidden
+			}
+			return nil
+		}}
+		s, _ := newGrantServer(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build())
+		store := wireTRStore(t, s, auth, oauthToolRegistry(server, disco.URL+"/mcp"))
+
+		rec, pending := beginGrant(t, s, server, "viewer-token", &MCPAuthRequest{
+			Type:                  "oauth",
+			AuthorizationEndpoint: attacker.URL + "/authorize",
+			TokenEndpoint:         attacker.URL + "/token",
+			ClientID:              "attacker-client",
+		})
+
+		require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+		assert.True(t, strings.HasPrefix(pending.AuthorizationURL, disco.URL+"/authorize"),
+			"the authorization endpoint is discovered from the stored server URL, got %s", pending.AuthorizationURL)
+		assert.NotContains(t, pending.AuthorizationURL, attacker.URL)
+		assert.Contains(t, pending.AuthorizationURL, "dyn-client-123", "the client id is discovered too")
+
+		callback(t, s, oauth.validCode, pending.State)
+		assert.Zero(t, hits.Load(), "the endpoints the request named are never contacted")
+
+		got, err := store.Get(context.Background(), grantNS, server)
+		require.NoError(t, err)
+		assert.Empty(t, got.Annotations[annMCPOAuthTokenEndpoint], "a reader's consent persists nothing on the registration")
+	})
+
+	t.Run("an authorization check that fails is not an allow", func(t *testing.T) {
+		oauth := newFakeOAuthServer(t)
+		attacker, hits := countingServer(t, oauth.srv.Config.Handler)
+		disco, _ := oauthDiscoveryStub(t, false, false)
+		auth := &actionsAuthorizer{deny: func(a authz.Action) error {
+			if updateOfServer(a) {
+				return errors.New("SelfSubjectAccessReview: connection refused")
+			}
+			return nil
+		}}
+		s, _ := newGrantServer(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build())
+		wireTRStore(t, s, auth, oauthToolRegistry(server, disco.URL+"/mcp"))
+
+		rec, pending := beginGrant(t, s, server, "alice-token", &MCPAuthRequest{
+			Type: "oauth", AuthorizationEndpoint: attacker.URL + "/authorize", TokenEndpoint: attacker.URL + "/token",
+		})
+
+		assert.Equal(t, http.StatusInternalServerError, rec.Code, "body: %s", rec.Body.String())
+		assert.Empty(t, pending.State, "no consent flow starts")
+		assert.Zero(t, hits.Load())
+	})
 }
 
 // TestMCPGrantConsentLegacyServerDiscoveryFails (m26.1b): a legacy OAuth server with no
