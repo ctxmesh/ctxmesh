@@ -241,12 +241,12 @@ export function AgentDetailPage() {
     setSearchParams((p) => { p.delete("delete"); return p; });
   }
 
-  // `silent` re-fetches WITHOUT dropping back to the skeleton — the difference between
-  // a refresh and a reload. The settle poll below uses it, because flashing the whole
-  // page every few seconds while an agent starts is worse than the staleness it fixes.
   // Reads still out. A settle tick that finds one is skipped, so a slow BFF never has a second read
   // stacked on the first.
   const readsInFlight = React.useRef(0);
+  // `silent` re-fetches WITHOUT dropping back to the skeleton — the difference between
+  // a refresh and a reload. The settle poll below uses it, because flashing the whole
+  // page every few seconds while an agent starts is worse than the staleness it fixes.
   const load = React.useCallback((silent = false) => {
     const controller = new AbortController();
     if (!silent) setState({ kind: "loading" });
