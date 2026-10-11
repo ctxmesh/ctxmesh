@@ -92,13 +92,13 @@ func TestDefaultOperationalScorer_ToolFailSpans(t *testing.T) {
 	}
 	spans := map[string][]onlinescore.TraceSpan{
 		"r1": {
-			{Type: "SPAN", Level: "ERROR"},
-			{Type: "SPAN", Level: "ERROR"},
+			{Type: "SPAN", Name: "tool:search", Level: "ERROR"},
+			{Type: "SPAN", Name: "tool_lookup", Level: "ERROR"},
 			{Type: "GENERATION", Level: "ERROR"}, // not a SPAN — not counted
 		},
 		"r2": {
-			{Type: "SPAN", Level: "ERROR"},
-			{Type: "SPAN", Level: "DEFAULT"}, // not ERROR — not counted
+			{Type: "SPAN", Name: "Tool fetch", Level: "ERROR"},
+			{Type: "SPAN", Name: "tool:search", Level: "DEFAULT"}, // not ERROR — not counted
 		},
 	}
 
@@ -120,10 +120,10 @@ func TestDefaultOperationalScorer_ToolFailCountsTOOLObservations(t *testing.T) {
 	runs := []*run.Run{makeRun("r1", run.StatusSucceeded, 100)}
 	spans := map[string][]onlinescore.TraceSpan{
 		"r1": {
-			{Type: "TOOL", Level: "ERROR"},
-			{Type: "TOOL", Level: "ERROR"},
-			{Type: "TOOL", Level: "DEFAULT"},
-			{Type: "SPAN", Level: "ERROR"},
+			{Type: "TOOL", Name: "search", Level: "ERROR"},
+			{Type: "TOOL", Name: "lookup", Level: "ERROR"},
+			{Type: "TOOL", Name: "search", Level: "DEFAULT"},
+			{Type: "SPAN", Name: "tool:search", Level: "ERROR"},
 			{Type: "GENERATION", Level: "ERROR"},
 			{Type: "EVENT", Level: "ERROR"},
 		},
@@ -134,6 +134,38 @@ func TestDefaultOperationalScorer_ToolFailCountsTOOLObservations(t *testing.T) {
 	}
 	if stats.ToolFailCount != 3 {
 		t.Errorf("ToolFailCount: got %d, want 3 (two TOOL + one legacy SPAN)", stats.ToolFailCount)
+	}
+}
+
+// TestDefaultOperationalScorer_PlumbingSpansAreNotToolFailures: the launcher records its own
+// work as SPANs (the model gateway, AMP calls, memory, knowledge search, the async consumer).
+// A failed one is a failed run step, not a failed tool call, so it does not inflate
+// ToolFailCount; only a SPAN named like a tool call does, as in the console's trace explorer.
+func TestDefaultOperationalScorer_PlumbingSpansAreNotToolFailures(t *testing.T) {
+	t.Parallel()
+	runs := []*run.Run{makeRun("r1", run.StatusFailed, 100)}
+	spans := map[string][]onlinescore.TraceSpan{
+		"r1": {
+			{Type: "SPAN", Name: "gateway.call", Level: "ERROR"},
+			{Type: "SPAN", Name: "amp.call", Level: "ERROR"},
+			{Type: "SPAN", Name: "amp.async.consume", Level: "ERROR"},
+			{Type: "SPAN", Name: "memory.append", Level: "ERROR"},
+			{Type: "SPAN", Name: "memory.agent_recall", Level: "ERROR"},
+			{Type: "SPAN", Name: "knowledge.search", Level: "ERROR"},
+			{Type: "SPAN", Name: "toolbox.sync", Level: "ERROR"},
+			{Type: "SPAN", Name: "", Level: "ERROR"},
+			{Type: "SPAN", Name: "TOOL:Search", Level: "ERROR"},
+		},
+	}
+	stats, err := onlinescore.DefaultOperationalScorer{}.Score(context.Background(), runs, spans)
+	if err != nil {
+		t.Fatalf("score: %v", err)
+	}
+	if stats.ToolFailCount != 1 {
+		t.Errorf("ToolFailCount: got %d, want 1 (only the SPAN named like a tool call)", stats.ToolFailCount)
+	}
+	if stats.ErrorCount != 1 {
+		t.Errorf("ErrorCount: got %d, want 1 (the run still failed)", stats.ErrorCount)
 	}
 }
 

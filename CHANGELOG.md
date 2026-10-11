@@ -110,6 +110,13 @@ team and still registers.
 only `SPAN` observations, and Langfuse records the platform's tool calls as `TOOL`. A failed `TOOL`
 observation now counts. A `SPAN` still counts, for traces recorded before Langfuse typed tool calls.
 
+**Fixed: per-version online scores counted the platform's own failures as failed tool calls.**
+Every failed `SPAN` counted, and the agent's launcher records its model gateway calls, AMP calls,
+memory and knowledge lookups and async work as `SPAN`s. A failing model gateway raised the
+tool-failure count of every run it touched. A `SPAN` now counts only when it is named like a tool
+call (`tool:`, `tool_` or `tool ` followed by the tool), the rule the console's trace explorer
+uses. Those failures still count as run errors.
+
 **Fixed: every agent run was cut off at five minutes.** Knative's default request timeout is 300
 seconds, and the platform never set one, while a run may take 600. A run that sends nothing until
 it is done also hit Knative's separate time-to-first-byte limit at the same 300 seconds. Every

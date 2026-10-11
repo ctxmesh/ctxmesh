@@ -20,6 +20,7 @@ import (
 	"context"
 	"math"
 	"slices"
+	"strings"
 
 	"github.com/ctxmesh/ctxmesh/internal/run"
 )
@@ -35,17 +36,31 @@ const (
 const spanLevelError = "ERROR"
 
 // TraceSpan is a lightweight projection of a trace observation carrying only the fields the
-// operational scorer needs: the observation type and its level. Callers build this slice from
-// bff.SpanSummary (or equivalent) so the scorer does not import the BFF package.
+// operational scorer needs: the observation type, its name and its level. Callers build this
+// slice from bff.SpanSummary (or equivalent) so the scorer does not import the BFF package.
 type TraceSpan struct {
 	Type  string
+	Name  string
 	Level string
 }
 
-// IsToolFailure reports whether an observation is a failed tool call: a TOOL (or, in a trace
-// recorded before Langfuse typed tool calls, a SPAN) at ERROR level.
+// IsToolFailure reports whether an observation is a failed tool call: a TOOL at ERROR level, or,
+// in a trace recorded before Langfuse typed tool calls, a SPAN at ERROR level whose name says it
+// is a tool call. Every other SPAN is platform plumbing (gateway.call, amp.call, memory.*,
+// knowledge.search, the async consumer): its failure is an error, not a tool failure.
 func IsToolFailure(s TraceSpan) bool {
-	return s.Level == spanLevelError && (s.Type == spanTypeTool || s.Type == spanTypeSpan)
+	if s.Level != spanLevelError {
+		return false
+	}
+	return s.Type == spanTypeTool || (s.Type == spanTypeSpan && IsToolCallName(s.Name))
+}
+
+// IsToolCallName reports whether a SPAN's name marks it as a tool call: "tool:", "tool_" or
+// "tool " followed by the tool, in any case. The console's trace explorer classifies a legacy
+// SPAN with the same rule (isToolSpan), so the score and the trace agree on what a tool call is.
+func IsToolCallName(name string) bool {
+	n := strings.ToLower(name)
+	return strings.HasPrefix(n, "tool:") || strings.HasPrefix(n, "tool_") || strings.HasPrefix(n, "tool ")
 }
 
 // OperationalScorer computes an OperationalStats from a set of runs and their trace spans.

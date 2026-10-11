@@ -438,11 +438,11 @@ func (s *Server) fetchDetailsAndFeedback(ctx context.Context, runs []RunSummary,
 }
 
 // spansToTraceSpans projects the BFF's SpanSummary list onto the onlinescore.TraceSpan the operational
-// scorer needs (Type + Level only), so the scorer stays free of the BFF package.
+// scorer needs (Type, Name and Level), so the scorer stays free of the BFF package.
 func spansToTraceSpans(spans []SpanSummary) []onlinescore.TraceSpan {
 	out := make([]onlinescore.TraceSpan, 0, len(spans))
 	for _, sp := range spans {
-		out = append(out, onlinescore.TraceSpan{Type: sp.Type, Level: sp.Level})
+		out = append(out, onlinescore.TraceSpan{Type: sp.Type, Name: sp.Name, Level: sp.Level})
 	}
 	return out
 }
