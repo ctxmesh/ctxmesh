@@ -1456,10 +1456,16 @@ export interface McpConsentTicket {
 }
 
 // McpConsentRedeemResponse is the console's answer to a redeemed ticket: the authorization URL
-// the /connect page navigates to. No token, verifier or state.
+// the /connect page navigates to once the user confirms, and what it shows them first. No
+// token, verifier or state.
 export interface McpConsentRedeemResponse {
   status: string;
   authorizationURL: string;
+  // The username of whoever pressed Connect: the grant is stored as theirs.
+  minter: string;
+  server: string;
+  agent: string;
+  namespace: string;
 }
 
 // McpApproval is one pending MCP server awaiting operator approval

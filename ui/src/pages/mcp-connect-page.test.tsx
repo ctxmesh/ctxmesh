@@ -1,15 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { McpConnectPage } from "@/pages/mcp-connect-page";
 import { MCP_CONSENT_READY, MCP_CONSENT_TICKET } from "@/lib/oauth-popup";
 
 // /connect (ADR 0040 amendment): the console page a chat on an agent hostname opens to begin MCP
 // consent on the console origin. It takes ONE ticket, by message, from window.opener only — never
-// from the URL — reports the message's own origin as the opener, and navigates only to an absolute
-// http(s) authorization URL.
+// from the URL — reports the message's own origin as the opener, shows whose consent it is, and
+// navigates only after the user continues, and only to an absolute http(s) authorization URL.
 
 const agentOrigin = "https://helper.prod.agents.example.com";
+
+const redeemed = {
+  status: "authorization_required",
+  authorizationURL: "https://as.example/authorize?state=s",
+  minter: "alice@example.com",
+  server: "github-mcp",
+  agent: "helper",
+  namespace: "prod",
+};
 
 interface Call {
   url: string;
@@ -74,17 +83,16 @@ describe("McpConnectPage", () => {
     expect(screen.getByTestId("mcp-connect-working")).toBeInTheDocument();
   });
 
-  it("redeems a ticket from its opener, reporting that message's origin, then goes to the provider", async () => {
-    const calls = stubRedeem({
-      status: 202,
-      json: { status: "authorization_required", authorizationURL: "https://as.example/authorize?state=s" },
-    });
+  it("redeems a ticket from its opener, reporting that message's origin, and says whose consent it is", async () => {
+    const calls = stubRedeem({ status: 202, json: redeemed });
     render(<McpConnectPage />);
 
     act(() => {
       window.dispatchEvent(fromWindow(opener, { type: MCP_CONSENT_TICKET, ticket: "tkt-1" }));
     });
-    await waitFor(() => expect(replace).toHaveBeenCalledWith("https://as.example/authorize?state=s"));
+    expect(await screen.findByTestId("connect-summary")).toHaveTextContent(
+      "Connecting github-mcp for helper, as alice@example.com. Continue only if that is you.",
+    );
 
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("/api/mcp/oauth/grant/redeem");
@@ -97,6 +105,40 @@ describe("McpConnectPage", () => {
       window.dispatchEvent(fromWindow(opener, { type: MCP_CONSENT_TICKET, ticket: "tkt-2" }));
     });
     expect(calls).toHaveLength(1);
+  });
+
+  it("goes to the provider only when the user continues", async () => {
+    stubRedeem({ status: 202, json: redeemed });
+    render(<McpConnectPage />);
+    act(() => {
+      window.dispatchEvent(fromWindow(opener, { type: MCP_CONSENT_TICKET, ticket: "tkt-1" }));
+    });
+    const cont = await screen.findByTestId("connect-continue");
+
+    // Shown is not consented: nothing navigates on its own, and an early click is not taken.
+    expect(cont).toBeDisabled();
+    expect(cont).not.toHaveFocus();
+    fireEvent.click(cont);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(replace).not.toHaveBeenCalled();
+
+    await waitFor(() => expect(cont).toBeEnabled());
+    expect(replace).not.toHaveBeenCalled();
+    fireEvent.click(cont);
+    expect(replace).toHaveBeenCalledTimes(1);
+    expect(replace).toHaveBeenCalledWith("https://as.example/authorize?state=s");
+    expect(screen.getByTestId("mcp-connect-working")).toHaveTextContent("Opening your provider");
+  });
+
+  it("refuses a consent that does not say whose it is", async () => {
+    stubRedeem({ status: 202, json: { ...redeemed, minter: "" } });
+    render(<McpConnectPage />);
+    act(() => {
+      window.dispatchEvent(fromWindow(opener, { type: MCP_CONSENT_TICKET, ticket: "tkt-1" }));
+    });
+    expect(await screen.findByTestId("mcp-connect-error")).toHaveTextContent("whose account");
+    expect(screen.queryByTestId("connect-continue")).toBeNull();
+    expect(replace).not.toHaveBeenCalled();
   });
 
   it("ignores a ticket in its URL", async () => {
@@ -129,16 +171,17 @@ describe("McpConnectPage", () => {
   });
 
   it("navigates only to an absolute http(s) authorization URL", async () => {
-    stubRedeem({
-      status: 202,
-      json: { status: "authorization_required", authorizationURL: "javascript:alert(1)" },
-    });
-    render(<McpConnectPage />);
-    act(() => {
-      window.dispatchEvent(fromWindow(opener, { type: MCP_CONSENT_TICKET, ticket: "tkt-1" }));
-    });
-    expect(await screen.findByTestId("mcp-connect-error")).toHaveTextContent("not valid");
-    expect(replace).not.toHaveBeenCalled();
+    for (const authorizationURL of ["javascript:alert(1)", "data:text/html,x", "/relative"]) {
+      stubRedeem({ status: 202, json: { ...redeemed, authorizationURL } });
+      const { unmount } = render(<McpConnectPage />);
+      act(() => {
+        window.dispatchEvent(fromWindow(opener, { type: MCP_CONSENT_TICKET, ticket: "tkt-1" }));
+      });
+      expect(await screen.findByTestId("mcp-connect-error")).toHaveTextContent("not valid");
+      expect(screen.queryByTestId("connect-continue")).toBeNull();
+      expect(replace).not.toHaveBeenCalled();
+      unmount();
+    }
   });
 
   it("shows the BFF's refusal and does not navigate", async () => {

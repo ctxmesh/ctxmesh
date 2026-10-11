@@ -3,7 +3,7 @@ import * as React from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { AuthCard } from "@/pages/login-page";
-import { api } from "@/lib/api";
+import { api, type McpConsentRedeemResponse } from "@/lib/api";
 import {
   isValidHttpUrl,
   MCP_CONSENT_READY,
@@ -23,24 +23,43 @@ import {
 //   3. redeems it here, reporting the origin the message came from (which the BFF
 //      accepts only as the ticket's agent hostname), so the binding cookie lands in
 //      this browser;
-//   4. replaces itself with the provider's authorization page, after checking it is an
-//      absolute http(s) URL.
+//   4. says whose consent this is (the account that pressed Connect, the server, the
+//      agent) and waits for the user: the tokens they are about to grant are stored as
+//      that account's, so this is the check that holds when a page that is not the
+//      agent's chat managed to open this window;
+//   5. on Continue, replaces itself with the provider's authorization page, after
+//      checking it is an absolute http(s) URL.
 //
 // The callback then lands in this same window and relays "connected" to the chat.
 //
-// data-testid contract:
-//   mcp-connect-working    — waiting for the ticket, or redeeming it
+// data-testid contract (a harness spec clicks these; keep the names):
+//   mcp-connect-working    — waiting for the ticket, redeeming it, or leaving for the provider
+//   mcp-connect-confirm    — the confirmation, holding:
+//     connect-summary      — "Connecting <server> for <agent>, as <minter>."
+//     connect-continue     — the only way on to the provider
 //   mcp-connect-error      — the redeem failed, the URL was not valid, or nothing arrived
 //   mcp-connect-no-opener  — opened directly, not from a chat
 
 /** How long to wait for the chat's ticket before saying nothing arrived. */
 const TICKET_WAIT_MS = 20_000;
 
+/**
+ * How long Continue stays disabled after the confirmation appears. The window that opened
+ * this one chose where it sits on screen, so it could put Continue under the pointer just as
+ * it asks for a click of its own; a click that arrives this early was not aimed here.
+ */
+const CONTINUE_ARM_MS = 500;
+
 const NOTHING_ARRIVED =
   "Nothing arrived from the chat that opened this window. Close it and press Connect in the chat again.";
 
+const BAD_SIGN_IN_URL =
+  "The connection could not start: the sign-in address it was given is not valid.";
+
 type Phase =
   | { kind: "waiting" }
+  | { kind: "redeeming" }
+  | { kind: "confirm"; consent: McpConsentRedeemResponse }
   | { kind: "redirecting" }
   | { kind: "failed"; message: string }
   | { kind: "no-opener" };
@@ -62,18 +81,23 @@ export function McpConnectPage() {
     let received = false;
 
     async function redeem(ticket: string, openerOrigin: string) {
-      setPhase({ kind: "redirecting" });
+      setPhase({ kind: "redeeming" });
       try {
         const res = await api.redeemMcpConsentTicket({ ticket, openerOrigin });
         if (!alive) return;
         if (!isValidHttpUrl(res.authorizationURL)) {
+          setPhase({ kind: "failed", message: BAD_SIGN_IN_URL });
+          return;
+        }
+        if (!res.minter || !res.server || !res.agent) {
+          // Without a name to show, the user cannot tell whose account this connects.
           setPhase({
             kind: "failed",
-            message: "The connection could not start: the sign-in address it was given is not valid.",
+            message: "This connection did not say whose account it is for, so it was not started. Close this window and press Connect in the chat again.",
           });
           return;
         }
-        window.location.replace(res.authorizationURL);
+        setPhase({ kind: "confirm", consent: res });
       } catch (err) {
         if (!alive) return;
         setPhase({
@@ -117,6 +141,23 @@ export function McpConnectPage() {
     </Button>
   );
 
+  const confirmed = phase.kind === "confirm" ? phase.consent : null;
+  const [armedFor, setArmedFor] = React.useState<McpConsentRedeemResponse | null>(null);
+  React.useEffect(() => {
+    if (!confirmed) return;
+    const t = window.setTimeout(() => setArmedFor(confirmed), CONTINUE_ARM_MS);
+    return () => window.clearTimeout(t);
+  }, [confirmed]);
+
+  function onContinue(consent: McpConsentRedeemResponse) {
+    if (!isValidHttpUrl(consent.authorizationURL)) {
+      setPhase({ kind: "failed", message: BAD_SIGN_IN_URL });
+      return;
+    }
+    setPhase({ kind: "redirecting" });
+    window.location.replace(consent.authorizationURL);
+  }
+
   if (phase.kind === "no-opener") {
     return (
       <AuthCard>
@@ -153,6 +194,42 @@ export function McpConnectPage() {
     );
   }
 
+  if (phase.kind === "confirm") {
+    const { consent } = phase;
+    return (
+      <AuthCard>
+        <div data-testid="mcp-connect-confirm">
+          <h1 className="font-serif text-2xl font-medium tracking-snug">
+            Connect {consent.server}?
+          </h1>
+          <p data-testid="connect-summary" className="mt-1.5 text-md text-secondary-foreground">
+            Connecting <span className="font-medium text-foreground">{consent.server}</span> for{" "}
+            <span className="font-medium text-foreground">{consent.agent}</span>, as{" "}
+            <span className="font-medium text-foreground">{consent.minter}</span>. Continue only
+            if that is you.
+          </p>
+          <p className="mt-3 text-md text-secondary-foreground">
+            The account you sign in to next will be stored for {consent.minter}, and{" "}
+            {consent.agent} will act with it. If you did not just press Connect in that
+            agent&rsquo;s chat, close this window.
+          </p>
+          <div className="mt-6 flex flex-col gap-2">
+            {/* Never autofocused: a key press meant for the window that opened this one must not continue. */}
+            <Button
+              data-testid="connect-continue"
+              className="h-11 w-full"
+              disabled={armedFor !== consent}
+              onClick={() => onContinue(consent)}
+            >
+              Continue to sign in
+            </Button>
+            {closeWindow}
+          </div>
+        </div>
+      </AuthCard>
+    );
+  }
+
   return (
     <AuthCard>
       <div data-testid="mcp-connect-working">
@@ -163,7 +240,9 @@ export function McpConnectPage() {
         <p role="status" className="mt-1.5 text-md text-secondary-foreground">
           {phase.kind === "redirecting"
             ? "Opening your provider's sign-in page."
-            : "Picking up the connection from your chat. This takes a moment."}
+            : phase.kind === "redeeming"
+              ? "Checking the connection with the console."
+              : "Picking up the connection from your chat. This takes a moment."}
         </p>
         <div className="mt-6">{closeWindow}</div>
       </div>

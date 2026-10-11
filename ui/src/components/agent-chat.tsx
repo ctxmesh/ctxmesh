@@ -490,6 +490,11 @@ export function ChatPanel({
           agent: name,
           redirectUri: `${window.location.origin}/api/mcp/oauth/callback`,
         });
+        // The popup, or the same-tab fallback, navigates to this; any scheme but http(s) would
+        // run in that window (DX-6).
+        if (!isValidHttpUrl(res.authorizationURL)) {
+          throw new Error("The sign-in address for this server is not valid, so it was not opened.");
+        }
         target = res.authorizationURL;
       }
     } catch (err) {
@@ -513,9 +518,8 @@ export function ChatPanel({
         );
         return;
       }
-      // Popup blocked → same-tab redirect, but validate the URL first (DX-6) so a bad
-      // authorizationURL can't hijack the tab.
-      if (isValidHttpUrl(target)) window.location.href = target;
+      // Popup blocked → same-tab redirect (target was validated above).
+      window.location.href = target;
       return;
     }
 

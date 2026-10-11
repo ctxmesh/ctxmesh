@@ -53,6 +53,8 @@ interface RunMock {
   createOk?: boolean;
   createStatus?: number;
   createJson?: unknown;
+  // The authorization URL the direct consent begin returns.
+  grantURL?: string;
 }
 
 function recordingFetch(run: RunMock = {}) {
@@ -116,7 +118,7 @@ function recordingFetch(run: RunMock = {}) {
         return Promise.resolve({
           ok: true,
           status: 202,
-          json: async () => ({ authorizationURL: "https://as.example/authorize?x=1", state: "st" }),
+          json: async () => ({ authorizationURL: run.grantURL ?? "https://as.example/authorize?x=1", state: "st" }),
           text: async () => "",
         } as Response);
       // Consent-ticket mint on an agent hostname (ADR 0040 amendment): 201 + the console page.
@@ -275,6 +277,37 @@ describe("ChatPanel (durable runs, ADR 0093)", () => {
 
     // The resumed run streams to completion.
     await waitFor(() => expect(screen.getByTestId("chat-turn-agent")).toHaveTextContent("connected + done"));
+  });
+
+  it("opens no window and leaves the chat in place for a non-http(s) authorization URL", async () => {
+    for (const grantURL of ["javascript:alert(document.domain)", "data:text/html,<script>alert(1)</script>", "/relative"]) {
+      for (const popupBlocked of [false, true]) {
+        const openSpy = vi.fn(() => (popupBlocked ? null : ({ closed: false } as Window)));
+        vi.stubGlobal("open", openSpy);
+        recordingFetch({
+          grantURL,
+          details: [
+            {
+              id: "run-1",
+              status: "requires_action",
+              traceId: "trace-consent",
+              messages: [{ role: "assistant", content: "please connect your account" }],
+              requiresAction: { kind: "consent_required", servers: ["scalekit-mcp-server"] },
+            },
+          ],
+        });
+        const { unmount } = renderChat(false);
+        await sendMessage("list orgs");
+        const before = window.location.href;
+
+        fireEvent.click(await screen.findByTestId("connect-scalekit-mcp-server"));
+        expect(await screen.findByText(/sign-in address for this server is not valid/)).toBeInTheDocument();
+        expect(openSpy).not.toHaveBeenCalled();
+        expect(window.location.href).toBe(before);
+        unmount();
+        vi.unstubAllGlobals();
+      }
+    }
   });
 
   it("(d) dev-mode keeps the old synchronous /api/invoke path (no cluster run store, ADR 0093 §2)", async () => {

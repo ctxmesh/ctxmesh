@@ -70,9 +70,31 @@ reached at another address is refused. Connect in an agent's own chat goes throu
 bound to the browser by a cookie on the console's address, which a chat at the agent's own
 hostname cannot set. Connect now gets a one-minute, single-use ticket from the agent's address,
 opens the console's new `/connect` page in a pop-up, and hands the ticket to that page by
-message; the page begins the connection on the console, in the same browser. The console accepts
+message; the page shows whose account it is connecting, for which server and agent, and begins
+the connection on the console, in the same browser, when you press Continue. The console accepts
 a ticket only from the hostname of the agent it was issued for, and never from a link. Pop-ups
-must be allowed for the agent's address.
+must be allowed for the agent's address. This works with the edge's `baseDomain: localhost` too:
+a single-label base domain that is not an ICANN suffix (`localhost`, `internal`, `corp`) is where
+the agents live, not a public suffix.
+
+**Security: an agent could serve a page at its own address and finish a visitor's OAuth consent
+as its author.** The console's consent page trusts a page at an agent's hostname, and with the
+edge's `extAuth.enabled: false`, `/invoke` at every agent hostname reaches the agent's own
+container with no credential. An agent's author could serve a page there that opened a visitor's
+consent page with a ticket minted for the author, so the visitor's upstream tokens were stored as
+the author's grant. The edge now sets `Content-Security-Policy: sandbox` and
+`X-Content-Type-Options: nosniff` on every response from an agent, replacing any the agent sent,
+so nothing an agent returns runs as a page at its address; clients reading `/invoke` with `fetch`
+or SSE are unaffected. The consent page names the account, server and agent and waits for
+Continue, and a ticket is minted only for an agent that exists and that the caller can read
+(HTTP 404 or 403 otherwise). **Behaviour change:** connecting from an agent's chat takes one more
+click. Re-install the `platform-edge` chart to get the sandbox.
+
+**Security: an OAuth MCP server's authorization endpoint could use any URL scheme.** Registration
+and discovery accepted a `javascript:` or `data:` endpoint, and the chat opened whatever address
+a consent returned. The authorization and token endpoints must now be absolute `http` or `https`
+URLs (HTTP 400 otherwise), discovery refuses metadata that names anything else, and the chat opens
+nothing else.
 
 **Fixed: an OAuth connection failed when its callback reached another BFF replica.** Pending
 OAuth flows were kept in the memory of the BFF pod that started them, so with more than one

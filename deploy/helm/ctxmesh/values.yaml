@@ -598,8 +598,11 @@ bff:
   # Connect in an agent's own chat begins on the console's /connect page by a single-use
   # ticket (ADR 0040 amendment). The console accepts the ticket only from
   # <agent>.<namespace>.<base>, where <base> is this host minus its first label (the host
-  # itself for an apex domain) — the platform edge's layout — or, for a loopback console,
-  # <agent>.<namespace>.127.0.0.1.sslip.io / .nip.io / .localhost.
+  # itself for an apex domain; console.localhost has its agents under localhost) — the
+  # platform edge's layout — or, for a loopback console,
+  # <agent>.<namespace>.127.0.0.1.sslip.io / .nip.io / .localhost. That check relies on the
+  # edge sandboxing every agent response (deploy/edge); /connect also names the account and
+  # waits for the user to continue.
   consoleURL: ""
   # BFF replica count (ADR 0051, M55). Default 1 == kustomize (no-drift). Scaling >1
   # REQUIRES runStore.enabled (dispatch) — else in-process runs split across pods and
