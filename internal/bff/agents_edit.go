@@ -332,6 +332,38 @@ func (s *Server) editRoundTrip(w http.ResponseWriter, r *http.Request, caller cl
 	writeJSON(w, http.StatusOK, UpdateAgentResponse{Mode: editModeRoundTrip})
 }
 
+// keepLiveToolBindings gives each regenerated MCPToolBinding that already exists for the same
+// agent and tool the live binding's registry and server, and returns the bindings that do not
+// exist yet: the tools this edit adds. The read runs as the editor; a failure other than
+// not-found refuses the edit rather than re-resolving a binding it could not see.
+func keepLiveToolBindings(ctx context.Context, reader AgentApplier, objs []decodedObject, ns string) ([]decodedObject, *createError) {
+	var added []decodedObject
+	for _, d := range objs {
+		b, ok := d.obj.(*agentsv1beta1.MCPToolBinding)
+		if !ok {
+			continue
+		}
+		var live agentsv1beta1.MCPToolBinding
+		err := reader.Get(ctx, client.ObjectKey{Namespace: ns, Name: b.Name}, &live)
+		switch {
+		case apierrors.IsNotFound(err):
+			added = append(added, d)
+			continue
+		case apierrors.IsForbidden(err):
+			return nil, &createError{status: 403, msg: fmt.Sprintf("forbidden: not allowed to read %s %q", mcpToolBindingKind, b.Name)}
+		case err != nil:
+			return nil, &createError{status: 502, msg: fmt.Sprintf("failed to read %s %q", mcpToolBindingKind, b.Name), cause: err}
+		}
+		if live.Spec.ToolName != b.Spec.ToolName || live.Spec.AgentRef != b.Spec.AgentRef {
+			added = append(added, d)
+			continue
+		}
+		b.Spec.RegistryRef = live.Spec.RegistryRef
+		b.Spec.Server = live.Spec.Server
+	}
+	return added, nil
+}
+
 // applyEditedSpec runs the full Mode-A round-trip against the applier: canonicalize
 // (guards) → expand → decode → stamp the new source-spec on the AgentDeployment →
 // SSA-apply every manifest under the console field-manager. It refuses to apply a
@@ -375,12 +407,16 @@ func applyEditedSpec(ctx context.Context, applier AgentApplier, promptStore prom
 		}
 	}
 
-	// Point regenerated MCPToolBindings at the registry their tool actually lives in
-	// (m25 S18) — same fix as create: expand's hardcoded default registry doesn't
-	// exist for BYO-MCP tools, so the binding would be RegistryNotFound forever.
-	// An edit re-applies every binding, so it binds exactly as a create does: to a server
-	// the editor may use, refusing a tool none provides, under the owner guard.
-	if bErr := bindAgentTools(ctx, regStore, objs, ns, callerOwner, false); bErr != nil {
+	// A tool the agent already has bound keeps that binding's server: re-resolving it from
+	// the editor's view would re-point another user's binding at whatever the editor can see,
+	// or refuse an edit that never touched tools. Only a tool the edit adds is bound as a
+	// create binds it (m25 S18): to a server the editor may use, refusing a tool none
+	// provides, under the owner guard.
+	added, kErr := keepLiveToolBindings(ctx, applier, objs, ns)
+	if kErr != nil {
+		return kErr
+	}
+	if bErr := bindAgentTools(ctx, regStore, added, ns, callerOwner, false); bErr != nil {
 		return bErr
 	}
 

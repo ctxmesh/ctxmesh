@@ -79,6 +79,12 @@ MCP server you do not own" even though a shared server offered the same tool; an
 re-pointed the tool at the private server. Create, edit and fork now consider only the servers
 you can use, and an edit applies the same owner check as a create.
 
+**Fixed: editing someone else's agent re-bound its tools.** An edit resolved every tool again
+from the editor's view, so changing only the image on another user's agent moved a tool bound to
+their private server onto a shared one, or was refused with HTTP 400 when no shared server offered
+it. A tool the agent already has keeps its server, whoever edits. Only a tool the edit adds is
+resolved, from the servers the editor can use.
+
 **Fixed: an agent could be created with a tool that does not exist.** A managed agent's tool that
 no registered MCP server provides was bound to a default registry that nothing creates, so the
 agent ran without the tool and only the binding's `RegistryNotFound` condition said so. Creating

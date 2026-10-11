@@ -30,6 +30,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	authnv1 "k8s.io/api/authentication/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -159,6 +162,192 @@ func TestEditAgentBindsTheServerTheEditorCanUse(t *testing.T) {
 	b := echoBinding(t, c, detailNS, "echo")
 	assert.Equal(t, teamEchoRegistry, b.Spec.RegistryRef)
 	assert.Equal(t, teamEchoURL, b.Spec.Server.URL)
+}
+
+// alicePrivateBinding is the binding Alice's create left for agent's tool: her private server.
+func alicePrivateBinding(agent, tool string) *agentsv1beta1.MCPToolBinding {
+	return &agentsv1beta1.MCPToolBinding{
+		ObjectMeta: metav1.ObjectMeta{Namespace: detailNS, Name: agent + "-" + tool},
+		Spec: agentsv1beta1.MCPToolBindingSpec{
+			AgentRef: agent, RegistryRef: alicePrivateRegistry, ToolName: tool, Mode: "remote",
+			Server: agentsv1beta1.ToolServer{URL: alicePrivateURL},
+		},
+	}
+}
+
+// TestEditAgentKeepsTheToolsItAlreadyHasBound: Alice's agent has echo bound to her private
+// server. Another user's edit that changes only the image used to re-resolve every binding from
+// the editor's view: it re-pointed echo at the team server (200), or, with no team server, was
+// refused 400. A tool already bound now keeps its binding, whoever edits.
+func TestEditAgentKeepsTheToolsItAlreadyHasBound(t *testing.T) {
+	img := "img:2"
+	src := managedEchoAgent("echo")
+	for _, srv := range []struct {
+		name       string
+		teamServer bool
+	}{
+		{"a team server also offers the tool", true},
+		{"only the owner's private server offers it", false},
+	} {
+		for _, edit := range []struct {
+			name string
+			body UpdateAgentRequest
+		}{
+			{"field edit", UpdateAgentRequest{Image: &img}},
+			{"full spec", UpdateAgentRequest{AgentYAML: src + "image: img:2\n"}},
+		} {
+			t.Run(srv.name+"/"+edit.name, func(t *testing.T) {
+				ad := consoleAgent(t, "echo", src, agentsv1beta1.AgentDeploymentSpec{Image: "img:1"})
+				c := identityClient(t, operatorUser, ad, alicePrivateBinding("echo", "echo"))
+				s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+				store := echoRegistries(t, detailNS)
+				if !srv.teamServer {
+					require.NoError(t, store.Delete(context.Background(), detailNS, teamEchoRegistry))
+				}
+				s.toolRegistryStore = store
+
+				body, err := json.Marshal(edit.body)
+				require.NoError(t, err)
+				rec := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodPut, "/api/agents/"+detailNS+"/echo", bytes.NewReader(body))
+				req.Header.Set("Authorization", "Bearer caller-token")
+				s.Handler().ServeHTTP(rec, req)
+
+				require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+				b := echoBinding(t, c, detailNS, "echo")
+				assert.Equal(t, alicePrivateRegistry, b.Spec.RegistryRef, "the binding is unchanged")
+				assert.Equal(t, alicePrivateURL, b.Spec.Server.URL)
+				var live agentsv1beta1.AgentDeployment
+				require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: detailNS, Name: "echo"}, &live))
+				assert.Equal(t, "img:2", live.Spec.Image, "the edit itself lands")
+			})
+		}
+	}
+}
+
+// TestEditAgentBindsAnAddedToolFromTheEditorsView: a tool the edit adds is resolved as a create
+// resolves it, among the servers the editor may use and under the owner guard, while the tools
+// already bound stay where they are.
+func TestEditAgentBindsAnAddedToolFromTheEditorsView(t *testing.T) {
+	const searchTeamURL = "https://search.example/mcp"
+	src := managedEchoAgent("echo")
+	seed := func(t *testing.T, teamOffersSearch bool) toolregistry.Store {
+		t.Helper()
+		store := echoRegistries(t, detailNS)
+		alice, err := store.Get(context.Background(), detailNS, alicePrivateRegistry)
+		require.NoError(t, err)
+		alice.Tools = append(alice.Tools, toolregistry.ToolEntry{Name: "search", URL: alicePrivateURL})
+		_, err = store.Upsert(context.Background(), *alice)
+		require.NoError(t, err)
+		if teamOffersSearch {
+			team, gErr := store.Get(context.Background(), detailNS, teamEchoRegistry)
+			require.NoError(t, gErr)
+			team.Tools = append(team.Tools, toolregistry.ToolEntry{Name: "search", URL: searchTeamURL})
+			_, err = store.Upsert(context.Background(), *team)
+			require.NoError(t, err)
+		}
+		return store
+	}
+	setup := func(t *testing.T, teamOffersSearch bool) (*Server, client.Client) {
+		ad := consoleAgent(t, "echo", src, agentsv1beta1.AgentDeploymentSpec{Image: "img:1"})
+		c := identityClient(t, operatorUser, ad, alicePrivateBinding("echo", "echo"))
+		s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+		s.toolRegistryStore = seed(t, teamOffersSearch)
+		return s, c
+	}
+
+	t.Run("a server the editor may use", func(t *testing.T) {
+		s, c := setup(t, true)
+		rec := putAgent(t, s, "echo", src+"  - search\n")
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		var search agentsv1beta1.MCPToolBinding
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: detailNS, Name: "echo-search"}, &search))
+		assert.Equal(t, teamEchoRegistry, search.Spec.RegistryRef, "the added tool binds the server the editor can use")
+		assert.Equal(t, searchTeamURL, search.Spec.Server.URL)
+		assert.Equal(t, alicePrivateRegistry, echoBinding(t, c, detailNS, "echo").Spec.RegistryRef, "the bound tool stays")
+	})
+
+	t.Run("only another user's private server", func(t *testing.T) {
+		s, c := setup(t, false)
+		rec := putAgent(t, s, "echo", src+"  - search\nimage: img:2\n")
+		require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+		assert.Contains(t, rec.Body.String(), `tool \"search\"`)
+		var live agentsv1beta1.AgentDeployment
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: detailNS, Name: "echo"}, &live))
+		assert.Equal(t, "img:1", live.Spec.Image, "a refused edit changes nothing")
+	})
+}
+
+// TestEditAgentDoesNotAdoptAnotherAgentsBinding: a live binding is kept only when it is this
+// agent's binding of the same tool. One of the regenerated name that binds the tool for another
+// agent (binding names are "<agent>-<tool>", and a binding applied outside the console can have
+// any name) is not adopted: the tool is resolved as new.
+func TestEditAgentDoesNotAdoptAnotherAgentsBinding(t *testing.T) {
+	src := "name: a\nruntime: managed\nsystemPrompt: hi\ntools:\n  - b-echo\n"
+	ad := consoleAgent(t, "a", src, agentsv1beta1.AgentDeploymentSpec{Image: "img:1"})
+	other := alicePrivateBinding("a", "b-echo")
+	other.Spec.AgentRef = "other-agent"
+	c := identityClient(t, operatorUser, ad, other)
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	store := toolregistry.NewMemStore()
+	_, err := store.Upsert(context.Background(), toolregistry.ToolRegistry{
+		Namespace: detailNS, Name: teamEchoRegistry,
+		Tools: []toolregistry.ToolEntry{{Name: "b-echo", URL: teamEchoURL}},
+		Labels: map[string]string{
+			labelManagedBy: managedByMCP, labelMCPScope: scopePublic,
+			labelMCPVisibility: visibilityTeam, labelMCPCredentialSource: credSourceNone,
+		},
+	})
+	require.NoError(t, err)
+	s.toolRegistryStore = store
+
+	rec := putAgent(t, s, "a", src+"image: img:2\n")
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var b agentsv1beta1.MCPToolBinding
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: detailNS, Name: "a-b-echo"}, &b))
+	assert.Equal(t, teamEchoRegistry, b.Spec.RegistryRef, "resolved from the editor's view, not taken from the other agent's binding")
+	assert.Equal(t, teamEchoURL, b.Spec.Server.URL)
+}
+
+// TestEditAgentRefusesWhenItCannotReadTheBindings: keeping a bound tool's server needs the live
+// binding. A read that fails is not taken as "not bound", which would re-resolve it; the edit is
+// refused and nothing is applied.
+func TestEditAgentRefusesWhenItCannotReadTheBindings(t *testing.T) {
+	src := managedEchoAgent("echo")
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{"forbidden", apierrors.NewForbidden(schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "mcptoolbindings"}, "echo-echo", errors.New("denied")), http.StatusForbidden},
+		{"unavailable", errors.New("etcdserver: request timed out"), http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ad := consoleAgent(t, "echo", src, agentsv1beta1.AgentDeploymentSpec{Image: "img:1"})
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+				WithObjects(ad, alicePrivateBinding("echo", "echo")).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						if _, ok := obj.(*agentsv1beta1.MCPToolBinding); ok {
+							return tc.err
+						}
+						return c.Get(ctx, key, obj, opts...)
+					},
+				}).Build()
+			s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+			s.toolRegistryStore = echoRegistries(t, detailNS)
+
+			rec := putAgent(t, s, "echo", src+"image: img:2\n")
+
+			require.Equal(t, tc.status, rec.Code, "body: %s", rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), "etcdserver")
+			var live agentsv1beta1.AgentDeployment
+			require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: detailNS, Name: "echo"}, &live))
+			assert.Equal(t, "img:1", live.Spec.Image, "a refused edit changes nothing")
+		})
+	}
 }
 
 // failingListStore is a ToolRegistry store whose List always fails.
