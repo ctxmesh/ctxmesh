@@ -2,5 +2,5 @@
 # mcp[cli] pulls in uvicorn + starlette (streamable-http transport deps).
 mcp[cli]==1.9.4
 # mcp 1.9.4 imports a pydantic internal that 2.12+ removed (pydantic 2.14 broke `import mcp`);
-# pinned to the last version it was verified with.
-pydantic==2.11.9
+# 2.10.6 matches the LangChain example, which shares this mcp pin.
+pydantic==2.10.6
