@@ -162,8 +162,13 @@ function DependencyRow({ d }: { d: AgentDependency }) {
   const page = pageFor(d);
   const fix = fixFor(d);
   const sub = subline(d);
-  // The condition's own words matter whenever the row is not simply fine.
-  const explain = d.state !== "ready" || !!d.message;
+  // The condition's own words matter whenever the row is not simply fine. A ready row's message
+  // ("the gateway serves this route") restates its tag, so it shows only when it is a caveat.
+  const explain =
+    d.state === "notReady" ||
+    d.state === "missing" ||
+    d.state === "unknown" ||
+    (!!d.message && (d.state === "declared" || d.reason === "PartiallyIngested"));
   return (
     <li
       className="flex min-w-0 flex-col gap-1 border-b border-border-soft py-2.5 last:border-b-0"

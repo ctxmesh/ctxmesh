@@ -29,7 +29,15 @@ const EVERY_KIND: AgentDependency[] = [
     reason: "NotYetServed",
     message: "ModelRoute chat: route rendered; the gateway has not started serving it yet",
   },
-  { kind: "secretBinding", name: "openai-key", namespace: "prod", via: "chat", state: "ready", reason: "Resolved" },
+  {
+    kind: "secretBinding",
+    name: "openai-key",
+    namespace: "prod",
+    via: "chat",
+    state: "ready",
+    reason: "Resolved",
+    message: "the secret resolves",
+  },
   {
     kind: "guardrailPolicy",
     name: "pii",
@@ -125,8 +133,9 @@ describe("AgentBindingsPanel", () => {
     expect(screen.getByTestId("bindings-attention")).toHaveTextContent("2");
   });
 
-  it("links each found reference to its own page", () => {
+  it("links each found reference to its own page, without restating a ready row's status", () => {
     renderPanel(EVERY_KIND);
+    expect(screen.getByTestId("dep-secretBinding-openai-key")).not.toHaveTextContent("the secret resolves");
     expect(
       within(screen.getByTestId("dep-secretBinding-openai-key")).getByRole("link", { name: "openai-key" }),
     ).toHaveAttribute("href", "/secrets/prod/openai-key");
