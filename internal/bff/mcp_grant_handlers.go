@@ -552,9 +552,9 @@ func refuseEndpointOverride(registered mcpOAuthConfig, auth *MCPAuthRequest) *cr
 // apply. Supplying the OAuth client config (endpoints, client id, scope) for a server whose
 // registration did not persist it chooses where the callback sends the authorization code and
 // the PKCE verifier, so it takes the authority that persisting it takes: update on the server's
-// ToolRegistry, the check backfillMCPOAuthConfig makes. A caller without it keeps only the
-// redirect hint, and the config is discovered from the stored server URL. A failed check is
-// never an allow.
+// ToolRegistry, the check backfillMCPOAuthConfig makes. A caller without it keeps only the type
+// and redirect fields (the redirect is overwritten by the canonical callback anyway), and the
+// config is discovered from the stored server URL. A failed check is never an allow.
 func (s *Server) consentClientConfigOverlay(ctx context.Context, caller client.Client, ns, server string, auth *MCPAuthRequest) (*MCPAuthRequest, *createError) {
 	if auth == nil || !suppliesOAuthClientConfig(auth) {
 		return auth, nil
@@ -582,8 +582,8 @@ func suppliesOAuthClientConfig(auth *MCPAuthRequest) bool {
 
 // overlayOAuthConfig overlays any non-empty fields of an explicitly-supplied auth block
 // over the recovered base. It lets a legacy server (no persisted config) still be
-// connected by supplying the config, and lets a caller override a single field (e.g. its
-// own origin's redirectUri). A nil auth block is a no-op.
+// connected by supplying the config. A supplied redirectUri is overlaid too, and then
+// overwritten by the canonical callback (prepareGrantConsent). A nil auth block is a no-op.
 func overlayOAuthConfig(base mcpOAuthConfig, auth *MCPAuthRequest) mcpOAuthConfig {
 	if auth == nil {
 		return base
