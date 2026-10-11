@@ -886,7 +886,12 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	events, cancel, err := s.runStore.Subscribe(rn.ID, lastEventID(r))
 	if err != nil {
-		writeError(w, http.StatusNotFound, "run not found")
+		if errors.Is(err, run.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "run not found")
+			return
+		}
+		s.log.Error(err, "run events: subscribing failed", "run", rn.ID)
+		writeError(w, http.StatusInternalServerError, "failed to read the run's events")
 		return
 	}
 	defer cancel()

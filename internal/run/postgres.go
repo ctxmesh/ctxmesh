@@ -293,14 +293,13 @@ func (p *pgStore) Get(id string) (*Run, error) {
 	return r, err
 }
 
-// GetByTraceID looks up a run by its trace_id column. Returns (nil, nil) when no row matches —
-// not an error, just "not found by trace id". The share mint calls this as a FALLBACK when
-// runStore.Get(id) returns ErrNotFound (the UI's trace-detail page keys by traceId, not run.ID).
-// Note: adding an index on trace_id would speed this up at scale — deferred as a follow-up since
-// share minting is a rare, user-initiated action and an unindexed scan over the runs table is
-// acceptable for now.
+// GetByTraceID looks up a run by its trace_id column (indexed by runs_trace_id). Returns (nil, nil) when no
+// row matches — not an error, just "not found by trace id". Callers resolve an id that may be a trace id
+// (the trace page keys by traceId, not run.ID), and authorize the trace through the run returned.
 func (p *pgStore) GetByTraceID(traceID string) (*Run, error) {
-	const sel = `SELECT id FROM runs WHERE trace_id = $1 LIMIT 1`
+	// Sub-runs share their parent's trace and a handoff starts a new root on it: a trace means its earliest root.
+	const sel = `SELECT id FROM runs WHERE trace_id = $1
+		ORDER BY (parent_run_id = '') DESC, created_at, id LIMIT 1`
 	var id string
 	err := p.db.QueryRowContext(context.Background(), sel, traceID).Scan(&id)
 	switch {
@@ -1456,11 +1455,23 @@ func (p *pgStore) Subscribe(id string, fromSeq int) (<-chan Event, func(), error
 	ch := make(chan Event, subBuffer)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// If already terminal, deliver the backlog once and close — no live events will follow.
+	// If already terminal, read the backlog now, so a failed read is this call's error rather than a
+	// stream that ends early and looks complete, then deliver it and close.
 	if r.Status.IsTerminal() {
+		backlog, err := p.eventsAfter(ctx, id, fromSeq)
+		if err != nil {
+			cancel()
+			return nil, nil, err
+		}
 		go func() {
 			defer close(ch)
-			_ = p.drain(ctx, id, fromSeq, ch)
+			for _, ev := range backlog {
+				select {
+				case ch <- ev:
+				case <-ctx.Done():
+					return
+				}
+			}
 		}()
 		return ch, cancel, nil
 	}
@@ -1503,31 +1514,13 @@ func (p *pgStore) tail(ctx context.Context, id string, fromSeq int, ch chan<- Ev
 	}
 }
 
-// drain delivers the backlog after the cursor once (used for an already-terminal run).
-func (p *pgStore) drain(ctx context.Context, id string, fromSeq int, ch chan<- Event) error {
-	_, err := p.deliverAfter(ctx, id, fromSeq, ch)
-	return err
-}
-
 // deliverAfter fetches events with seq > cursor and sends them on ch, returning the new cursor.
 func (p *pgStore) deliverAfter(ctx context.Context, id string, cursor int, ch chan<- Event) (int, error) {
-	const q = `SELECT seq, kind, data, at FROM run_events WHERE run_id=$1 AND seq>$2 ORDER BY seq`
-	rows, err := p.db.QueryContext(ctx, q, id, cursor)
+	events, err := p.eventsAfter(ctx, id, cursor)
 	if err != nil {
-		return cursor, fmt.Errorf("run: query events: %w", err)
+		return cursor, err
 	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var (
-			ev   Event
-			kind string
-			at   time.Time
-		)
-		if err := rows.Scan(&ev.Seq, &kind, &ev.Data, &at); err != nil {
-			return cursor, fmt.Errorf("run: scan event: %w", err)
-		}
-		ev.Kind = EventKind(kind)
-		ev.Time = at.UTC()
+	for _, ev := range events {
 		select {
 		case ch <- ev:
 			cursor = ev.Seq
@@ -1535,10 +1528,36 @@ func (p *pgStore) deliverAfter(ctx context.Context, id string, cursor int, ch ch
 			return cursor, ctx.Err()
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return cursor, fmt.Errorf("run: iterate events: %w", err)
-	}
 	return cursor, nil
+}
+
+// eventsAfter reads the run's events with seq > cursor, in order. It reads them all before returning, so
+// the connection is released before a slow subscriber is sent anything.
+func (p *pgStore) eventsAfter(ctx context.Context, id string, cursor int) ([]Event, error) {
+	const q = `SELECT seq, kind, data, at FROM run_events WHERE run_id=$1 AND seq>$2 ORDER BY seq`
+	rows, err := p.db.QueryContext(ctx, q, id, cursor)
+	if err != nil {
+		return nil, fmt.Errorf("run: query events: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Event
+	for rows.Next() {
+		var (
+			ev   Event
+			kind string
+			at   time.Time
+		)
+		if err := rows.Scan(&ev.Seq, &kind, &ev.Data, &at); err != nil {
+			return nil, fmt.Errorf("run: scan event: %w", err)
+		}
+		ev.Kind = EventKind(kind)
+		ev.Time = at.UTC()
+		out = append(out, ev)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("run: iterate events: %w", err)
+	}
+	return out, nil
 }
 
 // isTerminal reports whether the run's persisted status is terminal.

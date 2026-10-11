@@ -18,9 +18,11 @@ package bff
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -222,4 +224,25 @@ func TestGetRunFixture_CrossTenantIs403AndNoBytes(t *testing.T) {
 	assert.NotEqual(t, http.StatusOK, rec.Code, "a non-owner without access must be denied, never served")
 	assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, rec.Code)
 	assert.NotContains(t, rec.Body.String(), "topsecret-xyz", "a denied response must not leak fixture bytes")
+}
+
+// TestGetRunFixture_UnreadableStepLogIsAnError: when a finished run's events cannot be read from Postgres,
+// the stepper gets a 500, never a timeline with steps missing. A row whose time cannot be scanned stands in
+// for the failed read.
+func TestGetRunFixture_UnreadableStepLogIsAnError(t *testing.T) {
+	dsn := os.Getenv("RUN_POSTGRES_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set RUN_POSTGRES_TEST_DSN to run the Postgres run-store variant")
+	}
+	rs := fenceStores(t)["postgres"]
+	seedFinishedRun(t, rs, "r6", "tr-r6", false)
+	db, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	_, err = db.Exec(`UPDATE run_events SET at = 'infinity' WHERE run_id = 'r6' AND seq = 2`)
+	require.NoError(t, err)
+
+	s := fixtureRunServer(t, "alice@example.com", rs, objectstore.NewMemObjectStore())
+	rec, _ := getFixture(t, s, "r6")
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
 }

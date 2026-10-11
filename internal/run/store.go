@@ -133,8 +133,9 @@ type Store interface {
 	Get(id string) (*Run, error)
 	// GetByTraceID returns a COPY of the run whose TraceID matches traceID, or (nil, nil) if none
 	// is found (not an error — a nil run means "not found by trace id"). Callers must not mutate
-	// the returned run. This is the fallback resolution path for the share mint, which is keyed by
-	// the trace-detail page's traceId rather than the internal run.ID.
+	// the returned run. Several runs share a trace (sub-runs, a handoff's new root); the one returned
+	// is the earliest root, so every reader of a trace is authorized through the same run. It is how
+	// an id from the trace-detail page, which is a trace id rather than a run.ID, finds its run.
 	GetByTraceID(traceID string) (*Run, error)
 	// Update applies fn to the stored run atomically and returns a copy. A non-nil error from fn
 	// (e.g. an illegal Transition) aborts the update, leaving the run unchanged.
@@ -147,7 +148,8 @@ type Store interface {
 	// Subscribe returns a channel delivering the run's events with Seq > fromSeq: first the
 	// buffered backlog, then live events. The channel is CLOSED when the run reaches a terminal
 	// state and its backlog is drained (so an SSE handler ends cleanly). cancel releases the
-	// subscription. Errors if the run is unknown.
+	// subscription. Errors if the run is unknown, or (Postgres) if a terminal run's backlog cannot be
+	// read; a live stream that loses the database ends early, and the client resumes from its cursor.
 	Subscribe(id string, fromSeq int) (events <-chan Event, cancel func(), err error)
 	// ClaimQueued atomically leases the oldest `queued` run to workerID (transitioning it to
 	// `running`, stamping the worker + a lease that expires after `lease`) and returns it, so a
@@ -588,12 +590,31 @@ func (m *memStore) Get(id string) (*Run, error) {
 func (m *memStore) GetByTraceID(traceID string) (*Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// The run the Postgres store picks: a root before a sub-run, then the earliest, then the lowest id.
+	var best *Run
 	for _, e := range m.entries {
-		if e.run.TraceID == traceID {
-			return cloneRun(e.run), nil
+		if e.run.TraceID != traceID {
+			continue
+		}
+		if best == nil || traceRunBefore(e.run, best) {
+			best = e.run
 		}
 	}
-	return nil, nil // not found — not an error
+	if best == nil {
+		return nil, nil // not found — not an error
+	}
+	return cloneRun(best), nil
+}
+
+// traceRunBefore orders the runs sharing a trace: roots first, then by creation time, then by id.
+func traceRunBefore(a, b *Run) bool {
+	if aRoot, bRoot := a.ParentRunID == "", b.ParentRunID == ""; aRoot != bRoot {
+		return aRoot
+	}
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.Before(b.CreatedAt)
+	}
+	return a.ID < b.ID
 }
 
 func (m *memStore) Update(id string, fn func(*Run) error) (*Run, error) {

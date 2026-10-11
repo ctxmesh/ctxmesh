@@ -95,7 +95,10 @@ delivered any, so on the production store a recorded run had no steps to join it
 And the trace page asks by trace id, while the step read and the fixture lookup used that id as a
 run id, so from a trace the stepper found neither the steps nor the recording. Both now read the
 finished run by its run id, until its events are delivered. A run still in progress shows its
-recording with no step timeline until it ends.
+recording with no step timeline until it ends. A finished run's events that cannot be read from
+Postgres are now an error, where the stream used to end early as if complete. A trace that several
+runs share now always resolves to the same run, the earliest root, on both run stores; before, the
+Postgres store returned whichever row it found first and the in-memory store a random one.
 
 **Fixed: the chat streamed raw event JSON and never showed an approval or consent prompt
 mid-run.** The run event stream (`GET /api/runs/{id}/events`) put each event in its `data:` line as
