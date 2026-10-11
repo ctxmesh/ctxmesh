@@ -229,6 +229,7 @@ func (s *Server) beginMCPGrantConsent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to start the consent flow")
 		return
 	}
+	setOAuthBindingCookie(w, r, state)
 
 	writeJSON(w, http.StatusAccepted, OAuthPendingResponse{
 		Status:           "authorization_required",

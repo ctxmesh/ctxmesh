@@ -248,7 +248,7 @@ func TestMCPGrantConsentStoresPerUserGrant(t *testing.T) {
 	oauth.expectChallenge = "" // pass PKCE; assert grant storage
 
 	// The callback is browser-facing → 303 back to the console catalog, not JSON.
-	crec := callback(t, s, oauth.validCode, pending.State)
+	crec := callback(t, s, oauth.validCode, pending.State, rec.Result().Cookies()...)
 	q := assertCallbackRedirect(t, crec, "/tools/catalog")
 	assert.Equal(t, server, q.Get("mcp_connected"), "the redirect names the consented server")
 
@@ -305,7 +305,7 @@ func TestMCPGrantConsentDelegatesToGrantStore(t *testing.T) {
 	rec, pending := beginGrant(t, s, server, "alice-token", grantAuth(oauth))
 	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
 	oauth.expectChallenge = ""
-	crec := callback(t, s, oauth.validCode, pending.State)
+	crec := callback(t, s, oauth.validCode, pending.State, rec.Result().Cookies()...)
 	assertCallbackRedirect(t, crec, "/tools/catalog")
 
 	// The delegate received the grant WITH the token material.
@@ -412,7 +412,7 @@ func TestMCPGrantConsentRefusesChangingRegisteredEndpoints(t *testing.T) {
 			assert.Empty(t, pending.State, "no consent flow starts")
 			// Completing the consent with whatever state the response carried cannot reach
 			// the named endpoint either.
-			callback(t, s, oauth.validCode, pending.State)
+			callback(t, s, oauth.validCode, pending.State, rec.Result().Cookies()...)
 			assert.Zero(t, hits.Load(), "the endpoint the request named is never contacted")
 		})
 	}
@@ -451,7 +451,7 @@ func TestMCPGrantConsentLegacyServerSuppliedEndpointsNeedUpdate(t *testing.T) {
 		assert.Contains(t, pending.AuthorizationURL, oauth.authorizeURL(), "the supplied authorization endpoint is used")
 		assert.True(t, slices.ContainsFunc(auth.asked(), updateOfServer), "supplying endpoints asks for update on the server")
 		oauth.expectChallenge = ""
-		assertCallbackRedirect(t, callback(t, s, oauth.validCode, pending.State), "/tools/catalog")
+		assertCallbackRedirect(t, callback(t, s, oauth.validCode, pending.State, rec.Result().Cookies()...), "/tools/catalog")
 		assert.Equal(t, "authorization_code", oauth.gotGrant, "the code went to the supplied token endpoint")
 	})
 
@@ -481,7 +481,7 @@ func TestMCPGrantConsentLegacyServerSuppliedEndpointsNeedUpdate(t *testing.T) {
 		assert.NotContains(t, pending.AuthorizationURL, attacker.URL)
 		assert.Contains(t, pending.AuthorizationURL, "dyn-client-123", "the client id is discovered too")
 
-		callback(t, s, oauth.validCode, pending.State)
+		callback(t, s, oauth.validCode, pending.State, rec.Result().Cookies()...)
 		assert.Zero(t, hits.Load(), "the endpoints the request named are never contacted")
 
 		got, err := store.Get(context.Background(), grantNS, server)

@@ -885,8 +885,9 @@ type MCPAuthRequest struct {
 	ClientID string `json:"clientId"`
 	// Scope is the requested OAuth scope string (space-delimited); optional.
 	Scope string `json:"scope"`
-	// RedirectURI is the callback URL the authorization server redirects back to.
-	// It must resolve to the BFF's GET /api/mcp/oauth/callback route.
+	// RedirectURI is ignored: the BFF always uses its own canonical callback
+	// (ADR 0040), so an authorization code returns only to the browser that began
+	// the flow. Accepted for compatibility with older clients.
 	RedirectURI string `json:"redirectUri"`
 	// AutoDiscover requests ZERO-CONFIG OAuth (ADR 0028, m24.7): the BFF discovers
 	// the authorization/token/registration endpoints from the MCP server's spec

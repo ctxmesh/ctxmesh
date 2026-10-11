@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -321,7 +322,7 @@ func TestMCPOAuthFullFlow(t *testing.T) {
 
 	// --- callback (leg 2): valid code + state → 303 back to the console catalog,
 	// tokens in Secret (the callback is browser-facing, so it redirects, not JSON) ---
-	crec := callback(t, s, oauth.validCode, pending.State)
+	crec := callback(t, s, oauth.validCode, pending.State, rec.Result().Cookies()...)
 	cq := assertCallbackRedirect(t, crec, "/tools/catalog")
 	assert.Equal(t, "my-oauth-mcp", cq.Get("mcp_connected"), "the catalog redirect names the connected server")
 
@@ -379,9 +380,9 @@ func TestMCPOAuthRegisteredServerBelongsToTheRegistrant(t *testing.T) {
 	s, factory, _ := newMCPServer(t, c, false)
 	store := wireTRStore(t, s, nil)
 
-	_, pending := registerOAuth(t, s, "Owned OAuth MCP", mcp.URL, authFor(oauth))
+	brec, pending := registerOAuth(t, s, "Owned OAuth MCP", mcp.URL, authFor(oauth))
 	require.NotEmpty(t, pending.State)
-	assertCallbackRedirect(t, callback(t, s, oauth.validCode, pending.State), "/tools/catalog")
+	assertCallbackRedirect(t, callback(t, s, oauth.validCode, pending.State, brec.Result().Cookies()...), "/tools/catalog")
 
 	tr, err := store.Get(context.Background(), "prod", "owned-oauth-mcp")
 	require.NoError(t, err)
@@ -443,12 +444,16 @@ func TestMCPOAuthRegisterWithoutIdentityIsRefused(t *testing.T) {
 
 // callback drives GET /api/mcp/oauth/callback with a code + state (the browser
 // redirect leg, simulated). It carries NO Authorization header — the callback
-// authenticates via the state handle, not a bearer.
-func callback(t *testing.T, s *Server, code, state string) *httptest.ResponseRecorder {
+// authenticates via the state handle and the binding cookie, not a bearer. cookies
+// are what the browser holds: the begin response's, for the browser that began.
+func callback(t *testing.T, s *Server, code, state string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	target := "/api/mcp/oauth/callback?code=" + url.QueryEscape(code) + "&state=" + url.QueryEscape(state)
 	req := httptest.NewRequest(http.MethodGet, target, nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
 	s.Handler().ServeHTTP(rec, req)
 	return rec
 }
@@ -493,6 +498,266 @@ func TestMCPOAuthCallbackUnknownStateIs4xxNoExchange(t *testing.T) {
 	assert.Empty(t, oauth.gotGrant, "a bad state must NOT trigger a token exchange")
 }
 
+// TestMCPOAuthCallbackRequiresTheBrowserThatBegan (RFC 6749 §10.12): whoever begins a flow can
+// hand its authorization URL to someone else. The callback that person's consent produces carries
+// a valid state but not the binding cookie the begin response set, so it is refused before the
+// code is exchanged and nothing is stored. The browser that began completes, and the cookie is
+// then expired. Both the register and the grant-consent flows are bound.
+func TestMCPOAuthCallbackRequiresTheBrowserThatBegan(t *testing.T) {
+	t.Run("register", func(t *testing.T) {
+		begin := func(t *testing.T) (*Server, *fakeOAuthServer, *httptest.ResponseRecorder, OAuthPendingResponse, *bool) {
+			oauth := newFakeOAuthServer(t)
+			oauth.expectChallenge = ""
+			mcp := fakeMCPServer(t, false)
+			created := false
+			c := registrantClient(t, interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					created = true
+					return c.Create(ctx, obj, opts...)
+				},
+			})
+			s, _, _ := newMCPServer(t, c, false)
+			rec, pending := registerOAuth(t, s, "bound-mcp", mcp.URL, authFor(oauth))
+			require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+			return s, oauth, rec, pending, &created
+		}
+
+		t.Run("another browser is refused", func(t *testing.T) {
+			s, oauth, _, pending, created := begin(t)
+			q := assertCallbackRedirect(t, callback(t, s, oauth.validCode, pending.State), "/tools/add-mcp")
+			assert.Contains(t, q.Get("mcp_error"), "not started in this browser")
+			assert.Empty(t, oauth.gotGrant, "the code is never exchanged")
+			assert.False(t, *created, "nothing is stored")
+		})
+		t.Run("the browser that began completes", func(t *testing.T) {
+			s, oauth, rec, pending, created := begin(t)
+			crec := callback(t, s, oauth.validCode, pending.State, rec.Result().Cookies()...)
+			assertCallbackRedirect(t, crec, "/tools/catalog")
+			assert.True(t, *created)
+			cleared := bindingCookie(t, crec)
+			assert.Negative(t, cleared.MaxAge, "the binding cookie is expired once used")
+		})
+	})
+
+	t.Run("grant consent", func(t *testing.T) {
+		const server = "bound-grant-mcp"
+		begin := func(t *testing.T) (*Server, client.WithWatch, *fakeOAuthServer, *httptest.ResponseRecorder, OAuthPendingResponse) {
+			oauth := newFakeOAuthServer(t)
+			oauth.expectChallenge = ""
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+			s, _ := newGrantServer(t, c)
+			wireTRStore(t, s, nil, oauthToolRegistryWithConfig(server, "http://bound/mcp", oauth))
+			rec, pending := beginGrant(t, s, server, "mallory-token", nil)
+			require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+			return s, c, oauth, rec, pending
+		}
+		grants := func(t *testing.T, c client.Client) int {
+			var list corev1.SecretList
+			require.NoError(t, c.List(context.Background(), &list))
+			return len(list.Items)
+		}
+
+		t.Run("another browser is refused", func(t *testing.T) {
+			s, c, oauth, _, pending := begin(t)
+			// A different flow's cookie in the victim's browser does not stand in for this one.
+			_, other := beginGrant(t, s, server, "victim-token", nil)
+			otherCookie := &http.Cookie{Name: oauthBindingCookieName(other.State, false), Value: oauthStateDigest(other.State)}
+
+			q := assertCallbackRedirect(t, callback(t, s, oauth.validCode, pending.State, otherCookie), "/tools/add-mcp")
+			assert.Contains(t, q.Get("mcp_error"), "not started in this browser")
+			assert.Empty(t, oauth.gotGrant, "the code is never exchanged")
+			assert.Zero(t, grants(t, c), "no grant is stored")
+		})
+		t.Run("a cookie of the right name with the wrong value is refused", func(t *testing.T) {
+			s, c, oauth, _, pending := begin(t)
+			forged := &http.Cookie{Name: oauthBindingCookieName(pending.State, false), Value: oauthStateDigest("guess")}
+			assertCallbackRedirect(t, callback(t, s, oauth.validCode, pending.State, forged), "/tools/add-mcp")
+			assert.Empty(t, oauth.gotGrant)
+			assert.Zero(t, grants(t, c))
+		})
+		t.Run("the browser that began completes", func(t *testing.T) {
+			s, c, oauth, rec, pending := begin(t)
+			assertCallbackRedirect(t, callback(t, s, oauth.validCode, pending.State, rec.Result().Cookies()...), "/tools/catalog")
+			assert.Equal(t, "authorization_code", oauth.gotGrant)
+			assert.Equal(t, 1, grants(t, c), "the grant is stored")
+		})
+	})
+}
+
+// TestMCPOAuthBindingCookieAttributes: the cookie is unreadable by script, survives the
+// authorization server's top-level redirect (Lax) and lives as long as the flow. Over TLS it is
+// a __Host- cookie (Secure, Path=/, no Domain), which no sibling host can plant; over plain HTTP,
+// where that prefix is unavailable, it is scoped to the callback path.
+func TestMCPOAuthBindingCookieAttributes(t *testing.T) {
+	const server = "cookie-attrs-mcp"
+	oauth := newFakeOAuthServer(t)
+	s, _ := newGrantServer(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build())
+	wireTRStore(t, s, nil, oauthToolRegistryWithConfig(server, "http://attrs/mcp", oauth))
+
+	for _, tc := range []struct {
+		name       string
+		forwarded  string
+		wantSecure bool
+		wantPrefix string
+		wantPath   string
+	}{
+		{"plain http", "", false, oauthBindingCookiePrefix, mcpOAuthCallbackPath},
+		{"behind a TLS-terminating proxy", "https", true, "__Host-" + oauthBindingCookiePrefix, "/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := json.Marshal(MCPGrantConsentRequest{Server: server, Namespace: grantNS})
+			require.NoError(t, err)
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/mcp/oauth/grant", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer alice-token")
+			if tc.forwarded != "" {
+				req.Header.Set("X-Forwarded-Proto", tc.forwarded)
+			}
+			s.Handler().ServeHTTP(rec, req)
+			require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+			var pending OAuthPendingResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pending))
+
+			c := bindingCookie(t, rec)
+			assert.True(t, strings.HasPrefix(c.Name, tc.wantPrefix), "name %q", c.Name)
+			assert.Equal(t, oauthBindingCookieName(pending.State, tc.wantSecure), c.Name)
+			assert.Equal(t, oauthStateDigest(pending.State), c.Value)
+			assert.NotContains(t, c.Value, pending.State, "the cookie holds a digest, never the state")
+			assert.Equal(t, tc.wantPath, c.Path)
+			assert.Empty(t, c.Domain, "host-only")
+			assert.True(t, c.HttpOnly)
+			assert.Equal(t, http.SameSiteLaxMode, c.SameSite)
+			assert.Equal(t, tc.wantSecure, c.Secure)
+			assert.Equal(t, int(pendingFlowTTL/time.Second), c.MaxAge)
+		})
+	}
+
+	// Over TLS a plain-named cookie, which a sibling host could have planted, does not count.
+	body, err := json.Marshal(MCPGrantConsentRequest{Server: server, Namespace: grantNS})
+	require.NoError(t, err)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "https://console.example.com/api/mcp/oauth/grant", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer alice-token")
+	s.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+	var pending OAuthPendingResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pending))
+	tossed := &http.Cookie{Name: oauthBindingCookieName(pending.State, false), Value: oauthStateDigest(pending.State)}
+	crec := httptest.NewRecorder()
+	creq := httptest.NewRequest(http.MethodGet, "https://console.example.com"+mcpOAuthCallbackPath+"?"+
+		url.Values{"code": {oauth.validCode}, "state": {pending.State}}.Encode(), nil)
+	creq.AddCookie(tossed)
+	s.Handler().ServeHTTP(crec, creq)
+	q := assertCallbackRedirect(t, crec, "/tools/add-mcp")
+	assert.Contains(t, q.Get("mcp_error"), "not started in this browser")
+	assert.Empty(t, oauth.gotGrant, "the code is never exchanged")
+}
+
+// TestMCPOAuthConsentIsRedeemedOnlyWhereItBegan: with a console URL configured, the redirect_uri
+// is always the console's callback (ADR 0040). Consent begun on another origin, such as an agent
+// hostname, left its cookie there, so the console callback refuses it, and the code is not sent
+// on to the origin the request named, which a forged Origin and Host would choose. Consent begun
+// at the console completes.
+func TestMCPOAuthConsentIsRedeemedOnlyWhereItBegan(t *testing.T) {
+	const (
+		server      = "xorigin-mcp"
+		console     = "https://console.example.com"
+		agentOrigin = "https://helper.default.example.com"
+	)
+	begin := func(t *testing.T, at string) (*Server, *fakeOAuthServer, *httptest.ResponseRecorder, OAuthPendingResponse) {
+		oauth := newFakeOAuthServer(t)
+		oauth.expectChallenge = ""
+		s, _ := newGrantServer(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build())
+		wireTRStore(t, s, nil, oauthToolRegistryWithConfig(server, "http://xorigin/mcp", oauth))
+		s.consoleURL = console
+
+		body, err := json.Marshal(MCPGrantConsentRequest{Server: server, Namespace: grantNS})
+		require.NoError(t, err)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, at+"/api/mcp/oauth/grant", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer alice-token")
+		req.Header.Set("Origin", at)
+		s.Handler().ServeHTTP(rec, req)
+		require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+		var pending OAuthPendingResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pending))
+		require.Contains(t, pending.AuthorizationURL, url.QueryEscape(console+mcpOAuthCallbackPath), "the provider redirects to the console")
+		return s, oauth, rec, pending
+	}
+	callbackAtConsole := func(s *Server, rawQuery string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, console+mcpOAuthCallbackPath+"?"+rawQuery, nil)
+		for _, c := range cookies {
+			req.AddCookie(c)
+		}
+		s.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("begun on an agent hostname", func(t *testing.T) {
+		s, oauth, _, pending := begin(t, agentOrigin)
+		query := url.Values{"code": {oauth.validCode}, "state": {pending.State}}.Encode()
+
+		q := assertCallbackRedirect(t, callbackAtConsole(s, query), "/tools/add-mcp")
+		assert.Contains(t, q.Get("mcp_error"), "not started in this browser")
+		assert.Empty(t, oauth.gotGrant, "the code is never exchanged")
+	})
+
+	t.Run("begun at the console", func(t *testing.T) {
+		s, oauth, rec, pending := begin(t, console)
+		query := url.Values{"code": {oauth.validCode}, "state": {pending.State}}.Encode()
+
+		q := assertCallbackRedirect(t, callbackAtConsole(s, query, rec.Result().Cookies()...), "/tools/catalog")
+		assert.Equal(t, server, q.Get("mcp_connected"))
+		assert.Equal(t, "authorization_code", oauth.gotGrant)
+	})
+}
+
+// TestMCPOAuthRegisterRedirectIsServerControlled: the binding cookie protects a registration only
+// if the code comes back to this BFF's callback in the browser that began it. The redirect_uri is
+// therefore the canonical callback, whatever the request names, for supplied and discovered
+// configs alike.
+func TestMCPOAuthRegisterRedirectIsServerControlled(t *testing.T) {
+	const console = "https://console.example.com"
+	oauth := newFakeOAuthServer(t)
+	disco, _ := oauthDiscoveryStub(t, false, false)
+
+	for _, tc := range []struct {
+		name string
+		url  string
+		auth *MCPAuthRequest
+	}{
+		{"supplied config", "http://mcp/mcp", authFor(oauth)},
+		{"discovered config", disco.URL + "/mcp", &MCPAuthRequest{Type: "oauth", AutoDiscover: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, _ := newMCPServer(t, registrantClient(t, interceptor.Funcs{}), false)
+			s.consoleURL = console
+			auth := *tc.auth
+			auth.RedirectURI = "https://attacker.example/cb"
+
+			rec, pending := registerOAuth(t, s, "redirect-mcp", tc.url, &auth)
+
+			require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+			au, err := url.Parse(pending.AuthorizationURL)
+			require.NoError(t, err)
+			assert.Equal(t, console+mcpOAuthCallbackPath, au.Query().Get("redirect_uri"))
+		})
+	}
+}
+
+// bindingCookie returns the OAuth binding cookie a response set.
+func bindingCookie(t *testing.T, rec *httptest.ResponseRecorder) *http.Cookie {
+	t.Helper()
+	for _, c := range rec.Result().Cookies() {
+		if strings.Contains(c.Name, oauthBindingCookiePrefix) {
+			return c
+		}
+	}
+	require.FailNow(t, "the response set no OAuth binding cookie")
+	return nil
+}
+
 // TestMCPOAuthCallbackMismatchedStateIs4xx proves a callback whose state differs
 // from the one issued at register is rejected (CSRF): the real flow's state is
 // held, but a DIFFERENT state on the callback finds no flow → 4xx, no exchange.
@@ -502,11 +767,11 @@ func TestMCPOAuthCallbackMismatchedStateIs4xx(t *testing.T) {
 	c := registrantClient(t, interceptor.Funcs{})
 	s, _, _ := newMCPServer(t, c, false)
 
-	_, pending := registerOAuth(t, s, "csrf-mcp", mcp.URL, authFor(oauth))
+	brec, pending := registerOAuth(t, s, "csrf-mcp", mcp.URL, authFor(oauth))
 	require.NotEmpty(t, pending.State)
 
 	// Tamper: submit a state that is NOT the issued one.
-	crec := callback(t, s, oauth.validCode, pending.State+"-tampered")
+	crec := callback(t, s, oauth.validCode, pending.State+"-tampered", brec.Result().Cookies()...)
 	assertCallbackRedirect(t, crec, "/tools/add-mcp")
 	assert.Empty(t, oauth.gotGrant, "a mismatched state must NOT trigger a token exchange")
 }
@@ -521,12 +786,12 @@ func TestMCPOAuthCallbackExpiredStateIs4xx(t *testing.T) {
 
 	base := time.Now()
 	s.oauthFlows.now = func() time.Time { return base }
-	_, pending := registerOAuth(t, s, "expired-mcp", mcp.URL, authFor(oauth))
+	brec, pending := registerOAuth(t, s, "expired-mcp", mcp.URL, authFor(oauth))
 	require.NotEmpty(t, pending.State)
 
 	// Advance past the TTL so the pending flow is expired at callback time.
 	s.oauthFlows.now = func() time.Time { return base.Add(pendingFlowTTL + time.Minute) }
-	crec := callback(t, s, oauth.validCode, pending.State)
+	crec := callback(t, s, oauth.validCode, pending.State, brec.Result().Cookies()...)
 	assertCallbackRedirect(t, crec, "/tools/add-mcp")
 	assert.Empty(t, oauth.gotGrant, "an expired state must NOT trigger a token exchange")
 }
@@ -540,12 +805,12 @@ func TestMCPOAuthCallbackReplayIsRejected(t *testing.T) {
 	s, _, _ := newMCPServer(t, c, false)
 	wireTRStore(t, s, nil) // register writes the ToolRegistry to the store (retired, ADR 0044)
 
-	_, pending := registerOAuth(t, s, "replay-mcp", mcp.URL, authFor(oauth))
+	brec, pending := registerOAuth(t, s, "replay-mcp", mcp.URL, authFor(oauth))
 	// First callback succeeds → redirect to the catalog.
-	first := callback(t, s, oauth.validCode, pending.State)
+	first := callback(t, s, oauth.validCode, pending.State, brec.Result().Cookies()...)
 	assertCallbackRedirect(t, first, "/tools/catalog")
 	// Replay with the SAME state → the flow was consumed → error redirect (no re-exchange).
-	second := callback(t, s, oauth.validCode, pending.State)
+	second := callback(t, s, oauth.validCode, pending.State, brec.Result().Cookies()...)
 	assertCallbackRedirect(t, second, "/tools/add-mcp")
 }
 
@@ -557,7 +822,7 @@ func TestMCPOAuthCallbackErrorRedirectIs4xx(t *testing.T) {
 	c := registrantClient(t, interceptor.Funcs{})
 	s, _, _ := newMCPServer(t, c, false)
 
-	_, pending := registerOAuth(t, s, "denied-mcp", mcp.URL, authFor(oauth))
+	brec, pending := registerOAuth(t, s, "denied-mcp", mcp.URL, authFor(oauth))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet,
@@ -567,7 +832,7 @@ func TestMCPOAuthCallbackErrorRedirectIs4xx(t *testing.T) {
 	assert.Contains(t, q.Get("mcp_error"), "not granted", "a declined consent redirects back with a teaching error")
 
 	// The flow is consumed: a subsequent valid callback with the same state → error redirect.
-	crec := callback(t, s, oauth.validCode, pending.State)
+	crec := callback(t, s, oauth.validCode, pending.State, brec.Result().Cookies()...)
 	assertCallbackRedirect(t, crec, "/tools/add-mcp")
 }
 
@@ -583,12 +848,12 @@ func TestMCPOAuthWrongVerifierIsHonestError(t *testing.T) {
 	c := registrantClient(t, interceptorCreateFlag(&createCalled))
 	s, _, _ := newMCPServer(t, c, false)
 
-	_, pending := registerOAuth(t, s, "pkce-mcp", mcp.URL, authFor(oauth))
+	brec, pending := registerOAuth(t, s, "pkce-mcp", mcp.URL, authFor(oauth))
 	// Force a PKCE mismatch: pin the fake to expect a DIFFERENT challenge than the
 	// one the BFF issued, so the real verifier hashes to the wrong value.
 	oauth.expectChallenge = s256("some-other-verifier-entirely")
 
-	crec := callback(t, s, oauth.validCode, pending.State)
+	crec := callback(t, s, oauth.validCode, pending.State, brec.Result().Cookies()...)
 	q := assertCallbackRedirect(t, crec, "/tools/add-mcp")
 	assert.Contains(t, q.Get("mcp_error"), "invalid_grant", "a rejected PKCE verifier surfaces the honest error, not a 500")
 	assert.False(t, createCalled, "a failed token exchange must create NO objects")
@@ -603,10 +868,10 @@ func TestMCPOAuthBadCodeIsHonestError(t *testing.T) {
 	c := registrantClient(t, interceptorCreateFlag(&createCalled))
 	s, _, _ := newMCPServer(t, c, false)
 
-	_, pending := registerOAuth(t, s, "badcode-mcp", mcp.URL, authFor(oauth))
+	brec, pending := registerOAuth(t, s, "badcode-mcp", mcp.URL, authFor(oauth))
 	oauth.expectChallenge = "" // pass PKCE; fail on the code instead
 
-	crec := callback(t, s, "not-the-real-code", pending.State)
+	crec := callback(t, s, "not-the-real-code", pending.State, brec.Result().Cookies()...)
 	q := assertCallbackRedirect(t, crec, "/tools/add-mcp")
 	assert.NotEmpty(t, q.Get("mcp_error"), "a bad code surfaces as an error redirect")
 	assert.False(t, createCalled)
@@ -719,9 +984,10 @@ func TestMCPOAuthCallbackViewerForbiddenSurfacesError(t *testing.T) {
 	var pending OAuthPendingResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pending))
 
-	crec := callback(t, s, oauth.validCode, pending.State)
+	crec := callback(t, s, oauth.validCode, pending.State, rec.Result().Cookies()...)
 	q := assertCallbackRedirect(t, crec, "/tools/add-mcp")
 	assert.NotEmpty(t, q.Get("mcp_error"), "a viewer's denied create must surface as an error, not a swallowed success")
+	assert.Equal(t, "authorization_code", oauth.gotGrant, "the refusal is the create's, after the exchange")
 }
 
 // TestMCPOAuthRegisterMissingFieldsAre400 proves an OAuth register missing a
@@ -736,7 +1002,6 @@ func TestMCPOAuthRegisterMissingFieldsAre400(t *testing.T) {
 		{"no-auth-endpoint", &MCPAuthRequest{Type: "oauth", TokenEndpoint: "https://x/token", ClientID: "id", RedirectURI: "https://x/cb"}},
 		{"no-token-endpoint", &MCPAuthRequest{Type: "oauth", AuthorizationEndpoint: "https://x/authorize", ClientID: "id", RedirectURI: "https://x/cb"}},
 		{"no-client-id", &MCPAuthRequest{Type: "oauth", AuthorizationEndpoint: "https://x/authorize", TokenEndpoint: "https://x/token", RedirectURI: "https://x/cb"}},
-		{"no-redirect", &MCPAuthRequest{Type: "oauth", AuthorizationEndpoint: "https://x/authorize", TokenEndpoint: "https://x/token", ClientID: "id"}},
 		{"relative-endpoint", &MCPAuthRequest{Type: "oauth", AuthorizationEndpoint: "/authorize", TokenEndpoint: "https://x/token", ClientID: "id", RedirectURI: "https://x/cb"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

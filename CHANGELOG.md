@@ -54,6 +54,17 @@ included. A viewer could use it to reach internal addresses. Naming those endpoi
 permission to update the server, the permission saving them takes. Anyone else gets the endpoints
 discovered from the server's own URL.
 
+**Security: an OAuth consent link could connect someone else's account to yours.** The callback
+that finishes an MCP OAuth connection trusted its `state` alone. Anyone who could start a consent
+could send the authorization link to someone else, and if they approved it, their upstream tokens
+were stored under the sender's identity. The response that starts a connection now sets a cookie
+in that browser, and the callback refuses any other browser before the code is exchanged. The
+cookie is `__Host-` prefixed over HTTPS. Registering an OAuth server now always uses the BFF's own
+callback as its `redirect_uri`; a `redirectUri` in the request is ignored. **Behaviour change:** a
+connection must be finished in the browser, and at the address, where it started. With
+`bff.consoleURL` set, start consent from the console at that URL: Connect from an agent's own
+hostname, or from the console reached at another address, is refused.
+
 **Fixed: the console never recognised a real tool call in a trace.** Langfuse records the
 platform's tool calls as `TOOL` observations, and the run inspector and trace explorer only
 treated `SPAN`s as tools. A tool call showed as an internal step, and the run inspector opened on

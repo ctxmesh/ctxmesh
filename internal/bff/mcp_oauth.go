@@ -116,9 +116,9 @@ type mcpOAuthConfig struct {
 	ClientID string `json:"clientId"`
 	// Scope is the requested scope string (space-delimited); optional.
 	Scope string `json:"scope"`
-	// RedirectURI is the callback the authorization server redirects back to. It
-	// MUST match the BFF's own callback route; the SPA passes the absolute URL it
-	// was served from so it is registered with the auth server out-of-band.
+	// RedirectURI is the callback the authorization server redirects back to: always
+	// the BFF's canonical callback (canonicalOrigin + mcpOAuthCallbackPath), set
+	// server-side.
 	RedirectURI string `json:"redirectUri"`
 }
 
