@@ -840,9 +840,9 @@ describe("PlaygroundPage — RBAC-gated Run/Apply", () => {
     );
   }
 
-  function renderGated() {
+  function renderGated(initialEntry = "/playground") {
     return render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <NamespaceProvider>
           <CapabilitiesProvider>
             <PlaygroundPage />
@@ -861,6 +861,24 @@ describe("PlaygroundPage — RBAC-gated Run/Apply", () => {
     // Preview stays available; Apply is hidden until a preview + create right.
     expect(screen.getByRole("button", { name: /Preview CRD/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Apply to cluster/ })).toBeNull();
+  });
+
+  it("gives a viewer in chat mode the read-only note where the chat would be, and no mode toggle", async () => {
+    installFetch(false);
+    renderGated();
+    const note = await screen.findByTestId("run-readonly-note");
+    expect(screen.getByTestId("playground-chat-mode")).toContainElement(note);
+    expect(screen.getAllByTestId("run-readonly-note")).toHaveLength(1);
+    expect(screen.queryByTestId("playground-mode-chat")).toBeNull();
+    expect(screen.queryByTestId("playground-mode-json")).toBeNull();
+  });
+
+  it("gives a viewer on a JSON request the read-only note where the Run button would be", async () => {
+    installFetch(false);
+    renderGated("/playground?mode=json");
+    const note = await screen.findByTestId("run-readonly-note");
+    expect(screen.getByTestId("playground-chat-mode")).not.toContainElement(note);
+    expect(screen.getAllByTestId("run-readonly-note")).toHaveLength(1);
   });
 
   it("shows Run + Apply for an operator (create allowed)", async () => {
@@ -968,7 +986,8 @@ describe("PlaygroundPage — plain-text chat by default (m184.15)", () => {
 
     renderPage("/playground?agent=echo&ns=prod");
     fireEvent.click(screen.getByTestId("playground-mode-json"));
-    expect(screen.queryByTestId("chat-panel")).toBeNull();
+    // The chat is hidden, not unmounted, so a conversation survives the switch (see below).
+    expect(screen.getByTestId("playground-chat-mode")).not.toBeVisible();
     fill("Message (JSON)", '{"prompt":"hi","limit":3}');
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
@@ -977,6 +996,30 @@ describe("PlaygroundPage — plain-text chat by default (m184.15)", () => {
     expect(JSON.parse(createCall!.body).input).toEqual({ prompt: "hi", limit: 3 });
     expect(screen.getByTestId("view-full-trace")).toHaveAttribute("href", "/traces/trace-xyz");
     expect(screen.getByTestId("run-took")).toHaveTextContent("1.25s");
+  });
+
+  it("keeps the conversation when switching to a JSON request and back", async () => {
+    recordingFetch({
+      run: { detail: finished },
+      agents: [{ name: "echo", namespace: "prod" }],
+      agentDetails: { "prod/echo": readyDetail("prod", "echo") },
+    });
+
+    renderPage("/playground?agent=echo&ns=prod");
+    fireEvent.change(await screen.findByTestId("chat-input"), { target: { value: "hello there" } });
+    fireEvent.click(screen.getByTestId("chat-send"));
+    await waitFor(() => expect(screen.getByTestId("chat-turn-agent")).toHaveTextContent("MOCK_OK"));
+
+    fireEvent.click(screen.getByTestId("playground-mode-json"));
+    expect(screen.getByTestId("playground-chat-mode")).not.toBeVisible();
+    expect(screen.getByTestId("playground-json-mode")).toBeVisible();
+    expect(screen.getByLabelText("Message (JSON)")).toBeVisible();
+
+    fireEvent.click(screen.getByTestId("playground-mode-chat"));
+    expect(screen.getByTestId("playground-chat-mode")).toBeVisible();
+    expect(screen.getByTestId("playground-json-mode")).not.toBeVisible();
+    expect(screen.getByTestId("chat-turn-user")).toHaveTextContent("hello there");
+    expect(screen.getByTestId("chat-turn-agent")).toHaveTextContent("MOCK_OK");
   });
 
   it("holds Send while the agent's model route is still loading (ADR 0151)", async () => {

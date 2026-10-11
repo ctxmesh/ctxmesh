@@ -1,3 +1,4 @@
+import * as React from "react";
 import { Link } from "react-router-dom";
 
 import { Badge, type BadgeProps } from "@/components/ui/badge";
@@ -27,7 +28,8 @@ import type {
 //
 // data-testid contract:
 //   agent-bindings-panel · bindings-attention · bindings-group-<group>
-//   dep-<kind>-<name> · dep-state-<kind>-<name> · dep-fix-<kind>-<name>
+//   dep-<id> · dep-state-<id> · dep-reason-<id> · dep-fix-<id>, where <id> is <kind>-<name>, or
+//   approver-<User|Group>-<name> so a user and a group of one name stay two rows
 //   approvals-anyone-note · approvals-unused-note
 
 type Group = {
@@ -168,8 +170,14 @@ function subline(d: AgentDependency): string {
   return parts.join(" · ");
 }
 
+/** A row's identity: an approver is a user or a group, and both may carry one name. */
+function rowId(d: AgentDependency): string {
+  if (d.kind === "approver" && d.detail) return `approver-${d.detail}-${d.name}`;
+  return `${d.kind}-${d.name || "unlisted"}`;
+}
+
 function DependencyRow({ d }: { d: AgentDependency }) {
-  const id = `${d.kind}-${d.name || "unlisted"}`;
+  const id = rowId(d);
   const tag = stateTag(d);
   const page = pageFor(d);
   const fix = fixFor(d);
@@ -183,6 +191,10 @@ function DependencyRow({ d }: { d: AgentDependency }) {
     d.state === "unknown" ||
     (!!d.message &&
       (d.state === "declared" || d.reason === "PartiallyIngested" || d.reason === "Ingesting"));
+  // The explanation names the reason; a row without one shows it on its own line rather than only
+  // in a tooltip, unless it would just repeat the tag.
+  const reason = d.reason ? humanizeStatusReason(d.reason) : "";
+  const reasonLine = !explain && reason !== "" && reason.toLowerCase() !== tag.label.toLowerCase();
   return (
     <li
       className="flex min-w-0 flex-col gap-1 border-b border-border-soft py-2.5 last:border-b-0"
@@ -201,13 +213,13 @@ function DependencyRow({ d }: { d: AgentDependency }) {
             )}
           </p>
           {sub && <p className="truncate text-xs text-faint">{sub}</p>}
+          {reasonLine && (
+            <p className="truncate text-xs text-faint" data-testid={`dep-reason-${id}`}>
+              {reason}
+            </p>
+          )}
         </div>
-        <Badge
-          variant={tag.variant}
-          className="shrink-0"
-          data-testid={`dep-state-${id}`}
-          title={d.reason ? humanizeStatusReason(d.reason) : undefined}
-        >
+        <Badge variant={tag.variant} className="shrink-0" data-testid={`dep-state-${id}`}>
           {tag.label}
         </Badge>
       </div>
@@ -230,6 +242,7 @@ function DependencyRow({ d }: { d: AgentDependency }) {
 
 export function AgentBindingsPanel({ detail }: { detail: AgentDetailResponse }) {
   const deps = detail.dependencies;
+  const headingId = React.useId();
   const attention = deps ? deps.filter(blocking).length : 0;
 
   return (
@@ -266,14 +279,20 @@ export function AgentBindingsPanel({ detail }: { detail: AgentDetailResponse }) 
               {GROUPS.map((g) => {
                 const rows = deps.filter((d) => g.kinds.includes(d.kind));
                 return (
-                  <section key={g.id} data-testid={`bindings-group-${g.id}`} aria-label={g.title}>
-                    <h3 className="font-serif text-md font-medium">{g.title}</h3>
+                  <section
+                    key={g.id}
+                    data-testid={`bindings-group-${g.id}`}
+                    aria-labelledby={`${headingId}-${g.id}`}
+                  >
+                    <h3 id={`${headingId}-${g.id}`} className="font-serif text-md font-medium">
+                      {g.title}
+                    </h3>
                     {rows.length === 0 ? (
                       <p className="mt-1 text-sm text-faint">{g.empty}</p>
                     ) : (
                       <ul className="mt-1">
                         {rows.map((d) => (
-                          <DependencyRow key={`${d.kind}/${d.namespace ?? ""}/${d.name}`} d={d} />
+                          <DependencyRow key={`${rowId(d)}/${d.namespace ?? ""}`} d={d} />
                         ))}
                       </ul>
                     )}

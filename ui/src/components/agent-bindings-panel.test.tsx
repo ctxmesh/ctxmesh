@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -79,6 +79,10 @@ const EVERY_KIND: AgentDependency[] = [
   },
 ];
 
+// A row's testid: <kind>-<name>, except an approver, which also carries whether it is a user or a group.
+const rowTestId = (d: AgentDependency) =>
+  d.kind === "approver" ? `approver-${d.detail}-${d.name}` : `${d.kind}-${d.name}`;
+
 describe("AgentBindingsPanel", () => {
   it("lists every reference kind, each with its resolved state", () => {
     renderPanel(EVERY_KIND);
@@ -86,12 +90,12 @@ describe("AgentBindingsPanel", () => {
     expect(panel).toHaveTextContent("11 references");
 
     for (const d of EVERY_KIND) {
-      expect(screen.getByTestId(`dep-${d.kind}-${d.name}`)).toBeInTheDocument();
+      expect(screen.getByTestId(`dep-${rowTestId(d)}`)).toBeInTheDocument();
     }
     expect(screen.getByTestId("dep-state-secretBinding-openai-key")).toHaveTextContent("ready");
     expect(screen.getByTestId("dep-state-knowledgeBase-handbook")).toHaveTextContent("ready");
     expect(screen.getByTestId("dep-state-sessionMemory-session")).toHaveTextContent("declared");
-    expect(screen.getByTestId("dep-state-approver-finance")).toHaveTextContent("declared");
+    expect(screen.getByTestId("dep-state-approver-Group-finance")).toHaveTextContent("declared");
     expect(screen.getByTestId("dep-state-feedbackSource-human")).toHaveTextContent("declared");
     // A reference the caller cannot read claims nothing — neither ready nor missing.
     const hidden = screen.getByTestId("dep-state-knowledgeBase-secret-docs");
@@ -254,6 +258,39 @@ describe("AgentBindingsPanel", () => {
     const model = screen.getByTestId("bindings-group-model");
     expect(model).toHaveTextContent("No model route");
     expect(model).not.toHaveTextContent("no model to call");
+  });
+
+  it("keeps a user and a group of the same name as two rows", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    renderPanel([
+      { kind: "approvalRule", name: "create_refund", state: "declared" },
+      { kind: "approver", name: "finance", detail: "User", state: "declared" },
+      { kind: "approver", name: "finance", detail: "Group", state: "declared" },
+    ]);
+    expect(screen.getByTestId("dep-approver-User-finance")).toHaveTextContent("User");
+    expect(screen.getByTestId("dep-approver-Group-finance")).toHaveTextContent("Group");
+    expect(errors.mock.calls.some((c) => String(c[0]).includes("same key"))).toBe(false);
+    errors.mockRestore();
+  });
+
+  it("shows a row's reason as text, not only in a tooltip, unless it repeats the tag", () => {
+    renderPanel(EVERY_KIND);
+    expect(screen.getByTestId("dep-reason-secretBinding-openai-key")).toHaveTextContent("Resolved");
+    expect(screen.getByTestId("dep-state-secretBinding-openai-key")).not.toHaveAttribute("title");
+    // A ready knowledge base's reason is "Ready", which the tag already says.
+    expect(screen.queryByTestId("dep-reason-knowledgeBase-handbook")).toBeNull();
+    // A row that explains itself names its reason in the explanation.
+    expect(screen.getByTestId("dep-guardrailPolicy-pii")).toHaveTextContent("GuardrailPolicyNotFound");
+    expect(screen.queryByTestId("dep-reason-guardrailPolicy-pii")).toBeNull();
+  });
+
+  it("labels each group's section with its heading", () => {
+    renderPanel(EVERY_KIND);
+    const model = screen.getByRole("region", { name: "Model" });
+    expect(model).toBe(screen.getByTestId("bindings-group-model"));
+    const heading = within(model).getByRole("heading", { name: "Model" });
+    expect(model).toHaveAttribute("aria-labelledby", heading.id);
+    expect(model).not.toHaveAttribute("aria-label");
   });
 
   it("does not guess when the server sent no references", () => {

@@ -108,6 +108,7 @@ import {
 // data-testid contract:
 //   playground-namespace / playground-agent — the identity pickers
 //   playground-mode-chat / playground-mode-json — plain text (default) or a JSON request
+//   playground-chat-mode / playground-json-mode — each mode's column; the other is hidden, not unmounted
 //   playground-chat-empty / -loading / -missing / -invalid / -error — the chat column before a chat
 //   chat-panel and its own chat-* ids — the chat itself (agent-chat.tsx)
 //   playground-advanced      — the define-and-export fields disclosure
@@ -536,7 +537,7 @@ export function PlaygroundPage() {
   } = useChatAgent(
     chatNamespace,
     agentName,
-    mode === "chat" && canRun && agentName !== "" && !nameError && ambiguousHomes.length === 0,
+    canRun && agentName !== "" && !nameError && ambiguousHomes.length === 0,
   );
 
   // A namespace/name option names both; anything else is a name, picked or typed.
@@ -892,10 +893,27 @@ export function PlaygroundPage() {
     );
   }
 
+  // RBAC-aware chrome: a viewer has no composer and no Run button (running is a write-shaped op),
+  // so the place each would be says why. It renders in one place at a time: under the form for a
+  // JSON request, as the chat column in chat mode.
+  const readOnlyNote = (
+    <div data-testid="run-readonly-note">
+      <QuietNote title="You have read-only access.">
+        Running an agent needs create permission on AgentDeployments — ask an admin for a role
+        that has it. Previewing and exporting the definition stay available.
+      </QuietNote>
+    </div>
+  );
+
   let chatColumn: React.ReactNode = null;
   if (!canRun) {
-    // The read-only note under the form says why; there is no composer to offer.
-    chatColumn = null;
+    chatColumn =
+      mode === "chat" ? (
+        <Card className="min-w-0">
+          <PanelHeader title="Chat" />
+          <CardContent>{readOnlyNote}</CardContent>
+        </Card>
+      ) : null;
   } else if (!agentName) {
     chatColumn = chatPlaceholder(
       "playground-chat-empty",
@@ -1050,43 +1068,46 @@ export function PlaygroundPage() {
                 />
               </FormField>
 
-              <div className="space-y-2">
-                <p className="text-sm font-medium" id="playground-mode-label">
-                  How to talk to it
-                </p>
-                <div
-                  role="group"
-                  aria-labelledby="playground-mode-label"
-                  className="inline-flex rounded-md border border-border bg-surface-2 p-0.5"
-                >
-                  {(
-                    [
-                      ["chat", "Plain text"],
-                      ["json", "JSON request"],
-                    ] as const
-                  ).map(([m, label]) => (
-                    <button
-                      key={m}
-                      type="button"
-                      aria-pressed={mode === m}
-                      data-testid={`playground-mode-${m}`}
-                      onClick={() => setMode(m)}
-                      className={
-                        mode === m
-                          ? "rounded-sm bg-card px-3 py-1.5 text-sm font-medium text-foreground shadow-sm"
-                          : "rounded-sm px-3 py-1.5 text-sm text-secondary-foreground hover:text-foreground"
-                      }
-                    >
-                      {label}
-                    </button>
-                  ))}
+              {/* A viewer can run neither, so there is no choice to offer. */}
+              {canRun && (
+                <div className="space-y-2">
+                  <p className="text-sm font-medium" id="playground-mode-label">
+                    How to talk to it
+                  </p>
+                  <div
+                    role="group"
+                    aria-labelledby="playground-mode-label"
+                    className="inline-flex rounded-md border border-border bg-surface-2 p-0.5"
+                  >
+                    {(
+                      [
+                        ["chat", "Plain text"],
+                        ["json", "JSON request"],
+                      ] as const
+                    ).map(([m, label]) => (
+                      <button
+                        key={m}
+                        type="button"
+                        aria-pressed={mode === m}
+                        data-testid={`playground-mode-${m}`}
+                        onClick={() => setMode(m)}
+                        className={
+                          mode === m
+                            ? "rounded-sm bg-card px-3 py-1.5 text-sm font-medium text-foreground shadow-sm"
+                            : "rounded-sm px-3 py-1.5 text-sm text-secondary-foreground hover:text-foreground"
+                        }
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-faint">
+                    {mode === "chat"
+                      ? 'Each message is sent as {"input": "…"}, the shape a chat agent reads. Use a JSON request for an agent that takes a structured object.'
+                      : "The object below is posted verbatim to the agent. Switch back to plain text to chat; a conversation started there is kept."}
+                  </p>
                 </div>
-                <p className="text-xs text-faint">
-                  {mode === "chat"
-                    ? 'Each message is sent as {"input": "…"}, the shape a chat agent reads. Use a JSON request for an agent that takes a structured object.'
-                    : "The object below is posted verbatim to the agent. Switch back to plain text to chat."}
-                </p>
-              </div>
+              )}
 
               {mode === "json" && (
                 <FormField
@@ -1192,15 +1213,7 @@ export function PlaygroundPage() {
                   </>
                 )
               ) : (
-                // RBAC-aware chrome: a viewer has no Run affordance (running is
-                // a write-shaped op). They can still Preview/Export below.
-                <div data-testid="run-readonly-note">
-                  <QuietNote title="You have read-only access.">
-                    Running an agent needs create permission on AgentDeployments —
-                    ask an admin for a role that has it. Previewing and exporting
-                    the definition stay available.
-                  </QuietNote>
-                </div>
+                mode === "json" && readOnlyNote
               )}
             </div>
             {mode === "json" && run.kind === "error" && !run.forbidden && (
@@ -1225,174 +1238,175 @@ export function PlaygroundPage() {
           id="run-story"
           className="min-w-0 space-y-5 lg:col-start-2 lg:row-start-1"
         >
-          {mode === "chat" ? (
-            chatColumn
-          ) : (
-            <>
-              <Card className="min-w-0" data-testid="chat-transcript">
-                <PanelHeader
-                  title="What happened"
-                  meta={
-                    story.length > 0 ? (
-                      <span className="tabular-nums">
-                        {story.length} step{story.length === 1 ? "" : "s"}
+          {/* Both modes stay mounted and the other one is hidden, so switching to a JSON
+              request and back does not throw the conversation away. */}
+          <div hidden={mode !== "chat"} className="min-w-0" data-testid="playground-chat-mode">
+            {chatColumn}
+          </div>
+          <div hidden={mode !== "json"} className="min-w-0 space-y-5" data-testid="playground-json-mode">
+            <Card className="min-w-0" data-testid="chat-transcript">
+              <PanelHeader
+                title="What happened"
+                meta={
+                  story.length > 0 ? (
+                    <span className="tabular-nums">
+                      {story.length} step{story.length === 1 ? "" : "s"}
+                    </span>
+                  ) : undefined
+                }
+              >
+                {tag ? <Badge variant={tag.variant}>{tag.label}</Badge> : null}
+              </PanelHeader>
+              <CardContent>
+                {story.length === 0 ? (
+                  <QuietNote title="Nothing has run yet.">
+                    Pick an agent, write the message it should receive, and press{" "}
+                    <span className="font-medium">Run agent</span>. Every step the
+                    run takes appears here in order, and the full trace is one link
+                    from it.
+                  </QuietNote>
+                ) : (
+                  <>
+                    <Timeline steps={story} label="Steps in this run" />
+                    {closing && <ClosingNote>{closing}</ClosingNote>}
+                  </>
+                )}
+              </CardContent>
+            </Card>
+
+            {started && (
+              <Card className="min-w-0">
+                <PanelHeader title="What it produced">
+                  {run.kind === "running" && (
+                    <>
+                      <span className="text-xs text-faint" data-testid="run-streaming">
+                        Streaming…
                       </span>
-                    ) : undefined
-                  }
-                >
-                  {tag ? <Badge variant={tag.variant}>{tag.label}</Badge> : null}
+                      {run.step && (
+                        <Badge
+                          variant="progressing"
+                          className="max-w-[12rem] overflow-hidden"
+                          data-testid="run-step"
+                        >
+                          <span className="block truncate">{run.step}</span>
+                        </Badge>
+                      )}
+                    </>
+                  )}
                 </PanelHeader>
                 <CardContent>
-                  {story.length === 0 ? (
-                    <QuietNote title="Nothing has run yet.">
-                      Pick an agent, write the message it should receive, and press{" "}
-                      <span className="font-medium">Run agent</span>. Every step the
-                      run takes appears here in order, and the full trace is one link
-                      from it.
-                    </QuietNote>
-                  ) : (
-                    <>
-                      <Timeline steps={story} label="Steps in this run" />
-                      {closing && <ClosingNote>{closing}</ClosingNote>}
-                    </>
+                  {/* The agent's answer is prose as often as it is JSON, so this
+                      well wraps (`pre-wrap` + `break-words`, never `break-all`)
+                      rather than scrolling like the YAML well below — a paragraph
+                      on a horizontal scrollbar is unreadable. It still owns its
+                      own height. */}
+                  <div
+                    role="region"
+                    aria-label="Agent response"
+                    tabIndex={0}
+                    className="max-h-[24rem] overflow-auto rounded-md bg-surface-3 p-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    {response ? (
+                      <p className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
+                        {response}
+                      </p>
+                    ) : (
+                      <p className="font-mono text-xs text-ghost">
+                        {run.kind === "running"
+                          ? "waiting for the first token…"
+                          : "the run returned no content"}
+                      </p>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {consent.length > 0 && (
+              // A 2px hold rule, not a hold fill: §2.2 allows exactly two
+              // full-bleed semantic surfaces console-wide and this is not one.
+              <Card className="min-w-0 border-l-2 border-l-hold">
+                <PanelHeader title="Connect your account to continue" />
+                <CardContent className="space-y-3">
+                  <p className="text-sm text-secondary-foreground">
+                    This run needs your own credentials, not the platform's.
+                    Connect and it re-runs automatically — nothing has been lost.
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {consent.map((server) => (
+                      <Button
+                        key={server}
+                        size="sm"
+                        variant="outline"
+                        disabled={connecting !== null}
+                        onClick={() => void onConnect(server)}
+                        data-testid={`connect-${server}`}
+                      >
+                        {connecting === server ? "Connecting…" : `Connect ${server}`}
+                      </Button>
+                    ))}
+                  </div>
+                  {connectError && (
+                    <p
+                      className="font-mono text-xs text-destructive"
+                      role="alert"
+                      data-testid="connect-error"
+                    >
+                      {connectError}
+                    </p>
                   )}
                 </CardContent>
               </Card>
+            )}
 
-              {started && (
-                <Card className="min-w-0">
-                  <PanelHeader title="What it produced">
-                    {run.kind === "running" && (
-                      <>
-                        <span className="text-xs text-faint" data-testid="run-streaming">
-                          Streaming…
-                        </span>
-                        {run.step && (
-                          <Badge
-                            variant="progressing"
-                            className="max-w-[12rem] overflow-hidden"
-                            data-testid="run-step"
-                          >
-                            <span className="block truncate">{run.step}</span>
-                          </Badge>
-                        )}
-                      </>
-                    )}
-                  </PanelHeader>
-                  <CardContent>
-                    {/* The agent's answer is prose as often as it is JSON, so this
-                        well wraps (`pre-wrap` + `break-words`, never `break-all`)
-                        rather than scrolling like the YAML well below — a paragraph
-                        on a horizontal scrollbar is unreadable. It still owns its
-                        own height. */}
-                    <div
-                      role="region"
-                      aria-label="Agent response"
-                      tabIndex={0}
-                      className="max-h-[24rem] overflow-auto rounded-md bg-surface-3 p-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            {approval && (
+              <Card
+                className="min-w-0 border-l-2 border-l-hold"
+                data-testid="approval-request"
+              >
+                <PanelHeader title="Your decision" />
+                <CardContent className="space-y-4">
+                  <p className="text-sm text-secondary-foreground">
+                    This run is holding on one step. Approving lets it continue;
+                    denying stops it for good. It is held, not failed — the tool
+                    has not been called.
+                  </p>
+                  {approval.summary && (
+                    <p className="border-l-2 border-l-hold bg-surface-2 px-4 py-3 font-serif text-md italic">
+                      {approval.summary}
+                    </p>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      disabled={running}
+                      onClick={() => void onApprove(approval.runId)}
+                      data-testid="approve-run"
                     >
-                      {response ? (
-                        <p className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
-                          {response}
-                        </p>
-                      ) : (
-                        <p className="font-mono text-xs text-ghost">
-                          {run.kind === "running"
-                            ? "waiting for the first token…"
-                            : "the run returned no content"}
-                        </p>
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-              )}
+                      Approve
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={running}
+                      onClick={() => void onDeny(approval.runId)}
+                      data-testid="deny-run"
+                    >
+                      Deny
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
-              {consent.length > 0 && (
-                // A 2px hold rule, not a hold fill: §2.2 allows exactly two
-                // full-bleed semantic surfaces console-wide and this is not one.
-                <Card className="min-w-0 border-l-2 border-l-hold">
-                  <PanelHeader title="Connect your account to continue" />
-                  <CardContent className="space-y-3">
-                    <p className="text-sm text-secondary-foreground">
-                      This run needs your own credentials, not the platform's.
-                      Connect and it re-runs automatically — nothing has been lost.
-                    </p>
-                    <div className="flex flex-wrap gap-2">
-                      {consent.map((server) => (
-                        <Button
-                          key={server}
-                          size="sm"
-                          variant="outline"
-                          disabled={connecting !== null}
-                          onClick={() => void onConnect(server)}
-                          data-testid={`connect-${server}`}
-                        >
-                          {connecting === server ? "Connecting…" : `Connect ${server}`}
-                        </Button>
-                      ))}
-                    </div>
-                    {connectError && (
-                      <p
-                        className="font-mono text-xs text-destructive"
-                        role="alert"
-                        data-testid="connect-error"
-                      >
-                        {connectError}
-                      </p>
-                    )}
-                  </CardContent>
-                </Card>
-              )}
-
-              {approval && (
-                <Card
-                  className="min-w-0 border-l-2 border-l-hold"
-                  data-testid="approval-request"
-                >
-                  <PanelHeader title="Your decision" />
-                  <CardContent className="space-y-4">
-                    <p className="text-sm text-secondary-foreground">
-                      This run is holding on one step. Approving lets it continue;
-                      denying stops it for good. It is held, not failed — the tool
-                      has not been called.
-                    </p>
-                    {approval.summary && (
-                      <p className="border-l-2 border-l-hold bg-surface-2 px-4 py-3 font-serif text-md italic">
-                        {approval.summary}
-                      </p>
-                    )}
-                    <div className="flex flex-wrap gap-2">
-                      <Button
-                        size="sm"
-                        disabled={running}
-                        onClick={() => void onApprove(approval.runId)}
-                        data-testid="approve-run"
-                      >
-                        Approve
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={running}
-                        onClick={() => void onDeny(approval.runId)}
-                        data-testid="deny-run"
-                      >
-                        Deny
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              )}
-
-              {run.kind === "done" && run.nodes && run.nodes.length > 0 && (
-                <WorkflowGraphSection
-                  nodes={run.nodes}
-                  currentNode={run.currentNode}
-                  runStatus={run.runStatus}
-                />
-              )}
-            </>
-          )}
+            {run.kind === "done" && run.nodes && run.nodes.length > 0 && (
+              <WorkflowGraphSection
+                nodes={run.nodes}
+                currentNode={run.currentNode}
+                runStatus={run.runStatus}
+              />
+            )}
+          </div>
 
           <Card className="min-w-0">
             <PanelHeader title="The record" />
