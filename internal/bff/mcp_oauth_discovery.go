@@ -166,6 +166,9 @@ func discoverMCPOAuthConfig(
 	if asMeta.AuthorizationEndpoint == "" || asMeta.TokenEndpoint == "" {
 		return mcpOAuthConfig{}, &oauthDiscoveryError{msg: "the authorization server metadata is missing its authorize/token endpoints"}
 	}
+	if !isAbsoluteHTTPURL(asMeta.AuthorizationEndpoint) || !isAbsoluteHTTPURL(asMeta.TokenEndpoint) {
+		return mcpOAuthConfig{}, &oauthDiscoveryError{msg: "the authorization server metadata names an authorize or token endpoint that is not an absolute http or https URL"}
+	}
 
 	scope := strings.Join(asMeta.ScopesSupported, " ")
 

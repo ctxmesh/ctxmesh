@@ -147,18 +147,28 @@ func (c mcpOAuthConfig) validate() *createError {
 	if strings.TrimSpace(c.RedirectURI) == "" {
 		return &createError{status: http.StatusBadRequest, msg: "auth.redirectUri is required for an OAuth MCP server"}
 	}
-	// The endpoints must be absolute URLs so the browser redirect + server-side
-	// exchange target a real host (never a relative/garbage value).
+	// The endpoints must be absolute http(s) URLs: the browser is sent to the authorization
+	// endpoint, so any other scheme (javascript:, data:) would run in the page that navigates there.
 	for _, ep := range []struct{ name, val string }{
 		{"authorizationEndpoint", c.AuthorizationEndpoint},
 		{"tokenEndpoint", c.TokenEndpoint},
 	} {
-		u, err := url.Parse(strings.TrimSpace(ep.val))
-		if err != nil || u.Scheme == "" || u.Host == "" {
-			return &createError{status: http.StatusBadRequest, msg: fmt.Sprintf("auth.%s must be an absolute URL", ep.name)}
+		if !isAbsoluteHTTPURL(ep.val) {
+			return &createError{status: http.StatusBadRequest, msg: fmt.Sprintf("auth.%s must be an absolute http or https URL", ep.name)}
 		}
 	}
 	return nil
+}
+
+// isAbsoluteHTTPURL reports whether raw is an absolute http or https URL with a host. http stays
+// allowed: dev clusters and the e2e OAuth fixture serve plain http.
+func isAbsoluteHTTPURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	return scheme == schemeHTTP || scheme == schemeHTTPS
 }
 
 // pendingOAuthFlow is one in-flight OAuth authorization, held SERVER-SIDE and
