@@ -62,8 +62,17 @@ in that browser, and the callback refuses any other browser before the code is e
 cookie is `__Host-` prefixed over HTTPS. Registering an OAuth server now always uses the BFF's own
 callback as its `redirect_uri`; a `redirectUri` in the request is ignored. **Behaviour change:** a
 connection must be finished in the browser, and at the address, where it started. With
-`bff.consoleURL` set, start consent from the console at that URL: Connect from an agent's own
-hostname, or from the console reached at another address, is refused.
+`bff.consoleURL` set, start consent from the console at that URL: Connect from the console
+reached at another address is refused. Connect in an agent's own chat goes through the console
+(below).
+
+**Fixed: Connect in an agent's own chat failed with `bff.consoleURL` set.** The connection is
+bound to the browser by a cookie on the console's address, which a chat at the agent's own
+hostname cannot set. Connect now gets a one-minute, single-use ticket from the agent's address,
+opens the console's new `/connect` page in a pop-up, and hands the ticket to that page by
+message; the page begins the connection on the console, in the same browser. The console accepts
+a ticket only from the hostname of the agent it was issued for, and never from a link. Pop-ups
+must be allowed for the agent's address.
 
 **Fixed: an OAuth connection failed when its callback reached another BFF replica.** Pending
 OAuth flows were kept in the memory of the BFF pod that started them, so with more than one

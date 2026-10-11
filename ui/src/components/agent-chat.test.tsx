@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -6,7 +6,7 @@ import { ChatPanel } from "@/components/agent-chat";
 import { CapabilitiesProvider } from "@/lib/capabilities";
 import { NamespaceProvider } from "@/lib/namespace";
 import { DevModeContext } from "@/lib/dev-mode";
-import { MCP_OAUTH_MESSAGE } from "@/lib/oauth-popup";
+import { MCP_CONSENT_READY, MCP_CONSENT_TICKET, MCP_OAUTH_MESSAGE } from "@/lib/oauth-popup";
 
 // ChatPanel converges on DURABLE runs (ADR 0093): each cluster chat turn is createRun →
 // openRunStream → finalize (getRun), so it becomes a first-class, observable run — instead of
@@ -117,6 +117,18 @@ function recordingFetch(run: RunMock = {}) {
           ok: true,
           status: 202,
           json: async () => ({ authorizationURL: "https://as.example/authorize?x=1", state: "st" }),
+          text: async () => "",
+        } as Response);
+      // Consent-ticket mint on an agent hostname (ADR 0040 amendment): 201 + the console page.
+      if (path === "/api/mcp/oauth/ticket" && method === "POST")
+        return Promise.resolve({
+          ok: true,
+          status: 201,
+          json: async () => ({
+            ticket: "tkt-secret-123",
+            connectURL: "https://console.example.com/connect",
+            expiresIn: 60,
+          }),
           text: async () => "",
         } as Response);
       // The dev-mode fallback path.
@@ -421,5 +433,105 @@ describe("ChatPanel — the agent's model route", () => {
     renderChat(false, "operator", { status: "True", reason: "Served", message: "ok" });
     await screen.findByTestId("chat-input");
     expect(screen.queryByTestId("chat-route-note")).toBeNull();
+  });
+});
+
+// On an agent hostname with a console origin configured, consent begins on the console (ADR 0040
+// amendment): the chat mints a ticket, opens the console's /connect page, and answers that page's
+// READY with the ticket, addressed to the console origin only.
+describe("ChatPanel consent on an agent hostname", () => {
+  const consoleOrigin = "https://console.example.com";
+  let meta: HTMLMetaElement;
+
+  beforeEach(() => {
+    meta = document.createElement("meta");
+    meta.name = "mcp-callback-origin";
+    meta.content = consoleOrigin;
+    document.head.appendChild(meta);
+  });
+  afterEach(() => {
+    meta.remove();
+    vi.unstubAllGlobals();
+  });
+
+  function message(data: unknown, origin: string, source: unknown): MessageEvent {
+    const e = new MessageEvent("message", { data, origin });
+    Object.defineProperty(e, "source", { value: source });
+    return e;
+  }
+
+  async function reachConsent() {
+    const calls = recordingFetch({
+      details: [
+        {
+          id: "run-1",
+          status: "requires_action",
+          traceId: "trace-consent",
+          messages: [{ role: "assistant", content: "please connect your account" }],
+          requiresAction: { kind: "consent_required", servers: ["scalekit-mcp-server"] },
+        },
+        {
+          id: "run-1",
+          status: "succeeded",
+          traceId: "trace-done",
+          messages: [{ role: "assistant", content: '{"output":"connected + done"}' }],
+        },
+      ],
+    });
+    renderChat(false);
+    await sendMessage("list orgs");
+    return { calls, connect: await screen.findByTestId("connect-scalekit-mcp-server") };
+  }
+
+  it("mints a ticket, opens /connect, and answers only the console page's ready", async () => {
+    const popup = { closed: false, postMessage: vi.fn() };
+    const openSpy = vi.fn((_url: string, _name?: string, _features?: string) => popup as unknown as Window);
+    vi.stubGlobal("open", openSpy);
+    const { calls, connect } = await reachConsent();
+
+    fireEvent.click(connect);
+    await waitFor(() => expect(openSpy).toHaveBeenCalled());
+    const mint = calls.find((c) => c.url === "/api/mcp/oauth/ticket");
+    expect(JSON.parse(mint!.body)).toEqual({
+      server: "scalekit-mcp-server",
+      namespace: "default",
+      agent: "scalekit-agent",
+    });
+    expect(calls.find((c) => c.url === "/api/mcp/oauth/grant")).toBeUndefined();
+    expect(openSpy.mock.calls[0][0]).toBe(`${consoleOrigin}/connect`);
+    expect(String(openSpy.mock.calls[0][0])).not.toContain("tkt-secret-123");
+
+    // A ready from any other origin, or from a window that is not the popup, gets nothing.
+    window.dispatchEvent(message({ type: MCP_CONSENT_READY }, "https://evil.example", popup));
+    window.dispatchEvent(message({ type: MCP_CONSENT_READY }, window.location.origin, popup));
+    window.dispatchEvent(message({ type: MCP_CONSENT_READY }, consoleOrigin, {}));
+    expect(popup.postMessage).not.toHaveBeenCalled();
+
+    // The console page's ready gets the ticket, to the console origin exactly, once.
+    window.dispatchEvent(message({ type: MCP_CONSENT_READY }, consoleOrigin, popup));
+    window.dispatchEvent(message({ type: MCP_CONSENT_READY }, consoleOrigin, popup));
+    expect(popup.postMessage).toHaveBeenCalledTimes(1);
+    expect(popup.postMessage).toHaveBeenCalledWith(
+      { type: MCP_CONSENT_TICKET, ticket: "tkt-secret-123" },
+      consoleOrigin,
+    );
+
+    // The callback's relay from the console resumes the same run.
+    window.dispatchEvent(
+      message({ type: MCP_OAUTH_MESSAGE, server: "scalekit-mcp-server", error: "" }, consoleOrigin, popup),
+    );
+    await waitFor(() =>
+      expect(calls.find((c) => c.url === "/api/runs/run-1/resume" && c.method === "POST")).toBeDefined(),
+    );
+  });
+
+  it("says so when the popup is blocked, and never redirects the chat away", async () => {
+    vi.stubGlobal("open", vi.fn(() => null));
+    const { connect } = await reachConsent();
+    const before = window.location.href;
+
+    fireEvent.click(connect);
+    expect(await screen.findByText(/blocked the sign-in window/)).toBeInTheDocument();
+    expect(window.location.href).toBe(before);
   });
 });

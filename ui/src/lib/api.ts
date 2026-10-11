@@ -1444,6 +1444,24 @@ export interface OAuthInitResponse {
   state: string;
 }
 
+// McpConsentTicket is a single-use consent ticket minted by a chatbox on an agent hostname
+// (POST /api/mcp/oauth/ticket, ADR 0040 amendment). It goes to the console's /connect page by
+// postMessage, never in a URL.
+export interface McpConsentTicket {
+  ticket: string;
+  // The console's /connect page, which redeems the ticket.
+  connectURL: string;
+  // The ticket's lifetime in seconds.
+  expiresIn: number;
+}
+
+// McpConsentRedeemResponse is the console's answer to a redeemed ticket: the authorization URL
+// the /connect page navigates to. No token, verifier or state.
+export interface McpConsentRedeemResponse {
+  status: string;
+  authorizationURL: string;
+}
+
 // McpApproval is one pending MCP server awaiting operator approval
 // (GET /api/mcp/approvals). The operator approves/rejects via
 // POST /api/mcp/approvals/{ns}/{name}[/reject].
@@ -3668,6 +3686,42 @@ export const api = {
       return (await res.json()) as OAuthInitResponse;
     }
     throw await apiError(res, `beginMcpGrant failed (${res.status})`);
+  },
+
+  // mintMcpConsentTicket asks the BFF at THIS origin (an agent hostname) for a single-use ticket
+  // that begins the caller's consent on the console origin, where the binding cookie must land
+  // (ADR 0040 amendment). 201 + { ticket, connectURL }.
+  mintMcpConsentTicket: (
+    req: { server: string; namespace?: string; agent: string },
+    signal?: AbortSignal,
+  ) =>
+    postJSON<{ server: string; namespace?: string; agent: string }, McpConsentTicket>(
+      "/api/mcp/oauth/ticket",
+      req,
+      signal,
+    ),
+
+  // redeemMcpConsentTicket is the console /connect page's call: the ticket is the credential, so
+  // no bearer is sent. openerOrigin is the origin the ticket's message came from; the BFF accepts
+  // only the hostname of the agent the ticket names. 202 + { authorizationURL }.
+  redeemMcpConsentTicket: async (
+    req: { ticket: string; openerOrigin: string },
+    signal?: AbortSignal,
+  ): Promise<McpConsentRedeemResponse> => {
+    const res = await apiFetch(
+      "/api/mcp/oauth/grant/redeem",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal,
+      },
+      { token: "" },
+    );
+    if (res.status === 202) {
+      return (await res.json()) as McpConsentRedeemResponse;
+    }
+    throw await apiError(res, `redeemMcpConsentTicket failed (${res.status})`);
   },
 
   // addMcpServerOAuth starts the OAuth 2.1 MCP connect flow. The BFF returns 202

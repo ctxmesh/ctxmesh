@@ -22,7 +22,10 @@ import { extractAgentOutput } from "@/lib/agent-output";
 import { cn } from "@/lib/utils";
 import {
   isValidHttpUrl,
+  MCP_CONSENT_READY,
+  MCP_CONSENT_TICKET,
   MCP_OAUTH_MESSAGE,
+  type McpConsentTicketMessage,
   type McpOAuthPopupMessage,
   readMcpOAuthReturn,
 } from "@/lib/oauth-popup";
@@ -455,21 +458,40 @@ export function ChatPanel({
   // onConnect runs the INLINE per-user consent (ADR 0031): begin the OAuth grant for the
   // named server, open the provider consent in a POPUP so the chat stays on screen, then
   // RESUME the same run (ADR 0093) when it completes so the fresh credential is injected. The
-  // token never touches the SPA (server-side exchange). Popup blocked → redirect fallback.
+  // token never touches the SPA (server-side exchange).
+  //
+  // On an agent's own hostname with a console origin configured, consent must begin on the
+  // console, where the one registered callback runs and the browser-binding cookie must land
+  // (ADR 0040 amendment). So the chat mints a single-use ticket here, opens the console's
+  // /connect page, and answers that page's READY with the ticket, addressed to the console
+  // origin only. Otherwise consent begins directly, and a blocked popup falls back to a
+  // same-tab redirect.
   async function onConnect(server: string, text: string, agentTurnId: number, runId?: string) {
     setConnectError(null);
     setConnecting(server);
-    let authorizationURL: string;
+    const consoleOrigin = mcpCallbackOrigin();
+    const viaConsole = consoleOrigin !== "" && consoleOrigin !== window.location.origin;
+    let target: string;
+    let ticket: string | null = null;
     try {
-      const res = await api.beginMcpGrant({
-        server,
-        namespace: ns,
-        // Scope the grant to THIS agent's trust boundary (its registry, or itself) — the
-        // consent empowers this agent's team, not every agent the user owns (ADR 0033).
-        agent: name,
-        redirectUri: `${window.location.origin}/api/mcp/oauth/callback`,
-      });
-      authorizationURL = res.authorizationURL;
+      if (viaConsole) {
+        const minted = await api.mintMcpConsentTicket({ server, namespace: ns, agent: name });
+        if (!isValidHttpUrl(minted.connectURL) || new URL(minted.connectURL).origin !== consoleOrigin) {
+          throw new Error("The console's connect page is not at the address this chat expects.");
+        }
+        target = minted.connectURL;
+        ticket = minted.ticket;
+      } else {
+        const res = await api.beginMcpGrant({
+          server,
+          namespace: ns,
+          // Scope the grant to THIS agent's trust boundary (its registry, or itself) — the
+          // consent empowers this agent's team, not every agent the user owns (ADR 0033).
+          agent: name,
+          redirectUri: `${window.location.origin}/api/mcp/oauth/callback`,
+        });
+        target = res.authorizationURL;
+      }
     } catch (err) {
       setConnecting(null);
       if (err instanceof ApiError && err.isForbidden) reprobe();
@@ -478,14 +500,22 @@ export function ChatPanel({
     }
 
     const popup = window.open(
-      authorizationURL,
+      target,
       "ctxmesh-oauth-connect",
       "width=520,height=680,menubar=no,toolbar=no",
     );
     if (!popup) {
+      if (ticket !== null) {
+        // The ticket reaches the console page only through the popup's link to this window.
+        setConnecting(null);
+        setConnectError(
+          "Your browser blocked the sign-in window. Allow pop-ups for this page, then press Connect again.",
+        );
+        return;
+      }
       // Popup blocked → same-tab redirect, but validate the URL first (DX-6) so a bad
       // authorizationURL can't hijack the tab.
-      if (isValidHttpUrl(authorizationURL)) window.location.href = authorizationURL;
+      if (isValidHttpUrl(target)) window.location.href = target;
       return;
     }
 
@@ -504,12 +534,21 @@ export function ChatPanel({
       void resumeTurn(text, agentTurnId, runId); // continue the SAME run with the fresh credential
     }
     function onMessage(e: MessageEvent) {
+      const data = e.data as { type?: string } | null;
+      // The console's /connect page is ready for the ticket: answer it once, and only to the
+      // console origin — never "*", which would hand the ticket to whatever the popup now shows.
+      if (ticket !== null && popup && e.source === popup && e.origin === consoleOrigin) {
+        if (data?.type === MCP_CONSENT_READY) {
+          const message: McpConsentTicketMessage = { type: MCP_CONSENT_TICKET, ticket };
+          ticket = null;
+          popup.postMessage(message, consoleOrigin);
+          return;
+        }
+      }
       // Accept the relay from our own origin OR the canonical console origin (ADR 0040) — the popup's
       // callback runs at the console origin, which is a different origin when the chatbox is served at
       // an agent hostname. Any other origin is ignored.
-      const callbackOrigin = mcpCallbackOrigin();
-      if (e.origin !== window.location.origin && !(callbackOrigin && e.origin === callbackOrigin)) return;
-      const data = e.data as { type?: string } | null;
+      if (e.origin !== window.location.origin && !(consoleOrigin && e.origin === consoleOrigin)) return;
       if (data?.type === MCP_OAUTH_MESSAGE) finish();
     }
     window.addEventListener("message", onMessage);

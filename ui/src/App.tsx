@@ -15,6 +15,7 @@ import { AgentsPage } from "@/pages/agents-page";
 import { AddMcpPage } from "@/pages/add-mcp-page";
 import { McpServersPage } from "@/pages/mcp-servers-page";
 import { McpApprovalsPage } from "@/pages/mcp-approvals-page";
+import { McpConnectPage } from "@/pages/mcp-connect-page";
 import { TemplateGalleryPage } from "@/pages/template-gallery-page";
 import { ToolCatalogPage } from "@/pages/tool-catalog-page";
 import { ConfigBuilderPage } from "@/pages/config-builder-page";
@@ -174,6 +175,9 @@ export function App() {
           <Route path="login" element={<LoginPage />} />
           {/* OIDC redirect target (ADR 0020) — public, completes Auth-Code+PKCE. */}
           <Route path="auth/callback" element={<AuthCallbackPage />} />
+          {/* MCP consent hand-off from a chat on an agent hostname (ADR 0040 amendment) —
+              public: the ticket the chat posts to it is the credential. */}
+          <Route path="connect" element={<McpConnectPage />} />
           {/* Public shared-run page (m75.4) — no auth, no app-shell chrome */}
           <Route path="shared/runs/:token" element={<SharedRunPage />} />
           {/* Standalone per-agent chatbox (m37) — authenticated (same console login) but
