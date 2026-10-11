@@ -162,7 +162,7 @@ func attachConversationID(w http.ResponseWriter, r *http.Request, id string) (*h
 // capability is the invoking user's HASHED identity (`sub`), the agent as the RFC 8693
 // actor, scoped to a fresh run id — the agent only ever relays it, never forges it.
 func (s *Server) attachRunCapability(r *http.Request, caller client.Client, agent, namespace string) *http.Request {
-	return s.attachRunCapabilityForRun(r, caller, agent, namespace, "")
+	return s.attachRunCapabilityForRun(r, caller, agent, namespace, "", "")
 }
 
 // attachRunCapabilityForRun is attachRunCapability with the capability's run id PINNED to runID (a
@@ -170,7 +170,11 @@ func (s *Server) attachRunCapability(r *http.Request, caller client.Client, agen
 // minted capability's `run` claim is a KNOWN value the BFF can also bind an approval voucher to — the
 // egress sidecar checks voucher.run == runcap.run, so both MUST carry the same id. An empty runID keeps
 // the /invoke behaviour (a fresh random run id). Mirrors run_worker.go, which already pins to rn.ID.
-func (s *Server) attachRunCapabilityForRun(r *http.Request, caller client.Client, agent, namespace, runID string) *http.Request {
+//
+// boundary is the run's own (rn.Boundary): a sub-run carries its parent's, so the grants it resolves are
+// the ones made for the agent the person is talking to, whichever agent asks. Empty ⇒ the agent's own
+// boundary, for a request that has no run yet.
+func (s *Server) attachRunCapabilityForRun(r *http.Request, caller client.Client, agent, namespace, boundary, runID string) *http.Request {
 	if s.capabilitySigner == nil {
 		return r // minting disabled — no platform capability key configured
 	}
@@ -183,7 +187,9 @@ func (s *Server) attachRunCapabilityForRun(r *http.Request, caller client.Client
 	if ns == "" {
 		ns = defaultCreateNamespace
 	}
-	boundary := agentBoundary(r.Context(), caller, ns, agent)
+	if boundary == "" {
+		boundary = agentBoundary(r.Context(), caller, ns, agent)
+	}
 	token, ok := s.mintRunCapability(username, ns, agent, boundary, runID)
 	if !ok {
 		return r

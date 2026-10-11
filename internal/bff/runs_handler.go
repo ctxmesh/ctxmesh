@@ -163,8 +163,9 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 	// approval-voucher protocol (ADR 0074 §3, m82.4) binds a voucher to the runcap's `run` claim, and
 	// the egress sidecar checks voucher.run == runcap.run — so both must carry the SAME id, which only
 	// works if the id is a value the BFF knows here (rn.ID). This mirrors the durable worker path,
-	// which already pins to rn.ID.
-	r = s.attachRunCapabilityForRun(r, caller, rn.Agent, rn.Namespace, rn.ID)
+	// which already pins to rn.ID — and mints in rn.Boundary, which for a sub-run is its parent's, so a
+	// consent given for the agent the person is talking to is found after the resume too.
+	r = s.attachRunCapabilityForRun(r, caller, rn.Agent, rn.Namespace, rn.Boundary, rn.ID)
 
 	// On approval, re-invoke with the approved key granted so the agent's pause_for_approval(key)
 	// proceeds instead of pausing again (the consent path re-invokes the same input unchanged — the

@@ -152,6 +152,13 @@ workspace got 403 on the page, and adding a trace to a dataset or labelling a ca
 with no workspace selected says so instead of asking. The dataset list also showed a dataset
 whose cases could not be read as having 0 cases; it is now an HTTP 500.
 
+**Fixed: a sub-agent asked for the same Connect again after it was given.** A sub-run works in
+its parent's trust boundary, so the account a person connects from the chat is stored for the agent
+they are talking to. Resuming the sub-run minted its run capability in the sub-agent's own boundary
+instead, so for a sub-agent outside any agent registry the credential plane found no grant and the
+run paused for consent again. A resumed run's capability is now minted in the run's own boundary,
+as the run worker already did.
+
 **Fixed: the chat looked stuck when a sub-agent needed a Connect or an approval.** A supervisor
 that delegated waits on its sub-agent's run, and when that run paused for consent or an approval
 the supervisor's run event stream only named it (`descendant-requires-action`), which the chat and

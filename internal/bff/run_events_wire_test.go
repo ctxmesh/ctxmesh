@@ -240,10 +240,12 @@ const (
 	goldenSupervisorAnswer   = "The researcher found 3 sources."
 )
 
-// scriptedInvoke answers each endpoint's calls in order, streaming a reply's tokens when it has any.
+// scriptedInvoke answers each endpoint's calls in order, streaming a reply's tokens when it has any,
+// and records the run capability each call carried.
 type scriptedInvoke struct {
 	mu      sync.Mutex
 	replies map[string][]scriptedReply
+	caps    map[string][]string
 }
 
 type scriptedReply struct {
@@ -251,9 +253,13 @@ type scriptedReply struct {
 	body   string
 }
 
-func (s *scriptedInvoke) next(endpoint string) (scriptedReply, error) {
+func (s *scriptedInvoke) next(ctx context.Context, endpoint string) (scriptedReply, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.caps == nil {
+		s.caps = map[string][]string{}
+	}
+	s.caps[endpoint] = append(s.caps[endpoint], runCapabilityFromContext(ctx))
 	q := s.replies[endpoint]
 	if len(q) == 0 {
 		return scriptedReply{}, fmt.Errorf("no scripted reply left for %s", endpoint)
@@ -262,13 +268,13 @@ func (s *scriptedInvoke) next(endpoint string) (scriptedReply, error) {
 	return q[0], nil
 }
 
-func (s *scriptedInvoke) Invoke(_ context.Context, endpoint string, _ []byte) ([]byte, string, error) {
-	r, err := s.next(endpoint)
+func (s *scriptedInvoke) Invoke(ctx context.Context, endpoint string, _ []byte) ([]byte, string, error) {
+	r, err := s.next(ctx, endpoint)
 	return []byte(r.body), "trace-supervisor", err
 }
 
-func (s *scriptedInvoke) InvokeStream(_ context.Context, endpoint string, _ []byte, onToken func(string), _ func(string)) ([]byte, string, error) {
-	r, err := s.next(endpoint)
+func (s *scriptedInvoke) InvokeStream(ctx context.Context, endpoint string, _ []byte, onToken func(string), _ func(string)) ([]byte, string, error) {
+	r, err := s.next(ctx, endpoint)
 	for _, tok := range r.tokens {
 		onToken(tok)
 	}
