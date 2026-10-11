@@ -412,7 +412,8 @@ func (s *Server) authorizeKBWrite(w http.ResponseWriter, r *http.Request, caller
 // Honest errors (ADR 0027):
 //   - 400 — missing KB name
 //   - 404 — KB not found in the caller's namespace
-//   - 403/401 — RBAC denial / token rejected, or an identity the API server will not name
+//   - 403/401 — RBAC denial / token rejected
+//   - 500 — the caller's identity could not be resolved (an API-server failure, not the token)
 //   - 501 — knowledge store / embedder / object store not configured (ingestion is unwired)
 //   - 422 — the source cannot be resolved (bad source.type / empty prefix / no documents)
 func (s *Server) handleIngestKB(w http.ResponseWriter, r *http.Request) {
@@ -477,8 +478,9 @@ func (s *Server) handleIngestKB(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, msgTokenRejected)
 			return
 		}
+		// Not a token problem, so not a 401: the console reads a 401 as an expired session.
 		s.log.Error(err, "ingest: resolving the caller's identity failed", "ns", ns, "kb", kbName)
-		writeError(w, http.StatusUnauthorized, "could not resolve the caller's identity")
+		writeError(w, http.StatusInternalServerError, "failed to resolve the caller's identity")
 		return
 	}
 

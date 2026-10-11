@@ -98,6 +98,11 @@ if its creator could open it on the trace page: they made that run, or the run b
 being exported. A trace shared through a workflow or a handoff belongs to the run that started it,
 so it is withheld, and the export's result counts what it withheld.
 
+**Fixed: a passing API-server error signed the person out.** Starting a knowledge-base ingestion
+or a dataset export reads the caller's identity, and any failure to read it answered HTTP 401, which
+the console takes to mean the session has expired. Only a token the API server rejects is a 401 now;
+any other failure is a 500 and is logged.
+
 **Security: reading a knowledge base was enough to change it.** Uploading a document to a
 KnowledgeBase and starting its ingestion checked only that the caller could read it, so the shipped
 `viewer` role could add documents to a corpus other people's agents retrieve from, and start

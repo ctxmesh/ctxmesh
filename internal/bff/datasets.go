@@ -133,9 +133,10 @@ type ExportResponse struct {
 //
 // Honest errors (ADR 0027, ADR 0078):
 //   - 400 — missing dataset name / invalid body / an agent or namespace that is not a valid name
-//   - 401 — missing or rejected token, or an identity the API server will not name
+//   - 401 — missing or rejected token
 //   - 403 — no update on evalsuites in the dataset namespace, or no read on the source agent
 //   - 404 — the source agent does not exist, or a verified end-user bearer (ADR 0107)
+//   - 500 — the caller's identity could not be resolved (an API-server failure, not the token)
 //   - 501 — the dataset store or the Langfuse adapter is not configured (export is unwired)
 func (s *Server) handleExportDataset(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.callerClient(w, r)
@@ -204,8 +205,9 @@ func (s *Server) handleExportDataset(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, msgTokenRejected)
 			return
 		}
+		// Not a token problem, so not a 401: the console reads a 401 as an expired session.
 		s.log.Error(err, "export: resolving the caller's identity failed", "ns", ns, "dataset", datasetName)
-		writeError(w, http.StatusUnauthorized, "could not resolve the caller's identity")
+		writeError(w, http.StatusInternalServerError, "failed to resolve the caller's identity")
 		return
 	}
 
