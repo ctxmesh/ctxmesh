@@ -59,8 +59,15 @@ describe("McpConnectPage", () => {
   const originalLocation = window.location;
   let replace: ReturnType<typeof vi.fn>;
   let opener: { postMessage: ReturnType<typeof vi.fn> } | null;
+  // Whether this window has focus and is visible; jsdom has neither notion of its own.
+  let focused: boolean;
+  let visibility: DocumentVisibilityState;
 
   beforeEach(() => {
+    focused = true;
+    visibility = "visible";
+    vi.spyOn(document, "hasFocus").mockImplementation(() => focused);
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
     replace = vi.fn();
     Object.defineProperty(window, "location", {
       configurable: true,
@@ -72,9 +79,21 @@ describe("McpConnectPage", () => {
   afterEach(() => {
     Object.defineProperty(window, "location", { configurable: true, value: originalLocation });
     Object.defineProperty(window, "opener", { configurable: true, writable: true, value: null });
+    delete (document as { visibilityState?: unknown }).visibilityState;
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
+
+  async function confirmation() {
+    stubRedeem({ status: 202, json: redeemed });
+    render(<McpConnectPage />);
+    act(() => {
+      window.dispatchEvent(fromWindow(opener, { type: MCP_CONSENT_TICKET, ticket: "tkt-1" }));
+    });
+    return screen.findByTestId("connect-continue");
+  }
+
+  const pause = (ms: number) => act(() => new Promise<void>((r) => setTimeout(r, ms)));
 
   it("announces itself to its opener with no payload", () => {
     stubRedeem({ status: 202, json: {} });
@@ -128,6 +147,58 @@ describe("McpConnectPage", () => {
     expect(replace).toHaveBeenCalledTimes(1);
     expect(replace).toHaveBeenCalledWith("https://as.example/authorize?state=s");
     expect(screen.getByTestId("mcp-connect-working")).toHaveTextContent("Opening your provider");
+  });
+
+  it("disarms Continue while the window is blurred or hidden, and re-arms only after it is back", async () => {
+    const cont = await confirmation();
+    await waitFor(() => expect(cont).toBeEnabled());
+
+    // Covered by another window: disarmed at once, and a click then is not taken.
+    focused = false;
+    act(() => {
+      window.dispatchEvent(new Event("blur"));
+    });
+    expect(cont).toBeDisabled();
+    fireEvent.click(cont);
+    expect(replace).not.toHaveBeenCalled();
+
+    // Revealed again: still disarmed until it has been attended for a while.
+    focused = true;
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(cont).toBeDisabled();
+    await waitFor(() => expect(cont).toBeEnabled());
+
+    // Hidden (another tab, minimised): the same.
+    visibility = "hidden";
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(cont).toBeDisabled();
+    visibility = "visible";
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(cont).toBeDisabled();
+    await waitFor(() => expect(cont).toBeEnabled());
+
+    fireEvent.click(cont);
+    expect(replace).toHaveBeenCalledWith("https://as.example/authorize?state=s");
+  });
+
+  it("does not arm Continue in a window that was already covered when it rendered", async () => {
+    focused = false;
+    const cont = await confirmation();
+    await pause(800);
+    expect(cont).toBeDisabled();
+
+    focused = true;
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(cont).toBeDisabled();
+    await waitFor(() => expect(cont).toBeEnabled());
   });
 
   it("refuses a consent that does not say whose it is", async () => {

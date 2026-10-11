@@ -44,11 +44,17 @@ import {
 const TICKET_WAIT_MS = 20_000;
 
 /**
- * How long Continue stays disabled after the confirmation appears. The window that opened
- * this one chose where it sits on screen, so it could put Continue under the pointer just as
- * it asks for a click of its own; a click that arrives this early was not aimed here.
+ * How long this window must be visible and focused before Continue is enabled. The window
+ * that opened this one chose where it sits on screen, so it could cover it, or put Continue
+ * under the pointer just as it asks for a click of its own; a click that arrives sooner after
+ * the window was revealed was not aimed here.
  */
 const CONTINUE_ARM_MS = 500;
+
+/** Whether the user can be looking at this window: visible and focused. */
+function attended(): boolean {
+  return document.visibilityState === "visible" && document.hasFocus();
+}
 
 const NOTHING_ARRIVED =
   "Nothing arrived from the chat that opened this window. Close it and press Connect in the chat again.";
@@ -141,12 +147,37 @@ export function McpConnectPage() {
     </Button>
   );
 
+  // Continue is enabled only after the window has been attended for CONTINUE_ARM_MS without a
+  // break: losing focus or being hidden disarms it, and the wait starts again on return. The
+  // starting state is read, not assumed, because the opener may already have covered this window
+  // before the confirmation rendered.
   const confirmed = phase.kind === "confirm" ? phase.consent : null;
   const [armedFor, setArmedFor] = React.useState<McpConsentRedeemResponse | null>(null);
   React.useEffect(() => {
     if (!confirmed) return;
-    const t = window.setTimeout(() => setArmedFor(confirmed), CONTINUE_ARM_MS);
-    return () => window.clearTimeout(t);
+    let timer = 0;
+    function arm() {
+      window.clearTimeout(timer);
+      if (attended()) timer = window.setTimeout(() => setArmedFor(confirmed), CONTINUE_ARM_MS);
+    }
+    function disarm() {
+      window.clearTimeout(timer);
+      setArmedFor(null);
+    }
+    function onVisibility() {
+      if (document.visibilityState === "visible") arm();
+      else disarm();
+    }
+    arm();
+    window.addEventListener("focus", arm);
+    window.addEventListener("blur", disarm);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("focus", arm);
+      window.removeEventListener("blur", disarm);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [confirmed]);
 
   function onContinue(consent: McpConsentRedeemResponse) {
