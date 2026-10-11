@@ -124,6 +124,13 @@ withdrawn. A spec that matches the revision already serving all traffic now open
 recorded as promoted, and an automatically promoted revision no longer drops to
 `awaiting-promotion` on the next reconcile.
 
+**Fixed: a rollback left most traffic on the revision it rolled back from.** On an agent with a
+canary, the version a rollback restored opened as a new canary candidate, with `canaryPercent` of
+the traffic, and after an automatic rollback the freeze held that split while `RolledBack=True`. A
+gated agent without a canary held the restored version at `awaiting-promotion`. The version a
+rollback restores now takes all traffic at once, with no canary, approval or eval-gate run; a later
+spec change, including an edit back to that version after another has served, canaries as before.
+
 **Fixed: connecting a provider that was already connected failed with HTTP 400.** Every release
 updated the provider's SecretBinding and ModelRoute without a `resourceVersion`, which the API
 server refuses for a custom resource, so connecting a provider again to change its key or endpoint

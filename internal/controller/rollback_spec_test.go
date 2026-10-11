@@ -210,3 +210,72 @@ func TestRollbackSpec_NilRuntimeOnEitherSide(t *testing.T) {
 	assert.Nil(t, got.Runtime.ToolPolicy, "the live spec has no tool policy, so neither does the result")
 	assert.NotNil(t, got.Runtime.Resilience)
 }
+
+// TestRollbackTargetPending: the version a rollback reverted to bypasses the canary and the gate only
+// until it serves or another version is recorded after it.
+func TestRollbackTargetPending(t *testing.T) {
+	rolledBack := func(latest string) agentsv1beta1.AgentDeploymentStatus {
+		return agentsv1beta1.AgentDeploymentStatus{
+			LatestVersion: latest,
+			Rollback: &agentsv1beta1.RollbackStatus{
+				RolledBackTo: "a-v1",
+				History:      []agentsv1beta1.RollbackEvent{{ToVersion: "a-v1", FromVersion: "a-v2"}},
+			},
+		}
+	}
+	noHistory := rolledBack("a-v2")
+	noHistory.Rollback.History = nil
+	cases := []struct {
+		name    string
+		status  agentsv1beta1.AgentDeploymentStatus
+		version string
+		want    bool
+	}{
+		{"the rollback has not been served", rolledBack("a-v2"), "a-v1", true},
+		{"the target serves", rolledBack("a-v1"), "a-v1", false},
+		{"another version served since", rolledBack("a-v3"), "a-v1", false},
+		{"the spec is not the target", rolledBack("a-v2"), "a-v3", false},
+		{"no rollback", agentsv1beta1.AgentDeploymentStatus{LatestVersion: "a-v2"}, "a-v1", false},
+		{"no rollback event", noHistory, "a-v1", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, rollbackTargetPending(tc.status, tc.version))
+			assert.Equal(t, tc.want, rollbackBypass(tc.status, tc.version, "a-v1-h1"), "nothing has served it yet")
+		})
+	}
+}
+
+// TestRollbackBypass_WhileTargetServes: once served, the rollback target keeps its gate status and stays
+// un-gated until its version or revision changes, or something else is recorded.
+func TestRollbackBypass_WhileTargetServes(t *testing.T) {
+	serving := func(reason, rev string) agentsv1beta1.AgentDeploymentStatus {
+		return agentsv1beta1.AgentDeploymentStatus{
+			LatestVersion: "a-v1",
+			Gate:          &agentsv1beta1.GateStatus{Reason: reason, ScoredRevision: rev},
+			Rollback: &agentsv1beta1.RollbackStatus{
+				RolledBackTo: "a-v1",
+				History:      []agentsv1beta1.RollbackEvent{{ToVersion: "a-v1", FromVersion: "a-v2"}},
+			},
+		}
+	}
+	ungated := serving("", "")
+	ungated.Gate = nil
+	cases := []struct {
+		name    string
+		status  agentsv1beta1.AgentDeploymentStatus
+		version string
+		want    bool
+	}{
+		{"the target serves as the rollback put it", serving(reasonRollbackTarget, "a-v1-h1"), "a-v1", true},
+		{"its revision changed", serving(reasonRollbackTarget, "a-v1-h0"), "a-v1", false},
+		{"the spec changed", serving(reasonRollbackTarget, "a-v1-h1"), "a-v3", false},
+		{"the gate decided since", serving(reasonCandidateServing, "a-v1-h1"), "a-v1", false},
+		{"an ungated agent has no gate to skip", ungated, "a-v1", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, rollbackBypass(tc.status, tc.version, "a-v1-h1"))
+		})
+	}
+}

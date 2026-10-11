@@ -25,11 +25,13 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
+	"github.com/ctxmesh/ctxmesh/internal/eval"
 )
 
 // The HUMAN rollback actuator (ADR 0062 Fork 4, M69 — the HUMAN actuator + the damping
@@ -53,8 +55,8 @@ import (
 //
 // The spec-revert is an ordinary Update to the AgentDeployment object, so it is captured by
 // the existing control-plane Auditor (internal/audit) exactly like a promote — no new audit
-// path is added. There is NO auto-trigger, NO canary/traffic change (canary is m69.9): just
-// the annotation → a guarded spec-revert + status.
+// path is added. The actuator itself changes no traffic: the next reconcile serves the reverted spec
+// to all traffic at once, without a canary or the eval gate (serveRollbackTarget).
 
 // rollbackAnnotation is the HUMAN rollback signal (ADR 0062 Fork 4, PRD §17.4). Set it to
 // an explicit AgentVersion NAME (from status.latestVersion history / the version list) on an
@@ -83,6 +85,9 @@ const (
 	reasonAutoRollbackNoPrior    = "AutoRollbackNoPrior"     // False: auto-path found no prior version to roll back to
 	reasonRollbackNoEffect       = "RollbackNoEffect"        // False: target differs only in fields a rollback keeps
 )
+
+// reasonRollbackTarget is the gate reason for the version a rollback reverted to, served without the gate.
+const reasonRollbackTarget = "RollbackTarget"
 
 // Damping tunables (ADR 0062 Fork 4). Documented defaults; per-agent overrides from
 // EvalSuite.online are a deferred follow-up (m52), consistent with the detector's tunables.
@@ -118,8 +123,8 @@ const (
 // It runs BEFORE the workload reconcile: a rollback rewrites spec, and the workload must be
 // reconciled against the REVERTED spec, not the pre-revert one. Because the revert is a spec
 // Update, controller-runtime re-enqueues the object and the following reconcile serves the
-// reverted spec through the ordinary path (including the eval gate) — the actuator itself
-// never touches Knative traffic.
+// reverted spec to all traffic, skipping the canary and the eval gate (serveRollbackTarget) — the
+// actuator itself never touches Knative traffic.
 func (r *AgentDeploymentReconciler) maybeRollback(
 	ctx context.Context,
 	deploy *agentsv1beta1.AgentDeployment,
@@ -554,6 +559,65 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 	// The spec Update above re-enqueues the object; the next reconcile rolls the workload
 	// against the reverted spec. No requeue needed here.
 	return true, nil
+}
+
+// rollbackBypass reports whether serveRollbackTarget serves this spec: it is the version the last
+// rollback reverted to and has not served yet, or it serves under the gate status serveRollbackTarget
+// wrote and neither its version nor its revision has changed since. The gate stays un-run for the
+// target while it serves: re-scoring it, a blocked or unscored verdict would report "previous revision
+// keeps serving" over the revision serving every request.
+func rollbackBypass(st agentsv1beta1.AgentDeploymentStatus, versionName, candidateRev string) bool {
+	if rollbackTargetPending(st, versionName) {
+		return true
+	}
+	rb, g := st.Rollback, st.Gate
+	return rb != nil && rb.RolledBackTo == versionName && st.LatestVersion == versionName &&
+		g != nil && g.Reason == reasonRollbackTarget && g.ScoredRevision == candidateRev
+}
+
+// rollbackTargetPending reports whether versionName is the version the last rollback reverted to and
+// has not been served since: status.latestVersion still names the version that rollback reverted from.
+// Once the target serves, or any other version is recorded after it, a spec that matches the target is
+// an ordinary change, so a later edit back to it canaries and gates like any other.
+//
+// rolledBackTo names the version the reverted spec hashes to, which is the reconcile's versionName,
+// including when kept governance gives the reverted spec a version of its own (actuateRollback).
+func rollbackTargetPending(st agentsv1beta1.AgentDeploymentStatus, versionName string) bool {
+	rb := st.Rollback
+	if rb == nil || rb.RolledBackTo == "" || rb.RolledBackTo != versionName || len(rb.History) == 0 {
+		return false
+	}
+	return st.LatestVersion != versionName && rb.History[0].FromVersion == st.LatestVersion
+}
+
+// serveRollbackTarget pins all traffic to the rollback target's revision in the same write that applies
+// its template, ends any progression, and records the target as serving. The gate is not re-run: the
+// target has served. As a canary candidate it would get only the canary share, with the regressed
+// revision as the stable arm, and an automatic rollback's freeze would hold that split.
+func (r *AgentDeploymentReconciler) serveRollbackTarget(
+	ctx context.Context,
+	deploy *agentsv1beta1.AgentDeployment,
+	hash, versionName, candidateRev string,
+) (ctrl.Result, error) {
+	logf.FromContext(ctx).Info("Serving rollback target", "version", versionName, "revision", candidateRev)
+	ksvc, resolvedSkills, err := r.reconcileKnativeService(ctx, deploy, hash, namedFullTraffic(candidateRev))
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling Knative Service for rollback target: %w", err)
+	}
+	deploy.Status.Rollout = nil
+	if deploy.Spec.EvalSuiteRef != "" {
+		deploy.Status.Gate = &agentsv1beta1.GateStatus{
+			Phase:          eval.PhasePromoted,
+			Decision:       eval.DecisionPromoted,
+			ScoredRevision: candidateRev,
+			Reason:         reasonRollbackTarget,
+		}
+		r.emitGateSpan(ctx, deploy, *deploy.Status.Gate)
+	}
+	if err := r.syncStatus(ctx, deploy, ksvc, versionName, resolvedSkills); err != nil {
+		return ctrl.Result{}, fmt.Errorf("syncing status: %w", err)
+	}
+	return ctrl.Result{}, nil
 }
 
 // rollbackNoEffectMessage explains a refused rollback that would change nothing: the target is the

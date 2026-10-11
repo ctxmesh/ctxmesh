@@ -19,15 +19,20 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/eval"
@@ -713,4 +718,293 @@ func TestCanary_AutoProgress(t *testing.T) {
 	tm = trafficMap(getKsvc(t, name, namespace))
 	assert.Equal(t, int64(100), tm[r2], "auto-promote routes 100% to the candidate")
 	assert.Len(t, getKsvc(t, name, namespace).Spec.Traffic, 1, "a promoted canary has a single 100% arm")
+}
+
+// rollbackAfterPromotion drives a gated agent to the point a rollback starts from (promoteOver) and rolls
+// R2 back to R1's version (rollBack). It returns R1, R2, R1's version and status.rollback.rolledBackTo.
+func rollbackAfterPromotion(
+	t *testing.T, r *AgentDeploymentReconciler, name, namespace, suite string,
+	rollout *agentsv1beta1.RolloutSpec, auto bool, servingPolicy *agentsv1beta1.ToolPolicySpec,
+) (r1, r2, v1, rolledBackTo string) {
+	t.Helper()
+	r1, r2, v1, v2 := promoteOver(t, r, name, namespace, suite, rollout, auto, servingPolicy)
+	if auto {
+		setRegressionDetected(t, name, namespace, v2)
+	} else {
+		annotateRollback(t, name, namespace, v1)
+	}
+	return r1, r2, v1, rollBack(t, r, name, namespace, v1, servingPolicy != nil)
+}
+
+// promoteOver creates a gated agent whose R1 serves, then promotes R2 over it, so R2 serves alone.
+// servingPolicy, when set, is a governance change made with R2 that a rollback keeps, so the reverted
+// spec hashes to a version of its own. auto spaces the two versions so the auto path finds R1 as prior.
+func promoteOver(
+	t *testing.T, r *AgentDeploymentReconciler, name, namespace, suite string,
+	rollout *agentsv1beta1.RolloutSpec, auto bool, servingPolicy *agentsv1beta1.ToolPolicySpec,
+) (r1, r2, v1, v2 string) {
+	t.Helper()
+	deploy := &agentsv1beta1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1beta1.AgentDeploymentSpec{
+			Image:        "ghcr.io/ctxmesh/example-agent:latest",
+			EvalSuiteRef: suite,
+			Rollout:      rollout,
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+
+	reconcileNN(t, r, name, namespace)
+	r1 = getDeploy(t, name, namespace).Status.Gate.ScoredRevision
+	require.NotEmpty(t, r1)
+	promoteTo(t, r, name, namespace, r1)
+	v1 = getDeploy(t, name, namespace).Status.LatestVersion
+	require.Equal(t, r1, getKsvc(t, name, namespace).Spec.Template.Name)
+
+	if auto {
+		time.Sleep(1100 * time.Millisecond) // the auto path takes the prior by creation time
+	}
+	upd := getDeploy(t, name, namespace)
+	upd.Spec.Port = 8090
+	if servingPolicy != nil {
+		upd.Spec.Runtime = &agentsv1beta1.RuntimeSpec{ToolPolicy: servingPolicy.DeepCopy()}
+	}
+	delete(upd.Annotations, promoteAnnotation)
+	require.NoError(t, k8sClient.Update(testCtx, upd))
+	reconcileNN(t, r, name, namespace)
+	r2 = getDeploy(t, name, namespace).Status.Gate.ScoredRevision
+	require.NotEqual(t, r1, r2)
+
+	if ap := autoProgressConfig(getDeploy(t, name, namespace)); ap != nil {
+		backdateRolloutAdvance(t, name, namespace, 2*time.Minute)
+		setRegressionCondition(t, name, namespace, metav1.ConditionFalse)
+		reconcileNN(t, r, name, namespace)
+	} else {
+		promoteTo(t, r, name, namespace, r2)
+	}
+	promoted := getDeploy(t, name, namespace)
+	require.Equal(t, eval.PhasePromoted, promoted.Status.Gate.Phase)
+	require.Equal(t, r2, getKsvc(t, name, namespace).Spec.Template.Name)
+	if canaryConfigured(promoted, execModelServing) {
+		require.Equal(t, map[string]int64{r2: 100}, trafficMap(getKsvc(t, name, namespace)))
+	}
+	v2 = promoted.Status.LatestVersion
+	require.NotEqual(t, v1, v2)
+	return r1, r2, v1, v2
+}
+
+// rollBack runs the reconcile that acts on a requested rollback (the annotation, or a regression the
+// auto path acts on) and returns what it recorded in status.rollback.rolledBackTo.
+func rollBack(t *testing.T, r *AgentDeploymentReconciler, name, namespace, v1 string, keptGovernance bool) string {
+	t.Helper()
+	reconcileNN(t, r, name, namespace)
+
+	reverted := getDeploy(t, name, namespace)
+	require.Equal(t, int32(8080), reverted.Spec.Port, "the spec reverts to R1's")
+	require.NotNil(t, reverted.Status.Rollback)
+	rolledBackTo := reverted.Status.Rollback.RolledBackTo
+	hash, err := specHash(reverted.Spec)
+	require.NoError(t, err)
+	require.Equal(t, agentVersionName(name, hash), rolledBackTo,
+		"rolledBackTo is the version the next reconcile computes for the reverted spec")
+	if keptGovernance {
+		require.NotEqual(t, v1, rolledBackTo, "the kept governance makes the reverted spec a version of its own")
+	} else {
+		require.Equal(t, v1, rolledBackTo)
+	}
+	return rolledBackTo
+}
+
+// assertRollbackServes checks that the rolled-back version's revision serves all traffic at once:
+// no canary, no wait for approval, and no progression left from the regressed revision.
+func assertRollbackServes(t *testing.T, name, namespace, rolledBackTo string) string {
+	t.Helper()
+	ksvc := getKsvc(t, name, namespace)
+	rev := ksvc.Spec.Template.Name
+	require.True(t, rev == rolledBackTo || strings.HasPrefix(rev, rolledBackTo+"-h"),
+		"the template is the rolled-back version's revision, got %q", rev)
+	assert.Equal(t, map[string]int64{rev: 100}, trafficMap(ksvc), "the rollback target takes all traffic at once")
+	d := getDeploy(t, name, namespace)
+	assert.Equal(t, rolledBackTo, d.Status.LatestVersion)
+	require.NotNil(t, d.Status.Gate)
+	assert.Equal(t, eval.PhasePromoted, d.Status.Gate.Phase, "a rollback target neither canaries nor waits for approval")
+	assert.Equal(t, reasonRollbackTarget, d.Status.Gate.Reason)
+	assert.Equal(t, rev, d.Status.Gate.ScoredRevision)
+	assert.Nil(t, d.Status.Rollout, "the regressed revision's progression is over")
+	cond := apimeta.FindStatusCondition(d.Status.Conditions, conditionRolledBack)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	return rev
+}
+
+// A rollback on a canary-configured agent takes all traffic at once. Before, the regressed revision kept
+// the stable arm and the rollback target got the canary share, and after an automatic rollback the freeze
+// held that split: RolledBack=True while 90% stayed on the regressed revision.
+func TestRollback_CanaryTargetTakesAllTraffic(t *testing.T) {
+	const namespace = "default"
+	cases := []struct {
+		name, agent   string
+		auto          bool
+		rollout       *agentsv1beta1.RolloutSpec
+		servingPolicy *agentsv1beta1.ToolPolicySpec
+	}{
+		{
+			name: "automatic rollback of an auto-promoted revision", agent: "rb-canary-auto", auto: true,
+			rollout: &agentsv1beta1.RolloutSpec{
+				Strategy: rolloutStrategyCanary, CanaryPercent: 10,
+				AutoProgress: &agentsv1beta1.AutoProgressConfig{
+					Enabled: true, Steps: []agentsv1beta1.CanaryStep{{Percent: 100}}, DwellSeconds: 60,
+				},
+				AutoRollback: &agentsv1beta1.AutoRollbackConfig{Enabled: true},
+			},
+		},
+		{
+			name: "human rollback of a promoted revision", agent: "rb-canary-human",
+			rollout: &agentsv1beta1.RolloutSpec{Strategy: rolloutStrategyCanary, CanaryPercent: 10},
+		},
+		{
+			name: "automatic rollback that keeps a governance change", agent: "rb-canary-govkept", auto: true,
+			rollout: &agentsv1beta1.RolloutSpec{
+				Strategy: rolloutStrategyCanary, CanaryPercent: 10,
+				AutoRollback: &agentsv1beta1.AutoRollbackConfig{Enabled: true},
+			},
+			servingPolicy: &agentsv1beta1.ToolPolicySpec{MaxToolCallsPerRun: 5},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			es := mkEvalSuite(t, tc.agent+"-suite", namespace, "0.7", eval.GateBlock)
+			r := gateReconciler(0.9)
+			r1, r2, _, rolledBackTo := rollbackAfterPromotion(t, r, tc.agent, namespace, es.Name,
+				tc.rollout, tc.auto, tc.servingPolicy)
+
+			reconcileNN(t, r, tc.agent, namespace)
+			rev := assertRollbackServes(t, tc.agent, namespace, rolledBackTo)
+			assert.NotEqual(t, r2, rev)
+			if tc.servingPolicy == nil {
+				assert.Equal(t, r1, rev, "the rollback target is R1's revision")
+			}
+			if tc.auto {
+				assert.True(t, getDeploy(t, tc.agent, namespace).Status.Rollback.FrozenUntilAck,
+					"serving the target does not lift the freeze")
+			}
+
+			// Once the target serves, ordinary behaviour resumes: it is the stable revision.
+			reconcileNN(t, r, tc.agent, namespace)
+			assertServesWithoutCanary(t, tc.agent, namespace, rev)
+		})
+	}
+}
+
+// A gated agent without a canary serves the rollback target without waiting for approval. Before, the
+// target sat at awaiting-promotion with the regressed revision still serving.
+func TestRollback_GatedTargetServesWithoutApproval(t *testing.T) {
+	const namespace = "default"
+	for _, auto := range []bool{false, true} {
+		agent := "rb-gated-human"
+		var rollout *agentsv1beta1.RolloutSpec
+		if auto {
+			agent = "rb-gated-auto"
+			rollout = &agentsv1beta1.RolloutSpec{AutoRollback: &agentsv1beta1.AutoRollbackConfig{Enabled: true}}
+		}
+		t.Run(agent, func(t *testing.T) {
+			es := mkEvalSuite(t, agent+"-suite", namespace, "0.7", eval.GateBlock)
+			r := gateReconciler(0.9)
+			r1, _, v1, _ := rollbackAfterPromotion(t, r, agent, namespace, es.Name, rollout, auto, nil)
+
+			reconcileNN(t, r, agent, namespace)
+			assert.Equal(t, r1, assertRollbackServes(t, agent, namespace, v1))
+
+			// The gate is not re-run for the target while it serves: a verdict that would block it now
+			// does not report the revision serving every request as held.
+			reconcileNN(t, gateReconciler(0.5), agent, namespace)
+			assert.Equal(t, r1, assertRollbackServes(t, agent, namespace, v1))
+			ready := apimeta.FindStatusCondition(getDeploy(t, agent, namespace).Status.Conditions, conditionReady)
+			require.NotNil(t, ready)
+			assert.NotEqual(t, metav1.ConditionFalse, ready.Status)
+
+			reconcileNN(t, r, agent, namespace)
+			assertServesWithoutCanary(t, agent, namespace, r1)
+		})
+	}
+}
+
+// statusLagClient serves one AgentDeployment as an informer cache can just after a rollback: the
+// reverted spec, with the status and resourceVersion from before the rollback recorded itself.
+type statusLagClient struct {
+	client.Client
+	key   types.NamespacedName
+	stale *agentsv1beta1.AgentDeployment
+}
+
+func (c *statusLagClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := c.Client.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	if d, ok := obj.(*agentsv1beta1.AgentDeployment); ok && key == c.key {
+		d.Status = *c.stale.Status.DeepCopy()
+		d.ResourceVersion = c.stale.ResourceVersion
+	}
+	return nil
+}
+
+// A reconcile that reads the reverted spec before the rollback's status record does not strand the
+// rollback: it cannot record the reverted version (its status write conflicts), so the next reconcile
+// still finds the rollback unserved and gives the target all traffic.
+func TestRollback_TargetServesAfterCacheLag(t *testing.T) {
+	const name, namespace = "rb-canary-lag", "default"
+	es := mkEvalSuite(t, name+"-suite", namespace, "0.7", eval.GateBlock)
+	r := gateReconciler(0.9)
+	r1, _, v1, v2 := promoteOver(t, r, name, namespace, es.Name,
+		&agentsv1beta1.RolloutSpec{Strategy: rolloutStrategyCanary, CanaryPercent: 10}, false, nil)
+	annotateRollback(t, name, namespace, v1)
+	before := getDeploy(t, name, namespace)
+	rollBack(t, r, name, namespace, v1, false)
+
+	lagged := gateReconciler(0.9)
+	lagged.Client = &statusLagClient{Client: k8sClient, key: types.NamespacedName{Name: name, Namespace: namespace}, stale: before}
+	_, err := lagged.Reconcile(testCtx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: namespace}})
+	require.True(t, apierrors.IsConflict(err), "a stale status write is refused, got %v", err)
+	require.Equal(t, v2, getDeploy(t, name, namespace).Status.LatestVersion, "the lagging reconcile recorded nothing")
+
+	reconcileNN(t, r, name, namespace)
+	assert.Equal(t, r1, assertRollbackServes(t, name, namespace, v1))
+}
+
+// The bypass is spent once the target serves: a later spec change canaries as usual, and so does a later
+// edit back to the version the rollback restored, once another version has served since.
+func TestRollback_LaterSpecChangeCanaries(t *testing.T) {
+	const name, namespace = "rb-canary-after", "default"
+	es := mkEvalSuite(t, name+"-suite", namespace, "0.7", eval.GateBlock)
+	r := gateReconciler(0.9)
+	r1, _, v1, _ := rollbackAfterPromotion(t, r, name, namespace, es.Name,
+		&agentsv1beta1.RolloutSpec{Strategy: rolloutStrategyCanary, CanaryPercent: 10}, false, nil)
+	reconcileNN(t, r, name, namespace)
+	require.Equal(t, r1, assertRollbackServes(t, name, namespace, v1))
+
+	upd := getDeploy(t, name, namespace)
+	upd.Spec.Port = 8091
+	require.NoError(t, k8sClient.Update(testCtx, upd))
+	reconcileNN(t, r, name, namespace)
+	d := getDeploy(t, name, namespace)
+	assert.Equal(t, eval.PhaseCanary, d.Status.Gate.Phase, "a new spec after the rollback canaries")
+	r3 := d.Status.Gate.ScoredRevision
+	assert.Equal(t, map[string]int64{r1: 90, r3: 10}, trafficMap(getKsvc(t, name, namespace)))
+	hash, err := specHash(d.Spec)
+	require.NoError(t, err)
+	assert.Equal(t, agentVersionName(name, hash), d.Status.LatestVersion)
+
+	promoteTo(t, r, name, namespace, r3)
+	require.Equal(t, map[string]int64{r3: 100}, trafficMap(getKsvc(t, name, namespace)))
+
+	// Editing the spec back to R1's is a change like any other now; it is not the rollback.
+	upd = getDeploy(t, name, namespace)
+	upd.Spec.Port = 8080
+	require.NoError(t, k8sClient.Update(testCtx, upd))
+	reconcileNN(t, r, name, namespace)
+	d = getDeploy(t, name, namespace)
+	require.Equal(t, v1, d.Status.Rollback.RolledBackTo, "the spec matches the version the rollback restored")
+	assert.Equal(t, eval.PhaseCanary, d.Status.Gate.Phase)
+	assert.Equal(t, map[string]int64{r3: 90, r1: 10}, trafficMap(getKsvc(t, name, namespace)))
 }

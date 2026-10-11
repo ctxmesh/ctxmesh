@@ -451,9 +451,9 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// reverts the serving spec to that version's snapshot, guarded by the damping mechanism. It
 	// runs BEFORE the spec-hash / workload steps because a rollback rewrites spec — the ordinary
 	// path must reconcile the REVERTED spec, not the pre-revert one. The revert is a spec Update
-	// that re-enqueues the object, so the following reconcile rolls the workload through the
-	// normal path (the actuator never touches Knative traffic). An auto-path refusal is not
-	// handled: the ordinary reconcile below still runs.
+	// that re-enqueues the object, so the following reconcile rolls the workload, giving the
+	// reverted version all traffic at once (serveRollbackTarget; the actuator never touches Knative
+	// traffic). An auto-path refusal is not handled: the ordinary reconcile below still runs.
 	handled, rerr := r.maybeRollback(ctx, &deploy)
 	if rerr != nil || handled {
 		return ctrl.Result{}, rerr
@@ -608,21 +608,7 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 	deploy *agentsv1beta1.AgentDeployment,
 	hash, versionName string,
 ) (ctrl.Result, error) {
-	// Tear down the workloads owned by the other models (transition handling):
-	// the job-model Job/CronJob and the eventing Deployment + Service + Trigger.
-	if err := r.deleteWorkload(ctx, deploy, &batchv1.Job{}); err != nil {
-		return ctrl.Result{}, err
-	}
-	if err := r.deleteWorkload(ctx, deploy, &batchv1.CronJob{}); err != nil {
-		return ctrl.Result{}, err
-	}
-	if err := r.deleteStaleTrigger(ctx, deploy); err != nil {
-		return ctrl.Result{}, err
-	}
-	if err := r.deleteWorkload(ctx, deploy, &appsv1.Deployment{}); err != nil {
-		return ctrl.Result{}, err
-	}
-	if err := r.deleteNamedWorkload(ctx, deploy, &corev1.Service{}, eventingServiceName(deploy.Name)); err != nil {
+	if err := r.deleteNonServingWorkloads(ctx, deploy); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -638,6 +624,12 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 	candidateRev, err := r.candidateRevisionName(ctx, deploy, hash)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// A rollback returns to a version that has served: it takes all traffic at once, without a
+	// canary, an approval or a re-run of the gate (ADR 0062, 2026-10-11 amendment).
+	if rollbackBypass(deploy.Status, versionName, candidateRev) {
+		return r.serveRollbackTarget(ctx, deploy, hash, versionName, candidateRev)
 	}
 
 	// Resolve the OLD serving revision from the LIVE ksvc BEFORE any candidate write —
@@ -725,6 +717,27 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 		}
 	}
 	return ctrl.Result{}, nil
+}
+
+// deleteNonServingWorkloads tears down the workloads owned by the other execution models
+// (transition handling): the job-model Job/CronJob and the eventing Deployment + Service + Trigger.
+func (r *AgentDeploymentReconciler) deleteNonServingWorkloads(
+	ctx context.Context,
+	deploy *agentsv1beta1.AgentDeployment,
+) error {
+	if err := r.deleteWorkload(ctx, deploy, &batchv1.Job{}); err != nil {
+		return err
+	}
+	if err := r.deleteWorkload(ctx, deploy, &batchv1.CronJob{}); err != nil {
+		return err
+	}
+	if err := r.deleteStaleTrigger(ctx, deploy); err != nil {
+		return err
+	}
+	if err := r.deleteWorkload(ctx, deploy, &appsv1.Deployment{}); err != nil {
+		return err
+	}
+	return r.deleteNamedWorkload(ctx, deploy, &corev1.Service{}, eventingServiceName(deploy.Name))
 }
 
 // candidateRevisionName computes the Knative revision name the candidate WOULD
