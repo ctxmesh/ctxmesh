@@ -57,6 +57,8 @@ import (
 type identityCallerFactory struct {
 	backing client.WithWatch
 	extra   interceptor.Funcs
+	// username maps a token to its username; nil means "user:<token>".
+	username func(token string) string
 }
 
 func (f *identityCallerFactory) ForRequest(r *http.Request) (client.Client, error) {
@@ -70,7 +72,11 @@ func (f *identityCallerFactory) ForRequest(r *http.Request) (client.Client, erro
 	base := f.extra.Create
 	funcs.Create = func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 		if ssr, ok := obj.(*authnv1.SelfSubjectReview); ok {
-			ssr.Status = authnv1.SelfSubjectReviewStatus{UserInfo: authnv1.UserInfo{Username: "user:" + token}}
+			name := "user:" + token
+			if f.username != nil {
+				name = f.username(token)
+			}
+			ssr.Status = authnv1.SelfSubjectReviewStatus{UserInfo: authnv1.UserInfo{Username: name}}
 			return nil
 		}
 		if base != nil {

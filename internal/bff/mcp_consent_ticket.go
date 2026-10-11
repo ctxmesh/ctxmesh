@@ -26,6 +26,10 @@ import (
 	"time"
 
 	"golang.org/x/net/publicsuffix"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // Consent tickets (ADR 0040 amendment, m184.42). The binding cookie must land on the console
@@ -38,8 +42,8 @@ import (
 // minter's flow to the victim's browser. Two checks keep that delivery inside the platform:
 // the redeem must come from the console origin (only /connect calls it), and the origin that
 // delivered the ticket to /connect must be the hostname of the agent the ticket names, under the
-// console's own domain. An attacker can mint a ticket for their own agent, but cannot serve a
-// page at that agent's hostname.
+// console's own domain. The mint also requires that agent to exist and be readable by the minter.
+// Where those checks cannot hold, /connect shows whose consent it is and waits for the user.
 
 // consentTicketTTL is how long a minted ticket may wait for its redeem: long enough for a popup
 // to load, short enough that a leaked ticket is useless.
@@ -60,11 +64,14 @@ type consentTicket struct {
 	Boundary      string         `json:"boundary,omitempty"`
 	// Agent is the agent whose hostname must deliver the ticket; it runs in Namespace.
 	Agent string `json:"agent"`
+	// Minter is the minter's username, shown on /connect before the user continues.
+	Minter string `json:"minter"`
 }
 
 // handleMintConsentTicket serves POST /api/mcp/oauth/ticket (allowlisted at agent origins). It
-// runs the same validation as beginning consent, stores a single-use ticket for consentTicketTTL,
-// and returns it with the console's /connect URL. No flow starts and no cookie is set here.
+// requires the named agent to exist and be readable by the caller, runs the same validation as
+// beginning consent, stores a single-use ticket for consentTicketTTL, and returns it with the
+// console's /connect URL. No flow starts and no cookie is set here.
 func (s *Server) handleMintConsentTicket(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.callerClient(w, r)
 	if !ok {
@@ -96,8 +103,16 @@ func (s *Server) handleMintConsentTicket(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	ns := strings.TrimSpace(req.Namespace)
+	if ns == "" {
+		ns = defaultCreateNamespace
+	}
+	if !s.mintAgentReadable(w, r, caller, ns, agent) {
+		return
+	}
+
 	plan, pErr := s.prepareGrantConsent(r, caller, MCPGrantConsentRequest{
-		Server: req.Server, Namespace: req.Namespace, Agent: agent,
+		Server: req.Server, Namespace: ns, Agent: agent,
 	})
 	if pErr != nil {
 		writeError(w, pErr.status, pErr.msg)
@@ -119,6 +134,7 @@ func (s *Server) handleMintConsentTicket(w http.ResponseWriter, r *http.Request)
 		ServerURL:     plan.serverURL,
 		Boundary:      plan.boundary,
 		Agent:         agent,
+		Minter:        plan.username,
 	}); err != nil {
 		s.log.Error(err, "store MCP consent ticket failed", "server", plan.server)
 		writeError(w, http.StatusInternalServerError, "failed to start the consent flow")
@@ -201,7 +217,33 @@ func (s *Server) handleRedeemConsentTicket(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusAccepted, MCPConsentRedeemResponse{
 		Status:           oauthStatusAuthorizationRequired,
 		AuthorizationURL: authURL,
+		Minter:           t.Minter,
+		Server:           t.Server,
+		Agent:            t.Agent,
+		Namespace:        t.Namespace,
 	})
+}
+
+// mintAgentReadable reports whether the agent a ticket names exists in ns and the caller may read
+// it with their own token. It writes the 404 / 403 / 401 / 500 itself and returns false otherwise.
+// Without it, a ticket could name any hostname-shaped agent, including one that does not exist.
+func (s *Server) mintAgentReadable(w http.ResponseWriter, r *http.Request, caller client.Client, ns, agent string) bool {
+	var ad agentsv1beta1.AgentDeployment
+	err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: agent}, &ad)
+	switch {
+	case err == nil:
+		return true
+	case apierrors.IsNotFound(err):
+		writeError(w, http.StatusNotFound, "agent not found")
+	default:
+		if status, msg, isRBAC := classifyReadError(err); isRBAC {
+			writeError(w, status, msg)
+			return false
+		}
+		s.log.Error(err, "read the agent for an MCP consent ticket failed", "agent", agent, "namespace", ns)
+		writeError(w, http.StatusInternalServerError, "failed to read the agent")
+	}
+	return false
 }
 
 // sameOrigin reports whether origin (an Origin header) is the origin of base, comparing scheme
@@ -218,7 +260,13 @@ func sameOrigin(origin, base string) bool {
 // consentOpenerAllowed reports whether opener (the origin that handed /connect the ticket) is the
 // hostname of agent in ns, and returns it normalized. The host must be <agent>.<ns>.<base> with
 // the console's scheme, where base is the domain agent hostnames share with the console
-// (agentHostBase). The port is not compared.
+// (agentHostBaseAllows). The port is not compared.
+//
+// This check is sound only while no tenant-controlled document is served at an agent hostname.
+// The edge enforces that: the agents route, which reaches the tenant's container, answers with
+// Content-Security-Policy: sandbox, so a page there has an opaque origin that /connect refuses
+// (deploy/edge/templates/agent-routes.yaml). Where that does not hold, the defence is /connect's
+// confirmation, which names the minter and waits for the user before going to the provider.
 func (s *Server) consentOpenerAllowed(opener, agent, ns string) (string, bool) {
 	o, err := url.Parse(strings.TrimSpace(opener))
 	if err != nil || o.Host == "" || o.User != nil || o.Opaque != "" ||
@@ -246,9 +294,11 @@ func (s *Server) consentOpenerAllowed(opener, agent, ns string) (string, bool) {
 // <agent>.<ns>.<baseDomain> (deploy/edge), so the base is the console host minus its first label,
 // and it must match exactly: a page under any other domain, or a deeper subdomain of the base, is
 // not one the platform serves. A console at the apex of a registrable domain (its parent is a
-// public suffix) has agents directly under itself. A loopback console has agent hostnames that
-// resolve to loopback by construction: <ip>.sslip.io or <ip>.nip.io for a loopback IPv4, or
-// localhost. A console at any other IP names no agent domain.
+// public suffix) has agents directly under itself. A single-label parent that is not on the ICANN
+// list (localhost, internal, corp) is a private base domain, not a public suffix, even though the
+// list's default rule returns it as one. A loopback console has agent hostnames that resolve to
+// loopback by construction: <ip>.sslip.io or <ip>.nip.io for a loopback IPv4, or localhost. A
+// console at any other IP names no agent domain.
 func agentHostBaseAllows(consoleHost, rest string) bool {
 	if consoleHost == hostLocalhost {
 		return loopbackAgentBase(rest)
@@ -258,7 +308,9 @@ func agentHostBaseAllows(consoleHost, rest string) bool {
 	}
 	base := consoleHost
 	if _, parent, found := strings.Cut(consoleHost, "."); found {
-		if suffix, _ := publicsuffix.PublicSuffix(parent); suffix != parent {
+		suffix, icann := publicsuffix.PublicSuffix(parent)
+		parentIsPublicSuffix := suffix == parent && (icann || strings.Contains(parent, "."))
+		if !parentIsPublicSuffix {
 			base = parent
 		}
 	}

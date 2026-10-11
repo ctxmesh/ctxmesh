@@ -171,8 +171,11 @@ type grantConsentPlan struct {
 	server    string
 	namespace string
 	serverURL string
-	// userHash is the hashed username of the consenting caller (never the raw username).
+	// userHash is the hashed username of the consenting caller, the grant's key.
 	userHash string
+	// username is the consenting caller's username, shown to whoever finishes a ticketed consent
+	// so they can see whose grant it is. It is never stored with the grant.
+	username string
 	// boundary is the trust boundary the grant is stored under (ADR 0033); "" ⇒ unscoped.
 	boundary string
 }
@@ -263,6 +266,7 @@ func (s *Server) prepareGrantConsent(r *http.Request, caller client.Client, req 
 		namespace: ns,
 		serverURL: serverURL,
 		userHash:  userGrantHash(username),
+		username:  username,
 		boundary:  boundary,
 	}, nil
 }

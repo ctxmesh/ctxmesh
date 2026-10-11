@@ -1044,11 +1044,17 @@ type MCPConsentRedeemRequest struct {
 	OpenerOrigin string `json:"openerOrigin"`
 }
 
-// MCPConsentRedeemResponse carries the authorization URL the /connect page navigates to. No
-// token, verifier or state.
+// MCPConsentRedeemResponse carries the authorization URL the /connect page navigates to, and what
+// the page shows before it does: whose consent this is, for which server and agent. No token,
+// verifier or state.
 type MCPConsentRedeemResponse struct {
 	Status           string `json:"status"`
 	AuthorizationURL string `json:"authorizationURL"`
+	// Minter is the username of the caller who minted the ticket: the grant is stored as theirs.
+	Minter    string `json:"minter"`
+	Server    string `json:"server"`
+	Agent     string `json:"agent"`
+	Namespace string `json:"namespace"`
 }
 
 // MCPGrantResponse is returned by the per-user grant endpoints (m17.3). It carries

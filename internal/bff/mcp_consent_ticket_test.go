@@ -18,7 +18,9 @@ package bff
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -29,9 +31,14 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/oauthpending"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/pgtest"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
@@ -43,6 +50,7 @@ const (
 	ticketAgentOrigin = "https://helper." + grantNS + ".agents.example.com"
 	ticketServer      = "ticket-mcp"
 	ticketUserToken   = "alice-token"
+	ticketMinter      = "alice@example.com"
 )
 
 // ticketReplica is one BFF replica: its own Server over the shared cluster (fake client), grant
@@ -56,31 +64,51 @@ type ticketEnv struct {
 	oauth   *fakeOAuthServer
 	c       client.WithWatch
 	grants  *fakeGrantWriter
-	backend oauthpending.Store
+	backend *countingStore
 	// now is the default in-memory backend's clock.
 	now func() time.Time
+	// extra layers interceptors onto every caller's client.
+	extra interceptor.Funcs
+}
+
+// countingStore counts the records put, so a refused mint can be shown to store nothing.
+type countingStore struct {
+	oauthpending.Store
+	puts int
+}
+
+func (c *countingStore) Put(ctx context.Context, kind oauthpending.Kind, handle string, payload []byte, ttl time.Duration) error {
+	c.puts++
+	return c.Store.Put(ctx, kind, handle, payload, ttl)
 }
 
 func newTicketEnv(t *testing.T, backend oauthpending.Store) *ticketEnv {
 	t.Helper()
 	oauth := newFakeOAuthServer(t)
 	oauth.expectChallenge = ""
+	agent := &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: ticketAgent, Namespace: grantNS}}
 	e := &ticketEnv{
 		oauth:  oauth,
-		c:      fake.NewClientBuilder().WithScheme(testScheme(t)).Build(),
+		c:      fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build(),
 		grants: &fakeGrantWriter{},
 		now:    time.Now,
 	}
 	if backend == nil {
 		backend = oauthpending.NewMemStoreWithClock(func() time.Time { return e.now() })
 	}
-	e.backend = backend
+	e.backend = &countingStore{Store: backend}
 	return e
 }
 
 func (e *ticketEnv) replica(t *testing.T) ticketReplica {
 	t.Helper()
 	s, lb := newGrantServer(t, e.c)
+	s.callerClients = &identityCallerFactory{backing: e.c, extra: e.extra, username: func(token string) string {
+		if token == ticketUserToken {
+			return ticketMinter
+		}
+		return "user:" + token
+	}}
 	wireTRStore(t, s, nil, oauthToolRegistryWithConfig(ticketServer, "http://ticket/mcp", e.oauth))
 	s.consoleURL = ticketConsole
 	s.grantStore = e.grants
@@ -173,6 +201,10 @@ func TestConsentTicketCompletesOnTheConsole(t *testing.T) {
 	rrec, redeemed := redeemTicket(t, r.s, minted.Ticket, ticketAgentOrigin, nil)
 	require.Equal(t, http.StatusAccepted, rrec.Code, "body: %s", rrec.Body.String())
 	assert.Equal(t, ticketConsole+mcpOAuthCallbackPath, redirectURIOf(t, redeemed.AuthorizationURL))
+	assert.Equal(t, ticketMinter, redeemed.Minter, "/connect is told whose consent this is")
+	assert.Equal(t, ticketServer, redeemed.Server)
+	assert.Equal(t, ticketAgent, redeemed.Agent)
+	assert.Equal(t, grantNS, redeemed.Namespace)
 	cookie := bindingCookie(t, rrec)
 	assert.True(t, strings.HasPrefix(cookie.Name, "__Host-"), "the console is HTTPS: %s", cookie.Name)
 	assert.NotContains(t, rrec.Body.String(), ticketUserToken)
@@ -183,7 +215,7 @@ func TestConsentTicketCompletesOnTheConsole(t *testing.T) {
 	assert.Equal(t, ticketAgentOrigin, q.Get("opener_origin"))
 	assert.Equal(t, "authorization_code", env.oauth.gotGrant)
 	require.Equal(t, 1, env.grants.calls)
-	assert.Equal(t, userGrantHash("user:"+ticketUserToken), env.grants.userHash, "the grant is the minter's")
+	assert.Equal(t, userGrantHash(ticketMinter), env.grants.userHash, "the grant is the minter's")
 	assert.Equal(t, credresolve.AgentBoundary(grantNS, ticketAgent), env.grants.boundary)
 	assert.Equal(t, ticketServer, env.grants.server)
 
@@ -277,6 +309,23 @@ func TestConsentTicketRefusals(t *testing.T) {
 	})
 }
 
+// TestConsentTicketOnALocalhostBaseDomain: with the edge's baseDomain localhost, the console is
+// console.localhost and agents are <agent>.<ns>.localhost; a ticket from such an agent completes.
+func TestConsentTicketOnALocalhostBaseDomain(t *testing.T) {
+	const console = "http://console.localhost:8888"
+	env := newTicketEnv(t, nil)
+	r := env.replica(t)
+	r.s.consoleURL = console
+
+	_, minted := mintTicket(t, r.s, ticketAgent, nil)
+	require.NotEmpty(t, minted.Ticket)
+	rec, redeemed := redeemTicket(t, r.s, minted.Ticket, "http://helper."+grantNS+".localhost:8888", func(req *http.Request) {
+		req.Header.Set("Origin", console)
+	})
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, console+mcpOAuthCallbackPath, redirectURIOf(t, redeemed.AuthorizationURL))
+}
+
 // TestConsentTicketForgedHeaders: Origin and X-Forwarded-Host are the client's to choose, so on
 // neither the mint nor the redeem do they move the redirect_uri or the relay target.
 func TestConsentTicketForgedHeaders(t *testing.T) {
@@ -352,6 +401,28 @@ func TestConsentTicketMint(t *testing.T) {
 		wireTRStore(t, r.s, nil)
 		rec, _ := mintTicket(t, r.s, ticketAgent, nil)
 		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+	t.Run("for an agent that does not exist", func(t *testing.T) {
+		env := newTicketEnv(t, nil)
+		r := env.replica(t)
+		rec, minted := mintTicket(t, r.s, "nobody", nil)
+		assert.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+		assert.Empty(t, minted.Ticket)
+		assert.Zero(t, env.backend.puts, "nothing is stored")
+	})
+	t.Run("for an agent the caller cannot read", func(t *testing.T) {
+		env := newTicketEnv(t, nil)
+		env.extra = interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*agentsv1beta1.AgentDeployment); ok {
+				return apierrors.NewForbidden(schema.GroupResource{Group: "agents.ctxmesh.io", Resource: "agentdeployments"}, key.Name, errors.New("denied"))
+			}
+			return c.Get(ctx, key, obj, opts...)
+		}}
+		r := env.replica(t)
+		rec, minted := mintTicket(t, r.s, ticketAgent, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+		assert.Empty(t, minted.Ticket)
+		assert.Zero(t, env.backend.puts, "nothing is stored")
 	})
 	t.Run("without a console origin", func(t *testing.T) {
 		r := newTicketEnv(t, nil).replica(t)
@@ -489,6 +560,48 @@ func TestConsentOpenerAllowed(t *testing.T) {
 		{
 			console: "https://10.0.0.5",
 			refuse:  []string{"https://helper.prod.0.0.5", "https://helper.prod.10.0.0.5.sslip.io"},
+		},
+		{
+			console: "http://[::1]:9090",
+			allow:   []string{"http://helper.prod.localhost", "http://helper.prod.127.0.0.1.sslip.io"},
+			refuse:  []string{"http://helper.prod.evil.com", "http://helper.prod.1"},
+		},
+		// A single-label base domain off the ICANN list is private: the public-suffix list's
+		// default rule returns it, but agents live under it, not under the console.
+		{
+			console: "http://console.localhost:9090",
+			allow:   []string{"http://helper.prod.localhost:9090", "http://helper.prod.localhost"},
+			refuse: []string{
+				"http://helper.prod.console.localhost", "http://helper.prod.evil.localhost",
+				"http://helper.prod.localhost.evil.com", "https://helper.prod.localhost",
+			},
+		},
+		{
+			console: "https://console.internal",
+			allow:   []string{"https://helper.prod.internal"},
+			refuse:  []string{"https://helper.prod.console.internal", "https://helper.prod.evil.internal"},
+		},
+		{
+			console: "https://console.corp",
+			allow:   []string{"https://helper.prod.corp"},
+			refuse:  []string{"https://helper.prod.console.corp"},
+		},
+		{
+			console: "https://console.example.com",
+			allow:   []string{"https://helper.prod.example.com"},
+			refuse:  []string{"https://helper.prod.console.example.com", "https://helper.prod.com"},
+		},
+		{
+			console: "https://console.example.co.uk",
+			allow:   []string{"https://helper.prod.example.co.uk"},
+			refuse:  []string{"https://helper.prod.co.uk", "https://helper.prod.console.example.co.uk"},
+		},
+		// A private-section public suffix (github.io) is still a public suffix: other tenants own its
+		// other subdomains, so a console at x.github.io has its agents under itself.
+		{
+			console: "https://x.github.io",
+			allow:   []string{"https://helper.prod.x.github.io"},
+			refuse:  []string{"https://helper.prod.github.io", "https://helper.prod.y.github.io"},
 		},
 	} {
 		t.Run(tc.console, func(t *testing.T) {
