@@ -35,6 +35,7 @@ import (
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/sharedrun"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 )
@@ -256,8 +257,9 @@ func (s *Server) authorizeResolvedRun(w http.ResponseWriter, r *http.Request, ca
 }
 
 // callerCanReadRunBacking authorizes a NON-creator caller to read a run through their OWN RBAC on the run's
-// backing resource (ADR 0011): the Workflow CR for a workflow instance, otherwise the run's AgentDeployment.
-// An inline (CR-less) workflow run has no backing CR, so a non-creator is denied (404 — no oracle, uniform
+// backing resource (ADR 0011): the Workflow CR for a workflow instance, the datasets of its namespace for a
+// dataset export (whose Agent field is only the dataset's name), otherwise the run's AgentDeployment. An
+// inline (CR-less) workflow run has no backing CR, so a non-creator is denied (404 — no oracle, uniform
 // with a missing run). It writes the error response and returns false on denial/absence.
 func (s *Server) callerCanReadRunBacking(w http.ResponseWriter, r *http.Request, caller client.Client, rn *run.Run) bool {
 	var (
@@ -265,6 +267,16 @@ func (s *Server) callerCanReadRunBacking(w http.ResponseWriter, r *http.Request,
 		name = rn.Agent
 	)
 	switch {
+	case rn.IsDatasetExportJob():
+		// The permission that starts an export (datasets.go) also reads and cancels one.
+		if cErr := s.authzRefusal(
+			s.authorizeStore(r.Context(), caller, authz.VerbUpdate, resEvalSuites, rn.Namespace, ""),
+			"access this run",
+		); cErr != nil {
+			writeError(w, cErr.status, cErr.msg)
+			return false
+		}
+		return true
 	case rn.WorkflowRef != "":
 		// A workflow instance: authorize against the Workflow CR (rn.Agent is the CR name, but be explicit).
 		obj = &agentsv1beta1.Workflow{}

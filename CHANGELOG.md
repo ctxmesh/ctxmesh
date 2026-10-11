@@ -85,9 +85,18 @@ label a case in another namespace. Every dataset request is now authorized as th
 `evalsuites` in the dataset's namespace, before anything is read: reading needs `list`, and
 exporting, labeling, adding a run and pinning need `update`. An export also needs read access to
 the agent whose traces it copies. A label's case must belong to the dataset in the path. Refusals
-are 403, or 401 for a token the API server rejects. Reading or pinning a dataset that does not
-exist is a 404 and no longer creates it. The shipped viewer role can read datasets in the
-namespaces it is bound in, and the developer and operator roles can also change them.
+are 403, or 401 for a token the API server rejects. An end user's token is refused with a 404
+before any call to the API server. A namespace that is not a valid name is a 400, as is an export
+naming an agent that is not one. Reading or pinning a dataset that does not exist is a 404 and no
+longer creates it. The shipped viewer role can read datasets in the namespaces it is bound in, and
+the developer and operator roles can also change them.
+
+An export run belongs to whoever started it, so they can follow and cancel it; before, its creator
+got a 404 and anyone who could read an agent named like the dataset could read or cancel it. Others
+need permission to change that namespace's datasets. An export copies a trace that a run maps only
+if its creator could open it on the trace page: they made that run, or the run belongs to the agent
+being exported. A trace shared through a workflow or a handoff belongs to the run that started it,
+so it is withheld, and the export's result counts what it withheld.
 
 **Fixed: the replay stepper showed every step of a recorded run as a gap.** `GET
 /api/runs/{id}/fixture` stopped reading the run's events before the Postgres run store had

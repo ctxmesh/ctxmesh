@@ -423,7 +423,8 @@ func postExport(t *testing.T, s *Server, dsName string, body ExportRequest) (int
 func newExportEndpointServer(t *testing.T, lf LangfuseAdapter) (*Server, dataset.Store) {
 	t.Helper()
 	sc := testScheme(t)
-	fc := fake.NewClientBuilder().WithScheme(sc).WithObjects(readyAgent("chatbot", "team-a", "")).Build()
+	fc := fake.NewClientBuilder().WithScheme(sc).WithObjects(readyAgent("chatbot", "team-a", "")).
+		WithInterceptorFuncs(ssrInterceptor("exporter@example.com", nil)).Build()
 	ds := dataset.NewMemStore()
 	s := NewServer(Options{
 		CallerClients: newFakeFactory(fc),
