@@ -644,10 +644,19 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 	// it is the "old" arm of a canary split (the serving revision that is NOT the
 	// candidate). Read here (pre-apply) so the split pins the revision genuinely serving
 	// today. "" ⇒ no ksvc yet, or the only serving revision IS the candidate (no old arm).
-	oldRev, err := r.currentServingRevision(ctx, deploy, candidateRev)
+	live, err := r.liveKnativeService(ctx, deploy)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	oldRev := oldServingRevision(live, candidateRev)
+	// Whether the controller routes this service by revision name, and whether the candidate
+	// is the revision that routing treats as stable: a promoted or auto-promoted canary, or
+	// a spec reverted — after an abort, or mid-split — to the revision that was serving.
+	var stableRev string
+	if live != nil {
+		stableRev = stableArm(live.Spec.Traffic)
+	}
+	candidateIsStable := stableRev != "" && stableRev == candidateRev
 
 	outcome, err := r.evaluateGate(ctx, deploy, candidateRev)
 	if err != nil {
@@ -663,14 +672,21 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 	// serving revision takes the canary path (ADR 0062 Fork 3) — for BOTH the
 	// unapproved case (hold at a named {old, candidate:N%} split so both arms accumulate
 	// online scores) AND the human-completion case (promote=<candidate> → 100% candidate,
-	// abort → 100% old). The ordinary promote path leaves ksvc.Spec.Traffic alone, so a
-	// canary MUST route through reconcileCanary to set the named split/completion traffic.
+	// abort → 100% old). The ordinary promote path never splits, so a canary MUST route
+	// through reconcileCanary to set the named split/completion traffic.
 	// A gate:warn/blocked candidate (Decision != promoted) never canaries. A first deploy
 	// with no old arm (oldRev == "") is a degenerate canary → fall through to the ordinary
 	// path (hold at 0% until promoted, or promote-all — unchanged).
 	if outcome != nil && outcome.status.Decision == eval.DecisionPromoted &&
 		canaryConfigured(deploy, execModelServing) && oldRev != "" && oldRev != candidateRev {
 		return r.reconcileCanary(ctx, deploy, hash, versionName, candidateRev, oldRev, outcome)
+	}
+	// A passing candidate that is already the stable revision has nothing to wait for: the
+	// spec matches what serves. Holding it for approval would report a serving agent as
+	// awaiting promotion, which is what an auto-promoted revision did on its next reconcile.
+	if outcome != nil && !outcome.promote && outcome.status.Decision == eval.DecisionPromoted && candidateIsStable {
+		outcome = candidateServingOutcome(outcome)
+		r.emitGateSpan(ctx, deploy, outcome.status)
 	}
 	if outcome != nil && !outcome.promote {
 		// Gate held the rollout (blocked or awaiting-promotion): do NOT apply the
@@ -680,9 +696,22 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 		return r.recordHeldGate(ctx, deploy, versionName, outcome)
 	}
 
-	ksvc, resolvedSkills, err := r.reconcileKnativeService(ctx, deploy, hash)
+	// Once traffic is routed by name, keep routing by name, in the same write as the
+	// template. Applying the template alone drops spec.traffic when its name changes, and
+	// Knative then serves the latest ready revision, which after an abort is the rejected
+	// candidate. A named target that is not ready yet leaves the route as it was.
+	var keepTraffic []servingv1.TrafficTarget
+	if stableRev != "" {
+		keepTraffic = namedFullTraffic(candidateRev)
+	}
+	ksvc, resolvedSkills, err := r.reconcileKnativeService(ctx, deploy, hash, keepTraffic)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling Knative Service: %w", err)
+	}
+	// A progression recorded for another candidate is over: that candidate no longer serves.
+	// Left in place, re-applying its spec would resume at the percent it had reached.
+	if ro := deploy.Status.Rollout; ro != nil && ro.CandidateRevision != candidateRev {
+		deploy.Status.Rollout = nil
 	}
 	if err = r.syncStatus(ctx, deploy, ksvc, versionName, resolvedSkills); err != nil {
 		return ctrl.Result{}, fmt.Errorf("syncing status: %w", err)
@@ -719,26 +748,21 @@ func (r *AgentDeploymentReconciler) candidateRevisionName(
 	return revName, nil
 }
 
-// currentServingRevision returns the "old" arm for a canary split against
-// candidateRev: the revision the agent's Knative Service serves today that is NOT
-// the candidate. Returns "" when no ksvc exists yet OR the only serving revision is
-// the candidate (a first deploy / already-promoted candidate has no distinct old
-// arm). A NotFound ksvc is not an error — it just means there is no old revision to
-// split against. See oldServingRevision for the resolution order.
-func (r *AgentDeploymentReconciler) currentServingRevision(
+// liveKnativeService returns the agent's Knative Service as it stands, or nil when none
+// exists yet (a first deploy has no serving revision, which is not an error).
+func (r *AgentDeploymentReconciler) liveKnativeService(
 	ctx context.Context,
 	deploy *agentsv1beta1.AgentDeployment,
-	candidateRev string,
-) (string, error) {
+) (*servingv1.Service, error) {
 	var ksvc servingv1.Service
 	err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: deploy.Name}, &ksvc)
 	if apierrors.IsNotFound(err) {
-		return "", nil
+		return nil, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("reading current ksvc for serving revision: %w", err)
+		return nil, fmt.Errorf("reading current ksvc for serving revision: %w", err)
 	}
-	return oldServingRevision(&ksvc, candidateRev), nil
+	return &ksvc, nil
 }
 
 // reconcileEventing wraps the pod template in a plain apps/v1 Deployment + a
@@ -2457,10 +2481,15 @@ func (r *AgentDeploymentReconciler) ensureAgentIdentitySA(ctx context.Context, d
 // (m7.5: the AgentDeployment reconciler is the single writer of the ksvc and its
 // autoscaling annotations; the AgentScalingPolicy controller owns only the
 // separate KEDA ScaledObject).
+//
+// traffic, when non-nil, is written in the SAME update as the template; nil leaves
+// traffic as the template write leaves it. Two writes would pass through a service with
+// no traffic block, which Knative serves as 100% to the latest ready revision.
 func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	ctx context.Context,
 	deploy *agentsv1beta1.AgentDeployment,
 	hash string,
+	traffic []servingv1.TrafficTarget,
 ) (*servingv1.Service, []string, error) {
 	pod, err := r.buildPodTemplate(ctx, deploy)
 	if err != nil {
@@ -2533,6 +2562,11 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 		// revision name, which Knative requires for pod-spec changes.
 		if ksvc.Spec.Template.Name != desiredRev {
 			ksvc.Spec = desiredSpec
+		}
+		// Compared by revision and percent only: Knative defaults fields on each target, so a
+		// whole-object comparison would rewrite an unchanged block on every reconcile.
+		if traffic != nil && !trafficEqual(ksvc.Spec.Traffic, traffic) {
+			ksvc.Spec.Traffic = traffic
 		}
 		return ctrl.SetControllerReference(deploy, ksvc, r.Scheme)
 	})

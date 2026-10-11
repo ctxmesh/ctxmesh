@@ -337,6 +337,197 @@ func TestCanary_SpecChangeAfterAbortOpensFreshCanary(t *testing.T) {
 	assert.Equal(t, map[string]int64{r1: 90, r3: 10}, trafficMap(getKsvc(t, name, namespace)))
 }
 
+// assertServesWithoutCanary checks that rev, the revision the spec names, serves all traffic and
+// the gate says so, with no canary.
+func assertServesWithoutCanary(t *testing.T, name, namespace, rev string) {
+	t.Helper()
+	ksvc := getKsvc(t, name, namespace)
+	assert.Equal(t, map[string]int64{rev: 100}, trafficMap(ksvc), "the revision that serves keeps all traffic")
+	assert.Equal(t, rev, ksvc.Spec.Template.Name, "the template names what serves")
+	d := getDeploy(t, name, namespace)
+	require.NotNil(t, d.Status.Gate)
+	assert.Equal(t, rev, d.Status.Gate.ScoredRevision)
+	assert.Equal(t, eval.PhasePromoted, d.Status.Gate.Phase, "the spec matches what serves: no canary, nothing to promote")
+	hash, err := specHash(d.Spec)
+	require.NoError(t, err)
+	assert.Equal(t, agentVersionName(name, hash), d.Status.LatestVersion)
+}
+
+// Reverting the spec after an abort, to the version that still serves, opens no canary. The
+// Knative template still names the rejected candidate, and that is not what serves.
+func TestCanary_RevertAfterAbortOpensNoSplit(t *testing.T) {
+	const name, namespace = "canary-abort-revert", "default"
+	es := mkEvalSuite(t, "canary-abort-revert-suite", namespace, "0.7", eval.GateBlock)
+	r := gateReconciler(0.9)
+	r1, r2 := abortSecondCanary(t, r, name, namespace, es.Name)
+	require.Equal(t, r2, getKsvc(t, name, namespace).Spec.Template.Name,
+		"after an abort the template still names the rejected candidate")
+
+	// Revert to R1's spec, with no promote annotation naming R1.
+	rev := getDeploy(t, name, namespace)
+	rev.Spec.Port = 8080
+	delete(rev.Annotations, promoteAnnotation)
+	require.NoError(t, k8sClient.Update(testCtx, rev))
+	reconcileNN(t, r, name, namespace)
+	require.Equal(t, r1, getDeploy(t, name, namespace).Status.Gate.ScoredRevision, "the reverted spec is R1's")
+	assertServesWithoutCanary(t, name, namespace, r1)
+	assert.Equal(t, "CandidateServing", getDeploy(t, name, namespace).Status.Gate.Reason)
+
+	reconcileNN(t, r, name, namespace)
+	assertServesWithoutCanary(t, name, namespace, r1)
+}
+
+// The same revert when auto-progression promoted the serving revision, which leaves no promote
+// annotation naming it. An auto-promoted revision also stays promoted on later reconciles.
+func TestCanary_RevertAfterAbortOfAutoPromotedRevision(t *testing.T) {
+	const name, namespace = "canary-abort-revert-auto", "default"
+	es := mkEvalSuite(t, "canary-abort-revert-auto-suite", namespace, "0.7", eval.GateBlock)
+	deploy := &agentsv1beta1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1beta1.AgentDeploymentSpec{
+			Image:        "ghcr.io/ctxmesh/example-agent:latest",
+			EvalSuiteRef: es.Name,
+			Rollout: &agentsv1beta1.RolloutSpec{
+				Strategy:      rolloutStrategyCanary,
+				CanaryPercent: 10,
+				AutoProgress: &agentsv1beta1.AutoProgressConfig{
+					Enabled:      true,
+					Steps:        []agentsv1beta1.CanaryStep{{Percent: 100}},
+					DwellSeconds: 60,
+				},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	r := gateReconciler(0.9)
+
+	reconcileNN(t, r, name, namespace)
+	promoteTo(t, r, name, namespace, getDeploy(t, name, namespace).Status.Gate.ScoredRevision)
+
+	// R1 canaries, then auto-promotes.
+	upd := getDeploy(t, name, namespace)
+	upd.Spec.Port = 8090
+	delete(upd.Annotations, promoteAnnotation)
+	require.NoError(t, k8sClient.Update(testCtx, upd))
+	reconcileNN(t, r, name, namespace)
+	r1 := getDeploy(t, name, namespace).Status.Gate.ScoredRevision
+	backdateRolloutAdvance(t, name, namespace, 2*time.Minute)
+	setRegressionCondition(t, name, namespace, metav1.ConditionFalse)
+	reconcileNN(t, r, name, namespace)
+	require.Equal(t, eval.PhasePromoted, getDeploy(t, name, namespace).Status.Gate.Phase)
+	require.Equal(t, map[string]int64{r1: 100}, trafficMap(getKsvc(t, name, namespace)))
+
+	reconcileNN(t, r, name, namespace)
+	assertServesWithoutCanary(t, name, namespace, r1)
+
+	// R2 canaries and is aborted.
+	upd = getDeploy(t, name, namespace)
+	upd.Spec.Port = 8091
+	require.NoError(t, k8sClient.Update(testCtx, upd))
+	reconcileNN(t, r, name, namespace)
+	split := getDeploy(t, name, namespace)
+	r2 := split.Status.Gate.ScoredRevision
+	require.Equal(t, map[string]int64{r1: 90, r2: 10}, trafficMap(getKsvc(t, name, namespace)))
+	split.Annotations = map[string]string{rolloutAbortAnnotation: "true"}
+	require.NoError(t, k8sClient.Update(testCtx, split))
+	reconcileNN(t, r, name, namespace)
+	require.Equal(t, eval.PhaseAborted, getDeploy(t, name, namespace).Status.Gate.Phase)
+
+	// Revert to R1's spec.
+	upd = getDeploy(t, name, namespace)
+	upd.Spec.Port = 8090
+	require.NoError(t, k8sClient.Update(testCtx, upd))
+	reconcileNN(t, r, name, namespace)
+	require.Equal(t, r1, getDeploy(t, name, namespace).Status.Gate.ScoredRevision, "the reverted spec is R1's")
+	assertServesWithoutCanary(t, name, namespace, r1)
+}
+
+// progressCanaryPastHalf drives an auto-progressing canary until its candidate R1 holds 60% and
+// the promoted R0 holds 40%. No promote annotation names R0 by then.
+func progressCanaryPastHalf(t *testing.T, r *AgentDeploymentReconciler, name, namespace, suite string) (r0, r1 string) {
+	t.Helper()
+	deploy := &agentsv1beta1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1beta1.AgentDeploymentSpec{
+			Image:        "ghcr.io/ctxmesh/example-agent:latest",
+			EvalSuiteRef: suite,
+			Rollout: &agentsv1beta1.RolloutSpec{
+				Strategy:      rolloutStrategyCanary,
+				CanaryPercent: 10,
+				AutoProgress: &agentsv1beta1.AutoProgressConfig{
+					Enabled:      true,
+					Steps:        []agentsv1beta1.CanaryStep{{Percent: 60}, {Percent: 100}},
+					DwellSeconds: 60,
+				},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+
+	reconcileNN(t, r, name, namespace)
+	r0 = getDeploy(t, name, namespace).Status.Gate.ScoredRevision
+	promoteTo(t, r, name, namespace, r0)
+
+	upd := getDeploy(t, name, namespace)
+	upd.Spec.Port = 8090
+	delete(upd.Annotations, promoteAnnotation)
+	require.NoError(t, k8sClient.Update(testCtx, upd))
+	reconcileNN(t, r, name, namespace)
+	r1 = getDeploy(t, name, namespace).Status.Gate.ScoredRevision
+	backdateRolloutAdvance(t, name, namespace, 2*time.Minute)
+	setRegressionCondition(t, name, namespace, metav1.ConditionFalse)
+	reconcileNN(t, r, name, namespace)
+	require.Equal(t, map[string]int64{r0: 40, r1: 60}, trafficMap(getKsvc(t, name, namespace)))
+	return r0, r1
+}
+
+// Reverting the spec mid-split (by hand or by a rollback) withdraws the candidate, and a later
+// re-apply of its spec canaries afresh rather than resuming at the percent it had reached.
+func TestCanary_RevertMidSplitWithdrawsCandidate(t *testing.T) {
+	const name, namespace = "canary-revert-midsplit", "default"
+	es := mkEvalSuite(t, "canary-revert-midsplit-suite", namespace, "0.7", eval.GateBlock)
+	r := gateReconciler(0.9)
+	r0, r1 := progressCanaryPastHalf(t, r, name, namespace, es.Name)
+
+	upd := getDeploy(t, name, namespace)
+	upd.Spec.Port = 8080
+	require.NoError(t, k8sClient.Update(testCtx, upd))
+	reconcileNN(t, r, name, namespace)
+	require.Equal(t, r0, getDeploy(t, name, namespace).Status.Gate.ScoredRevision, "the reverted spec is R0's")
+	assertServesWithoutCanary(t, name, namespace, r0)
+	assert.Nil(t, getDeploy(t, name, namespace).Status.Rollout, "the withdrawn candidate's progression is over")
+
+	upd = getDeploy(t, name, namespace)
+	upd.Spec.Port = 8090
+	require.NoError(t, k8sClient.Update(testCtx, upd))
+	reconcileNN(t, r, name, namespace)
+	again := getDeploy(t, name, namespace)
+	assert.Equal(t, eval.PhaseCanary, again.Status.Gate.Phase)
+	require.NotNil(t, again.Status.Rollout)
+	assert.Equal(t, reasonCanaryOpened, again.Status.Rollout.Reason)
+	assert.Equal(t, map[string]int64{r0: 90, r1: 10}, trafficMap(getKsvc(t, name, namespace)),
+		"a re-applied candidate starts again at canaryPercent")
+}
+
+// A new candidate pushed while the previous one holds more than half the traffic splits against
+// the promoted revision. The superseded candidate was never promoted and must not take 90%.
+func TestCanary_NewCandidateSplitsAgainstPromotedRevision(t *testing.T) {
+	const name, namespace = "canary-supersede", "default"
+	es := mkEvalSuite(t, "canary-supersede-suite", namespace, "0.7", eval.GateBlock)
+	r := gateReconciler(0.9)
+	r0, r1 := progressCanaryPastHalf(t, r, name, namespace, es.Name)
+
+	upd := getDeploy(t, name, namespace)
+	upd.Spec.Port = 8091
+	require.NoError(t, k8sClient.Update(testCtx, upd))
+	reconcileNN(t, r, name, namespace)
+	r2 := getDeploy(t, name, namespace).Status.Gate.ScoredRevision
+	require.NotEqual(t, r1, r2)
+	assert.Equal(t, map[string]int64{r0: 90, r2: 10}, trafficMap(getKsvc(t, name, namespace)))
+}
+
 // TestCanary_Blocked_NoSplit: a canary-configured deployment whose candidate is
 // BLOCKED by the offline gate (below threshold, gate:block) never opens a split —
 // it holds like any blocked rollout (the old revision keeps serving unchanged).

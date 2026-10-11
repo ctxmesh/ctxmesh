@@ -66,11 +66,12 @@ const rolloutStrategyCanary = "canary"
 // eval-gate controller owns both. The controller clears it after acting so the
 // abort fires once.
 //
-// The other abort path is REMOVING the candidate (a spec revert / rollback), which
-// simply produces a new-or-prior candidate revision that the ordinary reconcile
-// serves — no canary-specific handling needed. This annotation is the explicit,
-// documented in-flight abort that keeps the OLD revision serving without a spec
-// change to the candidate.
+// The other abort path is REMOVING the candidate: reverting the spec, mid-split or
+// after an abort, to the revision that was serving. That revision is then the
+// candidate and the stable arm at once, so the ordinary reconcile pins all traffic
+// back to it (see oldServingRevision). This annotation is the explicit, documented
+// in-flight abort that keeps the OLD revision serving without a spec change to the
+// candidate.
 const rolloutAbortAnnotation = "agents.ctxmesh.ai/rollout-abort"
 
 // canaryConfigured reports whether the deployment requests a canary rollout for
@@ -103,31 +104,35 @@ func canaryPercent(deploy *agentsv1beta1.AgentDeployment) int64 {
 }
 
 // oldServingRevision resolves the revision name that is the "old" arm of a canary
-// split — the revision serving today that is NOT the candidate being rolled out.
-// candidateRev is excluded so that, during an ACTIVE split (spec.template.name is
-// already the candidate and spec.traffic pins {old, candidate}), the resolver still
-// returns the OLD arm rather than mistaking the candidate for the old revision.
+// split: the revision that was serving before any candidate, which a new candidate
+// splits against.
 //
-// Resolution order (each source excludes the candidate):
-//  1. spec.traffic — the named block the controller configured (a split's old arm,
-//     or a prior completed promote). Source of truth, available in envtest.
-//  2. status.traffic — what Knative reports is actually serving (real cluster).
-//  3. spec.template.name — the revision the current spec pins (a ksvc with no
-//     explicit traffic, e.g. an ungated/first-promoted single revision).
+// The first source that names a revision decides:
+//  1. spec.traffic — the named block the controller configured. Source of truth,
+//     available in envtest.
+//  2. status.traffic — what Knative programmed, when spec.traffic names no revision
+//     (Knative defaults an empty block to {latestRevision: true, percent: 100}).
+//  3. spec.template.name — only when neither block names a revision: Knative then
+//     serves the latest revision, which is the template's.
 //
-// Returns "" when the ksvc does not exist yet OR the only serving revision IS the
-// candidate (a first deploy, or a candidate already fully promoted — no distinct
-// old arm). A canary needs two distinct arms, so the caller then falls back to the
-// ordinary promote-all/hold path.
+// The old arm is the block's stable arm (see stableArm), never the template of a
+// candidate: after an abort the template still names the rejected candidate, which
+// serves nothing.
+//
+// Returns "" when the ksvc does not exist yet, or when the candidate IS the stable
+// arm: a promoted candidate, or a spec reverted to the revision that was serving.
+// A canary needs two distinct arms, so the caller then takes the ordinary path.
 func oldServingRevision(ksvc *servingv1.Service, candidateRev string) string {
 	if ksvc == nil {
 		return ""
 	}
-	if rev := pickOldArm(ksvc.Spec.Traffic, candidateRev); rev != "" {
-		return rev
-	}
-	if rev := pickOldArm(ksvc.Status.Traffic, candidateRev); rev != "" {
-		return rev
+	for _, traffic := range [][]servingv1.TrafficTarget{ksvc.Spec.Traffic, ksvc.Status.Traffic} {
+		if stable := stableArm(traffic); stable != "" {
+			if stable == candidateRev {
+				return ""
+			}
+			return stable
+		}
 	}
 	if ksvc.Spec.Template.Name != "" && ksvc.Spec.Template.Name != candidateRev {
 		return ksvc.Spec.Template.Name
@@ -135,26 +140,19 @@ func oldServingRevision(ksvc *servingv1.Service, candidateRev string) string {
 	return ""
 }
 
-// pickOldArm returns the highest-percent named revision in a traffic block that is
-// NOT the candidate — the "old" arm. Returns "" when the block names no non-candidate
-// revision.
-func pickOldArm(traffic []servingv1.TrafficTarget, candidateRev string) string {
-	var best string
-	var bestPct int64 = -1
+// stableArm returns the revision holding a traffic block's stable share: its first named
+// entry. The controller writes a split old arm first (namedSplitTraffic) and a pin as one
+// entry (namedFullTraffic), so this is the revision that served before the candidate,
+// whatever percent the candidate has reached. Choosing by percent instead would hand a
+// new candidate's split to an unpromoted candidate that had passed 50%. Returns "" when
+// the block names no revision.
+func stableArm(traffic []servingv1.TrafficTarget) string {
 	for _, tt := range traffic {
-		if tt.RevisionName == "" || tt.RevisionName == candidateRev {
-			continue
-		}
-		pct := int64(0)
-		if tt.Percent != nil {
-			pct = *tt.Percent
-		}
-		if pct > bestPct {
-			bestPct = pct
-			best = tt.RevisionName
+		if tt.RevisionName != "" {
+			return tt.RevisionName
 		}
 	}
-	return best
+	return ""
 }
 
 // namedSplitTraffic builds a NAMED-revision Knative traffic split
@@ -309,6 +307,21 @@ func (r *AgentDeploymentReconciler) reconcileCanary(
 		fmt.Sprintf("canary auto-progressing (%s): %d%% of traffic on candidate %q, %d%% on old %q; advances one step per dwell on a passing eval — promote=%s or annotate %s to intervene",
 			dec.reason, effPct, candidateRev, 100-effPct, oldRev, candidateRev, rolloutAbortAnnotation),
 		dec.rollout, ctrl.Result{RequeueAfter: requeue})
+}
+
+// reasonCandidateServing is the gate reason for a passing candidate that already serves all of
+// the configured traffic, so there was nothing to hold for approval.
+const reasonCandidateServing = "CandidateServing"
+
+// candidateServingOutcome turns a passing, unapproved outcome for a candidate that already
+// serves every request into a promotion: the spec matches what serves.
+func candidateServingOutcome(outcome *gateOutcome) *gateOutcome {
+	out := *outcome
+	out.promote = true
+	out.terminal = true
+	out.status.Phase = eval.PhasePromoted
+	out.status.Reason = reasonCandidateServing
+	return &out
 }
 
 // autoProgress reason strings — surfaced on status.rollout.reason + the Ready condition message for
@@ -502,40 +515,21 @@ func (r *AgentDeploymentReconciler) canaryAbortRequested(deploy *agentsv1beta1.A
 
 // setCanaryTraffic CreateOrUpdate's the ksvc so it (a) carries the candidate
 // revision template (so the candidate revision is created + retained) and (b)
-// serves the given NAMED traffic block. It reuses reconcileKnativeService to build
-// the candidate template identically to the promote path (same pod spec, digest,
-// autoscaling annotations), then layers the traffic block on with a change-guarded
-// write so a steady-state split does not thrash.
+// serves the given NAMED traffic block, in one write. It builds the candidate
+// template identically to the promote path (same pod spec, digest, autoscaling
+// annotations). The write is change-guarded, so a steady-state split does not thrash.
 //
-// The change guard compares the LIVE ksvc's traffic to the desired block and skips
-// the write when they already match (and the template is already the candidate).
+// One write, not template-then-traffic: a template change drops spec.traffic, and for
+// the moment between two writes Knative would serve the latest ready revision, which
+// after an abort is the rejected candidate.
 func (r *AgentDeploymentReconciler) setCanaryTraffic(
 	ctx context.Context,
 	deploy *agentsv1beta1.AgentDeployment,
 	hash string,
 	traffic []servingv1.TrafficTarget,
 ) error {
-	// Build the candidate revision template exactly as the promote path does. This
-	// applies the candidate pod spec (creating the candidate revision) and leaves
-	// ksvc.Spec.Template with the candidate's name.
-	ksvc, _, err := r.reconcileKnativeService(ctx, deploy, hash)
-	if err != nil {
+	if _, _, err := r.reconcileKnativeService(ctx, deploy, hash, traffic); err != nil {
 		return fmt.Errorf("reconciling Knative Service for canary: %w", err)
-	}
-
-	// Layer the traffic block on with a change-guarded update: only write when the
-	// live traffic differs (no thrash). reconcileKnativeService already persisted the
-	// template; this second update sets spec.traffic.
-	if trafficEqual(ksvc.Spec.Traffic, traffic) {
-		return nil
-	}
-	var fresh servingv1.Service
-	if err := r.Get(ctx, client.ObjectKeyFromObject(ksvc), &fresh); err != nil {
-		return fmt.Errorf("re-fetching ksvc for canary traffic: %w", err)
-	}
-	fresh.Spec.Traffic = traffic
-	if err := r.Update(ctx, &fresh); err != nil {
-		return fmt.Errorf("updating ksvc canary traffic: %w", err)
 	}
 	return nil
 }

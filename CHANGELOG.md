@@ -117,6 +117,13 @@ while the candidate kept its revision name, which also changes on a platform upg
 one, so the split reopened at `canaryPercent` to the rejected candidate. It now holds until the
 spec changes or someone promotes the candidate.
 
+**Fixed: reverting the spec after an aborted canary sent most traffic to the rejected candidate.**
+When no promote annotation named the revision the abort kept serving, as after an automatic
+promotion, the revert opened a split with `100 - canaryPercent` percent on the candidate that was
+withdrawn. A spec that matches the revision already serving all traffic now opens no canary and is
+recorded as promoted, and an automatically promoted revision no longer drops to
+`awaiting-promotion` on the next reconcile.
+
 **Fixed: connecting a provider that was already connected failed with HTTP 400.** Every release
 updated the provider's SecretBinding and ModelRoute without a `resourceVersion`, which the API
 server refuses for a custom resource, so connecting a provider again to change its key or endpoint
