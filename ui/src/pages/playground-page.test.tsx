@@ -422,7 +422,7 @@ describe("PlaygroundPage", () => {
     const calls = recordingFetch({
       expand: () => ({
         ok: true,
-        text: "apiVersion: agents.ctxmesh.ai/v1alpha1\nkind: AgentDeployment\nmetadata:\n  name: echo-agent\n",
+        text: "apiVersion: agents.ctxmesh.ai/v1beta1\nkind: AgentDeployment\nmetadata:\n  name: echo-agent\n",
       }),
       create: () => ({
         ok: true,

@@ -2142,7 +2142,7 @@ const ROUTES: FixtureRoute[] = [
       ],
     }),
     empty: (): CensusResponse => ({ total: 0, complete: true, groupsComplete: true, groups: [] }) },
-  { match: /^\/api\/agents\/generate$/, populated: () => ({ agentYAML: "name: support-assistant\nmodel:\n  route: anthropic-primary\ntools:\n  - search_documents\n", expanded: "apiVersion: agents.ctxmesh.ai/v1alpha1\nkind: AgentDeployment\n", model: "claude-opus-4", warnings: ["No guardrail policy was requested — the namespace default applies."] }) },
+  { match: /^\/api\/agents\/generate$/, populated: () => ({ agentYAML: "name: support-assistant\nmodel:\n  route: anthropic-primary\ntools:\n  - search_documents\n", expanded: "apiVersion: agents.ctxmesh.ai/v1beta1\nkind: AgentDeployment\n", model: "claude-opus-4", warnings: ["No guardrail policy was requested — the namespace default applies."] }) },
   { match: /^\/api\/agents\/refine$/, populated: () => ({ agentYAML: "name: support-assistant\nmodel:\n  route: anthropic-primary\n", diff: ["- scaling: {min: 1, max: 4}", "+ scaling: {min: 2, max: 8}"], model: "claude-opus-4", provider: "anthropic", warnings: [] }) },
   { match: /^\/api\/agents\/check-requirements$/, populated: (): CheckRequirementsResponse => ({ model: { required: true, connected: true, route: "anthropic-primary" }, tools: [{ name: "search_documents", status: "ready" }, { name: "create_refund", status: "needs-approval" }, { name: "post_message", status: "needs-consent" }, { name: "ledger_write", status: "not-found" }] }) },
   { match: /^\/api\/agents\/([^/]+)\/([^/]+)\/versions\/diff$/, populated: (ctx): AgentVersionDiffResponse => ({ resolveMode: "textual", fromName: `${param(ctx, 1, "demo-assistant")}-00013`, toName: `${param(ctx, 1, "demo-assistant")}-00014`, diff: [" spec:", "   image: ghcr.io/acme/demo-assistant:1.14.2", "-  scaling: {min: 1, max: 4}", "+  scaling: {min: 1, max: 8}", "-  guardrailPolicyRef: \"\"", "+  guardrailPolicyRef: pii-and-jailbreak"].join("\n"), identical: false }) },
@@ -2161,7 +2161,7 @@ const ROUTES: FixtureRoute[] = [
   { match: /^\/api\/agents\/([^/]+)\/([^/]+)$/, populated: agentDetail, empty: emptyAgentDetail },
   { match: /^\/api\/agents$/, methods: GET, populated: agentList },
   { match: /^\/api\/agents$/, populated: (): CreateAgentResponse => ({ created: [{ kind: "AgentDeployment", name: "support-assistant", namespace: NS_DEFAULT }, { kind: "MCPToolBinding", name: "support-assistant-docs-search", namespace: NS_DEFAULT }] }) },
-  { match: /^\/api\/expand$/, populated: () => "apiVersion: agents.ctxmesh.ai/v1alpha1\nkind: AgentDeployment\nmetadata:\n  name: support-assistant\n  namespace: default\nspec:\n  image: ghcr.io/acme/support-assistant:1.0.0\n  modelRoute: anthropic-primary\n" },
+  { match: /^\/api\/expand$/, populated: () => "apiVersion: agents.ctxmesh.ai/v1beta1\nkind: AgentDeployment\nmetadata:\n  name: support-assistant\n  namespace: default\nspec:\n  image: ghcr.io/acme/support-assistant:1.0.0\n  modelRoute: anthropic-primary\n" },
 
   // ── Teams, guardrails, workflows ──────────────────────────────────────────
   { match: /^\/api\/teams\/generate$/, populated: () => ({ teamYAML: "name: support-pod\nsupervisor: demo-supervisor\n", model: "claude-opus-4", provider: "anthropic", warnings: [], eligibleMembers: ["demo-researcher", "demo-writer", "support-triage"] }) },
