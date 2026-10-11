@@ -133,6 +133,13 @@ from it and a SecretBinding that does not exist. It is now refused with HTTP 400
 connection, and nothing is created. A client that sends only `model.provider` still resolves the
 connection named after that provider.
 
+**Fixed: the Datasets page worked only in the `default` namespace.** The console sent no
+namespace with any dataset request, so the BFF read `default`: a person bound only in their own
+workspace got 403 on the page, and adding a trace to a dataset or labelling a case wrote to
+`default`. Every dataset request from the console now names the selected workspace, and a console
+with no workspace selected says so instead of asking. The dataset list also showed a dataset
+whose cases could not be read as having 0 cases; it is now an HTTP 500.
+
 **Security: an agent could serve a page at its own address and finish a visitor's OAuth consent
 as its author.** The console's consent page trusts a page at an agent's hostname, and with the
 edge's `extAuth.enabled: false`, `/invoke` at every agent hostname reaches the agent's own

@@ -314,9 +314,10 @@ func (s *Server) handleListDatasets(w http.ResponseWriter, r *http.Request) {
 	for _, ds := range datasets {
 		cases, cErr := s.datasetStore.ListCases(r.Context(), ds.ID)
 		if cErr != nil {
-			s.log.Error(cErr, "list cases for dataset failed", "dataset", ds.ID)
-			// Best-effort: report count as 0 rather than failing the whole list.
-			cases = nil
+			// A count the store could not read is not a zero; the list fails rather than show one.
+			s.log.Error(cErr, "list cases for dataset failed", "ns", ns, "dataset", ds.ID)
+			writeError(w, http.StatusInternalServerError, "failed to list datasets")
+			return
 		}
 		items = append(items, DatasetListItem{
 			ID:        ds.ID,

@@ -40,6 +40,7 @@ import {
   type DatasetCasesResponse,
   type AppendLabelRequest,
 } from "@/lib/api";
+import { useNamespace } from "@/lib/namespace";
 
 // DatasetsPage — the labeling dataset list + detail surface (m69.3, ADR 0062 Fork 5;
 // the list re-housed on the editorial system in M151 as archetype A1).
@@ -92,6 +93,17 @@ function truncate(s: string, max: number): string {
   return `${s.slice(0, max)}…`;
 }
 
+// NoWorkspaceNote is what both pages say when the caller has no workspace: datasets live in a
+// namespace, and there is none to read them from.
+function NoWorkspaceNote() {
+  return (
+    <QuietNote title="Choose a workspace to see its datasets.">
+      Datasets belong to a workspace, and none is selected. Pick or enter one in the workspace
+      switcher.
+    </QuietNote>
+  );
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // List page
 // ──────────────────────────────────────────────────────────────────────────────
@@ -101,6 +113,8 @@ type ListLoadState =
   | { kind: "ready"; items: DatasetSummary[] }
   // The store is not configured (501). NOT an error — §7.1's "not configured".
   | { kind: "unavailable" }
+  // The caller has no workspace to read datasets in, so nothing is asked.
+  | { kind: "no-workspace" }
   | { kind: "error"; message: string; forbidden: boolean };
 
 interface NextStep {
@@ -127,6 +141,7 @@ type DSView = (typeof DS_VIEWS)[number];
 
 export function DatasetsPage() {
   const navigate = useNavigate();
+  const { workingNamespace } = useNamespace();
   const [query, setQuery] = useState("");
   const [view, setView] = useState<DSView>("all");
   const [loadState, setLoadState] = useState<ListLoadState>({ kind: "loading" });
@@ -136,9 +151,13 @@ export function DatasetsPage() {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
+    if (!workingNamespace) {
+      setLoadState({ kind: "no-workspace" });
+      return;
+    }
     setLoadState({ kind: "loading" });
     api
-      .listDatasets(controller.signal)
+      .listDatasets(workingNamespace, controller.signal)
       .then((res) => {
         if (controller.signal.aborted) return;
         setLoadState({ kind: "ready", items: res.items });
@@ -159,7 +178,7 @@ export function DatasetsPage() {
           forbidden: err instanceof ApiError && err.isForbidden,
         });
       });
-  }, []);
+  }, [workingNamespace]);
 
   useEffect(() => {
     load();
@@ -332,7 +351,11 @@ export function DatasetsPage() {
         lede="Human-labeled eval datasets for the improvement loop. Add a trace as a case with the “Add to dataset” action on any trace, then label the cases here."
       />
 
-      {loadState.kind === "unavailable" ? (
+      {loadState.kind === "no-workspace" ? (
+        <div data-testid="datasets-quiet-note">
+          <NoWorkspaceNote />
+        </div>
+      ) : loadState.kind === "unavailable" ? (
         // The backend cannot answer — and that is calm, not a failure (§7.1).
         <div data-testid="datasets-quiet-note">
           <QuietNote title="Datasets aren’t configured on this install.">
@@ -423,7 +446,9 @@ export function DatasetsPage() {
 
 type DetailLoadState =
   | { kind: "loading" }
-  | { kind: "ready"; data: DatasetCasesResponse }
+  // namespace is where the cases were read, so a label is written to the same dataset.
+  | { kind: "ready"; data: DatasetCasesResponse; namespace: string }
+  | { kind: "no-workspace" }
   | { kind: "error"; message: string };
 
 type LabelFormState =
@@ -450,12 +475,13 @@ function verdictVariant(value: string): "ok" | "crit" | "warn" {
 }
 
 interface LabelFormProps {
+  namespace: string;
   datasetName: string;
   caseId: string;
   onSaved: () => void;
 }
 
-function LabelForm({ datasetName, caseId, onSaved }: LabelFormProps) {
+function LabelForm({ namespace, datasetName, caseId, onSaved }: LabelFormProps) {
   const [value, setValue] = useState("pass");
   const [correction, setCorrection] = useState("");
   const [note, setNote] = useState("");
@@ -470,7 +496,7 @@ function LabelForm({ datasetName, caseId, onSaved }: LabelFormProps) {
         ...(correction.trim() ? { correction: correction.trim() } : {}),
         ...(note.trim() ? { note: note.trim() } : {}),
       };
-      await api.appendLabel(datasetName, caseId, req);
+      await api.appendLabel(namespace, datasetName, caseId, req);
       setState({ kind: "success" });
       // Reset form after success and trigger list reload.
       setValue("pass");
@@ -551,6 +577,7 @@ function LabelForm({ datasetName, caseId, onSaved }: LabelFormProps) {
 }
 
 interface CaseCardProps {
+  namespace: string;
   datasetName: string;
   c: DatasetCase;
   onLabelSaved: () => void;
@@ -558,7 +585,7 @@ interface CaseCardProps {
 
 /** One case: what was asked, what was expected, how it was judged (or that it
  *  has not been), and the form that judges it. */
-function CaseCard({ datasetName, c, onLabelSaved }: CaseCardProps) {
+function CaseCard({ namespace, datasetName, c, onLabelSaved }: CaseCardProps) {
   const label = c.latestLabel;
   const tags = Object.entries(c.tags ?? {});
 
@@ -660,6 +687,7 @@ function CaseCard({ datasetName, c, onLabelSaved }: CaseCardProps) {
         )}
 
         <LabelForm
+          namespace={namespace}
           datasetName={datasetName}
           caseId={c.id}
           onSaved={onLabelSaved}
@@ -674,6 +702,7 @@ export function DatasetDetailPage() {
   // link rather than a button that calls navigate() — and it renders in every
   // state, including the ones the old back button did not cover.
   const { name = "" } = useParams<{ name: string }>();
+  const { workingNamespace } = useNamespace();
   const [loadState, setLoadState] = useState<DetailLoadState>({ kind: "loading" });
   const abortRef = useRef<AbortController | null>(null);
 
@@ -682,12 +711,17 @@ export function DatasetDetailPage() {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
+    if (!workingNamespace) {
+      setLoadState({ kind: "no-workspace" });
+      return;
+    }
     setLoadState({ kind: "loading" });
+    const namespace = workingNamespace;
     api
-      .listDatasetCases(name, controller.signal)
+      .listDatasetCases(namespace, name, controller.signal)
       .then((data) => {
         if (controller.signal.aborted) return;
-        setLoadState({ kind: "ready", data });
+        setLoadState({ kind: "ready", data, namespace });
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted) return;
@@ -698,7 +732,7 @@ export function DatasetDetailPage() {
           message: err instanceof Error ? err.message : "failed to load dataset",
         });
       });
-  }, [name]);
+  }, [name, workingNamespace]);
 
   useEffect(() => {
     load();
@@ -729,6 +763,15 @@ export function DatasetDetailPage() {
             </CardContent>
           </Card>
         </div>
+      </div>
+    );
+  }
+
+  if (loadState.kind === "no-workspace") {
+    return (
+      <div className="min-w-0 space-y-6" data-testid="dataset-detail-no-workspace">
+        <PageHeader breadcrumb={crumbs} title={name} titleMono />
+        <NoWorkspaceNote />
       </div>
     );
   }
@@ -815,6 +858,7 @@ export function DatasetDetailPage() {
               {cases.map((c) => (
                 <CaseCard
                   key={c.id}
+                  namespace={loadState.namespace}
                   datasetName={name}
                   c={c}
                   onLabelSaved={load}

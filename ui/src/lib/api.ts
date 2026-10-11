@@ -2368,6 +2368,16 @@ async function apiError(res: Response, fallback: string): Promise<ApiError> {
   return new ApiError(message, res.status, code);
 }
 
+// datasetNamespaceQuery is the `namespace=` query every dataset call carries. The BFF reads
+// `default` when a dataset request names no namespace, so an empty one is refused here rather
+// than sent: it would read or write another namespace's datasets.
+function datasetNamespaceQuery(namespace: string): string {
+  if (!namespace.trim()) {
+    throw new Error("a dataset request needs a workspace namespace");
+  }
+  return `namespace=${encodeURIComponent(namespace)}`;
+}
+
 // RequestExtras lets a caller override the token (login-validation, which runs
 // BEFORE a session exists) and mark a call as a login-validation call so a 401 is
 // NOT treated as a session expiry (it's a wrong-token login error the login page
@@ -5112,13 +5122,13 @@ export const api = {
   },
 
   // --- Datasets labeling API (m69.3, ADR 0062 Fork 5) -------------------------
-  // listDatasets reads all datasets in the caller's namespace. 501-calm when the store is
+  // Datasets are namespaced, and the BFF reads `default` when a request names none, so every
+  // call takes the caller's workspace explicitly (datasetNamespaceQuery refuses an empty one).
+  //
+  // listDatasets reads all datasets in the namespace. 501-calm when the store is
   // unconfigured (dataset store needs CONTROLPLANE_DSN); 502-error on a fetch failure.
-  listDatasets: async (signal?: AbortSignal, namespace?: string): Promise<DatasetListResponse> => {
-    const path = namespace
-      ? `/api/datasets?namespace=${encodeURIComponent(namespace)}`
-      : "/api/datasets";
-    const res = await apiFetch(path, { signal });
+  listDatasets: async (namespace: string, signal?: AbortSignal): Promise<DatasetListResponse> => {
+    const res = await apiFetch(`/api/datasets?${datasetNamespaceQuery(namespace)}`, { signal });
     if (res.status === 501) return { items: [] }; // calm unconfigured degrade
     if (!res.ok) {
       throw await apiError(res, `list datasets failed (${res.status})`);
@@ -5129,13 +5139,12 @@ export const api = {
   // listDatasetCases reads the draft-head cases + latest label for one dataset.
   // 501-calm (unconfigured); 404 when the dataset does not exist → throws.
   listDatasetCases: async (
+    namespace: string,
     name: string,
     signal?: AbortSignal,
-    namespace?: string,
   ): Promise<DatasetCasesResponse> => {
-    const ns = namespace ?? "default";
     const res = await apiFetch(
-      `/api/datasets/${encodeURIComponent(name)}/cases?namespace=${encodeURIComponent(ns)}`,
+      `/api/datasets/${encodeURIComponent(name)}/cases?${datasetNamespaceQuery(namespace)}`,
       { signal },
     );
     if (res.status === 501) return { datasetId: "", name, cases: [] }; // calm degrade
@@ -5148,15 +5157,14 @@ export const api = {
   // appendLabel appends a label to a case. The author is always the authenticated caller.
   // 201 on success; throws on any error (404 case not found, 400 missing value, 501 unconfigured).
   appendLabel: async (
+    namespace: string,
     datasetName: string,
     caseId: string,
     req: AppendLabelRequest,
     signal?: AbortSignal,
-    namespace?: string,
   ): Promise<void> => {
-    const ns = namespace ?? "default";
     const res = await apiFetch(
-      `/api/datasets/${encodeURIComponent(datasetName)}/cases/${encodeURIComponent(caseId)}/labels?namespace=${encodeURIComponent(ns)}`,
+      `/api/datasets/${encodeURIComponent(datasetName)}/cases/${encodeURIComponent(caseId)}/labels?${datasetNamespaceQuery(namespace)}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -5173,14 +5181,13 @@ export const api = {
   // 201 on success with {caseId}; 501-calm when unconfigured (store or Langfuse adapter absent).
   // Throws on 400 (missing traceId), 422 (trace has no input), or 502 (Langfuse fetch failed).
   addRunToDataset: async (
+    namespace: string,
     datasetName: string,
     req: FromRunRequest,
     signal?: AbortSignal,
-    namespace?: string,
   ): Promise<{ caseId: string }> => {
-    const ns = namespace ?? "default";
     const res = await apiFetch(
-      `/api/datasets/${encodeURIComponent(datasetName)}/cases/from-run?namespace=${encodeURIComponent(ns)}`,
+      `/api/datasets/${encodeURIComponent(datasetName)}/cases/from-run?${datasetNamespaceQuery(namespace)}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },

@@ -30,6 +30,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -37,6 +38,7 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -192,6 +194,28 @@ func TestHandleListDatasets_ReturnsDatasetsWithCaseCount(t *testing.T) {
 	}
 	assert.Equal(t, 2, counts["goldens"], "goldens has 2 cases")
 	assert.Equal(t, 1, counts["evals"], "evals has 1 case")
+}
+
+// failingCasesStore is a dataset store whose case read fails.
+type failingCasesStore struct{ dataset.Store }
+
+func (failingCasesStore) ListCases(context.Context, string) ([]dataset.Case, error) {
+	return nil, errors.New("cases table unavailable")
+}
+
+// TestHandleListDatasets_CaseReadFailureIs500: a dataset whose cases cannot be read is a 500, not a
+// dataset listed with 0 cases, and the store's error is logged rather than sent.
+func TestHandleListDatasets_CaseReadFailureIs500(t *testing.T) {
+	s, ds := newLabelingServer(t, "alice", nil)
+	seedCase(t, ds, "default", "goldens", "input-a")
+	logs := &logBuffer{}
+	s.datasetStore = failingCasesStore{Store: ds}
+	s.log = funcr.New(func(prefix, args string) { logs.write(prefix, args) }, funcr.Options{})
+
+	code, body := labelingRequest(t, s, http.MethodGet, "/api/datasets?namespace=default", nil)
+	require.Equal(t, http.StatusInternalServerError, code, string(body))
+	assert.NotContains(t, string(body), "cases table unavailable")
+	assert.Contains(t, logs.String(), "cases table unavailable")
 }
 
 // TestHandleListDatasets_EmptyNamespace_Returns501 proves the endpoint degrades honestly (501) when the

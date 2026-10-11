@@ -25,6 +25,7 @@ import { FixtureStepper } from "@/components/dashboard/fixture-stepper";
 import { FeedbackPanel } from "@/components/dashboard/feedback-panel";
 import { api, ApiError, type SpanSummary, type TraceDetailResponse } from "@/lib/api";
 import { formatDateTime, formatLatency, formatUSD } from "@/lib/format";
+import { useNamespace } from "@/lib/namespace";
 import { settleNotice, useSettlingTrace } from "@/lib/trace-settle";
 import { ShareRunDialog } from "@/components/dashboard/share-run-dialog";
 
@@ -84,6 +85,8 @@ type AddToDatasetState =
   | { kind: "error"; message: string };
 
 function AddToDatasetPanel({ traceId }: { traceId: string }) {
+  // The dataset lives in the selected workspace, the namespace the Datasets page reads.
+  const { workingNamespace } = useNamespace();
   const [datasetName, setDatasetName] = React.useState("");
   const [state, setState] = React.useState<AddToDatasetState>({ kind: "idle" });
 
@@ -91,9 +94,13 @@ function AddToDatasetPanel({ traceId }: { traceId: string }) {
     e.preventDefault();
     const name = datasetName.trim();
     if (!name) return;
+    if (!workingNamespace) {
+      setState({ kind: "error", message: "Choose a workspace first: the dataset belongs to one." });
+      return;
+    }
     setState({ kind: "submitting" });
     try {
-      const result = await api.addRunToDataset(name, { traceId });
+      const result = await api.addRunToDataset(workingNamespace, name, { traceId });
       setState({ kind: "success", caseId: result.caseId });
     } catch (err) {
       if (err instanceof ApiError && err.isNotImplemented) {
@@ -113,7 +120,13 @@ function AddToDatasetPanel({ traceId }: { traceId: string }) {
       <CardContent>
         <p className="mb-3 text-sm text-secondary-foreground">
           Personal data is redacted, then the run is appended to a dataset as a
-          labelled case. The dataset is created if it does not exist yet.
+          labelled case. The dataset is created if it does not exist yet
+          {workingNamespace ? (
+            <>
+              , in <span className="font-mono text-xs">{workingNamespace}</span>
+            </>
+          ) : null}
+          .
         </p>
         <form
           onSubmit={(e) => void onSubmit(e)}
