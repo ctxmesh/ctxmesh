@@ -5,3 +5,6 @@ langchain-core==0.3.29
 langchain-openai==0.2.14
 # MCP client for tool consumption (m4.6 — no SDK, streamable-http transport).
 mcp[cli]==1.9.4
+# mcp 1.9.4 imports a pydantic internal that 2.12+ removed (pydantic 2.14 broke `import mcp`);
+# pinned to the last version it was verified with.
+pydantic==2.11.9
