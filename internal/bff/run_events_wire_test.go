@@ -384,3 +384,110 @@ func TestRunEventsWire_DescendantPauseMatchesGolden(t *testing.T) {
 	assert.Equal(t, []string{"search-mcp"}, detail.RequiresAction.Servers)
 	assert.Equal(t, rootID, detail.RootRunID)
 }
+
+// The fan-out goldens: a supervisor delegates to two sub-agents at once and both pause for consent,
+// one after the other, before either is resumed. runEventsFanOutGolden is the supervisor's stream (two
+// descendant-requires-action frames back to back); runFanOutPausedGolden is GET /api/runs/{sub} for
+// each paused sub-run, in the order they paused, timestamps fixed. Regenerate both with
+//
+//	UPDATE_FIXTURES=1 go test ./internal/bff -run TestRunEventsWire_FanOutPauseMatchesGolden
+var (
+	runEventsFanOutGolden = filepath.Join("..", "..", "sdk", "run-events-fanout.golden.sse")
+	runFanOutPausedGolden = filepath.Join("..", "..", "sdk", "run-fanout-paused.golden.json")
+)
+
+const (
+	goldenMailerEndpoint = "http://mailer.prod.svc.cluster.local"
+	goldenFanOutAnswer   = "Sources found and the summary is sent."
+)
+
+// TestRunEventsWire_FanOutPauseMatchesGolden drives the fan-out through the real run paths and pins
+// the supervisor's stream and both paused sub-runs' details to the fixtures the chat test replays.
+func TestRunEventsWire_FanOutPauseMatchesGolden(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(
+		readyAgent("supervisor", "prod", goldenSupervisorEndpoint),
+		readyAgent("researcher", "prod", goldenResearcherEndpoint),
+		readyAgent("mailer", "prod", goldenMailerEndpoint),
+	).Build()
+	delegate := func(agent, endpoint, call string) string {
+		return `{"sub_agent":"` + agent + `","endpoint":"` + endpoint + `","input":{"input":"` + agent + ` task"},"step":"1","call_id":"` + call + `"}`
+	}
+	inv := &scriptedInvoke{replies: map[string][]scriptedReply{
+		goldenSupervisorEndpoint: {
+			{body: `{"delegate_waiting":{"checkpoint":"cp-1","delegates":[` +
+				delegate("researcher", goldenResearcherEndpoint, "call-a") + `,` + delegate("mailer", goldenMailerEndpoint, "call-b") + `]}}`},
+			{tokens: []string{goldenFanOutAnswer}, body: `{"output":"` + goldenFanOutAnswer + `"}`},
+		},
+		goldenResearcherEndpoint: {{body: `{"consent_required":["search-mcp"]}`}, {body: `{"output":"3 sources"}`}},
+		goldenMailerEndpoint:     {{body: `{"consent_required":["mail-mcp"]}`}, {body: `{"output":"sent"}`}},
+	}}
+	s := newInvokeServerNoWorkers(t, newFakeFactory(c), inv)
+	ctx := context.Background()
+
+	const rootID = "run-fanout"
+	input := []byte(`{"input":"research and mail"}`)
+	require.NoError(t, s.runStore.Create(run.New(rootID, "prod", "supervisor", input, "", time.Now())))
+	s.executeRun(ctx, rootID, goldenSupervisorEndpoint, input)
+	subs := []struct{ id, endpoint string }{
+		{run.SpawnRunID(rootID, "1", "call-a"), goldenResearcherEndpoint},
+		{run.SpawnRunID(rootID, "1", "call-b"), goldenMailerEndpoint},
+	}
+	paused := make([]map[string]any, 0, len(subs))
+	for _, sub := range subs {
+		s.executeRun(ctx, sub.id, sub.endpoint, []byte(`{"input":"task"}`))
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/runs/"+sub.id, nil)
+		req.Header.Set("Authorization", "Bearer developer-persona-token")
+		s.Handler().ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var detail map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
+		require.Equal(t, string(run.StatusRequiresAction), detail["status"])
+		detail["createdAt"], detail["updatedAt"] = "2026-10-12T09:00:00Z", "2026-10-12T09:00:01Z"
+		paused = append(paused, detail)
+	}
+	for i, sub := range subs {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/runs/"+sub.id+"/resume", nil)
+		req.Header.Set("Authorization", "Bearer developer-persona-token")
+		s.Handler().ServeHTTP(rec, req)
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		require.Eventually(t, func() bool {
+			r, err := s.runStore.Get(sub.id)
+			return err == nil && r.Status == run.StatusSucceeded
+		}, 5*time.Second, 10*time.Millisecond)
+		root, err := s.runStore.Get(rootID)
+		require.NoError(t, err)
+		if i == 0 {
+			require.Equal(t, run.StatusWaiting, root.Status, "the supervisor waits for both")
+		}
+	}
+	require.Eventually(t, func() bool {
+		r, err := s.runStore.Get(rootID)
+		return err == nil && r.Status == run.StatusQueued
+	}, 5*time.Second, 10*time.Millisecond)
+	s.executeRun(ctx, rootID, goldenSupervisorEndpoint, input)
+
+	body := readRunEvents(t, s, rootID, "")
+	details, err := json.MarshalIndent(paused, "", "  ")
+	require.NoError(t, err)
+	details = append(details, '\n')
+	if os.Getenv("UPDATE_FIXTURES") == "1" {
+		require.NoError(t, os.WriteFile(runEventsFanOutGolden, []byte(body), 0o644))
+		require.NoError(t, os.WriteFile(runFanOutPausedGolden, details, 0o644))
+	}
+	want, err := os.ReadFile(runEventsFanOutGolden)
+	require.NoError(t, err, "the committed fixture is missing; regenerate it with UPDATE_FIXTURES=1")
+	require.Equal(t, string(want), body, "the supervisor's stream changed; regenerate %s (UPDATE_FIXTURES=1)", runEventsFanOutGolden)
+	wantDetails, err := os.ReadFile(runFanOutPausedGolden)
+	require.NoError(t, err, "the committed fixture is missing; regenerate it with UPDATE_FIXTURES=1")
+	require.Equal(t, string(wantDetails), string(details), "the paused sub-runs changed; regenerate %s", runFanOutPausedGolden)
+
+	var crumbs []string
+	for _, ev := range parseSSE(t, body) {
+		if ev.event == string(run.EventDescendantAction) {
+			crumbs = append(crumbs, ev.data)
+		}
+	}
+	assert.Equal(t, []string{subs[0].id, subs[1].id}, crumbs, "the stream names both paused sub-runs, in the order they paused")
+}

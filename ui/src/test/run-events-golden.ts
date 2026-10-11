@@ -83,3 +83,35 @@ export function chunked(bytes: string, n: number): string[] {
   for (let i = 0; i < bytes.length; i += n) out.push(bytes.slice(i, i + n));
   return out;
 }
+
+// The supervisor's stream when it delegates to two sub-agents at once and both pause for consent
+// before either is resumed: two `descendant-requires-action` frames back to back, then, once both
+// are resumed, the supervisor's answer. TestRunEventsWire_FanOutPauseMatchesGolden regenerates it,
+// and both paused sub-runs' details (in the order they paused), from the real handlers.
+export const RUN_EVENTS_FANOUT_GOLDEN = fs.readFileSync(
+  path.resolve(__dirname, "../../../sdk/run-events-fanout.golden.sse"),
+  "utf8",
+);
+
+// GET /api/runs/{sub} for each paused sub-run, as the handler served it.
+export const RUN_FANOUT_PAUSED: {
+  id: string;
+  agent: string;
+  rootRunId: string;
+  requiresAction: { kind: string; servers?: string[] };
+}[] = JSON.parse(
+  fs.readFileSync(path.resolve(__dirname, "../../../sdk/run-fanout-paused.golden.json"), "utf8"),
+);
+
+// The seqs of the frames that name the paused sub-runs, in stream order.
+export const FANOUT_PAUSE_SEQS = framesOf(RUN_EVENTS_FANOUT_GOLDEN)
+  .filter((f) => f.event === "descendant-requires-action")
+  .map((f) => f.seq);
+
+// The supervisor's answer once both sub-runs are resumed.
+export const FANOUT_ANSWER = "Sources found and the summary is sent.";
+
+// fanOutGolden is the supervisor's frames with after < seq <= through, as golden() is.
+export function fanOutGolden(after = 0, through = Number.POSITIVE_INFINITY): string {
+  return sliceFrames(RUN_EVENTS_FANOUT_GOLDEN, after, through);
+}

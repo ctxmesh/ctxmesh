@@ -1,0 +1,36 @@
+id: 1
+event: state
+data: running
+
+id: 2
+event: state
+data: waiting
+
+id: 3
+event: descendant-requires-action
+data: sub-8c82f73270ddc69ca8e21f4566cfef00
+
+id: 4
+event: descendant-requires-action
+data: sub-536cc662486fcdd28c502ec2eb981ce3
+
+id: 5
+event: state
+data: queued
+
+id: 6
+event: state
+data: running
+
+id: 7
+event: token
+data: Sources found and the summary is sent.
+
+id: 8
+event: message
+data: Sources found and the summary is sent.
+
+id: 9
+event: state
+data: succeeded
+

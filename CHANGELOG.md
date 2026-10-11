@@ -159,13 +159,15 @@ instead, so for a sub-agent outside any agent registry the credential plane foun
 run paused for consent again. A resumed run's capability is now minted in the run's own boundary,
 as the run worker already did.
 
-**Fixed: the chat looked stuck when a sub-agent needed a Connect or an approval.** A supervisor
-that delegated waits on its sub-agent's run, and when that run paused for consent or an approval
-the supervisor's run event stream only named it (`descendant-requires-action`), which the chat and
-the Playground ignored. Both now read the sub-agent's run and show the same prompt as for the
-agent's own pause, saying which sub-agent asked. Connect resumes the sub-agent's run, the chat
-follows the supervisor on to its answer, and the hold links to the sub-agent's run. If the stream
-ends while the supervisor waits, the pause is found from the supervisor's run.
+**Fixed: the chat looked stuck when a sub-agent needed a Connect or an approval.** A supervisor that
+delegated waits on its sub-agent's run, and when that run paused for consent or an approval the
+supervisor's run event stream only named it (`descendant-requires-action`), which the chat and the
+Playground ignored. Both now read the sub-agent's run and show the same prompt as for the agent's
+own pause, saying which sub-agent asked. Connect resumes the sub-agent's run, the chat follows the
+supervisor on to its answer, and the hold links to the sub-agent's run. If the stream ends while the
+supervisor waits, the pause is found from the supervisor's run. When several sub-agents pause
+together, the chat asks about them one at a time in the order they paused. Starting a new chat, or
+leaving it, while a sub-agent's pause is being read no longer affects the new conversation.
 
 **Fixed: the tool catalog was refused to anyone bound to a namespace.** The console read
 `/api/tools` without a namespace, and the BFF then asked whether the caller may list tool registries

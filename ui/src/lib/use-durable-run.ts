@@ -145,9 +145,16 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
   const optsRef = React.useRef(options);
   optsRef.current = options;
 
+  // The generation of the current stream. Every stopStream (a cancel, a reset, a new run, a
+  // resume, an unmount) moves it on, so whatever an older stream left in flight — a sub-run
+  // lookup, a finalize read — sees a stale generation and does nothing: it can neither finalize
+  // a run the person has left nor stop the stream that replaced it.
+  const genRef = React.useRef(0);
+
   const stopStream = React.useCallback(() => {
     streamCancelRef.current?.();
     streamCancelRef.current = null;
+    genRef.current += 1;
   }, []);
 
   // Abort an in-flight stream on unmount — the fetch reader keeps reading otherwise (OTH-2).
@@ -157,6 +164,7 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
   // requires_action) — the SSE stream carries tokens but not traceId / requiresAction / nodes,
   // which live on the run object. Mirrors the Playground's finalizeRun.
   const finalizeRun = React.useCallback(async (runId: string, streamed: string, subPause?: RunPause) => {
+    const gen = genRef.current;
     setState((s) => ({ ...s, status: "finalizing" }));
     let detail: RunDetail;
     let pause = subPause;
@@ -175,6 +183,7 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
       const waitingOn = detail.descendantsRequiringAction?.[0];
       if (!pause && waitingOn) pause = await subRunPause(waitingOn.runId);
     } catch (err) {
+      if (genRef.current !== gen) return;
       if (err instanceof ApiError && err.isForbidden) optsRef.current.onForbidden?.(err.message);
       optsRef.current.onFinalizeError?.(err);
       setState((s) => ({
@@ -185,6 +194,7 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
       }));
       return;
     }
+    if (genRef.current !== gen) return;
     // Prefer the finalized assistant message (the clean, trace-truthful content) over the
     // raw-accumulated stream text; fall back to the streamed text when messages is absent.
     const lastMessage = detail.messages?.length
@@ -221,17 +231,24 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
         pause: undefined,
       }));
       lastSeqRef.current = { runId, seq: fromSeq };
+      const gen = genRef.current;
       let acc = "";
       let step = "";
       let finalized = false;
+      // live: this stream still decides what happens to its run.
+      const live = () => !finalized && genRef.current === gen;
+      // Sub-run lookups run one at a time, in the order their frames arrived, so the pause this
+      // stream stops at is always the earliest one still waiting.
+      let lookups: Promise<void> = Promise.resolve();
       const finalize = () => {
-        if (finalized) return;
+        if (!live()) return;
         finalized = true;
         stopStream();
         void finalizeRun(runId, acc);
       };
       const cancelStream = openRunStream(runId, {
         onEvent: (kind, data, seq) => {
+          if (genRef.current !== gen) return;
           if (seq > 0) lastSeqRef.current = { runId, seq };
           if (kind === "token") {
             acc += data;
@@ -253,20 +270,15 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
           } else if (kind === "descendant-requires-action" && data) {
             // A sub-run this run delegated to paused. This run waits on it and its stream stays
             // open, so the action is read from the sub-run. One that has already moved on (someone
-            // resolved it elsewhere) needs nothing here, and the stream carries on.
+            // resolved it elsewhere) needs nothing here, and the next frame's sub-run is read.
             const at = seq;
-            subRunPause(data)
-              .then((pause) => {
-                if (finalized || !pause) return;
-                finalized = true;
-                stopStream();
-                // Resume after THIS frame, so a second sub-run's pause that arrived meanwhile is
-                // read again rather than skipped.
-                if (at > 0) lastSeqRef.current = { runId, seq: at };
-                void finalizeRun(runId, acc, pause);
-              })
-              .catch((err: unknown) => {
-                if (finalized) return;
+            lookups = lookups.then(async () => {
+              if (!live()) return;
+              let pause: RunPause | undefined;
+              try {
+                pause = await subRunPause(data);
+              } catch (err) {
+                if (!live()) return;
                 finalized = true;
                 stopStream();
                 const forbidden = err instanceof ApiError && err.isForbidden;
@@ -278,16 +290,27 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
                   error: `A sub-agent this run delegated to is waiting for an action, and it could not be read: ${reason}`,
                   forbidden,
                 }));
-              });
+                return;
+              }
+              if (!live() || !pause) return;
+              finalized = true;
+              stopStream();
+              // Resume after THIS frame: any later sub-run's pause is read again when the stream
+              // reopens rather than skipped.
+              if (at > 0) lastSeqRef.current = { runId, seq: at };
+              void finalizeRun(runId, acc, pause);
+            });
           }
         },
         onClose: finalize,
         onError: (message, status) => {
+          if (!live()) return;
           finalized = true;
           setState((s) => ({ ...s, status: "error", error: message, forbidden: false }));
           void status;
         },
         onForbidden: (message) => {
+          if (!live()) return;
           finalized = true;
           optsRef.current.onForbidden?.(message);
           setState((s) => ({ ...s, status: "forbidden", error: message, forbidden: true }));
@@ -301,11 +324,13 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
   const start = React.useCallback(
     async (args: StartArgs) => {
       stopStream();
+      const gen = genRef.current;
       setState({ status: "creating", responseText: "", step: "", forbidden: false });
       let runId: string;
       try {
         runId = (await api.createRun(args)).id;
       } catch (err) {
+        if (genRef.current !== gen) return;
         const forbidden = err instanceof ApiError && err.isForbidden;
         if (forbidden) optsRef.current.onForbidden?.(err.message);
         setState({
@@ -317,6 +342,7 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
         });
         return;
       }
+      if (genRef.current !== gen) return;
       streamRun(runId);
     },
     [stopStream, streamRun],
@@ -328,9 +354,11 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
       if (!runId) return;
       const pause = state.pause;
       stopStream();
+      const gen = genRef.current;
       try {
         await api.resumeRun(pause?.runId ?? runId, decision, reason);
       } catch (err) {
+        if (genRef.current !== gen) return;
         const forbidden = err instanceof ApiError && err.isForbidden;
         if (forbidden) optsRef.current.onForbidden?.(err.message);
         setState((s) => ({
@@ -341,6 +369,7 @@ export function useDurableRun(options: UseDurableRunOptions = {}): UseDurableRun
         }));
         return;
       }
+      if (genRef.current !== gen) return;
       if (decision === "deny" && !pause?.descendant) {
         // A denied run is finalized without a re-stream; read its terminal state. A denied sub-run
         // ends only the sub-run, so the watched run is followed on to whatever it does next.

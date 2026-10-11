@@ -12,10 +12,14 @@ import {
   DESCENDANT_ANSWER,
   DESCENDANT_PAUSE_SEQ,
   descendantGolden,
+  FANOUT_ANSWER,
+  FANOUT_PAUSE_SEQS,
+  fanOutGolden,
   golden,
   GOLDEN_REQUIRES_ACTION_SEQ,
   GOLDEN_TEXT,
   RUN_DESCENDANT_PAUSED,
+  RUN_FANOUT_PAUSED,
 } from "@/test/run-events-golden";
 
 // ChatPanel converges on DURABLE runs (ADR 0093): each cluster chat turn is createRun →
@@ -69,11 +73,16 @@ function sseBody(frames: string[], openUntil?: AbortSignal) {
 // the create outcome (for the forbidden case).
 interface RunMock {
   frames?: string[];
-  // A stream per /events request, given the request's Last-Event-ID; `open` keeps it from closing.
-  stream?: (lastEventId: string | null) => { frames: string[]; open?: boolean };
+  // A stream per /events request, given the request's Last-Event-ID and run id; `open` keeps it
+  // from closing.
+  stream?: (lastEventId: string | null, runId: string) => { frames: string[]; open?: boolean };
   details?: unknown[]; // successive GET /api/runs/{id} responses (consent → success)
   // Successive GET /api/runs/{id} responses per run id, for a turn that reads more than one run.
   detailsById?: Record<string, unknown[]>;
+  // A run id's GET /api/runs/{id} answers only once its gate resolves.
+  detailGates?: Record<string, Promise<void>>;
+  // Successive POST /api/runs responses, when a test creates more than one run.
+  creates?: unknown[];
   createOk?: boolean;
   createStatus?: number;
   createJson?: unknown;
@@ -85,6 +94,7 @@ function recordingFetch(run: RunMock = {}) {
   const calls: Captured[] = [];
   let detailIdx = 0;
   const byIdIdx: Record<string, number> = {};
+  let createIdx = 0;
   vi.stubGlobal(
     "fetch",
     vi.fn((input: string | URL, init?: RequestInit) => {
@@ -104,15 +114,16 @@ function recordingFetch(run: RunMock = {}) {
       // Durable run: create → stream → finalize.
       if (path === "/api/runs" && method === "POST") {
         const ok = run.createOk ?? true;
+        const created = run.creates?.[Math.min(createIdx++, run.creates.length - 1)];
         return Promise.resolve({
           ok,
           status: run.createStatus ?? (ok ? 202 : 403),
-          json: async () => run.createJson ?? { id: "run-1", status: "queued" },
+          json: async () => created ?? run.createJson ?? { id: "run-1", status: "queued" },
           text: async () => JSON.stringify(run.createJson ?? { error: "denied" }),
         } as Response);
       }
       if (path.endsWith("/events")) {
-        const scripted = run.stream?.(lastEventId);
+        const scripted = run.stream?.(lastEventId, path.split("/")[3]);
         return Promise.resolve({
           ok: true,
           status: 200,
@@ -135,7 +146,9 @@ function recordingFetch(run: RunMock = {}) {
         const id = path.slice("/api/runs/".length);
         const i = byIdIdx[id] ?? 0;
         byIdIdx[id] = i + 1;
-        return j(byId[Math.min(i, byId.length - 1)]);
+        const answer = byId[Math.min(i, byId.length - 1)];
+        const gate = run.detailGates?.[id];
+        return gate ? gate.then(() => j(answer)) : j(answer);
       }
       if (path.startsWith("/api/runs/")) {
         const details = run.details ?? [
@@ -465,6 +478,117 @@ describe("ChatPanel (durable runs, ADR 0093)", () => {
     expect(screen.getByTestId("chat-turn-agent")).toHaveTextContent(DESCENDANT_ANSWER);
     expect(screen.queryByTestId("chat-consent")).not.toBeInTheDocument();
     expect(calls.filter((c) => c.url === `/api/runs/${SUPERVISOR}/events`)).toHaveLength(1);
+  });
+
+  // Two sub-agents that pause together: the supervisor's stream names both, back to back. The chat
+  // must ask about them in that order whichever lookup answers first, or its resume point skips the
+  // first frame and the turn waits for ever.
+  const FANOUT = "run-fanout";
+  const [SUB_A, SUB_B] = RUN_FANOUT_PAUSED;
+  const [SEQ_A, SEQ_B] = FANOUT_PAUSE_SEQS;
+
+  it("(k) two sub-agents pausing together are asked about in the order they paused, and the turn ends", async () => {
+    const popup = { closed: false } as Window;
+    vi.stubGlobal("open", vi.fn(() => popup));
+    let releaseA = () => {};
+    const gateA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const calls = recordingFetch({
+      createJson: { id: FANOUT, status: "queued" },
+      // The server keeps the stream open while the supervisor waits: until both are resumed.
+      stream: (lastEventId) =>
+        lastEventId === null
+          ? { frames: chunked(fanOutGolden(0, SEQ_B), 17), open: true }
+          : lastEventId === String(SEQ_A)
+            ? { frames: [fanOutGolden(SEQ_A, SEQ_B)], open: true }
+            : { frames: [fanOutGolden(Number(lastEventId))] },
+      detailsById: {
+        [FANOUT]: [
+          { id: FANOUT, status: "waiting", messages: [] },
+          { id: FANOUT, status: "waiting", messages: [] },
+          { id: FANOUT, status: "succeeded", traceId: "trace-fanout", messages: [{ role: "assistant", content: FANOUT_ANSWER }] },
+        ],
+        [SUB_A.id]: [SUB_A],
+        [SUB_B.id]: [SUB_B],
+      },
+      detailGates: { [SUB_A.id]: gateA },
+    });
+    renderChat(false);
+    await sendMessage("research and mail");
+
+    // The second sub-run could be read at once; the chat waits for the first.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByTestId("chat-consent")).not.toBeInTheDocument();
+    releaseA();
+    expect(await screen.findByTestId("connect-search-mcp")).toBeInTheDocument();
+    expect(screen.queryByTestId("connect-mail-mcp")).not.toBeInTheDocument();
+
+    const connect = async (server: string) => {
+      fireEvent.click(screen.getByTestId(`connect-${server}`));
+      await waitFor(() =>
+        expect(calls.filter((c) => c.url === "/api/mcp/oauth/grant").map((c) => JSON.parse(c.body).server)).toContain(server),
+      );
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { type: MCP_OAUTH_MESSAGE, server, error: "" },
+          origin: window.location.origin,
+        }),
+      );
+    };
+    await connect("search-mcp");
+    expect(await screen.findByTestId("connect-mail-mcp")).toBeInTheDocument();
+    await connect("mail-mcp");
+
+    await waitFor(() => expect(screen.getByTestId("open-trace")).toHaveTextContent("trace-fanout"));
+    expect(screen.getByTestId("chat-turn-agent")).toHaveTextContent(FANOUT_ANSWER);
+    expect(calls.filter((c) => c.url.endsWith("/resume")).map((c) => c.url)).toEqual([
+      `/api/runs/${SUB_A.id}/resume`,
+      `/api/runs/${SUB_B.id}/resume`,
+    ]);
+    expect(calls.filter((c) => c.url === `/api/runs/${FANOUT}/events`).map((c) => c.lastEventId)).toEqual([
+      null,
+      String(SEQ_A),
+      String(SEQ_B),
+    ]);
+  });
+
+  it("(l) a new chat started while a sub-run is being read is neither finalized nor stopped by it", async () => {
+    let releaseA = () => {};
+    const gateA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const calls = recordingFetch({
+      creates: [
+        { id: FANOUT, status: "queued" },
+        { id: "run-2", status: "queued" },
+      ],
+      stream: (_lastEventId, runId) =>
+        runId === FANOUT
+          ? { frames: [fanOutGolden(0, SEQ_A)], open: true }
+          : { frames: chunked(golden(GOLDEN_REQUIRES_ACTION_SEQ, 9), 11), open: true },
+      detailsById: {
+        [FANOUT]: [{ id: FANOUT, status: "waiting", messages: [] }],
+        [SUB_A.id]: [SUB_A],
+      },
+      detailGates: { [SUB_A.id]: gateA },
+    });
+    renderChat(false);
+    await sendMessage("research and mail");
+    await waitFor(() => expect(calls.find((c) => c.url === `/api/runs/${SUB_A.id}`)).toBeDefined());
+
+    fireEvent.click(screen.getByTestId("chat-new"));
+    await sendMessage("something else");
+    await waitFor(() =>
+      expect(screen.getByTestId("chat-turn-agent")).toHaveTextContent("FIXTURE_ECHO: ping"),
+    );
+    releaseA();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(calls.find((c) => c.url === "/api/runs/run-2/events")?.signal?.aborted).toBe(false);
+    expect(calls.find((c) => c.url === `/api/runs/${FANOUT}` && c.method === "GET")).toBeUndefined();
+    expect(screen.queryByTestId("chat-consent")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("chat-turn-agent")).toHaveLength(1);
   });
 
   it("(c) a consent_required finalize shows Connect → clicking connect RESUMES the same run (not a new createRun)", async () => {
