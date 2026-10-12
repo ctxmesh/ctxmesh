@@ -149,15 +149,17 @@ func (f fakeLangfuseAdapter) TraceScores(_ context.Context, _ string) ([]Feedbac
 	return []FeedbackScore{}, nil
 }
 
-// CostBreakdown returns the seeded breakdown/breakdownErr (m16.5 cost drill-down).
-func (f fakeLangfuseAdapter) CostBreakdown(_ context.Context, _ int, _ string) (CostBreakdownResponse, error) {
+// CostBreakdown scopes and pages the seeded breakdown exactly as the real adapter scopes and pages
+// its aggregate: breakdown.Agents is the whole sorted list and breakdown.Total the window total.
+func (f fakeLangfuseAdapter) CostBreakdown(_ context.Context, q CostBreakdownQuery) (CostBreakdownResponse, error) {
 	if f.breakdownErr != nil {
 		return CostBreakdownResponse{}, f.breakdownErr
 	}
+	all := CostBreakdownResponse{Total: CostSummary{ByModel: []MetricPoint{}}}
 	if f.breakdown != nil {
-		return *f.breakdown, nil
+		all = *f.breakdown
 	}
-	return CostBreakdownResponse{Agents: []AgentCostItem{}, Total: CostSummary{ByModel: []MetricPoint{}}}, nil
+	return costBreakdownPage(all.Agents, all.Total, q)
 }
 
 // CreateScore is a no-op stub (m84.4) — the fake does not capture or assert calls;

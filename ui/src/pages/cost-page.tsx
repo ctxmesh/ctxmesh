@@ -52,10 +52,10 @@ import {
 // the response's `total` means two DIFFERENT things depending on the scope,
 // and the page must not paper over the difference.
 //
-//   • WITH a tenant (the normal path): the BFF filters the cluster-wide
-//     breakdown down to the tenant's namespaces and RECOMPUTES `total` as the
-//     sum of the kept rows. So the totals and the rows are the same window and
-//     the rows do add up to the total — but `observations` is never computed
+//   • WITH a tenant (the normal path): the BFF keeps the tenant's namespaces
+//     BEFORE it pages, and `total` is the sum of every kept row on every page.
+//     So the totals and the rows are the same window and the rows across all
+//     pages add up to the total — but `observations` is never computed
 //     on that path and arrives as 0. That 0 is NOT "no traced calls"; it is a
 //     figure this path does not answer, so it renders as unknown, not as zero.
 //   • For the caller's WORKSPACES (no tenant, and a caller who cannot list
@@ -648,7 +648,7 @@ export function CostPage() {
   const total = loadState.kind === "ready" ? loadState.total : emptyCostSummary;
   // The caller's workspaces, when that is what the breakdown covers.
   const workspaces = loadState.kind === "ready" ? loadState.namespaces : undefined;
-  // Tenant and workspace totals are the rows added up (handlers.go keepNamespaces).
+  // Tenant and workspace totals are their rows added up (adapters.go costBreakdownPage).
   const totalSumsRows = Boolean(tenant) || workspaces !== undefined;
   const nextCursor = loadState.kind === "ready" ? loadState.nextCursor : "";
 
@@ -952,7 +952,21 @@ export function CostPage() {
   // back out instead of teaching a reader with 12 rows how to get their first.
   const viewEmptied =
     agents.length > 0 && visible.length === 0 && view !== "all" && q === "";
-  const empty: EmptyStateProps = viewEmptied
+  // An empty page with another page before or after it is not an empty window:
+  // "No cost data yet" there would be a false zero.
+  const pageEmptied = agents.length === 0 && (hasNext || hasPrev);
+  const empty: EmptyStateProps = pageEmptied
+    ? {
+        icon: Coins,
+        title: "Nothing on this page",
+        description: hasNext
+          ? "More rows follow on the next page. An empty page is not a report of zero spend."
+          : "The rows are on the pages before this one. An empty page is not a report of zero spend.",
+        action: hasNext
+          ? { label: "Load the next page", onClick: onNext }
+          : { label: "Back to the previous page", variant: "outline", onClick: onPrev },
+      }
+    : viewEmptied
     ? {
         intent: "filtered",
         icon: Filter,

@@ -436,6 +436,22 @@ describe("CostPage — cursor pagination (m16.10)", () => {
     await screen.findByTestId("cost-row-prod-page-zero-agent");
   });
 
+  it("an empty page with a cursor after it never claims there is no cost data", async () => {
+    installFetch((qs) =>
+      qs.get("cursor")
+        ? { ok: true, body: { agents: [item({ agentName: "later" })], total: summary(), nextCursor: "" } }
+        : { ok: true, body: { agents: [], total: summary(), nextCursor: "50" } },
+    );
+
+    renderPage();
+    expect(await screen.findByText("Nothing on this page")).toBeInTheDocument();
+    expect(screen.queryByText("No cost data yet")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Next page/ })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Load the next page" }));
+    await screen.findByTestId("cost-row-default-later");
+  });
+
   it("hasNext is determined by nextCursor (not row count)", async () => {
     // Page with data but nextCursor="" → hasNext false
     installFetch(() => ({

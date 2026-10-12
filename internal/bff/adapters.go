@@ -19,6 +19,8 @@ package bff
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strconv"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -142,12 +144,13 @@ type LangfuseAdapter interface {
 	// cost/usage breakdown (GET /api/cost/breakdown?by=agent). It groups traces by
 	// the `agent:<ns>/<name>` tag the launcher stamps, accumulates cost/tokens/count
 	// per agent, surfaces untagged traces as an explicit "(untagged)" bucket, sorts
-	// agents by totalCostUSD desc, and paginates the agent list via limit/cursor.
+	// agents by totalCostUSD desc, keeps the namespaces q selects, and pages what
+	// it kept by q.Limit/q.Cursor.
 	//
 	// HONEST BOUNDED WINDOW: the rollup is over a recent window of traces, NOT
 	// all-time historical cost. A malformed cursor returns ErrBadParam (→ 400).
 	// Upstream failure returns an error (→ 502). Agents is non-nil on success.
-	CostBreakdown(ctx context.Context, limit int, cursor string) (CostBreakdownResponse, error)
+	CostBreakdown(ctx context.Context, q CostBreakdownQuery) (CostBreakdownResponse, error)
 
 	// CreateScore writes a per-trace numeric score to the Langfuse scores API
 	// (POST /api/public/scores). It is BEST-EFFORT observability sugar: a
@@ -156,6 +159,84 @@ type LangfuseAdapter interface {
 	// to [0,1] by the caller before passing, comment is optional (pass "" to
 	// omit). A non-2xx response is returned as an error.
 	CreateScore(ctx context.Context, traceID, name string, value float64, comment string) error
+}
+
+// CostBreakdownQuery selects one page of the per-agent cost breakdown.
+//
+// Narrowing happens before paging: Limit, Cursor, NextCursor and the total all count only the
+// agents the query keeps. Paging first and filtering after would hand a caller whose agents rank
+// low an empty first page, a $0 total and a cursor, and let them count every agent in the cluster
+// with limit=1.
+type CostBreakdownQuery struct {
+	// Limit is the page size; 0 or less means defaultRunLimit.
+	Limit int
+	// Cursor is a previous page's NextCursor; "" is the first page.
+	Cursor string
+	// AllNamespaces keeps every agent, the untagged bucket included, and the total is the trace
+	// backend's own window rollup. Otherwise only agents in Namespaces are kept, the total sums
+	// them, and an empty Namespaces keeps none. A row with no namespace (untagged, or a bare
+	// agent:<name> tag) belongs to no namespace, so only AllNamespaces keeps it.
+	AllNamespaces bool
+	Namespaces    []string
+}
+
+// offset decodes Cursor into an index over the kept agents.
+func (q CostBreakdownQuery) offset() (int, error) {
+	if q.Cursor == "" {
+		return 0, nil
+	}
+	off, err := strconv.Atoi(q.Cursor)
+	if err != nil || off < 0 {
+		return 0, fmt.Errorf("%w: cursor must be a non-negative integer, got %q", ErrBadParam, q.Cursor)
+	}
+	return off, nil
+}
+
+// costBreakdownPage narrows agents (sorted, every namespace) to the namespaces q keeps and cuts the
+// page q selects. windowTotal is the total for AllNamespaces; a narrowed breakdown's total is the
+// sum of everything it kept, on every page, and carries no per-model split or call count.
+func costBreakdownPage(agents []AgentCostItem, windowTotal CostSummary, q CostBreakdownQuery) (CostBreakdownResponse, error) {
+	offset, err := q.offset()
+	if err != nil {
+		return CostBreakdownResponse{}, err
+	}
+	limit := q.Limit
+	if limit <= 0 {
+		limit = defaultRunLimit
+	}
+	kept, total := agents, windowTotal
+	if !q.AllNamespaces {
+		in := make(map[string]struct{}, len(q.Namespaces))
+		for _, ns := range q.Namespaces {
+			in[ns] = struct{}{}
+		}
+		kept = make([]AgentCostItem, 0, len(agents))
+		total = CostSummary{}
+		for _, a := range agents {
+			if _, ok := in[a.AgentNs]; !ok || a.AgentNs == "" {
+				continue
+			}
+			kept = append(kept, a)
+			// The total is the sum of what is known: an unpriced agent adds nothing rather than
+			// a zero that would pass for a measurement.
+			total.TotalCostUSD += costOrZero(a.TotalCostUSD)
+			total.TotalTokens += a.TotalTokens
+		}
+	}
+	if total.ByModel == nil {
+		total.ByModel = []MetricPoint{}
+	}
+	resp := CostBreakdownResponse{Agents: []AgentCostItem{}, Total: total}
+	if offset >= len(kept) {
+		return resp, nil
+	}
+	page := kept[offset:]
+	if len(page) > limit {
+		page = page[:limit]
+		resp.NextCursor = strconv.Itoa(offset + limit)
+	}
+	resp.Agents = append(resp.Agents, page...)
+	return resp, nil
 }
 
 // ErrTraceNotFound is returned by LangfuseAdapter.TraceDetail when the backend

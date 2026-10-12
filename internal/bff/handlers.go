@@ -592,8 +592,10 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 //	             value. Any other `by` value (including missing/empty) → 400
 //	             (honest: don't silently accept a by you don't implement).
 //	?tenant=T    the tenant whose namespaces the breakdown covers
-//	?limit=N     page size over the agent list (default defaultRunLimit, no max)
+//	?limit=N     page size over the agents in scope (default defaultRunLimit, no max)
 //	?cursor=TOKEN opaque next-page token from a prior response's nextCursor
+//
+// Pages, cursors and totals count only the agents in scope (CostBreakdownQuery).
 //
 // The response is a RECENT-WINDOW ROLLUP — the totals cover a bounded recent
 // window of traces, NOT all-time historical cost. The window matches CostUsage.
@@ -643,9 +645,23 @@ func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	cursor := strings.TrimSpace(qs.Get("cursor"))
+	query := CostBreakdownQuery{Limit: limit, Cursor: strings.TrimSpace(qs.Get("cursor"))}
+	switch {
+	case tenant != "":
+		// One Tenant GET as the caller; Tenant.spec.namespaces is the membership set.
+		var tnt agentsv1beta1.Tenant
+		if err := caller.Get(r.Context(), client.ObjectKey{Name: tenant}, &tnt); err != nil {
+			s.writeGetError(w, err, "tenant")
+			return
+		}
+		query.Namespaces = tnt.Spec.Namespaces
+	case scope != nil:
+		query.Namespaces = scope
+	default:
+		query.AllNamespaces = true
+	}
 
-	resp, err := s.adapters.Langfuse.CostBreakdown(r.Context(), limit, cursor)
+	resp, err := s.adapters.Langfuse.CostBreakdown(r.Context(), query)
 	if err != nil {
 		if errors.Is(err, ErrBadParam) {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -671,19 +687,7 @@ func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 	if resp.Agents == nil {
 		resp.Agents = []AgentCostItem{}
 	}
-	switch {
-	case tenant != "":
-		// One Tenant GET as the caller; Tenant.spec.namespaces is the membership set.
-		var tnt agentsv1beta1.Tenant
-		if err := caller.Get(r.Context(), client.ObjectKey{Name: tenant}, &tnt); err != nil {
-			s.writeGetError(w, err, "tenant")
-			return
-		}
-		keepNamespaces(&resp, tnt.Spec.Namespaces)
-	case scope != nil:
-		keepNamespaces(&resp, scope)
-		resp.Namespaces = scope
-	}
+	resp.Namespaces = scope
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -726,30 +730,6 @@ func (s *Server) costScopeWithoutTenant(w http.ResponseWriter, r *http.Request, 
 		return nil, false
 	}
 	return namespaces, true
-}
-
-// keepNamespaces narrows a cluster-wide breakdown to agents in namespaces and recomputes the total
-// over the kept rows. Pagination is over the unfiltered list, so a page may hold fewer rows than
-// its limit (ADR 0077).
-func keepNamespaces(resp *CostBreakdownResponse, namespaces []string) {
-	in := make(map[string]struct{}, len(namespaces))
-	for _, ns := range namespaces {
-		in[ns] = struct{}{}
-	}
-	kept := make([]AgentCostItem, 0, len(resp.Agents))
-	total := CostSummary{ByModel: []MetricPoint{}}
-	for _, a := range resp.Agents {
-		if _, ok := in[a.AgentNs]; ok {
-			kept = append(kept, a)
-			// An UNPRICED agent contributes nothing to the total and does not make it wrong:
-			// the total is the sum of what is known. Treating unknown as zero would report a
-			// confident figure built partly from absence.
-			total.TotalCostUSD += costOrZero(a.TotalCostUSD)
-			total.TotalTokens += a.TotalTokens
-		}
-	}
-	resp.Agents = kept
-	resp.Total = total
 }
 
 // handleTraceLink serves GET /api/traces/{id} — resolves a traceId to its one

@@ -151,6 +151,14 @@ everyone. The `developer` and `operator` roles now grant `get` and `list` on `po
 `viewer` role now grants `get`, `list` and `watch` on `skills`, and the `developer` and `operator`
 roles grant the same verbs they hold on `promptversions`, in the namespaces they are bound in.
 
+**Fixed: a tenant's or a workspace's cost breakdown could show a false zero.** The breakdown cut
+its page from every agent in the cluster and only then kept the ones the caller may see, so an
+agent that ranked below the first page came back as an empty page, a $0 total and a next cursor,
+and the Cost page said "No cost data yet". Paging with `limit=1` also counted every agent in the
+cluster. The breakdown now keeps the tenant's or the caller's namespaces first: pages, `nextCursor`
+and the total cover only those agents, and the total is the sum of all of them, not of one page.
+The Cost page no longer shows the empty state on a page that has another page beside it.
+
 **Fixed: an agent's live output never showed.** The log tail on an agent's page named no
 container, and Kubernetes refuses a log read without one on a pod with more than one container,
 which every agent pod is (Knative runs `queue-proxy` beside it). The tail now reads the agent's own

@@ -813,21 +813,12 @@ type agentCostKey struct {
 // Traces with no agent tag go into an explicit "(untagged)" bucket
 // (agentNs="", agentName="(untagged)") so they are visible, not silently
 // dropped. The agent list is sorted by totalCostUSD desc (tie-break: agentNs,
-// agentName asc) and then paginated by limit/cursor — the cursor is an offset
-// over the sorted agent list, encoded as an opaque integer.
-func (a *langfuseAdapter) CostBreakdown(ctx context.Context, limit int, cursor string) (CostBreakdownResponse, error) {
-	if limit <= 0 {
-		limit = defaultRunLimit
-	}
-
-	// Decode cursor → offset into the sorted agent list. "" = start.
-	offset := 0
-	if cursor != "" {
-		off, err := strconv.Atoi(cursor)
-		if err != nil || off < 0 {
-			return CostBreakdownResponse{}, fmt.Errorf("%w: cursor must be a non-negative integer, got %q", ErrBadParam, cursor)
-		}
-		offset = off
+// agentName asc), narrowed to the namespaces q keeps, and only then paged (see
+// costBreakdownPage).
+func (a *langfuseAdapter) CostBreakdown(ctx context.Context, cq CostBreakdownQuery) (CostBreakdownResponse, error) {
+	// Reject a malformed cursor before any upstream call.
+	if _, err := cq.offset(); err != nil {
+		return CostBreakdownResponse{}, err
 	}
 
 	// Fetch a bounded window of recent traces for aggregation.
@@ -939,6 +930,12 @@ func (a *langfuseAdapter) CostBreakdown(ctx context.Context, limit int, cursor s
 		return 0
 	})
 
+	// A narrowed breakdown totals its own rows, so the cluster-wide window total is only needed,
+	// and only fetched, when every agent is kept.
+	if !cq.AllNamespaces {
+		return costBreakdownPage(agents, CostSummary{}, cq)
+	}
+
 	// Window total from the SAME daily-metrics aggregation the dashboard cost card
 	// uses, so the Cost page total and the dashboard never contradict (m24.4). The
 	// per-agent breakdown above stays trace-derived (daily metrics carries no agent
@@ -966,30 +963,7 @@ func (a *langfuseAdapter) CostBreakdown(ctx context.Context, limit int, cursor s
 			ByModel:      byModel,
 		}
 	}
-
-	// Paginate the agent list.
-	if offset >= len(agents) {
-		return CostBreakdownResponse{
-			Agents:     []AgentCostItem{},
-			Total:      total,
-			NextCursor: "",
-		}, nil
-	}
-	page := agents[offset:]
-	nextCursor := ""
-	if len(page) > limit {
-		page = page[:limit]
-		nextCursor = strconv.Itoa(offset + limit)
-	}
-	if page == nil {
-		page = []AgentCostItem{}
-	}
-
-	return CostBreakdownResponse{
-		Agents:     page,
-		Total:      total,
-		NextCursor: nextCursor,
-	}, nil
+	return costBreakdownPage(agents, total, cq)
 }
 
 // latencyMsOf converts a Langfuse trace's latency (SECONDS — Langfuse's unit) to the
