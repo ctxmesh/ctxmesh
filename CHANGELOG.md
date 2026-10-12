@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+**Security: any pod in the cluster could read, write and revoke any person's tool credentials at the
+token service, and search any tenant's memory and knowledge.** The token service resolved, stored and
+revoked grants and searched long-term memory and knowledge bases for whatever namespace, boundary and
+user hash a request named. Its comment said only platform sidecars could reach it; nothing enforced
+that. A user hash is not a secret (an agent holds the capability that carries it), so an agent's code
+could take the credentials of whoever invoked it for any server and boundary, overwrite or revoke
+anyone's grants, and read or poison another tenant's memory. Confirmed on a live cluster: a pod in
+another namespace got HTTP 200 from `/v1/resolve`.
+
+The token service now authenticates every request but the health probes with a projected
+ServiceAccount token, reviewed by TokenReview (ADR 0154):
+
+- `/v1/resolve` admits only an agent's egress sidecar (audience `ctxmesh-token-service`, mounted into
+  the sidecar container alone). It resolves for the user and boundary of the run capability the sidecar
+  forwards, in the sidecar's own namespace; a request naming another user, boundary or namespace, or a
+  capability for another namespace, is refused with 403.
+- `/v1/store` and `/v1/revoke` admit only the BFF.
+- Long-term memory and knowledge search admit an agent's own container (audience
+  `ctxmesh-token-service-agent`) for its own namespace and agent; per-user memory and a per-user
+  knowledge base also need the run capability, and act only for its user. The BFF's knowledge test
+  query may search any namespace.
+- No token is 401, a bad or expired capability 401 with a code, a refusal 403, and an unreachable
+  TokenReview 503 (a tool call then fails with 502, visibly).
+
+The token service reads the capability public key from `bff-capability` and needs `create` on
+`tokenreviews` (a new ClusterRole). A NetworkPolicy now admits only the BFF from the install namespace
+and pods from other namespaces to its port (`tokenService.networkPolicy.enabled`, default on; it does
+nothing on a CNI that does not enforce NetworkPolicy). A knowledge-base reference to another namespace
+no longer resolves. **Agents built on an older base image lose long-term memory and knowledge until
+rebuilt**: their launcher sends no token. See [docs/upgrading.md](docs/upgrading.md).
+
+The MCP grant key is now read from a Secret: `bff.mcp.grantHmacKeySecret` names one you create (key
+`MCP_GRANT_HMAC_KEY`), or `bff.mcp.grantHmacKey` makes the chart create `ctxmesh-grant-hmac`. It was a
+literal in the BFF's Deployment, readable by anyone who can read Deployments, and it shadowed a key
+placed in `bff-adapters`. The run-worker now reads the same key; it had none, so a durable run's tool
+calls hashed the user differently from the grant the BFF stored.
+
 **Security: any pod in the cluster could invoke an agent in an AgentRegistry, past its registry's
 isolation and its `allowedCallers`.** The launcher checked registry isolation and the callee's
 `allowedCallers` and role rules only when a request carried an AMP envelope, the envelope was

@@ -79,6 +79,40 @@ Upgrade one minor version at a time. Skipping versions is untested, and a schema
 migration that assumes the immediately previous shape has no way to tell you it was
 skipped.
 
+## The token service authenticates every caller (agents on an older base image lose memory and knowledge)
+
+**What changed.** The token service now refuses any request without a projected ServiceAccount token
+(ADR 0154). The controller mounts one into every agent's egress sidecar and, for an agent with long-term
+memory or knowledge bases, into the agent's own container; the launcher in the agent's image sends it.
+
+**During the upgrade** every agent with a tool, long-term memory or a knowledge base rolls one new
+revision, which carries the token. An approval on such an agent carries to it. The token service
+restarts once more when the capability-key hook runs.
+
+**After upgrading,** rebuild agents whose image carries an older launcher (an older `ctxmesh` base image).
+Until then their long-term memory and knowledge searches fail: the launcher logs
+`token-service ... status 401 (unauthenticated: ...)`, and the token service logs the refusal. Tool calls
+are unaffected, because the sidecar rolls with the controller.
+
+**A knowledge-base reference to another namespace** no longer resolves; an agent searches only its own
+namespace's knowledge bases.
+
+**If you set `bff.mcp.grantHmacKey`,** the chart now creates a Secret `ctxmesh-grant-hmac` from it, and
+every upgrade must pass the same value. To stop passing it, create your own Secret holding the same key
+under `MCP_GRANT_HMAC_KEY` and set `bff.mcp.grantHmacKeySecret` instead of `bff.mcp.grantHmacKey`:
+
+```sh
+kubectl -n ctxmesh create secret generic ctxmesh-grant-key \
+  --from-literal=MCP_GRANT_HMAC_KEY="$(helm -n ctxmesh get values ctxmesh -o json | jq -r .bff.mcp.grantHmacKey)"
+```
+
+Using a different key re-keys every grant, and each person reconnects. If the key was in `bff-adapters`,
+it now takes effect: it was shadowed by an empty literal, so grants made until now were keyed without it
+and people reconnect once.
+
+**With an enforcing CNI,** the token service's new NetworkPolicy admits only the BFF from the install
+namespace. Anything else in that namespace that called it stops reaching it.
+
 ## Registry-scoped grants and shared scratchpads are keyed by namespace
 
 **What changed.** The trust boundary a person's grants are scoped to for an agent in an
