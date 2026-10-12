@@ -107,11 +107,11 @@ function ChatboxApp({ pin }: { pin: { ns: string; name: string } }) {
 
 // MovedTo answers a route whose page now lives elsewhere, keeping what a deep link
 // carried (its query, its hash) and adding what selects the page there (a tab, a mode).
-function MovedTo({ path, set }: { path: string; set: Record<string, string> }) {
+function MovedTo({ to, set }: { to: string; set: Record<string, string> }) {
   const { search, hash } = useLocation();
   const params = new URLSearchParams(search);
   for (const [k, v] of Object.entries(set)) params.set(k, v);
-  return <Navigate to={`${path}?${params.toString()}${hash}`} replace />;
+  return <Navigate to={`${to}?${params.toString()}${hash}`} replace />;
 }
 
 // App — the SPA route table (ADR 0012 auth routing):
@@ -191,7 +191,7 @@ export function App() {
                 primary create action). */}
             <Route path="agents/new" element={<CreateAgentPage />} />
             {/* The config builder is the create wizard's agent.yaml entrance. */}
-            <Route path="config" element={<MovedTo path="/agents/new" set={{ mode: "yaml" }} />} />
+            <Route path="config" element={<MovedTo to="/agents/new" set={{ mode: "yaml" }} />} />
             <Route path="playground" element={<PlaygroundPage />} />
             {/* The M14 first-agent wizards (m14.9): connect a provider. */}
             <Route path="providers" element={<ProvidersPage />} />
@@ -202,9 +202,9 @@ export function App() {
             <Route path="tools/mcp-servers" element={<McpServersPage />} />
             <Route path="tools/add-mcp" element={<AddMcpPage />} />
             {/* The MCP approval queue is the Approvals page's MCP tab. */}
-            <Route path="tools/approvals" element={<MovedTo path="/approvals" set={{ tab: "mcp" }} />} />
+            <Route path="tools/approvals" element={<MovedTo to="/approvals" set={{ tab: "mcp" }} />} />
             {/* The tool catalog is the MCP servers page's Tools tab. */}
-            <Route path="tools/catalog" element={<MovedTo path="/tools/mcp-servers" set={{ tab: "tools" }} />} />
+            <Route path="tools/catalog" element={<MovedTo to="/tools/mcp-servers" set={{ tab: "tools" }} />} />
             {/* m76.1: /tools/mcp-catalog retired — redirect to Gallery (the single
                 discovery surface, which renders its own inline McpCatalogTab). The old
                 standalone mcp-catalog-page was deleted as dead code. */}

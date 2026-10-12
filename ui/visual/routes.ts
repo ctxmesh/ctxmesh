@@ -50,7 +50,7 @@ export const ROUTES: RouteCase[] = [
   { id: "playground", path: "/playground", label: "Playground", chrome: "shell", archetype: "playground" },
 
   // ── Library ─────────────────────────────────────────────────────────────
-  { id: "tools-catalog", path: "/tools/catalog", label: "Tool catalog", chrome: "shell", archetype: "index" },
+  { id: "tools-catalog", path: "/tools/mcp-servers?tab=tools", label: "Tool catalog (MCP servers, Tools tab)", chrome: "shell", archetype: "index" },
   { id: "mcp-servers", path: "/tools/mcp-servers", label: "MCP servers", chrome: "shell", archetype: "index" },
   { id: "mcp-add", path: "/tools/add-mcp", label: "Add MCP server", chrome: "shell", archetype: "wizard" },
   { id: "knowledgebases", path: "/knowledgebases", label: "Knowledge bases", chrome: "shell", archetype: "index" },
@@ -59,11 +59,11 @@ export const ROUTES: RouteCase[] = [
   { id: "gallery", path: "/gallery", label: "Template gallery", chrome: "shell", archetype: "gallery" },
   { id: "workflows", path: "/workflows", label: "Workflows", chrome: "shell", archetype: "index" },
   { id: "workflow-detail", path: "/workflows/default/demo-flow", label: "Workflow detail", chrome: "shell", archetype: "detail" },
-  { id: "config", path: "/config", label: "Config builder", chrome: "shell", archetype: "authoring" },
+  { id: "config", path: "/agents/new?mode=yaml", label: "Create agent, agent.yaml entrance", chrome: "shell", archetype: "authoring" },
 
   // ── Govern ──────────────────────────────────────────────────────────────
   { id: "approvals", path: "/approvals", label: "Approvals", chrome: "shell", archetype: "index" },
-  { id: "mcp-approvals", path: "/tools/approvals", label: "MCP approvals", chrome: "shell", archetype: "index" },
+  { id: "mcp-approvals", path: "/approvals?tab=mcp", label: "MCP approvals (Approvals, MCP tab)", chrome: "shell", archetype: "index" },
   { id: "stops", path: "/stops", label: "Stops", chrome: "shell", archetype: "index" },
   { id: "guardrails", path: "/guardrails", label: "Guardrails", chrome: "shell", archetype: "index" },
   { id: "evals", path: "/evals", label: "Evals", chrome: "shell", archetype: "index" },
