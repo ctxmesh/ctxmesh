@@ -15,7 +15,6 @@ import { AddMcpPage } from "@/pages/add-mcp-page";
 import { McpServersPage } from "@/pages/mcp-servers-page";
 import { McpConnectPage } from "@/pages/mcp-connect-page";
 import { TemplateGalleryPage } from "@/pages/template-gallery-page";
-import { ConfigBuilderPage } from "@/pages/config-builder-page";
 import { CostPage } from "@/pages/cost-page";
 import { ConnectProviderPage } from "@/pages/connect-provider-page";
 import { ProvidersPage } from "@/pages/providers-page";
@@ -191,7 +190,8 @@ export function App() {
                 picker → Create. Placed under /agents/new (the agents surface's
                 primary create action). */}
             <Route path="agents/new" element={<CreateAgentPage />} />
-            <Route path="config" element={<ConfigBuilderPage />} />
+            {/* The config builder is the create wizard's agent.yaml entrance. */}
+            <Route path="config" element={<MovedTo path="/agents/new" set={{ mode: "yaml" }} />} />
             <Route path="playground" element={<PlaygroundPage />} />
             {/* The M14 first-agent wizards (m14.9): connect a provider. */}
             <Route path="providers" element={<ProvidersPage />} />

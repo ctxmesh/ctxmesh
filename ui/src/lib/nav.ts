@@ -18,7 +18,6 @@ import {
   ScrollText,
   Share2,
   Shield,
-  SlidersHorizontal,
   Tags,
   TestTube2,
   Users,
@@ -238,17 +237,6 @@ export const NAV_SECTIONS: NavSection[] = [
         label: "Workflows",
         icon: GitFork,
         route: "/workflows",
-      },
-      {
-        // The config-builder — the raw agent.yaml → CRD-apply surface. It is a
-        // hand-authoring path, so it sits with the other material rather than in
-        // the agent-creation flow ("New agent" is the ONE primary create entry,
-        // m23.7 / audit B3). A WRITE surface, hidden from a viewer's nav.
-        id: "config",
-        label: "Config builder",
-        icon: SlidersHorizontal,
-        route: "/config",
-        requiresCapability: { resource: RES_AGENTS, verb: "create" },
       },
     ],
   },

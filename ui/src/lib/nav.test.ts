@@ -88,7 +88,6 @@ describe("every pre-M151 destination still lands somewhere", () => {
     "guardrails",
     "workflows",
     "knowledgebases",
-    "config",
     "registries",
     "routes",
     "secrets",
@@ -113,6 +112,7 @@ describe("pages folded into another page (m184.43)", () => {
   it.each([
     ["mcp-approvals", "approvals"],
     ["tool-catalog", "mcp-servers"],
+    ["config", "agents"],
   ])("%s is reached through %s", (gone, holder) => {
     expect(NAV_ITEMS.find((i) => i.id === gone)).toBeUndefined();
     expect(NAV_ITEMS.find((i) => i.id === holder)).toBeDefined();
@@ -157,9 +157,8 @@ describe("nav consolidation (m23.7 / m25 S8, carried forward)", () => {
     expect(labelsOf("Agents")).not.toContain("New agent");
   });
 
-  it("keeps the hand-authoring Config builder out of the agent-creation flow", () => {
-    expect(labelsOf("Agents")).not.toContain("Config builder");
-    expect(sectionOf("Config builder")).toBe("Library");
+  it("has one authoring path: the config builder is New agent's agent.yaml entrance", () => {
+    expect(NAV_ITEMS.map((i) => i.label)).not.toContain("Config builder");
   });
 
   it("groups the MCP/tool surfaces in Library, with the approval queue in Govern", () => {

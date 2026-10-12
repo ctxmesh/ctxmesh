@@ -1243,11 +1243,11 @@ export interface CreateTeamRequest {
   namespace?: string;
 }
 
-// --- Config builder (POST /api/expand, POST /api/agents) --------------------
-// The config-builder submits the SAME simplified agent.yaml the CLI consumes:
-// the form builds the YAML, /api/expand previews the CRD (server-side, the CLI
-// expand core), and /api/agents applies it (client-go create, RBAC-scoped). The
-// browser never hand-edits raw CRDs.
+// --- Agent config (POST /api/expand, POST /api/agents) ----------------------
+// The create-agent review submits the SAME simplified agent.yaml the CLI
+// consumes: /api/expand previews the CRDs it becomes (server-side, the CLI expand
+// core), and /api/agents applies it (client-go create, RBAC-scoped). The browser
+// never hand-edits raw CRDs.
 
 // One created CRD object's flat identity (mirrors the BFF createdObject DTO).
 export interface CreatedObject {
@@ -3474,7 +3474,7 @@ export const api = {
     ),
 
   // expand posts the form's agent.yaml and returns the expanded CRD manifest(s)
-  // as plain YAML text — the config-builder's read-only preview. A validation
+  // as plain YAML text — the create-agent review's read-only preview. A validation
   // failure (400) surfaces the BFF's message via ApiError.
   expand: async (agentYAML: string, signal?: AbortSignal): Promise<string> => {
     const res = await apiFetch("/api/expand", {

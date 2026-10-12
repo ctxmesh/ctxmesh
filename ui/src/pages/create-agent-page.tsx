@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { ChevronRight, PlugZap, Plus, Search, Send, Server } from "lucide-react";
+import { ChevronRight, PlugZap, Plus, Search, Send, Server, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -64,6 +64,9 @@ import { groupToolsByServer } from "@/lib/tool-groups";
 //     (basics → behaviour → resources → optional → review), reusing
 //     lib/config-form's validate + toAgentYAML (NOT rewritten), converging on
 //     the SAME review.
+//   • "Write the agent.yaml" (`?mode=yaml`, where /config redirects) — the file
+//     the CLI expands, typed or pasted, for any field the form does not carry.
+//     It needs no connected provider, since a custom image may call no model.
 //
 // ── A GENERATED CONFIG IS A PROPOSAL, NOT A FACT ────────────────────────────
 //
@@ -94,8 +97,8 @@ import { groupToolsByServer } from "@/lib/tool-groups";
 // a model.
 
 // The mode is the top-level flow selection: the entrance fork, then one of the
-// entrances. `configure`, `describe` and `recipe` all end at the shared review.
-type Mode = "entrance" | "describe" | "configure" | "recipe";
+// entrances. Every entrance ends at the shared review.
+type Mode = "entrance" | "describe" | "configure" | "recipe" | "yaml";
 
 // The Describe-it sub-state. `prompt` is the form; `review` hands off to the
 // refine/draft surface. `issue` is the 422 outcome, rendered INLINE in the
@@ -131,7 +134,8 @@ type DraftState =
   | { kind: "conflict" }
   | { kind: "error"; message: string };
 
-/** Where a config on the review came from — it decides how strongly it is claimed. */
+/** Where a config on the review came from — it decides how strongly it is claimed.
+ *  `form` is anything the user wrote themselves, in the form or as YAML. */
 type Origin = "generated" | "recipe" | "form";
 
 export function CreateAgentPage() {
@@ -145,7 +149,7 @@ export function CreateAgentPage() {
   // is fragile and may be truncated by URL-length limits).
   const initialRecipe = params.get("recipe") ?? "";
   const [mode, setMode] = React.useState<Mode>(
-    initialProvider ? "configure" : "entrance",
+    initialProvider ? "configure" : params.get("mode") === "yaml" ? "yaml" : "entrance",
   );
   // recipeSpec: the spec from a recipe the user clicked (m72.5). When set, mode="recipe"
   // and SharedReview renders with this spec pre-filled.
@@ -178,14 +182,20 @@ export function CreateAgentPage() {
     <div className="min-w-0 space-y-6">
       <PageHeader
         title="New agent"
-        lede="Describe it in a sentence and we compose a validated config — or set every knob yourself. Both paths end at the same review, where you see the whole thing and pick its tools before anything is created."
+        lede="Describe it in a sentence and we compose a validated config — or set every knob yourself, in a form or in its agent.yaml. Every way in ends at the same review, where you see the whole thing and pick its tools before anything is created."
       />
       {/* The A4 content measure, on the header's own left margin (the band's
           px-6) so the h1 and every step heading share one edge. Cancel lives in
           the wizard footer, so the header carries no side actions. */}
       <div className="min-w-0 px-6">
         <div className="min-w-0 max-w-[46rem]">
-        <ProviderGate>
+        {mode === "yaml" ? (
+          <YamlFlow
+            onBack={() => setMode("entrance")}
+            onConfigure={() => setMode("configure")}
+          />
+        ) : (
+        <ProviderGate onWriteYaml={() => setMode("yaml")}>
           {mode === "entrance" && (
             <Entrance onPick={setMode} onPickRecipe={onPickRecipe} />
           )}
@@ -205,6 +215,7 @@ export function CreateAgentPage() {
             />
           )}
         </ProviderGate>
+        )}
         </div>
       </div>
     </div>
@@ -215,8 +226,15 @@ export function CreateAgentPage() {
 // the Describe-it path needs a provider to generate, and running any agent needs
 // a model. A load FAILURE (incl. the kill-switch 404) is NOT treated as "no
 // provider" — we let the flow through (an honest "no false gate"), so a hardened
-// install that 404s /api/providers still reaches the form.
-function ProviderGate({ children }: { children: React.ReactNode }) {
+// install that 404s /api/providers still reaches the form. The agent.yaml entrance
+// stays open from the gate: a custom image may call no model at all.
+function ProviderGate({
+  children,
+  onWriteYaml,
+}: {
+  children: React.ReactNode;
+  onWriteYaml: () => void;
+}) {
   const navigate = useNavigate();
   const { workingNamespace } = useNamespace();
   const [state, setState] = React.useState<
@@ -261,6 +279,7 @@ function ProviderGate({ children }: { children: React.ReactNode }) {
             icon: PlugZap,
             onClick: () => navigate("/providers/connect"),
           }}
+          secondaryAction={{ label: "Write the agent.yaml instead", onClick: onWriteYaml }}
         />
       </div>
     );
@@ -303,12 +322,14 @@ function Entrance({
 
   const cardBase =
     "rounded-lg border p-5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
+  const quietWay =
+    "flex w-full items-center gap-2 rounded-lg border border-dashed border-border-strong p-4 text-sm text-muted-foreground transition-colors hover:border-faint hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
 
   return (
     <div className="min-w-0 space-y-6" data-testid="create-entrance">
       <SectionHeader
         title="How do you want to start?"
-        lede="Both paths end at the same review — the whole config, in plain words, with its tools — before anything is created."
+        lede="Every way in ends at the same review — the whole config, in plain words, with its tools — before anything is created."
       />
       <div className="grid gap-4 md:grid-cols-2">
         <button
@@ -338,16 +359,27 @@ function Entrance({
         </button>
       </div>
 
-      {/* The recipe shelf (m72.5) — a third way in, deliberately quieter. */}
+      {/* The recipe shelf (m72.5) and the agent.yaml — two more ways in,
+          deliberately quieter. */}
       {!showRecipes ? (
-        <button
-          type="button"
-          onClick={handleShowRecipes}
-          className="flex w-full items-center gap-2 rounded-lg border border-dashed border-border-strong p-4 text-sm text-muted-foreground transition-colors hover:border-faint hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-          data-testid="entrance-recipes-toggle"
-        >
-          Start from a recipe
-        </button>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <button
+            type="button"
+            onClick={handleShowRecipes}
+            className={quietWay}
+            data-testid="entrance-recipes-toggle"
+          >
+            Start from a recipe
+          </button>
+          <button
+            type="button"
+            onClick={() => onPick("yaml")}
+            className={quietWay}
+            data-testid="entrance-yaml"
+          >
+            Write the agent.yaml
+          </button>
+        </div>
       ) : (
         <section aria-labelledby="recipes-head" data-testid="recipe-gallery">
           <SectionHeader
@@ -388,6 +420,91 @@ function Entrance({
         </section>
       )}
     </div>
+  );
+}
+
+// ── Write the agent.yaml ────────────────────────────────────────────────────
+//
+// The file the CLI expands, typed or pasted. It reaches every field the platform
+// takes, including the ones the guided form leaves out (min/max scaling, a pinned
+// managed image beside a model route, anything newer than the form), and it lands
+// on the same review: the tools, the requirements, Preview (the server-side
+// expansion) and Create. The well never soft-wraps: in YAML a wrapped line reads
+// as a different nesting than the one that would be applied.
+
+const YAML_STARTER = `name: my-agent
+runtime: managed
+systemPrompt: |
+  You are a helpful assistant.
+`;
+
+function YamlFlow({ onBack, onConfigure }: { onBack: () => void; onConfigure: () => void }) {
+  const [text, setText] = React.useState(YAML_STARTER);
+  const [error, setError] = React.useState<string | undefined>();
+  const [reviewing, setReviewing] = React.useState(false);
+
+  if (reviewing) {
+    return (
+      <SharedReview
+        baseYAML={text}
+        initialTools={parseToolsFromYAML(text)}
+        summary={summarizeYAML(text)}
+        advancedYAML={text}
+        origin="form"
+        onBack={() => setReviewing(false)}
+      />
+    );
+  }
+
+  function onReview() {
+    // The server is the judge of the rest; this only catches a file with no name,
+    // which the review could not even title.
+    if (!scalar(text, "name")) {
+      setError("The file needs a top-level name: line.");
+      return;
+    }
+    setError(undefined);
+    setReviewing(true);
+  }
+
+  return (
+    <section aria-labelledby="yaml-head" className="min-w-0 space-y-5" data-testid="yaml-flow">
+      <SectionHeader
+        id="yaml-head"
+        title="Write the agent.yaml"
+        lede="The same file the CLI expands. Nothing is sent until the review, where Preview shows the exact CRDs it becomes."
+      />
+      <FormField id="agent-yaml" label="agent.yaml" error={error}>
+        <Textarea
+          id="agent-yaml"
+          data-testid="agent-yaml-input"
+          className="min-h-[20rem] whitespace-pre font-mono text-xs leading-relaxed"
+          wrap="off"
+          spellCheck={false}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+      </FormField>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Button variant="ghost" onClick={onBack}>
+          Back
+        </Button>
+        <Button onClick={onReview} data-testid="yaml-review">
+          Review + tools
+        </Button>
+      </div>
+      <p className="text-sm text-faint">
+        Prefer a form?{" "}
+        <button
+          type="button"
+          onClick={onConfigure}
+          className="border-b border-accent font-semibold text-primary hover:border-primary"
+        >
+          Configure it step by step
+        </button>
+        .
+      </p>
+    </section>
   );
 }
 
@@ -1706,7 +1823,7 @@ function ConfigureFlow({
 }
 
 // OptionalStep — the budget/eval/prompt opt-in blocks, factored out of the
-// original config-builder form (same field logic, reusing config-form errors).
+// M12 config-builder form (same field logic, reusing config-form errors).
 function OptionalStep({
   form,
   set,
@@ -1756,6 +1873,21 @@ function OptionalStep({
             />
           </FormField>
         </div>
+        <FormField
+          id="cfg-budget-soft"
+          label="Soft alert threshold (%)"
+          error={errors.budgetSoftThresholdPct}
+          hint="1–99; defaults to 80."
+        >
+          <Input
+            id="cfg-budget-soft"
+            className="font-mono"
+            inputMode="numeric"
+            value={form.budgetSoftThresholdPct}
+            onChange={(e) => set("budgetSoftThresholdPct", e.target.value)}
+            placeholder="80"
+          />
+        </FormField>
       </ToggleSection>
       <ToggleSection
         id="cfg-prompt"
@@ -1848,20 +1980,123 @@ function OptionalStep({
             />
           </FormField>
         </div>
-        <FormField
-          id="cfg-eval-threshold"
-          label="Threshold"
-          error={errors.evalThreshold}
-        >
-          <Input
+        <div className="grid gap-4 sm:grid-cols-2">
+          <FormField
             id="cfg-eval-threshold"
-            className="font-mono"
-            value={form.evalThreshold}
-            onChange={(e) => set("evalThreshold", e.target.value)}
-            placeholder="0.8"
-          />
-        </FormField>
+            label="Threshold"
+            error={errors.evalThreshold}
+          >
+            <Input
+              id="cfg-eval-threshold"
+              className="font-mono"
+              value={form.evalThreshold}
+              onChange={(e) => set("evalThreshold", e.target.value)}
+              placeholder="0.8"
+            />
+          </FormField>
+          <FormField id="cfg-eval-gate" label="Gate">
+            <Select
+              id="cfg-eval-gate"
+              value={form.evalGate}
+              onChange={(e) => set("evalGate", e.target.value as ConfigForm["evalGate"])}
+            >
+              <option value="block">block (fail closed)</option>
+              <option value="warn">warn (promote anyway)</option>
+            </Select>
+          </FormField>
+        </div>
+        <Scorers form={form} set={set} errors={errors} />
       </ToggleSection>
+    </div>
+  );
+}
+
+// Scorers — the eval gate's scoring rows. An enabled gate needs at least one, and
+// each named row needs a type; validate() reports both by row.
+function Scorers({
+  form,
+  set,
+  errors,
+}: {
+  form: ConfigForm;
+  set: <K extends keyof ConfigForm>(key: K, value: ConfigForm[K]) => void;
+  errors: FieldErrors;
+}) {
+  const update = (i: number, patch: Partial<ConfigForm["scorers"][number]>) =>
+    set(
+      "scorers",
+      form.scorers.map((sc, idx) => (idx === i ? { ...sc, ...patch } : sc)),
+    );
+  return (
+    <div className="space-y-2" data-testid="cfg-scorers">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-sm font-medium">Scorers</span>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => set("scorers", [...form.scorers, { name: "", type: "heuristic", weight: "" }])}
+        >
+          <Plus className="h-4 w-4" /> Add scorer
+        </Button>
+      </div>
+      {errors.scorers && (
+        <p className="font-mono text-xs text-destructive" role="alert">
+          {errors.scorers}
+        </p>
+      )}
+      {form.scorers.map((scorer, i) => (
+        <div
+          key={i}
+          className="flex flex-wrap items-end gap-2 rounded-md border border-border bg-surface-2 p-3"
+        >
+          <div className="min-w-[8rem] flex-1">
+            <FormField id={`cfg-scorer-${i}-name`} label="Name" error={errors[`scorer.${i}.name`]}>
+              <Input
+                id={`cfg-scorer-${i}-name`}
+                className="font-mono"
+                value={scorer.name}
+                onChange={(e) => update(i, { name: e.target.value })}
+                placeholder="exact-match"
+              />
+            </FormField>
+          </div>
+          <div className="min-w-[8rem] flex-1">
+            <FormField id={`cfg-scorer-${i}-type`} label="Type" error={errors[`scorer.${i}.type`]}>
+              <Input
+                id={`cfg-scorer-${i}-type`}
+                className="font-mono"
+                value={scorer.type}
+                onChange={(e) => update(i, { type: e.target.value })}
+                placeholder="heuristic"
+              />
+            </FormField>
+          </div>
+          <div className="w-20">
+            <FormField id={`cfg-scorer-${i}-weight`} label="Weight">
+              <Input
+                id={`cfg-scorer-${i}-weight`}
+                className="font-mono"
+                inputMode="numeric"
+                value={scorer.weight}
+                onChange={(e) => update(i, { weight: e.target.value })}
+                placeholder="1"
+              />
+            </FormField>
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="text-faint hover:text-destructive"
+            aria-label={`Remove scorer ${i + 1}`}
+            onClick={() => set("scorers", form.scorers.filter((_, idx) => idx !== i))}
+            disabled={form.scorers.length === 1}
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
+      ))}
     </div>
   );
 }

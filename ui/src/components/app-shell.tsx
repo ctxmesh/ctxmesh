@@ -687,8 +687,8 @@ function NavItemLink({
   );
 }
 
-// NavSections renders the grouped IA. Write-only items (config-builder,
-// Playground, the operator-only queues) are HIDDEN when the caller lacks the
+// NavSections renders the grouped IA. Write-only items (Playground, the
+// operator-only surfaces) are HIDDEN when the caller lacks the
 // gating right (RBAC-aware chrome, §3) — a viewer sees a read-only nav by
 // construction. In a workspace with no agent yet it renders only the first-run
 // destinations, as one flat list with a line saying the rest is coming.

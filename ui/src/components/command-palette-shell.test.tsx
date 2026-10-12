@@ -126,7 +126,7 @@ describe("ShellCommandPalette (cmd-K in the production shell)", () => {
     expect(screen.getByRole("option", { name: /Home/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Agents/ })).toBeInTheDocument();
     // With create allowed, the write surface IS offered (like the nav).
-    expect(screen.getByRole("option", { name: /Config builder/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Playground/ })).toBeInTheDocument();
     // The Sign out action is offered.
     expect(screen.getByRole("option", { name: /Sign out/ })).toBeInTheDocument();
   });
@@ -153,7 +153,7 @@ describe("ShellCommandPalette (cmd-K in the production shell)", () => {
     renderShell();
     // The nav omits write-only surfaces for a viewer (established shell contract).
     await waitFor(() =>
-      expect(screen.queryByRole("link", { name: /Config builder/ })).toBeNull(),
+      expect(screen.queryByRole("link", { name: /Playground/ })).toBeNull(),
     );
 
     pressCmdK();
@@ -161,7 +161,6 @@ describe("ShellCommandPalette (cmd-K in the production shell)", () => {
     // Read surface is still navigable…
     expect(screen.getByRole("option", { name: /^Agents/ })).toBeInTheDocument();
     // …but write-only surfaces are absent from the palette too (parity with nav).
-    expect(screen.queryByRole("option", { name: /Config builder/ })).toBeNull();
     expect(screen.queryByRole("option", { name: /Playground/ })).toBeNull();
   });
 
@@ -232,7 +231,6 @@ describe("buildCommands (RBAC + namespace sub-commands)", () => {
     });
     const labels = cmds.map((c) => c.label);
     expect(labels).toContain("Agents");
-    expect(labels).not.toContain("Config builder");
     expect(labels).not.toContain("Playground");
   });
 

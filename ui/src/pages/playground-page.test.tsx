@@ -418,7 +418,7 @@ describe("PlaygroundPage", () => {
     });
   });
 
-  it("exports the definition to a CRD via expand → apply (the config-builder path)", async () => {
+  it("exports the definition to a CRD via expand → apply (the create-agent path)", async () => {
     const calls = recordingFetch({
       expand: () => ({
         ok: true,

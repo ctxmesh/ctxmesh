@@ -113,6 +113,17 @@ drawer and decisions. `/tools/approvals` redirects to the tab, and the links tha
 (an MCP server awaiting approval, a requirement on the create-agent review, a server queued after
 it is added) go there. The MCP approvals nav entry is removed.
 
+**Changed: one way to author an agent. The config builder is New agent's agent.yaml entrance.** The
+console had two: the New agent wizard, and the config builder, a second form over the same fields
+with its own preview and apply. New agent now has a fourth way in, Write the agent.yaml
+(`/agents/new?mode=yaml`): the file the CLI expands, typed or pasted, for any field the form does not
+carry. It needs no connected provider, and the no-provider prompt offers it. Like the other ways in it
+ends at the shared review, where Preview shows the expanded CRDs and Create applies them into the
+chosen workspace. The three fields only the config builder had, the budget's soft alert threshold and
+the eval gate's mode and scorers, are now in Configure's Optional step; before, enabling the eval gate
+there failed on a scorer the step did not show. `/config` redirects to the new entrance. The Config
+builder nav entry is removed.
+
 **Security: a registry in one namespace could share another namespace's team scratchpad and
 credential boundary by copying its `registryId`.** A registry's id is chosen by its author and was
 the whole key for what its members share: the shared scratchpad (`sessionMemory.scope: shared`)

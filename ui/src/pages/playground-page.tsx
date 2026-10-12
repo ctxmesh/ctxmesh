@@ -154,7 +154,7 @@ type Run =
   | { kind: "error"; message: string; status?: number; forbidden?: boolean };
 
 // Export is the export-to-CRD lifecycle: expand (preview) → apply. It reuses the
-// config-builder's expand/apply path verbatim (same server-side mapping as the
+// create-agent review's expand/apply path verbatim (same server-side mapping as the
 // CLI); no raw YAML is hand-edited.
 type Export =
   | { kind: "idle" }
@@ -783,7 +783,7 @@ export function PlaygroundPage() {
   }
 
   // Export-to-CRD: preview the expanded CRD (POST /api/expand), then apply it
-  // (POST /api/agents) — the SAME caller-scoped path the config-builder uses.
+  // (POST /api/agents) — the SAME caller-scoped path the create-agent review uses.
   async function onPreview() {
     const found = validate(form);
     setErrors(found);
@@ -1517,7 +1517,7 @@ export function PlaygroundPage() {
                   className="max-w-[72ch]"
                 >
                   Take this definition to a CRD — the same server-side expand and
-                  apply the config builder performs. Press{" "}
+                  apply that creating an agent performs. Press{" "}
                   <span className="font-medium">Preview CRD</span> to read the
                   exact manifest; nothing reaches the cluster until you apply it.
                 </QuietNote>

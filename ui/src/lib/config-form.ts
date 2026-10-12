@@ -1,4 +1,4 @@
-// config-form — the config-builder's form model, client-side validation, and
+// config-form — the create-agent form's model, client-side validation, and
 // agent.yaml serializer. It mirrors the simplified agent.yaml schema the engine's
 // `expand` core consumes (cmd/ctxmesh/expand.go → internal/expand): name,
 // image, executionModel, resources, scaling, model.route, budget, eval, prompt.
@@ -13,9 +13,8 @@ export type EvalGate = "block" | "warn";
 // Runtime selects the agent runtime (ADR 0013): "managed" is the stock
 // tool-calling image (no Docker build — image OPTIONAL, systemPrompt + tools
 // allowed); "custom" is the unchanged bring-your-own-image path (image
-// REQUIRED, managed-only fields rejected). The create wizard defaults to
-// "managed" (the aha on-ramp); the config-builder keeps "custom" (its original
-// image-required behavior).
+// REQUIRED, managed-only fields rejected). The create wizard seeds "managed"
+// (the aha on-ramp).
 export type Runtime = "managed" | "custom";
 
 // ScorerForm is one eval scorer row. weight is a string in the form (empty →
@@ -26,7 +25,7 @@ export interface ScorerForm {
   weight: string;
 }
 
-// ConfigForm is the full editable state of the config-builder. Every field is a
+// ConfigForm is the full editable state of the create-agent form. Every field is a
 // string (form-native); the serializer coerces + omits empties so the emitted
 // agent.yaml only carries what the user set — matching the CLI's optional-field
 // behavior. `eval` and `prompt` are opt-in blocks (enabled flags) because they
@@ -35,8 +34,8 @@ export interface ConfigForm {
   name: string;
   // runtime selects the two-runtime branch (ADR 0013). "managed" → image
   // optional + systemPrompt/tools serialized; "custom" → image required, the
-  // managed-only fields omitted. Defaults to "custom" in emptyForm (the M12
-  // config-builder's unchanged behavior); the create wizard seeds "managed".
+  // managed-only fields omitted. Defaults to "custom" in emptyForm; the create
+  // wizard seeds "managed".
   runtime: Runtime;
   image: string;
   // systemPrompt + tools are MANAGED-ONLY (expand rejects them on a custom
@@ -79,7 +78,7 @@ export interface ConfigForm {
   scorers: ScorerForm[];
 }
 
-// emptyForm is the initial config-builder state.
+// emptyForm is a blank form.
 export function emptyForm(): ConfigForm {
   return {
     name: "",

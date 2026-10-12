@@ -170,11 +170,10 @@ describe("AppShell — the approved IA", () => {
     expect(within(nav).getByRole("link", { name: /Home/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Agents/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Runs/ })).toBeInTheDocument();
-    // With create allowed, the write surfaces are present.
+    // With create allowed, the write surface is present.
     await waitFor(() =>
-      expect(screen.getByRole("link", { name: /Config builder/ })).toBeInTheDocument(),
+      expect(screen.getByRole("link", { name: /Playground/ })).toBeInTheDocument(),
     );
-    expect(screen.getByRole("link", { name: /Playground/ })).toBeInTheDocument();
     // The workspace switcher (friendly label over namespace — ADR 0068 §7) is in the top bar.
     expect(screen.getByLabelText("Workspace")).toBeInTheDocument();
   });
@@ -191,9 +190,8 @@ describe("AppShell — the approved IA", () => {
     renderShell();
     expect(await screen.findByRole("link", { name: /Agents/ })).toBeInTheDocument();
     await waitFor(() =>
-      expect(screen.queryByRole("link", { name: /Config builder/ })).toBeNull(),
+      expect(screen.queryByRole("link", { name: /Playground/ })).toBeNull(),
     );
-    expect(screen.queryByRole("link", { name: /Playground/ })).toBeNull();
     // No banner — a definite deny is not a probe failure.
     expect(screen.queryByTestId("capability-banner")).toBeNull();
   });
@@ -228,7 +226,6 @@ describe("AppShell — the approved IA", () => {
     });
     renderShell();
     expect(await screen.findByTestId("capability-banner")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Config builder/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Playground/ })).toBeInTheDocument();
   });
 
