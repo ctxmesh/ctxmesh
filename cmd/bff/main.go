@@ -494,13 +494,14 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	ingestOCR := newIngestOCR(log)
 
 	bindStore := runcapBindStore(log)
-	// Pod identity for the guardrail audit edge (m184.7): TokenReview needs the BFF's
-	// system:auth-delegator binding. A clientset that cannot be built leaves that path off.
+	// Pod identity for the guardrail audit edge (m184.7) and the AMP attestation edge (ADR 0153):
+	// TokenReview needs the BFF's tokenreviews grant. A clientset that cannot be built leaves both off.
 	var podAuth statelayer.PodAuthenticator
 	if cs, csErr := kubernetes.NewForConfig(cfg); csErr == nil {
 		podAuth = statelayer.NewTokenReviewAuthenticator(cs, runcap.BFFPodAudience, time.Now)
 	} else {
-		log.Error(csErr, "no Kubernetes clientset: a guarded AMP callee's block cannot be audited")
+		log.Error(csErr, "no Kubernetes clientset: a guarded AMP callee's block cannot be audited, "+
+			"and no registry member can be attested, so every AMP call is refused")
 	}
 	requirePoP, err := requireProofOfPossession(log, os.Getenv("RUNCAP_REQUIRE_POP"), bindStore != nil)
 	if err != nil {

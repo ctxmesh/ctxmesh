@@ -679,7 +679,8 @@ type Options struct {
 	RuncapBind RuncapBindStore
 	// PodAuth authenticates an agent pod by its projected token for the BFF audience (TokenReview).
 	// The guardrail audit edge uses it for a capability relayed over AMP, which is bound to the
-	// caller's key and so cannot be proven by the agent that enforced the block. Nil ⇒ that path is off.
+	// caller's key and so cannot be proven by the agent that enforced the block; the AMP attestation
+	// edge uses it to learn which agent is asking (ADR 0153). Nil ⇒ both paths are off.
 	PodAuth statelayer.PodAuthenticator
 	// ProofSpender shares the proof-replay set across BFF replicas (M149 m149.4). Nil ⇒
 	// the verifier's in-process map, which is correct at one replica and silently
@@ -937,6 +938,9 @@ func (s *Server) Handler() http.Handler {
 	// Wired alongside the spawn edge — both are internal launcher-to-BFF endpoints authenticated on
 	// the run capability, not a browser bearer token.
 	s.registerGuardrailEventRoute(api)
+	// AMP attestation (ADR 0153): a registry member's launcher trades its pod token for the platform's
+	// statement of which agent it is, which every agent it calls verifies.
+	s.registerAMPAttestationRoute(api)
 
 	// Authenticated surface. The CRD routes run through the CALLER-SCOPED client
 	// (ADR 0011): list/create/topology reflect exactly what the caller's own RBAC
