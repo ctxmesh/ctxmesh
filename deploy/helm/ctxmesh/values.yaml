@@ -50,7 +50,9 @@ global:
 # A digest pins the bytes, not their availability: an upstream that closes anonymous pulls breaks
 # an install whatever the pin says. CI pulls every image rendered here (hack/chart-images-pullable.sh).
 thirdPartyImages:
-  # Replaces the registry of every entry below when set, e.g. registry.internal:5000.
+  # Replaces the registry of every entry below when set, e.g. registry.internal:5000. Use it for a
+  # registry you fill with all of them. The project's mirror (hack/third-party-images.txt) does not
+  # carry litellm, so it is chosen per entry with `registry`, never here.
   registryOverride: ""
   # The model gateway (LiteLLM). MIT, except the enterprise/ directory the image also ships, which
   # is under BerriAI's commercial licence.

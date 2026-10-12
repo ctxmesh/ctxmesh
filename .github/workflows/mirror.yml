@@ -76,6 +76,8 @@ jobs:
             fi
             echo "copied $src -> $dst"
           done < plan.txt
+      # Anonymous because this step has no token: DOCKER_CONFIG is empty and GITHUB_TOKEN is not in
+      # its env. Do not add the token here; the point is to read the copies as an installer would.
       - name: Read each copy back anonymously
         run: |
           set -euo pipefail
