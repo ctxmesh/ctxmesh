@@ -41,7 +41,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: litellm
-          image: ghcr.io/berriai/litellm:v1.91.0
+          image: ghcr.io/berriai/litellm:v1.91.0@sha256:078f96272f0c84da383e6a1f197478390b5204a86dcf00a181bcfe02a00e5dfa
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

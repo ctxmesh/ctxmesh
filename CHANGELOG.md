@@ -716,6 +716,31 @@ kubectl patch crd agentdeployments.agents.ctxmesh.ai --subresource=status --type
   -p '{"status":{"storedVersions":["v1beta1"]}}'
 ```
 
+**Behaviour change: the bundled NATS is off by default.** Nothing used it until `bff.asyncBackend`
+was set, so every install ran an idle broker on a 4 GiB volume. Turn it on with
+`devDataPlane.nats.enabled=true`, `bff.asyncBackend=jetstream` and
+`bff.natsURL=nats://ctxmesh-nats.<namespace>.svc:4222`. An upgrade removes the NATS Deployment and
+its PersistentVolumeClaim; if you use the bundled broker for async calls, set
+`devDataPlane.nats.enabled=true` before upgrading, or messages still queued in it are lost.
+
+**The bundled object store can be turned off.** `devDataPlane.objectstore.enabled=false` leaves
+SeaweedFS out, and the BFF and the controller are no longer handed its address: knowledge-base
+upload and ingestion and the run-fixture view answer 501, record-capable agents fail at start with
+`OBJECT_STORE_ADDR is unset`, and async payloads between registry members travel inline (up to
+1 MiB) instead of being offloaded. It stays on by default. With `devDataPlane.enabled=false` the
+BFF's `OBJECT_STORE_ADDR` is now empty too, so those endpoints answer 501 instead of failing on a
+Service that was not rendered.
+
+**Every third-party image can be moved to another registry, and all of them are pinned by digest.**
+LiteLLM, Valkey, PostgreSQL, SeaweedFS, NATS and Dex are under `thirdPartyImages`, each as
+`registry`, `repository`, `tag` and `digest`; `thirdPartyImages.registryOverride` moves all of them
+at once, and `global.imagePullSecrets` adds pull secrets to every pod the chart renders. LiteLLM
+(`v1.91.0`), Valkey (`8.1.3`) and Dex (`v2.41.1`) were pinned by tag and are now pinned by digest;
+the images are unchanged. **Breaking for one value:** `auth.oidc.image` moved to
+`thirdPartyImages.dex`, and a render that still sets it fails with a message naming the new key.
+CI and the nightly pull every third-party image the chart renders without credentials, so an
+upstream that closes anonymous pulls fails a check rather than an install.
+
 ## v0.1.0-beta.9 — the first install stopped working, and the gate that would have said so had never run
 
 **Every new install of `v0.1.0-beta.8` fails.** The bundled dev object store is MinIO, and MinIO

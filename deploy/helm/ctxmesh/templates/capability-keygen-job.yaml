@@ -113,7 +113,7 @@ spec:
       labels:
         app.kubernetes.io/name: ctxmesh
         app.kubernetes.io/component: keygen
-    spec:
+    spec:{{ include "ctxmesh.imagePullSecrets" (list $ 6) }}
       restartPolicy: Never
       serviceAccountName: ctxmesh-keygen
       securityContext:

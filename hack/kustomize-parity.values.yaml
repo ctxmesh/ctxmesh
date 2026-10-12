@@ -47,3 +47,9 @@ statelayerProxy:
   image:
     repository: statelayer-proxy
     tag: latest
+# The bundled NATS is the one intended difference that is not an image. config/default keeps it so
+# the dev path (and the harness's async proofs) has a broker; the chart leaves it off because nothing
+# uses it until bff.asyncBackend is set. Turning it on here keeps its resources in the diff.
+devDataPlane:
+  nats:
+    enabled: true

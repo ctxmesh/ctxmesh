@@ -596,6 +596,9 @@ func main() {
 		// it false). False ⇒ neither dev credential family is injected, so a production render
 		// never ships the bundled dev.local creds.
 		DevDataPlane: strings.TrimSpace(os.Getenv("DEV_DATA_PLANE")) == envValueTrue,
+		// The bundled object store can be off while the rest of the dev data plane is on. Only an
+		// explicit "false" withholds its env, so an install that predates DEV_OBJECT_STORE is unchanged.
+		DevObjectStoreOff: strings.TrimSpace(os.Getenv("DEV_OBJECT_STORE")) == "false",
 		// In-mesh call posture (ADR 0153): a registry member requires an attested caller unless the
 		// operator explicitly opts out (chart: controllerManager.amp.requireAttestation=false) to roll
 		// out in two steps. Unset or anything but "false" requires.

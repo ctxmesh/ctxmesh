@@ -173,6 +173,11 @@ spec:
           # injected. Its value must track the bundled dev Valkey/MinIO gate (same values key).
           - name: DEV_DATA_PLANE
             value: "true"
+          # Whether the bundled object store is deployed. "false" withholds the object-store env
+          # while DEV_DATA_PLANE stays on, so record mode and blob offload see no store rather than
+          # a Service that does not exist. The chart templates it from devDataPlane.objectstore.enabled.
+          - name: DEV_OBJECT_STORE
+            value: "true"
           # AMP_REQUIRE_ATTESTATION (ADR 0153) — DEFAULT-ON. A registry member admits /invoke only from an
           # attested AMP caller, its own async consumer, or a run capability naming it. "false" is the
           # rollout's accept posture: members also admit what they admitted before. The chart templates it

@@ -1011,7 +1011,7 @@ spec:
       labels:
         app.kubernetes.io/name: ctxmesh
         control-plane: controller-manager
-    spec:
+    spec:{{ include "ctxmesh.imagePullSecrets" (list $ 6) }}
       containers:
       - args:
         - --metrics-bind-address=:8443
@@ -1056,6 +1056,8 @@ spec:
           value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default (printf "%s://ctxmesh-token-service.%s.svc:8443" (ternary "https" "http" .Values.tokenService.tls.required) .Values.namespace) }}
         - name: DEV_DATA_PLANE
           value: {{ .Values.devDataPlane.enabled | quote }}
+        - name: DEV_OBJECT_STORE
+          value: {{ if and .Values.devDataPlane.enabled .Values.devDataPlane.objectstore.enabled }}"true"{{ else }}"false"{{ end }}
         - name: AMP_REQUIRE_ATTESTATION
           value: {{ ternary "true" "false" .Values.controllerManager.amp.requireAttestation | quote }}
         - name: ENABLE_TENANT_LABEL_WEBHOOK
@@ -1144,12 +1146,12 @@ spec:
       labels:
         app.kubernetes.io/name: ctxmesh
         control-plane: gateway
-    spec:
+    spec:{{ include "ctxmesh.imagePullSecrets" (list $ 6) }}
       containers:
       - args:
         - --config
         - /etc/litellm/config.yaml
-        image: ghcr.io/berriai/litellm:v1.91.0
+        image: {{ include "ctxmesh.thirdPartyImage" (list $ .Values.thirdPartyImages.litellm) }}
         lifecycle:
           preStop:
             exec:
@@ -1225,7 +1227,7 @@ spec:
       labels:
         app.kubernetes.io/name: ctxmesh
         control-plane: statelayer-proxy
-    spec:
+    spec:{{ include "ctxmesh.imagePullSecrets" (list $ 6) }}
       containers:
       - env:
         - name: CONTAINER_MEMORY_LIMIT_BYTES
@@ -1303,7 +1305,7 @@ spec:
       labels:
         app.kubernetes.io/name: ctxmesh
         control-plane: token-service
-    spec:
+    spec:{{ include "ctxmesh.imagePullSecrets" (list $ 6) }}
       containers:
       - env:
         - name: CONTAINER_MEMORY_LIMIT_BYTES

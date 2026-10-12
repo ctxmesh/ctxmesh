@@ -80,7 +80,7 @@ spec:
             capabilities:
               drop:
                 - ALL
-          image: chrislusf/seaweedfs:3.80@sha256:1055999e08eed1789b0ae45d235126e4495e23d3fb9d6396293fd42539b1ae6a
+          image: docker.io/chrislusf/seaweedfs:3.80@sha256:1055999e08eed1789b0ae45d235126e4495e23d3fb9d6396293fd42539b1ae6a
           args:
             - server
             - -dir=/data

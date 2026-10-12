@@ -79,6 +79,21 @@ Upgrade one minor version at a time. Skipping versions is untested, and a schema
 migration that assumes the immediately previous shape has no way to tell you it was
 skipped.
 
+## The bundled NATS is off by default, and third-party images moved under `thirdPartyImages`
+
+- **NATS.** The chart no longer deploys the bundled NATS unless `devDataPlane.nats.enabled=true`.
+  An upgrade deletes the `ctxmesh-nats` Deployment and its PersistentVolumeClaim. If your install
+  sets `bff.asyncBackend=jetstream` against the bundled broker, add
+  `--set devDataPlane.nats.enabled=true` to the upgrade command, or messages queued in it are lost.
+  An install pointing `bff.natsURL` at its own NATS is unaffected.
+- **Dex image.** `auth.oidc.image` is now `thirdPartyImages.dex` (`registry`, `repository`, `tag`,
+  `digest`). The upgrade fails with a message naming the new key if your values still set the old
+  one; move the setting and re-run it.
+- **A private registry or mirror.** `thirdPartyImages.registryOverride=<registry>` pulls every
+  third-party image from that registry under the same repository path, tag and digest, and
+  `global.imagePullSecrets` adds pull secrets to every pod the chart renders. Copy the images with
+  `crane copy` (or `skopeo copy --all`) so the digests match.
+
 ## Agent version history moves to the control-plane database
 
 Releases before this one recorded every spec change of an agent as an `AgentVersion` object and

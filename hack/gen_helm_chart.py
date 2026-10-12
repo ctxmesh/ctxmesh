@@ -7,10 +7,12 @@ documents, buckets each by component, and writes three template files:
   templates/crds.yaml          — the CustomResourceDefinitions (always installed)
   templates/control-plane.yaml — namespace, RBAC, controller-manager, gateway,
                                  metrics service (the production control plane)
-  templates/dev-data-plane.yaml— statelayer (Valkey) + objectstore (MinIO) +
-                                 their dev creds/config — gated by
-                                 `.Values.devDataPlane.enabled` (dev/trial ONLY,
-                                 PRD §23; production brings its own data plane)
+  templates/dev-data-plane.yaml— postgres + statelayer (Valkey) + objectstore
+                                 (SeaweedFS) + nats and their dev creds/config —
+                                 gated by `.Values.devDataPlane.enabled` (dev/trial
+                                 ONLY, PRD §23; production brings its own data
+                                 plane); objectstore and nats each have their own
+                                 switch inside it
   templates/bff.yaml           — the Go BFF (UI server-side layer) Deployment +
                                  Service + its least-privilege SA/RBAC (ADR 0011:
                                  no agent-CRD access) — gated by
@@ -457,6 +459,94 @@ DEV_DATA_PLANE_ENV_HELM = (
     "          value: {{ .Values.devDataPlane.enabled | quote }}"
 )
 
+# The bundled object store can be off while the rest of the dev data plane is on
+# (devDataPlane.objectstore.enabled). Both ends follow it: the controller withholds the object-store
+# env from agent pods, and the BFF gets no OBJECT_STORE_ADDR, so KB uploads and run fixtures answer
+# 501 instead of dialling a Service that is not rendered. Defaults render the kustomize literals.
+OBJECT_STORE_DEPLOYED = (
+    "and .Values.devDataPlane.enabled .Values.devDataPlane.objectstore.enabled"
+)
+DEV_OBJECT_STORE_ENV_KUSTOMIZE = (
+    '        - name: DEV_OBJECT_STORE\n' '          value: "true"'
+)
+DEV_OBJECT_STORE_ENV_HELM = (
+    "        - name: DEV_OBJECT_STORE\n"
+    "          value: {{ if " + OBJECT_STORE_DEPLOYED + ' }}"true"{{ else }}"false"{{ end }}'
+)
+BFF_OBJECT_STORE_ADDR_KUSTOMIZE = (
+    "        - name: OBJECT_STORE_ADDR\n"
+    f"          value: ctxmesh-objectstore.{NS_KUSTOMIZE}.svc:9000"
+)
+BFF_OBJECT_STORE_ADDR_HELM = (
+    "        - name: OBJECT_STORE_ADDR\n"
+    "          value: {{ if " + OBJECT_STORE_DEPLOYED + " }}"
+    '{{ printf "ctxmesh-objectstore.%s.svc:9000" .Values.namespace }}{{ else }}""{{ end }}'
+)
+
+# Third-party images, keyed by repository path, to their thirdPartyImages entry in values.yaml.
+# config/ names each one in full (registry/repository:tag@digest) so the dev path and the chart pull
+# the same bytes; helm-verify holds the values defaults equal to those literals. An image the render
+# names that is neither first-party nor listed here fails the generation: a ref no value reaches is
+# a ref an air-gapped or mirrored install cannot move.
+THIRD_PARTY_IMAGES = {
+    "berriai/litellm": "litellm",
+    "valkey/valkey": "valkey",
+    "pgvector/pgvector": "postgres",
+    "library/nats": "nats",
+    "chrislusf/seaweedfs": "seaweedfs",
+}
+WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet", "Job"}
+IMAGE_LINE = re.compile(r"^([ \t]*(?:-[ \t]+)?image:[ \t]*)(\S+)[ \t]*$", re.MULTILINE)
+
+
+def template_third_party_images(doc: str) -> str:
+    """Replace each third-party `image:` literal with its thirdPartyImages value."""
+
+    def repl(m: re.Match) -> str:
+        ref = m.group(2)
+        if ref.startswith("{{"):
+            return m.group(0)  # a first-party image, already templated
+        name = ref.split("@", 1)[0]
+        last = name.rsplit("/", 1)[-1]
+        if ":" in last:
+            name = name[: len(name) - len(last)] + last.split(":", 1)[0]
+        host, _, path = name.partition("/")
+        if not path or not ("." in host or ":" in host or host == "localhost"):
+            sys.exit(
+                f"gen_helm_chart: image {ref} names no registry. Write it in full "
+                "(docker.io/library/... for an official image) so the chart and config/ agree."
+            )
+        key = THIRD_PARTY_IMAGES.get(path)
+        if key is None:
+            sys.exit(
+                f"gen_helm_chart: image {ref} has no values seam. Add {path!r} to THIRD_PARTY_IMAGES "
+                "and a thirdPartyImages entry in values.yaml."
+            )
+        return m.group(1) + '{{ include "ctxmesh.thirdPartyImage" (list $ .Values.thirdPartyImages.%s) }}' % key
+
+    return IMAGE_LINE.sub(repl, doc)
+
+
+def inject_pull_secrets(doc: str) -> str:
+    """Append the imagePullSecrets include to the pod template's `spec:` line."""
+    lines = doc.split("\n")
+    for i, line in enumerate(lines):
+        if line.strip() != "template:":
+            continue
+        indent = len(line) - len(line.lstrip())
+        for j in range(i + 1, len(lines)):
+            cur = lines[j]
+            if not cur.strip():
+                continue
+            cur_indent = len(cur) - len(cur.lstrip())
+            if cur_indent <= indent:
+                break
+            if cur_indent == indent + 2 and cur.strip() == "spec:":
+                lines[j] = cur.rstrip() + '{{ include "ctxmesh.imagePullSecrets" (list $ %d) }}' % (indent + 4)
+                return "\n".join(lines)
+    sys.exit(f"gen_helm_chart: no pod template spec in {kind_of(doc)}/{name_of(doc)} for imagePullSecrets")
+
+
 # AMP_REQUIRE_ATTESTATION (ADR 0153) — DEFAULT-ON. config/manager hardcodes "true" (== the kustomize default,
 # so the DEFAULT render matches → no drift); the chart templates it from controllerManager.amp.requireAttestation
 # so an operator can roll out in two steps. ternary, not `default`, so an explicit false stays false.
@@ -486,6 +576,12 @@ ENABLE_TENANT_LABEL_WEBHOOK_ENV_HELM = (
 # plane (in-cluster Valkey/MinIO). Production supplies its own — PRD §23 — so
 # these are gated behind .Values.devDataPlane.enabled.
 DEV_DATA_PLANE_LABELS = {"statelayer", "objectstore", "postgres", "nats"}
+
+# Dev data-plane components with a switch of their own, inside devDataPlane.enabled.
+OPTIONAL_DEV_COMPONENTS = {
+    "objectstore": ".Values.devDataPlane.objectstore.enabled",
+    "nats": ".Values.devDataPlane.nats.enabled",
+}
 
 # Resources whose `control-plane:` label marks them as the Go BFF (the UI's
 # server-side layer) + its least-privilege SA/RBAC. Gated behind
@@ -744,6 +840,8 @@ def substitute(doc: str) -> str:
     # OPS-2 — the dev-data-plane gate -> Helm value. Default "true" renders == kustomize (no drift);
     # profile=production sets devDataPlane.enabled=false so the controller injects no dev creds.
     doc = doc.replace(DEV_DATA_PLANE_ENV_KUSTOMIZE, DEV_DATA_PLANE_ENV_HELM)
+    doc = doc.replace(DEV_OBJECT_STORE_ENV_KUSTOMIZE, DEV_OBJECT_STORE_ENV_HELM)
+    doc = doc.replace(BFF_OBJECT_STORE_ADDR_KUSTOMIZE, BFF_OBJECT_STORE_ADDR_HELM)
     doc = doc.replace(AMP_REQUIRE_ATTESTATION_ENV_KUSTOMIZE, AMP_REQUIRE_ATTESTATION_ENV_HELM)
     doc = doc.replace(ENABLE_TENANT_LABEL_WEBHOOK_ENV_KUSTOMIZE, ENABLE_TENANT_LABEL_WEBHOOK_ENV_HELM)
     # The Namespace object's own name + RoleBinding/ClusterRoleBinding subject
@@ -839,6 +937,9 @@ def main() -> None:
 
         # Apply substitutions to every doc uniformly (image + namespace fields).
         doc = substitute(doc)
+        if kind in WORKLOAD_KINDS:
+            doc = template_third_party_images(doc)
+            doc = inject_pull_secrets(doc)
         if kind in ("Deployment", "StatefulSet") and cp in RESOURCE_DIALS:
             doc = template_resources(doc, RESOURCE_DIALS[cp])
         # The release Namespace is NOT the chart's to own (2026-09-18). It came through from
@@ -868,7 +969,7 @@ def main() -> None:
         if kind == "CustomResourceDefinition":
             crds.append(doc)
         elif cp in DEV_DATA_PLANE_LABELS:
-            dev_data_plane.append(doc)
+            dev_data_plane.append((cp, doc))
         elif cp in BFF_LABELS:
             bff.append(doc)
         else:
@@ -923,14 +1024,24 @@ def main() -> None:
     with open(os.path.join(out_dir, "dev-data-plane.yaml"), "w") as f:
         f.write(GEN_BANNER)
         f.write(
-            "# The bundled in-cluster Valkey (statelayer) + MinIO (objectstore)"
-            " are for\n# DEV / TRIAL ONLY (PRD §23). Deterministic dev creds,"
+            "# The bundled in-cluster Postgres, Valkey (statelayer), SeaweedFS (objectstore)"
+            " and NATS\n# are for DEV / TRIAL ONLY (PRD §23). Deterministic dev creds,"
             " never real secrets.\n"
             "# Production sets devDataPlane.enabled=false and brings its own"
             " data plane.\n"
         )
         f.write("{{- if .Values.devDataPlane.enabled }}\n")
-        f.write("\n---\n".join(dev_data_plane))
+        f.write("\n---\n".join(d for cp, d in dev_data_plane if cp not in OPTIONAL_DEV_COMPONENTS))
+        # Components with their own switch. NATS is off by default: nothing uses it until
+        # bff.asyncBackend names it. The object store is on by default: KB documents and run
+        # fixtures live there, and turning it off makes those features answer 501.
+        for cp, gate in OPTIONAL_DEV_COMPONENTS.items():
+            docs = [d for c, d in dev_data_plane if c == cp]
+            if not docs:
+                sys.exit(f"gen_helm_chart: no {cp} resources in the render, but {gate} gates them")
+            f.write("\n{{- if %s }}\n---\n" % gate)
+            f.write("\n---\n".join(docs))
+            f.write("\n{{- end }}")
         f.write("\n{{- end }}\n")
 
     # --- bff.yaml ------------------------------------------------------------

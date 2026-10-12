@@ -8,6 +8,9 @@
 # user out of the box (dev/trial), or enterprise IdPs via connectors[] (Google/
 # Azure AD/Okta/GitHub/LDAP = OIDC, SAML = a Dex SAML connector). The API server
 # must be configured to trust the issuer (NOTES.txt) — this chart cannot do that.
+{{- if .Values.auth.oidc.image }}
+{{- fail "auth.oidc.image moved to thirdPartyImages.dex (registry, repository, tag, digest). Set it there and remove auth.oidc.image." }}
+{{- end }}
 {{- if .Values.auth.oidc.enabled }}
 {{- $oidc := .Values.auth.oidc }}
 apiVersion: v1
@@ -103,10 +106,10 @@ spec:
       annotations:
         # Roll the pod when the Dex config changes (issuer/clients/user/connectors).
         checksum/config: {{ toYaml $oidc | sha256sum }}
-    spec:
+    spec:{{ include "ctxmesh.imagePullSecrets" (list $ 6) }}
       containers:
         - name: dex
-          image: "{{ $oidc.image.repository }}:{{ $oidc.image.tag }}"
+          image: {{ include "ctxmesh.thirdPartyImage" (list $ .Values.thirdPartyImages.dex) }}
           args: ["dex", "serve", "/etc/dex/config.yaml"]
           ports:
             - name: http

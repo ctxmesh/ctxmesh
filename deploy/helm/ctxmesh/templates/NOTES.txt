@@ -110,7 +110,8 @@ Bundled dev data plane (dev/trial ONLY — PRD §23):
   - enabled:                   {{ .Values.devDataPlane.enabled }}
 {{- if .Values.devDataPlane.enabled }}
   - statelayer (Valkey):       Deployment/ctxmesh-statelayer
-  - objectstore (MinIO):       Deployment/ctxmesh-objectstore
+  - objectstore (SeaweedFS):   {{ if .Values.devDataPlane.objectstore.enabled }}Deployment/ctxmesh-objectstore{{ else }}off — KB uploads and run fixtures answer 501{{ end }}
+  - async broker (NATS):       {{ if .Values.devDataPlane.nats.enabled }}Deployment/ctxmesh-nats{{ if not .Values.bff.asyncBackend }} (unused until bff.asyncBackend=jetstream and bff.natsURL are set){{ end }}{{ else }}off (devDataPlane.nats.enabled){{ end }}
   NOTE: uses DETERMINISTIC DEV credentials — never use in production. Set
         `--set devDataPlane.enabled=false` and supply your own data plane.
 {{- end }}

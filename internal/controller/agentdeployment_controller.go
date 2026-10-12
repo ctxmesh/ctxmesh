@@ -136,13 +136,13 @@ const (
 // record fixture sinks) so the names + values stay in lockstep. Values are reconcile-time
 // constants — NEVER valueFrom (the m5.7 Knative landmine / tier1 no-valueFrom guard).
 //
-// OPS-2: the triple is DEV-ONLY (the bundled MinIO). It is injected ONLY when the dev data plane is
-// enabled (devDataPlane=false ⇒ nil, no injection), so a `profile: production` install never ships
-// the dev.local object-store creds into agent pods — a record-capable agent there then C2-fails-
-// closed on the absent store rather than pointing at a non-existent dev MinIO (the correct posture:
-// production has not provisioned a durable store, so record/blob-offload is feature-off).
-func objectStoreEnv(devDataPlane bool) []corev1.EnvVar {
-	if !devDataPlane {
+// OPS-2: the triple is DEV-ONLY (the bundled object store). It is injected ONLY when that store is
+// deployed (devObjectStore=false ⇒ nil, no injection), so a `profile: production` install never ships
+// the dev object-store creds into agent pods — a record-capable agent there then C2-fails-closed on
+// the absent store rather than pointing at a Service that does not exist (production has not
+// provisioned a durable store, so record/blob-offload is feature-off).
+func objectStoreEnv(devObjectStore bool) []corev1.EnvVar {
+	if !devObjectStore {
 		return nil
 	}
 	return []corev1.EnvVar{
@@ -150,6 +150,12 @@ func objectStoreEnv(devDataPlane bool) []corev1.EnvVar {
 		{Name: envObjectStoreAccessKey, Value: objectStoreDevAccessKey},
 		{Name: envObjectStoreSecretKey, Value: objectStoreDevSecretKey},
 	}
+}
+
+// devObjectStore reports whether agent pods get the bundled object store's env: the dev data plane
+// is on and its object store was not turned off.
+func (r *AgentDeploymentReconciler) devObjectStore() bool {
+	return r.DevDataPlane && !r.DevObjectStoreOff
 }
 
 const (
@@ -333,6 +339,12 @@ type AgentDeploymentReconciler struct {
 	// as feature-off (blob offload / record fixtures / feedback scores simply do not run). The
 	// creds themselves remain deterministic dev-only non-secrets; this gate governs INJECTION.
 	DevDataPlane bool
+
+	// DevObjectStoreOff withholds the object-store env that DevDataPlane would inject, for an install
+	// that runs the bundled data plane without its object store (DEV_OBJECT_STORE=false; chart:
+	// devDataPlane.objectstore.enabled=false). Record mode and blob offload then see no store, which
+	// they treat as feature-off, instead of an address no Service answers.
+	DevObjectStoreOff bool
 
 	// StatelayerProxyURL, when set (from the controller's STATELAYER_PROXY_URL env),
 	// is injected into memory-bound agents so the launcher reverse-proxies session/
@@ -1184,7 +1196,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	if recordCapable {
 		env = append(env, corev1.EnvVar{Name: "RECORD_CAPABLE", Value: gatewaySyncValue})
 		if !envVarPresent(env, envObjectStoreAddr) && !envVarPresent(deploy.Spec.Env, envObjectStoreAddr) {
-			env = append(env, objectStoreEnv(r.DevDataPlane)...)
+			env = append(env, objectStoreEnv(r.devObjectStore())...)
 		}
 	}
 
@@ -1677,7 +1689,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// record-mode block above — inject only when not already present (last-write
 		// semantics would otherwise leave a duplicate env entry).
 		if !envVarPresent(env, envObjectStoreAddr) && !envVarPresent(deploy.Spec.Env, envObjectStoreAddr) {
-			env = append(env, objectStoreEnv(r.DevDataPlane)...)
+			env = append(env, objectStoreEnv(r.devObjectStore())...)
 		}
 
 		// (Async dedup through the proxy needs the same pod token; it is now set by the
@@ -1860,7 +1872,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		agentIdentity := deploy.Namespace + "/" + deploy.Name
 		containers = append(containers, egressSidecarContainer(
 			r.OBOEgress, deploy.Namespace, agentIdentity, agentEgressBoundary(deploy, membership),
-			egressRoutesJSON(egressRoutes), recordCapable, r.DevDataPlane, toolPolicyMount, toolPolicyEnv,
+			egressRoutesJSON(egressRoutes), recordCapable, r.devObjectStore(), toolPolicyMount, toolPolicyEnv,
 			routesMount, routesEnv))
 	}
 

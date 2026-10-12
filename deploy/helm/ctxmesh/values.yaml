@@ -35,6 +35,61 @@ security:
   # (the default) and under the dev profile.
   tenantLabelEnforcement: ""
 
+global:
+  # Pull secrets for every pod this chart renders: the control plane, the bundled data plane and the
+  # install hooks. Each entry is the name of a kubernetes.io/dockerconfigjson Secret in the install
+  # namespace, as a string or as {name: <secret>}. Agent pods are not covered; they pull in their
+  # own namespaces.
+  imagePullSecrets: []
+
+# Third-party images, each pulled as <registry>/<repository>:<tag>@<digest>. The digest is what the
+# runtime pulls; the tag is for a reader. To pull from a private registry or a mirror, set `registry`
+# on an entry, or `registryOverride` for all of them; the repository path, tag and digest stay the
+# same, so a copy made with `crane copy` or `skopeo copy --all` matches.
+#
+# A digest pins the bytes, not their availability: an upstream that closes anonymous pulls breaks
+# an install whatever the pin says. CI pulls every image rendered here (hack/chart-images-pullable.sh).
+thirdPartyImages:
+  # Replaces the registry of every entry below when set, e.g. registry.internal:5000.
+  registryOverride: ""
+  # The model gateway (LiteLLM). MIT, except the enterprise/ directory the image also ships, which
+  # is under BerriAI's commercial licence.
+  litellm:
+    registry: ghcr.io
+    repository: berriai/litellm
+    tag: v1.91.0
+    digest: sha256:078f96272f0c84da383e6a1f197478390b5204a86dcf00a181bcfe02a00e5dfa
+  # The state layer (Valkey): devDataPlane and statelayer.persistence. BSD-3-Clause.
+  valkey:
+    registry: docker.io
+    repository: valkey/valkey
+    tag: 8.1.3
+    digest: sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571
+  # The bundled database: PostgreSQL with pgvector. PostgreSQL License.
+  postgres:
+    registry: docker.io
+    repository: pgvector/pgvector
+    tag: pg16
+    digest: sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+  # The bundled object store (SeaweedFS). Apache-2.0.
+  seaweedfs:
+    registry: docker.io
+    repository: chrislusf/seaweedfs
+    tag: "3.80"
+    digest: sha256:1055999e08eed1789b0ae45d235126e4495e23d3fb9d6396293fd42539b1ae6a
+  # The bundled async broker (NATS JetStream), rendered only with devDataPlane.nats.enabled. Apache-2.0.
+  nats:
+    registry: docker.io
+    repository: library/nats
+    tag: 2.11-alpine
+    digest: sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00
+  # The console login broker (Dex), rendered only with auth.oidc.enabled. Apache-2.0.
+  dex:
+    registry: ghcr.io
+    repository: dexidp/dex
+    tag: v2.41.1
+    digest: sha256:bc7cfce7c17f52864e2bb2a4dc1d2f86a41e3019f6d42e81d92a301fad0c8a1d
+
 # Namespace the platform installs into. MUST match the namespace baked into
 # config/default (ctxmesh) for the no-drift default to hold. Change
 # it for a custom install; `--create-namespace` (or crds.install) still applies.
@@ -316,14 +371,20 @@ statelayerProxy:
 crds:
   install: true
 
-# --- Bundled dev data plane (Valkey statelayer + MinIO objectstore) ----------
-# DEV / TRIAL ONLY (PRD §23). These run an in-cluster Valkey + MinIO with
-# DETERMINISTIC dev credentials (never real secrets). In production set
-# `enabled: false` and point the controller at an externally-managed data plane.
+# --- Bundled dev data plane (Postgres, Valkey, SeaweedFS, NATS) --------------
+# DEV / TRIAL ONLY (PRD §23). These run in-cluster with DETERMINISTIC dev
+# credentials (never real secrets). In production set `enabled: false` and point
+# the controller at an externally-managed data plane.
 devDataPlane:
   # Container resources for the bundled dev data plane. Same contract as the
   # control-plane components: today's numbers, overridable per component.
   nats:
+    # The async A2A broker (NATS JetStream, ADR 0121). Off by default: nothing uses it until the
+    # BFF is pointed at it, so enable it together with
+    #   bff.asyncBackend: jetstream
+    #   bff.natsURL: nats://ctxmesh-nats.<namespace>.svc:4222
+    # Without a broker the async publish edge is not registered and `?mode=async` is refused.
+    enabled: false
     resources:
       limits:
         memory: 512Mi
@@ -331,6 +392,11 @@ devDataPlane:
         cpu: 50m
         memory: 64Mi
   objectstore:
+    # The object store (SeaweedFS, S3 API on :9000): knowledge-base documents, recorded run
+    # fixtures, and large async payloads between registry members. Turning it off makes KB upload
+    # and ingestion and the run-fixture view answer 501, record-capable agents fail at start, and
+    # async payloads between registry members travel inline, so one over 1 MiB is refused.
+    enabled: true
     resources:
       limits:
         memory: 512Mi
@@ -708,9 +774,7 @@ auth:
     # Dex at. It MUST match the apiserver --oidc-issuer-url byte-for-byte. Override
     # for your ingress / LoadBalancer host.
     issuer: "https://dex.ctxmesh.example.com"
-    image:
-      repository: ghcr.io/dexidp/dex
-      tag: "v2.41.1"
+    # The Dex image is thirdPartyImages.dex.
     # The console OAuth client — Auth-Code + PKCE, a PUBLIC client (no secret in the
     # browser; PKCE is the proof). redirectURIs is the SPA's callback origin(s).
     client:

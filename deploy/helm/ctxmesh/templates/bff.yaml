@@ -126,7 +126,7 @@ spec:
       labels:
         app.kubernetes.io/name: ctxmesh
         control-plane: bff
-    spec:
+    spec:{{ include "ctxmesh.imagePullSecrets" (list $ 6) }}
       containers:
       - env:
         - name: CONTAINER_MEMORY_LIMIT_BYTES
@@ -197,7 +197,7 @@ spec:
         - name: OIDC_CLIENT_ID
           value: {{ if .Values.auth.oidc.enabled }}{{ .Values.auth.oidc.client.id | quote }}{{ else }}""{{ end }}
         - name: OBJECT_STORE_ADDR
-          value: ctxmesh-objectstore.ctxmesh.svc:9000
+          value: {{ if and .Values.devDataPlane.enabled .Values.devDataPlane.objectstore.enabled }}{{ printf "ctxmesh-objectstore.%s.svc:9000" .Values.namespace }}{{ else }}""{{ end }}
         - name: OBJECT_STORE_ACCESS_KEY
           valueFrom:
             secretKeyRef:

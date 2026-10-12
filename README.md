@@ -18,7 +18,10 @@ There are three ways to work with it:
 ctxmesh ships as a Helm chart in [`deploy/helm/ctxmesh`](deploy/helm/ctxmesh). It installs the
 control plane — controller-manager + CRDs, the LiteLLM model gateway, RBAC personas
 (`ctxmesh-{operator,developer,viewer}`), the operator UI + Go BFF, and (for dev/trial) a bundled
-data plane: PostgreSQL with pgvector, Valkey, SeaweedFS (S3-compatible object storage) and NATS JetStream.
+data plane: PostgreSQL with pgvector, Valkey and SeaweedFS (S3-compatible object storage). NATS
+JetStream, the broker for async calls between agents, is bundled but off; turn it on with
+`devDataPlane.nats.enabled=true`, `bff.asyncBackend=jetstream` and
+`bff.natsURL=nats://ctxmesh-nats.ctxmesh.svc:4222`.
 
 <!-- ctxmesh:prerequisites kubernetes>=1.29 knative-serving -->
 **Prerequisites.** A Kubernetes cluster with **Knative Serving** installed, and Helm 3.8 or newer.
@@ -87,15 +90,22 @@ retrieval works with no external service if you run your own embedder. Once that
 uploading documents and searching returns ranked chunks **with citations** (`documentRef` +
 `chunkIndex`), which is what an agent grounds its answers on.
 
-**Use your own images.** The chart defaults to the `:latest` tags built by `make docker-build-*`
-(side-loaded into a kind cluster). For a real cluster, push the images to a registry and override
-the repository + tag:
+**Use your own registry.** ctxmesh's own images default to `ghcr.io/ctxmesh/*` at the chart's
+version; each has a repository value (`controllerManager.image`, `bff.image`, `tokenService.image`,
+`statelayerProxy.image`, and the images injected into agent pods under
+`controllerManager.injectedImages`, `controllerManager.oboEgress.sidecarImage` and
+`bff.managedAgentImage`). The third-party images — LiteLLM, Valkey, PostgreSQL, SeaweedFS, NATS and
+Dex — are under `thirdPartyImages`, each as registry, repository, tag and digest.
+`thirdPartyImages.registryOverride` moves all of them to one registry with the same paths and
+digests, so a copy made with `crane copy` matches. `global.imagePullSecrets` adds pull secrets to
+every pod the chart renders.
 
 ```sh
 helm install ctxmesh ./deploy/helm/ctxmesh -n ctxmesh --create-namespace \
-  --set controllerManager.image.repository=ghcr.io/my-org/ctxmesh-controller \
-  --set controllerManager.image.tag=v0.1.0
-  # …likewise bff.image.* and gateway.image.* (see values.yaml)
+  --set controllerManager.image.repository=registry.example.com/ctxmesh/controller \
+  --set thirdPartyImages.registryOverride=registry.example.com \
+  --set 'global.imagePullSecrets[0]=regcred'
+  # …likewise bff.image, tokenService.image and statelayerProxy.image (see values.yaml)
 ```
 
 ### Production

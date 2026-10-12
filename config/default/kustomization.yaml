@@ -31,7 +31,8 @@ resources:
 # The bundled dev NATS JetStream (M148/m148.7, ADR 0121) — the async A2A broker.
 # BYO stays the production posture (like Valkey, ADR 0053); this exists so the async
 # hop's LIVE proof can run on a real cluster at all, instead of only against the
-# hermetic embedded broker. Dev/trial tier: gated behind `devDataPlane.enabled`.
+# hermetic embedded broker. The chart renders it only with `devDataPlane.nats.enabled`
+# (off by default: nothing uses it until bff.asyncBackend is set); the dev path keeps it.
 - ../nats
 # The Go BFF (UI server-side layer) + its least-privilege SA/RBAC. Flows into
 # both `make deploy` and the generated Helm chart (no-drift). ADR 0011: the BFF

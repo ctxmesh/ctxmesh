@@ -45,7 +45,7 @@ spec:
         # config/. M154's install-from-artifacts slice ran it on a fresh cluster and
         # it failed on the first try.
         control-plane: preflight
-    spec:
+    spec:{{ include "ctxmesh.imagePullSecrets" (list $ 6) }}
       restartPolicy: Never
       serviceAccountName: ctxmesh-bff
       securityContext:

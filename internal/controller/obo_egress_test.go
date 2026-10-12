@@ -181,6 +181,29 @@ func TestEgressSidecarContainer_RecordCapableNoDevDataPlane(t *testing.T) {
 	}
 }
 
+// TestDevObjectStore_FollowsTheBundledStore: the object-store env reaches agent pods only when the
+// dev data plane is on AND its object store is deployed. With the store turned off the env is absent,
+// so record mode and blob offload treat it as feature-off instead of dialling a missing Service.
+func TestDevObjectStore_FollowsTheBundledStore(t *testing.T) {
+	for _, tc := range []struct {
+		devDataPlane, storeOff, want bool
+	}{
+		{devDataPlane: true, storeOff: false, want: true},
+		{devDataPlane: true, storeOff: true, want: false},
+		{devDataPlane: false, storeOff: false, want: false},
+		{devDataPlane: false, storeOff: true, want: false},
+	} {
+		r := &AgentDeploymentReconciler{DevDataPlane: tc.devDataPlane, DevObjectStoreOff: tc.storeOff}
+		assert.Equal(t, tc.want, r.devObjectStore(), "devDataPlane=%t storeOff=%t", tc.devDataPlane, tc.storeOff)
+		env := objectStoreEnv(r.devObjectStore())
+		if tc.want {
+			assert.Len(t, env, 3, "devDataPlane=%t storeOff=%t", tc.devDataPlane, tc.storeOff)
+		} else {
+			assert.Empty(t, env, "devDataPlane=%t storeOff=%t", tc.devDataPlane, tc.storeOff)
+		}
+	}
+}
+
 // TestEgressSidecarContainer_ToolPolicyMount: when the controller passes a tool-policy mount + env
 // (M82, ADR 0074 §1), the sidecar container carries TOOL_POLICY_FILE (static, never valueFrom) and
 // the read-only policy volume mount — the DELIVERY plumbing (permissive; not yet enforced).

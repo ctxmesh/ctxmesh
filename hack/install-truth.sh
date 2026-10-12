@@ -47,7 +47,7 @@ ok "CONTROLPLANE_DSN and RUN_STORE_DSN are both sourced by the chart"
 
 # 3. The database exists, is pgvector, and keeps its data.
 grep -q 'name: ctxmesh-postgres$'      "$RENDER" || fail "no Postgres workload — the run store, control plane, cost rollups and knowledge chunks all require it"
-grep -q 'image: pgvector/pgvector'     "$RENDER" || fail "the bundled database is not pgvector — vector search (ADR 0084) fails at the first knowledge query, not at install"
+grep -q 'image: [^ ]*pgvector/pgvector' "$RENDER" || fail "the bundled database is not pgvector — vector search (ADR 0084) fails at the first knowledge query, not at install"
 grep -q 'kind: PersistentVolumeClaim'  "$RENDER" || fail "the bundled database has no PVC — run history and cost rollups are real state"
 ok "pgvector is deployed, with a PVC rather than an emptyDir"
 
@@ -79,6 +79,26 @@ ok "the MODEL_GATEWAY_URL default names a Service this chart ships"
 grep -A1 'name: COST_ROLLUP_ENABLED' "$RENDER" | grep -q '"1"' \
   || fail "COST_ROLLUP_ENABLED no longer defaults on — cost_rollups stays empty even once spend is booked"
 ok "COST_ROLLUP_ENABLED still defaults on"
+
+# 7b. Optional data-plane components leave nothing pointing at them when they are off.
+#
+# NATS is off by default: nothing reads it until bff.asyncBackend names it, and a broker that
+# renders anyway is a PVC and a pod spent on nothing. The object store can be turned off, and then
+# the BFF and the controller must not be handed its address, or KB uploads and record mode dial a
+# Service that is not there instead of answering 501.
+grep -q 'name: ctxmesh-nats$' "$RENDER" && fail "the default render deploys NATS, which nothing uses until bff.asyncBackend is set"
+WITHNATS="$(helm template ctxmesh "$CHART" -n ctxmesh --set devDataPlane.nats.enabled=true 2>/dev/null)" \
+  || fail "the chart does not template with NATS on"
+grep -q 'name: ctxmesh-nats-ingress$' <<<"$WITHNATS" \
+  || fail "devDataPlane.nats.enabled=true does not render NATS with its NetworkPolicy"
+NOSTORE="$(helm template ctxmesh "$CHART" -n ctxmesh --set devDataPlane.objectstore.enabled=false 2>/dev/null)" \
+  || fail "the chart does not template with the object store off"
+grep -q 'name: ctxmesh-objectstore$' <<<"$NOSTORE" && fail "devDataPlane.objectstore.enabled=false still deploys the object store"
+grep -A1 'name: OBJECT_STORE_ADDR' <<<"$NOSTORE" | grep -q 'value: ""' \
+  || fail "with the object store off the BFF still gets an OBJECT_STORE_ADDR, so KB uploads dial a missing Service instead of answering 501"
+grep -A1 'name: DEV_OBJECT_STORE' <<<"$NOSTORE" | grep -q '"false"' \
+  || fail "with the object store off the controller still injects its address into agent pods"
+ok "NATS is opt-in; turning the object store off unwires it from the BFF and the controller"
 
 # 8. A production render REFUSES rather than shipping something that cannot start.
 if helm template ctxmesh "$CHART" -n ctxmesh --set profile=production \

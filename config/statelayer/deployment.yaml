@@ -1,6 +1,6 @@
 # Valkey State-Layer Deployment — dedicated session-memory backend (specs/state-layer.md, PRD §10).
 # Deliberately NOT Langfuse's Redis: no product-to-observability coupling.
-# Image pinned at valkey/valkey:8.1.3 (newest 8.1.x stable as of 2026-07-09;
+# Image pinned by digest at valkey/valkey:8.1.3 (newest 8.1.x stable as of 2026-07-09;
 # verified multi-arch amd64/arm64 via docker manifest inspect).
 # Dev posture: emptyDir + appendonly no — agent scale-to-zero never touches
 # Valkey; losing dev sessions on a Valkey restart is accepted (spec: Not in M5).
@@ -32,7 +32,7 @@ spec:
     spec:
       containers:
         - name: valkey
-          image: valkey/valkey:8.1.3
+          image: docker.io/valkey/valkey:8.1.3@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571
           args:
             - --appendonly
             - "no"

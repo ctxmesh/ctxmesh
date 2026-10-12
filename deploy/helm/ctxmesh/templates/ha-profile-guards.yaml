@@ -22,7 +22,7 @@ profile). Closes m52.D2 (the proxy-HA render guard) and generalizes it.
 {{- fail "\n\nprofile=production requires bff.runStore.worker.minReplicaCount>=2 — a WARM worker\npool (avoid a scale-from-0 cold start on an interactive run; a drain never zeroes the\npool, ADR 0051 Fork-C).\n" }}
 {{- end }}
 {{- if .Values.devDataPlane.enabled }}
-{{- fail "\n\nprofile=production forbids devDataPlane.enabled — the bundled in-cluster Valkey +\nMinIO use DETERMINISTIC dev credentials (PRD §23). Point at an externally-managed,\nHA data plane instead (devDataPlane.enabled=false).\n" }}
+{{- fail "\n\nprofile=production forbids devDataPlane.enabled — the bundled in-cluster data plane\n(Postgres, Valkey, SeaweedFS, NATS) uses DETERMINISTIC dev credentials (PRD §23). Point at an externally-managed,\nHA data plane instead (devDataPlane.enabled=false).\n" }}
 {{- end }}
 {{- /* M148/ADR 0130: the same shape as the statelayer guard below, for the database.
    With devDataPlane disabled (required above) the bundled Postgres is NOT rendered, so
