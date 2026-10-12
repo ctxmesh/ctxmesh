@@ -34,7 +34,7 @@ func (f fakeRewriter) Rewrite(_ context.Context, _ string) (string, error) {
 }
 
 func TestApplyRewrite_UsesRewrittenQuery(t *testing.T) {
-	s := NewServer(nil, logr.Discard()).WithRewriter(fakeRewriter{out: "reset forgotten account password login credentials"})
+	s := NewServer(nil, testAuth.Auth, logr.Discard()).WithRewriter(fakeRewriter{out: "reset forgotten account password login credentials"})
 	got := s.applyRewrite(context.Background(), "how do I get back in")
 	if got != "reset forgotten account password login credentials" {
 		t.Fatalf("applyRewrite = %q, want the rewritten query", got)
@@ -42,7 +42,7 @@ func TestApplyRewrite_UsesRewrittenQuery(t *testing.T) {
 }
 
 func TestApplyRewrite_FailOpenOnError(t *testing.T) {
-	s := NewServer(nil, logr.Discard()).WithRewriter(fakeRewriter{err: errors.New("gateway down")})
+	s := NewServer(nil, testAuth.Auth, logr.Discard()).WithRewriter(fakeRewriter{err: errors.New("gateway down")})
 	got := s.applyRewrite(context.Background(), "original query")
 	if got != "original query" {
 		t.Fatalf("applyRewrite on error = %q, want the original query (fail open)", got)
@@ -50,7 +50,7 @@ func TestApplyRewrite_FailOpenOnError(t *testing.T) {
 }
 
 func TestApplyRewrite_FailOpenOnEmpty(t *testing.T) {
-	s := NewServer(nil, logr.Discard()).WithRewriter(fakeRewriter{out: "   "})
+	s := NewServer(nil, testAuth.Auth, logr.Discard()).WithRewriter(fakeRewriter{out: "   "})
 	got := s.applyRewrite(context.Background(), "original query")
 	if got != "original query" {
 		t.Fatalf("applyRewrite on empty = %q, want the original query (fail open)", got)

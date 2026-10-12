@@ -36,8 +36,10 @@ import (
 // postRaw sends a raw (possibly malformed) body to path — used to assert honest 4xx on bad input.
 func postRaw(t *testing.T, s *Server, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+testAuth.AgentToken(testAgentNS, testAgent))
 	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, bytes.NewReader([]byte(body))))
+	s.Handler().ServeHTTP(rec, req)
 	return rec
 }
 
@@ -88,7 +90,7 @@ func (e dirEmbedder) EmbedBatch(ctx context.Context, model string, texts []strin
 
 func knowledgeServer(t *testing.T, store knowledge.Store) *Server {
 	t.Helper()
-	return NewServer(nil, logr.Discard()).WithKnowledge(store, dirEmbedder{})
+	return NewServer(nil, testAuth.Auth, logr.Discard()).WithKnowledge(store, dirEmbedder{})
 }
 
 // A well-formed request embeds the query with the corpus model, searches, and returns the provenance-carrying JSON.
@@ -153,7 +155,7 @@ func TestKnowledgeSearch_MalformedBodyIs400(t *testing.T) {
 
 // Without WithKnowledge the endpoint answers errCodeUnsupported (started without DSN/gateway) — never a panic.
 func TestKnowledgeSearch_UnsupportedWhenNotWired(t *testing.T) {
-	s := NewServer(nil, logr.Discard())
+	s := NewServer(nil, testAuth.Auth, logr.Discard())
 	rec := postJSON(t, s, pathKnowledgeSearch, knowledgeSearchRequest{Namespace: "prod", KnowledgeBase: "docs", Query: "x"})
 	var out knowledgeSearchResponse
 	require.NoError(t, decodeBody(rec.Body.Bytes(), &out))

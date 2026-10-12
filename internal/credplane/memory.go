@@ -23,11 +23,12 @@ import (
 
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // The long-term-memory API paths (ADR 0045). The token-service is the ONLY holder of CONTROLPLANE_DSN + the
-// pgvector store — agent pods never get DB credentials; their launcher proxies here over the same trusted
-// (mTLS + NetworkPolicy) channel the OBO resolve uses, presenting the already-resolved identity.
+// pgvector store — agent pods never get DB credentials; their launcher proxies here with the agent's own
+// projected token, and the namespace and agent come from that token (ADR 0154).
 const (
 	pathMemoryRemember = "/v1/memory/remember"
 	pathMemorySearch   = "/v1/memory/search"
@@ -102,8 +103,15 @@ func (s *Server) handleMemoryRemember(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, memoryRememberResponse{Error: errCodeUnsupported})
 		return
 	}
+	c, ok := s.authenticate(w, r, runcap.TokenServiceAgentAudience)
+	if !ok {
+		return
+	}
 	var req memoryRememberRequest
 	if !decode(w, r, &req) {
+		return
+	}
+	if !s.memoryScopeAllowed(w, r, c, req.Namespace, req.AgentName, req.Scope, req.Subject) {
 		return
 	}
 	vec, dim, err := s.embedder.Embed(r.Context(), req.EmbeddingModel, req.Content)
@@ -137,8 +145,15 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, memorySearchResponse{Results: []memoryHit{}, Error: errCodeUnsupported})
 		return
 	}
+	c, ok := s.authenticate(w, r, runcap.TokenServiceAgentAudience)
+	if !ok {
+		return
+	}
 	var req memorySearchRequest
 	if !decode(w, r, &req) {
+		return
+	}
+	if !s.memoryScopeAllowed(w, r, c, req.Namespace, req.AgentName, req.Scope, req.Subject) {
 		return
 	}
 	vec, _, err := s.embedder.Embed(r.Context(), req.EmbeddingModel, req.Query)
@@ -161,4 +176,40 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 		hits = append(hits, memoryHit{Content: sm.Memory.Content, Tags: sm.Memory.Tags, Score: sm.Score})
 	}
 	writeJSON(w, memorySearchResponse{Results: hits})
+}
+
+// memoryScopeAllowed refuses a memory request outside the calling agent's own partition: the namespace and
+// agent are the reviewed token's, and a per-user subject is the run capability's user. Agent-wide memory
+// has no subject.
+func (s *Server) memoryScopeAllowed(
+	w http.ResponseWriter, r *http.Request, c caller, namespace, agentName, scope, subject string,
+) bool {
+	agent := c.agentName()
+	switch {
+	case agent == "":
+		s.forbid(w, r, c, "only an agent may use long-term memory")
+		return false
+	case namespace != c.Namespace:
+		s.forbid(w, r, c, "the request names another namespace than the caller's")
+		return false
+	case agentName != agent:
+		s.forbid(w, r, c, "the request names another agent than the caller")
+		return false
+	}
+	if scope != agentmemory.ScopeAgentUser {
+		if subject != "" {
+			s.forbid(w, r, c, "agent-wide memory has no subject")
+			return false
+		}
+		return true
+	}
+	cp, ok := s.capability(w, r)
+	if !ok {
+		return false
+	}
+	if subject != cp.User {
+		s.forbid(w, r, c, "the request names another user than the run capability")
+		return false
+	}
+	return true
 }

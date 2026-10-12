@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // defaultTimeout bounds a delegation round-trip. The central service may itself refresh a
@@ -54,7 +55,8 @@ func NewClient(baseURL string, httpClient *http.Client) *Client {
 
 // Resolve delegates to the central service and maps its structured error codes back to the
 // credresolve sentinels, so callers branch identically whether resolution is embedded or
-// delegated.
+// delegated. The service resolves only for the run capability ctx carries (runcap.WithToken),
+// so the caller must put the one it verified there (ADR 0154).
 func (c *Client) Resolve(ctx context.Context, ns, boundary, server, userHash string) (credresolve.Credential, error) {
 	var resp resolveResponse
 	if err := c.post(ctx, pathResolve, resolveRequest{Namespace: ns, Boundary: boundary, Server: server, UserHash: userHash}, &resp); err != nil {
@@ -119,6 +121,9 @@ func (c *Client) post(ctx context.Context, path string, req, out any) error {
 		return fmt.Errorf("credplane: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if capability := runcap.TokenFrom(ctx); capability != "" {
+		httpReq.Header.Set(runcap.HeaderName, capability)
+	}
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -131,6 +136,10 @@ func (c *Client) post(ctx context.Context, path string, req, out any) error {
 		return fmt.Errorf("credplane: read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
+		var why refusal
+		if json.Unmarshal(raw, &why) == nil && why.Error != "" {
+			return fmt.Errorf("credplane: central service returned %d (%s: %s)", resp.StatusCode, why.Error, why.Message)
+		}
 		return fmt.Errorf("credplane: central service returned %d", resp.StatusCode)
 	}
 	if err := json.Unmarshal(raw, out); err != nil {

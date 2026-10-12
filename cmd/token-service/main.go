@@ -16,7 +16,8 @@ limitations under the License.
 
 // Command token-service is the CENTRAL TOKEN SERVICE (ADR 0030 §1, the scaling split). One
 // Deployment in the locked credential namespace runs the credresolve backend behind an
-// internal mTLS API; the per-pod egress sidecars delegate cache-miss resolution to it, so
+// internal API that authenticates every caller (ADR 0154); the per-pod egress sidecars
+// delegate cache-miss resolution to it, so
 // grant-Secret reads + OAuth refresh are singleflighted GLOBALLY (one refresh across the
 // fleet), not per-pod — the two operations that hit ceilings are amortized here.
 package main
@@ -36,6 +37,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
@@ -122,6 +124,19 @@ func newInClusterClient() (client.Client, error) {
 	return c, nil
 }
 
+// newCallerAuth builds the caller authentication over an in-cluster clientset for TokenReview.
+func newCallerAuth(log logr.Logger) (credplane.CallerAuth, error) {
+	restCfg, err := ctrl.GetConfig()
+	if err != nil {
+		return credplane.CallerAuth{}, fmt.Errorf("in-cluster config: %w", err)
+	}
+	cs, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return credplane.CallerAuth{}, fmt.Errorf("build the TokenReview client: %w", err)
+	}
+	return callerAuth(log, cs, os.Getenv)
+}
+
 // wireMemoryAndKnowledge attaches the token-service's pgvector-backed data planes to the server:
 // long-term memory (ADR 0045) and managed-RAG retrieval (ADR 0061), plus the two OPTIONAL
 // retrieval-quality stages (cross-encoder rerank, ADR 0117; LLM query-rewrite, M140.3). All of it hangs
@@ -172,6 +187,12 @@ func run(log logr.Logger) error {
 
 	// In-cluster client: reads grant Secrets (credresolve) + ToolRegistry auth-type.
 	k8sClient, err := newInClusterClient()
+	if err != nil {
+		return err
+	}
+	// Every caller is authenticated by a TokenReview of its projected token (ADR 0154); decided before
+	// anything waits on the network, so a bad capability key refuses to start at once.
+	auth, err := newCallerAuth(log)
 	if err != nil {
 		return err
 	}
@@ -237,15 +258,15 @@ func run(log logr.Logger) error {
 		return err
 	}
 
-	tsServer := credplane.NewServer(resolver, log)
+	tsServer := credplane.NewServer(resolver, auth, log)
 	wireMemoryAndKnowledge(tsServer, cpDB, log)
 	handler := tsServer.Handler()
 	listenAddr := envOr("TOKEN_SERVICE_LISTEN_ADDR", defaultListenAddr)
 	srv := &http.Server{Addr: listenAddr, Handler: handler, ReadHeaderTimeout: readHeaderTimeout}
 
-	// mTLS: only platform sidecars holding a client cert from the platform CA may call the
-	// credential API. Certs are mounted from a Secret (Helm, m25.8). Absent ⇒ plain HTTP with
-	// a LOUD warning (dev only — never run the credential API without mTLS in production).
+	// TLS encrypts the wire and lets callers verify the service; it does not authenticate callers,
+	// which the projected-token review above does on every request. Certs are mounted from a Secret
+	// (Helm, m25.8). Absent ⇒ plain HTTP with a LOUD warning (dev only).
 	certFile := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_TLS_CERT_FILE"))
 	keyFile := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_TLS_KEY_FILE"))
 	caFile := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_CLIENT_CA_FILE"))
@@ -257,18 +278,10 @@ func run(log logr.Logger) error {
 	//   - serving = a serving cert+key is provisioned → the wire is encrypted + the server is verifiable.
 	//   - E-2 (mutual): a client CA is ALSO provisioned → REQUIRE + verify a client cert.
 	//   - E-1 (server-auth): serving cert, no client CA → present the serving cert, don't require a client
-	//     cert (client identity is the app-layer run capability, ADR 0030). The honest GA bar.
+	//     cert (callers authenticate with projected tokens, ADR 0154). The honest GA bar.
 	serving := certFile != "" && keyFile != "" && filesExist(certFile, keyFile)
 	clientCAPresent := caFile != "" && filesExist(caFile)
-	// clientAuth knob: default = require iff a client CA is provisioned (NEVER downgrade an operator who
-	// deployed mutual material — ADR 0102 §3); TOKEN_SERVICE_CLIENT_AUTH=require|none forces it.
-	requireClient := clientCAPresent
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("TOKEN_SERVICE_CLIENT_AUTH"))) {
-	case "require":
-		requireClient = true
-	case "none":
-		requireClient = false
-	}
+	requireClient := requireClientCert(clientCAPresent)
 	if requireClient && !clientCAPresent {
 		return fmt.Errorf("TOKEN_SERVICE_CLIENT_AUTH=require but no client CA is provisioned " +
 			"(missing/absent TOKEN_SERVICE_CLIENT_CA_FILE) — refusing to start a mutual-mTLS server without a client CA")
@@ -296,7 +309,8 @@ func run(log logr.Logger) error {
 		log.Info("token-service TLS enabled", "posture", posture)
 	} else {
 		log.Info("WARNING: token-service running WITHOUT TLS (no TOKEN_SERVICE_TLS_CERT_FILE/KEY_FILE) — " +
-			"the credential API is unauthenticated; provision platform certs before production (ADR 0030 §1 / ADR 0102 §3)")
+			"callers' tokens and credentials cross the wire in plaintext; " +
+			"provision platform certs before production (ADR 0102 §3)")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -334,6 +348,20 @@ func run(log logr.Logger) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGracePeriod)
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
+	}
+}
+
+// requireClientCert is the clientAuth knob: require a client certificate iff a client CA is provisioned
+// (NEVER downgrade an operator who deployed mutual material — ADR 0102 §3); TOKEN_SERVICE_CLIENT_AUTH=
+// require|none forces it.
+func requireClientCert(clientCAPresent bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TOKEN_SERVICE_CLIENT_AUTH"))) {
+	case "require":
+		return true
+	case "none":
+		return false
+	default:
+		return clientCAPresent
 	}
 }
 
@@ -446,14 +474,7 @@ func envOr(key, fallback string) string {
 }
 
 // envTrue reports whether an env var is a truthy string.
-func envTrue(key string) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}
+func envTrue(key string) bool { return isTruthy(os.Getenv(key)) }
 
 // filesExist reports whether every path is a readable regular file — used to gate mTLS on
 // an OPTIONAL cert Secret actually being mounted (absent ⇒ degrade to plain HTTP, not crash).

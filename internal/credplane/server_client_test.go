@@ -19,7 +19,10 @@ package credplane_test
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -35,6 +38,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve/secretbackend"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 const (
@@ -64,21 +68,48 @@ func (m *mockResolver) Revoke(_ context.Context, ns, boundary, server, userHash 
 	return nil
 }
 
-// newDelegation wires a credplane server (over the given resolver) behind an httptest
-// server and returns a delegating client for it.
-func newDelegation(t *testing.T, resolver credresolve.CredentialResolver) *credplane.Client {
+// testAgent is the agent whose egress sidecar the delegating clients call as.
+const testAgent = "helper"
+
+// testBoundary is testAgent's standalone trust boundary, the one its capabilities carry.
+var testBoundary = credresolve.AgentBoundary(testNS, testAgent)
+
+// tokenFile writes a pod token where a BearerTransport reads it.
+func tokenFile(t *testing.T, token string) string {
 	t.Helper()
-	ts := httptest.NewServer(credplane.NewServer(resolver, logr.Discard()).Handler())
+	path := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(path, []byte(token), 0o600))
+	return path
+}
+
+// callerClient is a delegating client sending token over base.
+func callerClient(t *testing.T, baseURL string, base http.RoundTripper, token string) *credplane.Client {
+	t.Helper()
+	return credplane.NewClient(baseURL, &http.Client{
+		Transport: credplane.NewBearerTransport(base, tokenFile(t, token)), Timeout: 5 * time.Second,
+	})
+}
+
+// asUser is a context carrying user's run capability for testAgent, as the egress proxy passes it.
+func asUser(f *credplane.AuthFixture, user string) context.Context {
+	return runcap.WithToken(context.Background(), f.StandaloneCapability(user, testNS, testAgent))
+}
+
+// newDelegation wires a credplane server (over the given resolver) behind an httptest server and
+// returns a delegating client calling as testAgent's egress sidecar.
+func newDelegation(t *testing.T, resolver credresolve.CredentialResolver) (*credplane.Client, *credplane.AuthFixture) {
+	t.Helper()
+	f := credplane.NewAuthFixture()
+	ts := httptest.NewServer(credplane.NewServer(resolver, f.Auth, logr.Discard()).Handler())
 	t.Cleanup(ts.Close)
-	return credplane.NewClient(ts.URL, ts.Client())
+	return callerClient(t, ts.URL, ts.Client().Transport, f.SidecarToken(testNS, testAgent)), f
 }
 
 func TestDelegationResolveRoundTrip(t *testing.T) {
-	ctx := context.Background()
 	mock := &mockResolver{cred: credresolve.Credential{Kind: credresolve.KindBearer, Value: "USER-TOKEN"}}
-	client := newDelegation(t, mock)
+	client, f := newDelegation(t, mock)
 
-	got, err := client.Resolve(ctx, testNS, "", testServer, "u-alicehash")
+	got, err := client.Resolve(asUser(f, "u-alicehash"), testNS, testBoundary, testServer, "u-alicehash")
 	require.NoError(t, err)
 	assert.Equal(t, credresolve.KindBearer, got.Kind)
 	assert.Equal(t, "USER-TOKEN", got.Value)
@@ -89,21 +120,19 @@ func TestDelegationResolveRoundTrip(t *testing.T) {
 }
 
 func TestDelegationMapsSentinels(t *testing.T) {
-	ctx := context.Background()
-
 	t.Run("consent_required", func(t *testing.T) {
-		client := newDelegation(t, &mockResolver{err: credresolve.ErrConsentRequired})
-		_, err := client.Resolve(ctx, testNS, "", testServer, "u-a")
+		client, f := newDelegation(t, &mockResolver{err: credresolve.ErrConsentRequired})
+		_, err := client.Resolve(asUser(f, "u-a"), testNS, testBoundary, testServer, "u-a")
 		assert.ErrorIs(t, err, credresolve.ErrConsentRequired)
 	})
 	t.Run("no_credential", func(t *testing.T) {
-		client := newDelegation(t, &mockResolver{err: credresolve.ErrNoCredential})
-		_, err := client.Resolve(ctx, testNS, "", testServer, "u-a")
+		client, f := newDelegation(t, &mockResolver{err: credresolve.ErrNoCredential})
+		_, err := client.Resolve(asUser(f, "u-a"), testNS, testBoundary, testServer, "u-a")
 		assert.ErrorIs(t, err, credresolve.ErrNoCredential)
 	})
 	t.Run("internal error is generic (never leaks the cause)", func(t *testing.T) {
-		client := newDelegation(t, &mockResolver{err: errors.New("etcd on fire: secret xyz")})
-		_, err := client.Resolve(ctx, testNS, "", testServer, "u-a")
+		client, f := newDelegation(t, &mockResolver{err: errors.New("etcd on fire: secret xyz")})
+		_, err := client.Resolve(asUser(f, "u-a"), testNS, testBoundary, testServer, "u-a")
 		require.Error(t, err)
 		assert.NotErrorIs(t, err, credresolve.ErrConsentRequired)
 		assert.NotContains(t, err.Error(), "etcd on fire", "the central cause must not cross the wire")
@@ -112,8 +141,17 @@ func TestDelegationMapsSentinels(t *testing.T) {
 
 func TestDelegationRevoke(t *testing.T) {
 	mock := &mockResolver{}
-	client := newDelegation(t, mock)
-	require.NoError(t, client.Revoke(context.Background(), testNS, "", testServer, "u-alicehash"))
+	f := credplane.NewAuthFixture()
+	ts := httptest.NewServer(credplane.NewServer(mock, f.Auth, logr.Discard()).Handler())
+	t.Cleanup(ts.Close)
+
+	sidecar := callerClient(t, ts.URL, ts.Client().Transport, f.SidecarToken(testNS, testAgent))
+	require.ErrorContains(t, sidecar.Revoke(context.Background(), testNS, "", testServer, "u-alicehash"), "403",
+		"an agent's sidecar may not revoke a grant")
+	assert.Zero(t, mock.revokeCalls)
+
+	bff := callerClient(t, ts.URL, ts.Client().Transport, f.BFFToken())
+	require.NoError(t, bff.Revoke(context.Background(), testNS, "", testServer, "u-alicehash"))
 	assert.Equal(t, 1, mock.revokeCalls)
 	assert.Equal(t, "u-alicehash", mock.revUser)
 }
@@ -150,16 +188,15 @@ func (b *blockingExchanger) calls() int {
 // sidecar calls for the SAME grant, arriving concurrently at the ONE central service,
 // collapse to a SINGLE OAuth refresh — the herd is amortized globally, not per-pod.
 func TestDelegationGlobalSingleflight(t *testing.T) {
-	ctx := context.Background()
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	userHash := credresolve.UserHash(nil, "alice@example.com")
 
 	// A near-expiry grant Secret (in-skew ⇒ the backend refreshes).
 	grant := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      credresolve.SecretName(testServer, userHash, ""),
+			Name:      credresolve.SecretName(testServer, userHash, credresolve.BoundaryHash(testBoundary)),
 			Namespace: testNS,
-			Labels:    credresolve.SecretLabels(testServer, userHash, "", ""),
+			Labels:    credresolve.SecretLabels(testServer, userHash, "", credresolve.BoundaryHash(testBoundary)),
 		},
 		Data: credresolve.SecretData(
 			credresolve.OAuthConfig{TokenEndpoint: "https://as/token", ClientID: "cid"},
@@ -181,8 +218,10 @@ func TestDelegationGlobalSingleflight(t *testing.T) {
 		Now:       func() time.Time { return now },
 	})
 
-	ts := httptest.NewServer(credplane.NewServer(backend, logr.Discard()).Handler())
+	f := credplane.NewAuthFixture()
+	ts := httptest.NewServer(credplane.NewServer(backend, f.Auth, logr.Discard()).Handler())
 	t.Cleanup(ts.Close)
+	userCtx := asUser(f, userHash)
 
 	// Many independent delegating clients (as N sidecars would be), firing concurrently.
 	const n = 12
@@ -193,8 +232,8 @@ func TestDelegationGlobalSingleflight(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			client := credplane.NewClient(ts.URL, ts.Client())
-			results[i], errs[i] = client.Resolve(ctx, testNS, "", testServer, userHash)
+			client := callerClient(t, ts.URL, ts.Client().Transport, f.SidecarToken(testNS, testAgent))
+			results[i], errs[i] = client.Resolve(userCtx, testNS, testBoundary, testServer, userHash)
 		}(i)
 	}
 

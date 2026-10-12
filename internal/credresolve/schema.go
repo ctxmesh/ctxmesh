@@ -163,7 +163,23 @@ func ParseRegistryBoundary(boundary string) (namespace, registryID string, ok bo
 // its own boundary, so its grants are per-agent (ADR 0033). Namespaced to avoid a registry
 // and an agent of the same name colliding.
 func AgentBoundary(ns, agent string) string {
-	return "a:" + ns + "/" + agent
+	return agentBoundaryPrefix + ns + "/" + agent
+}
+
+// agentBoundaryPrefix marks a standalone agent's trust boundary ("a:<ns>/<agent>").
+const agentBoundaryPrefix = "a:"
+
+// ParseAgentBoundary splits a boundary built by AgentBoundary. ok is false for any other boundary.
+func ParseAgentBoundary(boundary string) (namespace, agent string, ok bool) {
+	rest, isAgent := strings.CutPrefix(boundary, agentBoundaryPrefix)
+	if !isAgent {
+		return "", "", false
+	}
+	namespace, agent, found := strings.Cut(rest, "/")
+	if !found || namespace == "" || agent == "" || strings.Contains(agent, "/") {
+		return "", "", false
+	}
+	return namespace, agent, true
 }
 
 // BoundaryHash derives a short, label/name-safe token from a raw boundary string

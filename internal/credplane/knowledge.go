@@ -31,11 +31,12 @@ import (
 	"go.opentelemetry.io/otel/codes"
 
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // The managed-RAG retrieval read path (ADR 0061 Fork 3 + governance #8). The token-service is the ONLY holder of
 // CONTROLPLANE_DSN + the pgvector knowledge store — agent pods never get DB credentials; their launcher proxies
-// here over the same trusted (mTLS + NetworkPolicy) channel the OBO resolve + memory search use. This mirrors the
+// here with the agent's own projected token, scoped to the agent's namespace (ADR 0154). This mirrors the
 // long-term-memory read seam (memory.go): the READ goes via this proxy; the WRITE path (ingestion) is the
 // run-worker holding the store directly (m68.6). Verification #4 in ADR 0061: memory search already does exactly
 // this shape.
@@ -285,8 +286,15 @@ func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, knowledgeSearchResponse{Results: []knowledgeHit{}, Error: errCodeUnsupported})
 		return
 	}
+	c, ok := s.authenticate(w, r, runcap.TokenServiceAgentAudience, runcap.TokenServicePodAudience)
+	if !ok {
+		return
+	}
 	var req knowledgeSearchRequest
 	if !decode(w, r, &req) {
+		return
+	}
+	if !s.knowledgeScopeAllowed(w, r, c, req) {
 		return
 	}
 
@@ -430,4 +438,32 @@ func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(attribute.StringSlice("knowledge.document_refs", docRefs))
 
 	writeJSON(w, knowledgeSearchResponse{Results: hits})
+}
+
+// knowledgeScopeAllowed refuses a search outside the caller's reach. An agent searches only its own
+// namespace, and a per-user subject only as the run capability's user. The BFF's test query may search any
+// namespace; it derives the subject itself.
+func (s *Server) knowledgeScopeAllowed(w http.ResponseWriter, r *http.Request, c caller, req knowledgeSearchRequest) bool {
+	if c.platform {
+		return true
+	}
+	switch {
+	case c.audience != runcap.TokenServiceAgentAudience || c.agentName() == "":
+		s.forbid(w, r, c, "only an agent or the platform may search knowledge")
+		return false
+	case req.Namespace != c.Namespace:
+		s.forbid(w, r, c, "an agent searches only its own namespace's knowledge")
+		return false
+	case req.Subject == "":
+		return true
+	}
+	cp, ok := s.capability(w, r)
+	if !ok {
+		return false
+	}
+	if req.Subject != cp.User {
+		s.forbid(w, r, c, "the request names another user than the run capability")
+		return false
+	}
+	return true
 }

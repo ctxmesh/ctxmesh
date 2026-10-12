@@ -216,3 +216,14 @@ type voucherClaims struct {
 // the BFF alongside a run capability it cannot prove: one relayed to it over AMP, bound to its caller's
 // key. The controller projects the token; the BFF reviews it.
 const BFFPodAudience = "ctxmesh-bff"
+
+// The two audiences of the projected ServiceAccount tokens the token service reviews (ADR 0154). They
+// differ so that a token one container can read is refused where only the other may call.
+const (
+	// TokenServicePodAudience is mounted only into an agent's egress sidecar container and into the BFF,
+	// never into a container that runs the agent's code.
+	TokenServicePodAudience = "ctxmesh-token-service"
+	// TokenServiceAgentAudience is mounted into the user container of an agent with long-term memory or
+	// knowledge bases. The agent's code can read it; it proves only which agent the pod is.
+	TokenServiceAgentAudience = "ctxmesh-token-service-agent"
+)

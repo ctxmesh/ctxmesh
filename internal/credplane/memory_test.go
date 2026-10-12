@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // vecEmbedder maps a text to a fixed vector so search is deterministic: "north" → (1,0), else → (0,1).
@@ -62,16 +63,37 @@ func (v vecEmbedder) EmbedBatch(ctx context.Context, model string, texts []strin
 
 func memServer(t *testing.T) *Server {
 	t.Helper()
-	return NewServer(nil, logr.Discard()).WithMemory(agentmemory.NewMemStore(), vecEmbedder{})
+	return NewServer(nil, testAuth.Auth, logr.Discard()).WithMemory(agentmemory.NewMemStore(), vecEmbedder{})
 }
 
+// postJSON posts body as agent prod/asst's container would.
 func postJSON(t *testing.T, s *Server, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	return postJSONWith(t, s, path, body, map[string]string{
+		"Authorization": "Bearer " + testAuth.AgentToken(testAgentNS, testAgent),
+	})
+}
+
+// postJSONWith posts body with exactly the given headers.
+func postJSONWith(t *testing.T, s *Server, path string, body any, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	b, err := json.Marshal(body)
 	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b)))
+	s.Handler().ServeHTTP(rec, req)
 	return rec
+}
+
+// asAgentFor is agent prod/asst's headers on behalf of user.
+func asAgentFor(user string) map[string]string {
+	return map[string]string{
+		"Authorization":   "Bearer " + testAuth.AgentToken(testAgentNS, testAgent),
+		runcap.HeaderName: testAuth.StandaloneCapability(user, testAgentNS, testAgent),
+	}
 }
 
 // Remember embeds + stores; Search embeds the query + returns the nearest by cosine.
@@ -102,25 +124,27 @@ func TestMemory_RememberThenSearch(t *testing.T) {
 // A per-user (scope agent_user) memory is isolated by subject: user B never retrieves user A's memory.
 func TestMemory_PerUserIsolationOverWire(t *testing.T) {
 	s := memServer(t)
-	require.Equal(t, http.StatusOK, postJSON(t, s, pathMemoryRemember, memoryRememberRequest{
+	require.Equal(t, http.StatusOK, postJSONWith(t, s, pathMemoryRemember, memoryRememberRequest{
 		Namespace: "prod", AgentName: "asst", Scope: agentmemory.ScopeAgentUser, Subject: "hash-alice",
 		Content: "north", EmbeddingModel: "embed-v1",
-	}).Code)
+	}, asAgentFor("hash-alice")).Code)
 
-	rec := postJSON(t, s, pathMemorySearch, memorySearchRequest{
+	rec := postJSONWith(t, s, pathMemorySearch, memorySearchRequest{
 		Namespace: "prod", AgentName: "asst", Scope: agentmemory.ScopeAgentUser, Subject: "hash-bob",
 		Query: "north", EmbeddingModel: "embed-v1", TopK: 3,
-	})
+	}, asAgentFor("hash-bob"))
+	require.Equal(t, http.StatusOK, rec.Code)
 	var sr memorySearchResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &sr))
 	assert.Empty(t, sr.Results, "a user must not retrieve another user's memory")
 }
 
-// An invalid write (agent-wide scope with a subject) surfaces the stable "invalid" code, not a 500.
+// An invalid write (an unknown scope) surfaces the stable "invalid" code, not a 500. An agent-wide write
+// with a subject, the case this used to send, is now refused before the store (TestMemory_Scope).
 func TestMemory_InvalidWrite(t *testing.T) {
 	s := memServer(t)
 	rec := postJSON(t, s, pathMemoryRemember, memoryRememberRequest{
-		Namespace: "prod", AgentName: "asst", Scope: agentmemory.ScopeAgent, Subject: "hash-alice",
+		Namespace: "prod", AgentName: "asst", Scope: "bogus",
 		Content: "north", EmbeddingModel: "embed-v1",
 	})
 	var rr memoryRememberResponse
@@ -130,7 +154,7 @@ func TestMemory_InvalidWrite(t *testing.T) {
 
 // Without WithMemory the endpoints answer errCodeUnsupported (token-service started without DSN/gateway).
 func TestMemory_UnsupportedWhenNotWired(t *testing.T) {
-	s := NewServer(nil, logr.Discard())
+	s := NewServer(nil, testAuth.Auth, logr.Discard())
 	rec := postJSON(t, s, pathMemorySearch, memorySearchRequest{Namespace: "prod", AgentName: "asst", Query: "x"})
 	var sr memorySearchResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &sr))

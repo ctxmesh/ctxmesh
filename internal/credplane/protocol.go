@@ -22,8 +22,10 @@ limitations under the License.
 // global singleflight, so a busy multi-user fleet does N-sidecar work as one refresh, and
 // the rotating-refresh-token race across pods (ADR 0029 §6 R3) disappears.
 //
-// The wire protocol is a tiny JSON request/response over mTLS. The Client implements
-// credresolve.CredentialResolver; it is the egress sidecar's only resolver.
+// The wire protocol is a tiny JSON request/response, over TLS when the service has a serving
+// certificate. Every caller authenticates with a projected ServiceAccount token and the service
+// derives who it acts for from that token and the forwarded run capability (ADR 0154). The Client
+// implements credresolve.CredentialResolver; it is the egress sidecar's only resolver.
 package credplane
 
 // The internal API paths.
@@ -34,8 +36,9 @@ const (
 )
 
 // resolveRequest asks the central service to resolve the OBO credential for one
-// (namespace, server, userHash). userHash is the ALREADY-HASHED invoking user (from the
-// sidecar's verified run capability) — the raw username never crosses this API.
+// (namespace, server, userHash). userHash is the ALREADY-HASHED invoking user — the raw
+// username never crosses this API. The service resolves for the forwarded capability's user
+// and boundary in the caller's namespace and refuses a request whose fields disagree.
 type resolveRequest struct {
 	Namespace string `json:"namespace"`
 	// Boundary is the trust boundary the personal grant is scoped to (ADR 0033); "" =
@@ -46,8 +49,8 @@ type resolveRequest struct {
 }
 
 // resolveResponse returns the resolved credential OR a structured error code. The token
-// Value crosses the mTLS link server-to-server (sidecar ← central) and is injected by the
-// sidecar — it never reaches the agent container.
+// Value crosses server-to-server (sidecar ← central) and is injected by the sidecar — it
+// never reaches the agent container.
 type resolveResponse struct {
 	Kind  string `json:"kind,omitempty"`
 	Value string `json:"value,omitempty"`
@@ -72,7 +75,7 @@ type revokeResponse struct {
 // storeRequest asks the central service to PERSIST a user's grant to the config-selected
 // backend (the SPI write path, ADR 0032) — the BFF OAuth callback delegates here so DB /
 // remote-vault creds stay in the token-service, not the user-facing BFF. Token fields are
-// secret and cross only the mTLS link.
+// secret; only a platform caller may send them.
 type storeRequest struct {
 	Namespace          string `json:"namespace"`
 	Boundary           string `json:"boundary,omitempty"`

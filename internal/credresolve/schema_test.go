@@ -152,3 +152,15 @@ func TestParseRegistryBoundary(t *testing.T) {
 		assert.False(t, ok, "%q is not a namespaced registry boundary", b)
 	}
 }
+
+func TestParseAgentBoundary(t *testing.T) {
+	ns, agent, ok := ParseAgentBoundary(AgentBoundary("team-a", "helper"))
+	assert.True(t, ok)
+	assert.Equal(t, "team-a", ns)
+	assert.Equal(t, "helper", agent)
+
+	for _, b := range []string{"", "a:helper", "a:/helper", "a:team-a/", "a:a/b/c", "r:team-a/squad", "team-a/helper"} {
+		_, _, ok := ParseAgentBoundary(b)
+		assert.False(t, ok, "%q is not an agent boundary", b)
+	}
+}
