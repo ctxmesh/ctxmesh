@@ -160,7 +160,7 @@ func TestReconcile_GuardrailValidRef(t *testing.T) {
 	// This is the interposition trigger — preserved, now keyed on the mounted file's presence.
 	assert.Equal(t, budgetProxyURL, env["MODEL_GATEWAY_URL"].Value,
 		"a guarded agent must route MODEL_GATEWAY_URL through the launcher proxy")
-	assert.Equal(t, litellmGatewayURL, env["GATEWAY_UPSTREAM_URL"].Value,
+	assert.Equal(t, defaultPlatform.gatewayURL(), env["GATEWAY_UPSTREAM_URL"].Value,
 		"the real LiteLLM address travels as GATEWAY_UPSTREAM_URL")
 
 	// The revision name still carries the combined-digest suffix (presence of the ref folds in).
@@ -351,7 +351,7 @@ func TestReconcile_GuardedAgentGetsBFFURL(t *testing.T) {
 	// BFF_INTERNAL_URL must be injected for a guarded non-delegate agent (m66.15).
 	bffEnv, ok := env["BFF_INTERNAL_URL"]
 	require.True(t, ok, "BFF_INTERNAL_URL must be injected for a guarded agent (m66.15 audit sink reachability)")
-	assert.Equal(t, bffInternalURL, bffEnv.Value,
+	assert.Equal(t, defaultPlatform.bffInternalURL(), bffEnv.Value,
 		"BFF_INTERNAL_URL must equal the operator's in-cluster BFF address")
 	assert.Nil(t, bffEnv.ValueFrom,
 		"BFF_INTERNAL_URL must be static (Knative rejects valueFrom)")
@@ -440,10 +440,10 @@ func TestReconcile_EveryAgentGetsBFFURL(t *testing.T) {
 		userEnv []corev1.EnvVar
 		want    string
 	}{
-		{name: "unguarded-gets-bff", want: bffInternalURL},
+		{name: "unguarded-gets-bff", want: defaultPlatform.bffInternalURL()},
 		{
 			name: "unguarded-own-bff", userEnv: []corev1.EnvVar{{Name: "BFF_INTERNAL_URL", Value: "http://own:9090"}},
-			want: bffInternalURL,
+			want: defaultPlatform.bffInternalURL(),
 		},
 	} {
 		deploy := &agentsv1beta1.AgentDeployment{

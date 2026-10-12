@@ -39,10 +39,6 @@ const (
 	// mock-first policy). Must not be changed without updating harness fixtures.
 	MockResponse = "MOCK_OK deterministic response from ctxmesh gateway"
 
-	// GatewayNamespace is the namespace where the LiteLLM gateway is deployed.
-	// All gateway resources (ConfigMap, Deployment, Service) live here.
-	GatewayNamespace = "ctxmesh"
-
 	// GatewayConfigMapName is the full post-kustomize name of the ConfigMap the
 	// controller renders into. The kustomize namePrefix adds "ctxmesh-" to
 	// the base name "gateway-config".
@@ -96,13 +92,13 @@ func EnvVarName(namespace, bindingName string) string {
 // mirrorSecretPrefix starts the name of every provider Secret mirrored into the gateway namespace.
 const mirrorSecretPrefix = "ctxmesh-sb-"
 
-// MirrorSecretName is the gateway-namespace Secret that holds namespace's Secret name. A Secret in
-// the gateway namespace is used where it is. Any other is mirrored under a name derived from its
+// MirrorSecretName is the Secret in gatewayNamespace (the platform's, where the gateway runs) that
+// holds namespace's Secret name. A Secret in the gateway namespace is used where it is. Any other is mirrored under a name derived from its
 // namespace and name together: mirroring under the bare name let a tenant name a Secret after a
 // platform Secret and have its route resolve to the platform's value, or collide with another
 // tenant's mirror.
-func MirrorSecretName(namespace, name string) string {
-	if namespace == GatewayNamespace {
+func MirrorSecretName(gatewayNamespace, namespace, name string) string {
+	if namespace == gatewayNamespace {
 		return name
 	}
 	return mirrorSecretPrefix + qualifiedHash(namespace, name)
@@ -202,7 +198,9 @@ const OTelHeadersKey = "headers"
 // result fully owns them each reconcile.
 const OTelEnvPrefix = "OTEL_"
 
+// Render renders the gateway config for a gateway running in gatewayNamespace.
 func Render(
+	gatewayNamespace string,
 	routes []agentsv1beta1.ModelRoute,
 	bindings map[string]agentsv1beta1.SecretBinding,
 	secretRVs map[string]string,
@@ -347,7 +345,7 @@ func Render(
 						ValueFrom: &corev1.EnvVarSource{
 							SecretKeyRef: &corev1.SecretKeySelector{
 								LocalObjectReference: corev1.LocalObjectReference{
-									Name: MirrorSecretName(r.Namespace, sb.Spec.SecretRef.Name),
+									Name: MirrorSecretName(gatewayNamespace, r.Namespace, sb.Spec.SecretRef.Name),
 								},
 								Key: sb.Spec.SecretRef.Key,
 							},

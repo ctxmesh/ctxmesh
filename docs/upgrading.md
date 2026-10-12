@@ -188,6 +188,11 @@ pod, not a new spec.
 **After upgrading,** an agent's `PlatformEnvIgnored` condition names every entry the platform did
 not use.
 
+On an install outside the `ctxmesh` namespace, the platform addresses agents are given now name the
+install's own namespace, so `spec.env` overrides of `MODEL_GATEWAY_URL`, `BFF_INTERNAL_URL` or the
+memory and object-store addresses are no longer needed. Remove them; each of those agents rolls one
+new revision either way.
+
 ## M162 — the agent container is hardened by default (BREAKING for root images)
 
 **What changed.** The agent's own container now gets a `securityContext`: `runAsNonRoot`, no

@@ -29,7 +29,11 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/gateway"
 )
 
-const testNS = "default"
+const (
+	testNS = "default"
+	// testGatewayNS is where the gateway runs: the platform namespace, which need not be the default.
+	testGatewayNS = "platform-x"
+)
 
 // newMockRoute constructs a ModelRoute with a single mock provider.
 func newMockRoute(name string) agentsv1beta1.ModelRoute {
@@ -117,7 +121,7 @@ func TestRender_GoldenConfig(t *testing.T) {
 		secretKey("anthropic-api-key"): "rv-1",
 	}
 
-	result := gateway.Render(routes, bindings, rvs, gateway.OTelConfig{})
+	result := gateway.Render(testGatewayNS, routes, bindings, rvs, gateway.OTelConfig{})
 
 	// Golden YAML: a-route first (alphabetic), anthropic provider first (priority 1).
 	wantConfig := `model_list:
@@ -149,7 +153,7 @@ func TestRender_GoldenConfig(t *testing.T) {
 	assert.Equal(t, "SB_ANTHROPIC_KEY_C8A1829890FF", ev.Name)
 	require.NotNil(t, ev.ValueFrom)
 	require.NotNil(t, ev.ValueFrom.SecretKeyRef)
-	assert.Equal(t, gateway.MirrorSecretName(testNS, "anthropic-api-key"), ev.ValueFrom.SecretKeyRef.Name)
+	assert.Equal(t, gateway.MirrorSecretName(testGatewayNS, testNS, "anthropic-api-key"), ev.ValueFrom.SecretKeyRef.Name)
 	assert.Equal(t, "api-key", ev.ValueFrom.SecretKeyRef.Key)
 
 	// No routes should be excluded.
@@ -162,7 +166,7 @@ func TestRender_GoldenConfig(t *testing.T) {
 // TestRender_EmptyRoutes verifies that Render with no routes produces an empty
 // model_list config and an empty EnvVars slice.
 func TestRender_EmptyRoutes(t *testing.T) {
-	result := gateway.Render(nil, nil, nil, gateway.OTelConfig{})
+	result := gateway.Render(testGatewayNS, nil, nil, nil, gateway.OTelConfig{})
 	assert.Equal(t, "model_list: []\n", result.ConfigYAML)
 	assert.Empty(t, result.EnvVars)
 	assert.Empty(t, result.Excluded)
@@ -183,8 +187,8 @@ func TestRender_Deterministic(t *testing.T) {
 	}
 	rvs := map[string]string{secretKey("my-secret"): "rv-42"}
 
-	r1 := gateway.Render(routes, bindings, rvs, gateway.OTelConfig{})
-	r2 := gateway.Render(routes, bindings, rvs, gateway.OTelConfig{})
+	r1 := gateway.Render(testGatewayNS, routes, bindings, rvs, gateway.OTelConfig{})
+	r2 := gateway.Render(testGatewayNS, routes, bindings, rvs, gateway.OTelConfig{})
 
 	assert.Equal(t, r1.ConfigYAML, r2.ConfigYAML, "ConfigYAML must be identical across calls")
 	assert.Equal(t, r1.Hash, r2.Hash, "Hash must be identical across calls")
@@ -205,8 +209,8 @@ func TestRender_RouteOrderDoesNotAffectOutput(t *testing.T) {
 		newMockRoute("a"),
 	}
 
-	r1 := gateway.Render(routes1, nil, nil, gateway.OTelConfig{})
-	r2 := gateway.Render(routes2, nil, nil, gateway.OTelConfig{})
+	r1 := gateway.Render(testGatewayNS, routes1, nil, nil, gateway.OTelConfig{})
+	r2 := gateway.Render(testGatewayNS, routes2, nil, nil, gateway.OTelConfig{})
 	assert.Equal(t, r1.ConfigYAML, r2.ConfigYAML, "route order must not affect rendered config")
 	assert.Equal(t, r1.Hash, r2.Hash, "route order must not affect hash")
 }
@@ -221,7 +225,7 @@ func TestRender_ExcludesRouteWithMissingBinding(t *testing.T) {
 	}
 
 	// bindings map does NOT contain "missing-binding".
-	result := gateway.Render(routes, map[string]agentsv1beta1.SecretBinding{}, map[string]string{}, gateway.OTelConfig{})
+	result := gateway.Render(testGatewayNS, routes, map[string]agentsv1beta1.SecretBinding{}, map[string]string{}, gateway.OTelConfig{})
 
 	require.Contains(t, result.Excluded, bindingKey("bad-route"),
 		"bad-route must be in Excluded")
@@ -242,7 +246,7 @@ func TestRender_ExcludesRouteWithMissingSecret(t *testing.T) {
 	// empty value → secret not found
 	rvs := map[string]string{secretKey("my-secret"): ""}
 
-	result := gateway.Render(routes, bindings, rvs, gateway.OTelConfig{})
+	result := gateway.Render(testGatewayNS, routes, bindings, rvs, gateway.OTelConfig{})
 
 	require.Contains(t, result.Excluded, bindingKey("secret-missing"))
 	assert.Equal(t, "model_list: []\n", result.ConfigYAML,
@@ -263,8 +267,8 @@ func TestRender_HashChangesOnSecretRotation(t *testing.T) {
 	rv1 := map[string]string{secretKey("my-secret"): "rv-100"}
 	rv2 := map[string]string{secretKey("my-secret"): "rv-101"}
 
-	r1 := gateway.Render(routes, bindings, rv1, gateway.OTelConfig{})
-	r2 := gateway.Render(routes, bindings, rv2, gateway.OTelConfig{})
+	r1 := gateway.Render(testGatewayNS, routes, bindings, rv1, gateway.OTelConfig{})
+	r2 := gateway.Render(testGatewayNS, routes, bindings, rv2, gateway.OTelConfig{})
 
 	assert.Equal(t, r1.ConfigYAML, r2.ConfigYAML,
 		"ConfigYAML must not change on secret rotation")
@@ -276,7 +280,7 @@ func TestRender_HashChangesOnSecretRotation(t *testing.T) {
 // the MOCK_OK marker string — the harness's canonical assertion marker.
 func TestRender_MockRouteContainsMockOK(t *testing.T) {
 	routes := []agentsv1beta1.ModelRoute{newMockRoute("my-route")}
-	result := gateway.Render(routes, nil, nil, gateway.OTelConfig{})
+	result := gateway.Render(testGatewayNS, routes, nil, nil, gateway.OTelConfig{})
 
 	assert.True(t, strings.Contains(result.ConfigYAML, "MOCK_OK"),
 		"mock provider entry must contain the MOCK_OK marker")
@@ -298,7 +302,7 @@ func TestRender_APIBaseRouteProxiesUpstream(t *testing.T) {
 	}
 
 	// No bindings/secrets provided — an apiBase route must render regardless.
-	result := gateway.Render(routes, nil, nil, gateway.OTelConfig{})
+	result := gateway.Render(testGatewayNS, routes, nil, nil, gateway.OTelConfig{})
 
 	wantConfig := `model_list:
   - model_name: tool-mock
@@ -350,7 +354,7 @@ func TestRender_EnvVarsDeduplicated(t *testing.T) {
 	}
 	rvs := map[string]string{secretKey("my-secret"): "rv-7"}
 
-	result := gateway.Render(routes, bindings, rvs, gateway.OTelConfig{})
+	result := gateway.Render(testGatewayNS, routes, bindings, rvs, gateway.OTelConfig{})
 
 	assert.Empty(t, result.Excluded)
 	require.Len(t, result.EnvVars, 1, "env var must be deduplicated for shared binding")
@@ -369,7 +373,7 @@ func TestRender_EnvVarValueFromSecretKeyRef(t *testing.T) {
 	}
 	rvs := map[string]string{secretKey("openai-secret"): "rv-1"}
 
-	result := gateway.Render(routes, bindings, rvs, gateway.OTelConfig{})
+	result := gateway.Render(testGatewayNS, routes, bindings, rvs, gateway.OTelConfig{})
 
 	require.Len(t, result.EnvVars, 1)
 	ev := result.EnvVars[0]
@@ -381,7 +385,7 @@ func TestRender_EnvVarValueFromSecretKeyRef(t *testing.T) {
 	require.NotNil(t, ev.ValueFrom.SecretKeyRef, "env var must use SecretKeyRef")
 
 	skr := ev.ValueFrom.SecretKeyRef
-	assert.Equal(t, gateway.MirrorSecretName(testNS, "openai-secret"), skr.Name)
+	assert.Equal(t, gateway.MirrorSecretName(testGatewayNS, testNS, "openai-secret"), skr.Name)
 	assert.Equal(t, "key", skr.Key)
 }
 
@@ -398,7 +402,7 @@ func TestRender_RateLimitAppearsOnAllProviders(t *testing.T) {
 		},
 	}
 
-	result := gateway.Render([]agentsv1beta1.ModelRoute{route}, nil, nil, gateway.OTelConfig{})
+	result := gateway.Render(testGatewayNS, []agentsv1beta1.ModelRoute{route}, nil, nil, gateway.OTelConfig{})
 
 	assert.Contains(t, result.ConfigYAML, "rpm: 300",
 		"rpm must appear in config for rate-limited route")
@@ -415,7 +419,7 @@ func TestRender_OTelEnabledAddsCallbackAndEnv(t *testing.T) {
 	}
 	otel := gateway.OTelConfig{Endpoint: "http://langfuse/api/public/otel", HeadersSecret: "gw-otel", HeadersSecretRV: "7"}
 
-	enabled := gateway.Render([]agentsv1beta1.ModelRoute{route}, nil, nil, otel)
+	enabled := gateway.Render(testGatewayNS, []agentsv1beta1.ModelRoute{route}, nil, nil, otel)
 	assert.Contains(t, enabled.ConfigYAML, `callbacks: ["otel"]`, "otel callback enabled")
 	// M11.6 PII-leak fix: with otel enabled, the gateway exports its own trace
 	// straight to Langfuse (bypassing the redaction collector). Message logging
@@ -452,11 +456,11 @@ func TestRender_OTelEnabledAddsCallbackAndEnv(t *testing.T) {
 	rotated := otel
 	rotated.HeadersSecretRV = "8"
 	assert.NotEqual(t, enabled.Hash,
-		gateway.Render([]agentsv1beta1.ModelRoute{route}, nil, nil, rotated).Hash,
+		gateway.Render(testGatewayNS, []agentsv1beta1.ModelRoute{route}, nil, nil, rotated).Hash,
 		"rotating the OTel header Secret must change the rollout hash")
 
 	// Disabled (zero value) adds neither.
-	off := gateway.Render([]agentsv1beta1.ModelRoute{route}, nil, nil, gateway.OTelConfig{})
+	off := gateway.Render(testGatewayNS, []agentsv1beta1.ModelRoute{route}, nil, nil, gateway.OTelConfig{})
 	assert.NotContains(t, off.ConfigYAML, "callbacks", "no otel callback when disabled")
 	for _, e := range off.EnvVars {
 		assert.NotContains(t, e.Name, "OTEL_", "no OTEL_ env when disabled")
@@ -494,7 +498,7 @@ func TestRender_ExcludesCrossNamespaceNameCollision(t *testing.T) {
 	}
 	rvs := map[string]string{"tenant-a/s-a": "rv", "tenant-b/s-b": "rv"}
 
-	result := gateway.Render(routes, bindings, rvs, gateway.OTelConfig{})
+	result := gateway.Render(testGatewayNS, routes, bindings, rvs, gateway.OTelConfig{})
 
 	assert.NotContains(t, result.ConfigYAML, "model_name: anthropic", "colliding name must be excluded, not pooled")
 	assert.Contains(t, result.ConfigYAML, "model_name: solo", "the non-colliding route still renders")
@@ -511,11 +515,13 @@ func TestQualifiedNames(t *testing.T) {
 	assert.Equal(t, gateway.EnvVarName("team-a", "openai"), gateway.EnvVarName("team-a", "openai"), "deterministic")
 	assert.Regexp(t, `^SB_OPENAI_[0-9A-F]{12}$`, gateway.EnvVarName("team-a", "openai"))
 
-	assert.Equal(t, "provider-key", gateway.MirrorSecretName(gateway.GatewayNamespace, "provider-key"),
+	assert.Equal(t, "provider-key", gateway.MirrorSecretName(testGatewayNS, testGatewayNS, "provider-key"),
 		"a Secret already in the gateway namespace is used where it is")
-	a, b := gateway.MirrorSecretName("team-a", "provider-key"), gateway.MirrorSecretName("team-b", "provider-key")
+	assert.NotEqual(t, "provider-key", gateway.MirrorSecretName(testGatewayNS, "ctxmesh", "provider-key"),
+		"the default install namespace is a tenant namespace like any other when the platform runs elsewhere")
+	a, b := gateway.MirrorSecretName(testGatewayNS, "team-a", "provider-key"), gateway.MirrorSecretName(testGatewayNS, "team-b", "provider-key")
 	assert.NotEqual(t, a, b, "the same Secret name in two namespaces must give two mirrors")
 	assert.Regexp(t, `^ctxmesh-sb-[0-9a-f]{12}$`, a, "a mirror's name must not be one a tenant can choose")
 	// The ambiguity the hash input must not have: "a-b"/"c" and "a"/"b-c" are different Secrets.
-	assert.NotEqual(t, gateway.MirrorSecretName("a-b", "c"), gateway.MirrorSecretName("a", "b-c"))
+	assert.NotEqual(t, gateway.MirrorSecretName(testGatewayNS, "a-b", "c"), gateway.MirrorSecretName(testGatewayNS, "a", "b-c"))
 }

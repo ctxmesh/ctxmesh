@@ -110,7 +110,7 @@ const (
 
 func egressSidecarContainer(
 	cfg OBOEgressConfig, namespace, agentIdentity, boundary, routesJSON string,
-	recordCapable, devObjectStore bool,
+	recordCapable bool, objectStore []corev1.EnvVar,
 	toolPolicyMount *corev1.VolumeMount, toolPolicyEnv []corev1.EnvVar,
 	routesMount *corev1.VolumeMount, routesEnv []corev1.EnvVar,
 ) corev1.Container {
@@ -150,12 +150,12 @@ func egressSidecarContainer(
 	if cfg.StreamIdleTimeout != "" {
 		env = append(env, corev1.EnvVar{Name: envEgressStreamIdleTimeout, Value: cfg.StreamIdleTimeout})
 	}
-	// Record mode (M78, ADR 0071 §1/C1): give the sidecar a fixture sink + flip on capture.
-	// RECORD_CAPABLE=true forces the C2 fail-closed at startup if OBJECT_STORE_ADDR is unset —
-	// STATIC env (reconcile-time constants), never valueFrom.
+	// Record mode (M78, ADR 0071 §1/C1): give the sidecar a fixture sink (objectStore, the agent's own
+	// object-store env, empty off the dev data plane) + flip on capture. RECORD_CAPABLE=true forces the
+	// C2 fail-closed at startup if OBJECT_STORE_ADDR is unset — STATIC env, never valueFrom.
 	if recordCapable {
 		env = append(env, corev1.EnvVar{Name: envRecordCapable, Value: gatewaySyncValue})
-		env = append(env, objectStoreEnv(devObjectStore)...)
+		env = append(env, objectStore...)
 	}
 	// Tool-call governance (M82, ADR 0074 §1): the resolved tool-policy file path (TOOL_POLICY_FILE)
 	// — STATIC (a mounted path, never valueFrom). Appended after the record env so the sidecar reads

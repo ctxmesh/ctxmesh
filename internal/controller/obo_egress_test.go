@@ -59,7 +59,7 @@ func TestEgressSidecarContainer_RoutesFileSupersedesEnv(t *testing.T) {
 	cfg := OBOEgressConfig{SidecarImage: "egress-sidecar:test", CapabilityPublicKeyB64: "K", CapabilityAudience: "a", CredentialNamespace: "ns"}
 	mount := &corev1.VolumeMount{Name: egressRoutesVolumeName, MountPath: egressRoutesMountPath, ReadOnly: true}
 	env := []corev1.EnvVar{{Name: envEgressRoutesFile, Value: egressRoutesMountPath + "/" + egressRoutesConfigMapKey}}
-	c := egressSidecarContainer(cfg, "ns", "ns/a", "", `[{"name":"s"}]`, false, false, nil, nil, mount, env)
+	c := egressSidecarContainer(cfg, "ns", "ns/a", "", `[{"name":"s"}]`, false, nil, nil, nil, mount, env)
 
 	_, hasStatic := envValue(c, "EGRESS_ROUTES")
 	assert.False(t, hasStatic, "with a routes mount, the static EGRESS_ROUTES env must NOT be set")
@@ -75,7 +75,7 @@ func TestEgressSidecarContainer_RoutesFileSupersedesEnv(t *testing.T) {
 	assert.True(t, mounted, "the routes ConfigMap must be mounted on the sidecar")
 
 	// Fallback: no mount ⇒ the static EGRESS_ROUTES env is used (legacy / dev).
-	c2 := egressSidecarContainer(cfg, "ns", "ns/a", "", `[{"name":"s"}]`, false, false, nil, nil, nil, nil)
+	c2 := egressSidecarContainer(cfg, "ns", "ns/a", "", `[{"name":"s"}]`, false, nil, nil, nil, nil, nil)
 	staticEnv, ok := envValue(c2, "EGRESS_ROUTES")
 	require.True(t, ok, "with no mount, the static EGRESS_ROUTES env is the fallback")
 	assert.Contains(t, staticEnv.Value, `"name":"s"`)
@@ -91,7 +91,7 @@ func TestEgressSidecarContainer(t *testing.T) {
 		CapabilityAudience:     "aud",
 		CredentialNamespace:    "ae-credentials",
 	}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", `[{"name":"scalekit"}]`, false, false, nil, nil, nil, nil)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", `[{"name":"scalekit"}]`, false, nil, nil, nil, nil, nil)
 
 	assert.Equal(t, egressSidecarContainerName, c.Name)
 	assert.Equal(t, "egress-sidecar:test", c.Image)
@@ -128,7 +128,7 @@ func TestEgressSidecarContainer(t *testing.T) {
 	assert.False(t, hasStore, "a non-record sidecar gets no object-store env")
 
 	cfg.TokenServiceURL = "https://token-service:8443"
-	delegating := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false, false, nil, nil, nil, nil)
+	delegating := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false, nil, nil, nil, nil, nil)
 	tsu, ok := envValue(delegating, "TOKEN_SERVICE_URL")
 	require.True(t, ok)
 	assert.Equal(t, "https://token-service:8443", tsu.Value)
@@ -144,7 +144,7 @@ func TestEgressSidecarContainer_RecordMode(t *testing.T) {
 		CapabilityAudience:     "aud",
 		CredentialNamespace:    "ae-credentials",
 	}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true, true, nil, nil, nil, nil)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true, objectStoreEnv(true, newPlatformServices("")), nil, nil, nil, nil)
 
 	rec, ok := envValue(c, "RECORD_CAPABLE")
 	require.True(t, ok, "record-capable sidecar carries RECORD_CAPABLE")
@@ -169,7 +169,7 @@ func TestEgressSidecarContainer_RecordCapableNoDevDataPlane(t *testing.T) {
 		CapabilityAudience:     "aud",
 		CredentialNamespace:    "ae-credentials",
 	}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true, false, nil, nil, nil, nil)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true, objectStoreEnv(false, newPlatformServices("")), nil, nil, nil, nil)
 
 	rec, ok := envValue(c, "RECORD_CAPABLE")
 	require.True(t, ok, "record-capable sidecar still carries RECORD_CAPABLE")
@@ -195,7 +195,7 @@ func TestDevObjectStore_FollowsTheBundledStore(t *testing.T) {
 	} {
 		r := &AgentDeploymentReconciler{DevDataPlane: tc.devDataPlane, DevObjectStoreOff: tc.storeOff}
 		assert.Equal(t, tc.want, r.devObjectStore(), "devDataPlane=%t storeOff=%t", tc.devDataPlane, tc.storeOff)
-		env := objectStoreEnv(r.devObjectStore())
+		env := objectStoreEnv(r.devObjectStore(), r.platformServices())
 		if tc.want {
 			assert.Len(t, env, 3, "devDataPlane=%t storeOff=%t", tc.devDataPlane, tc.storeOff)
 		} else {
@@ -216,7 +216,7 @@ func TestEgressSidecarContainer_ToolPolicyMount(t *testing.T) {
 	}
 	mount := &corev1.VolumeMount{Name: toolPolicyVolumeName, MountPath: toolPolicyMountPath, ReadOnly: true}
 	env := []corev1.EnvVar{{Name: envToolPolicyFile, Value: toolPolicyMountPath + "/" + toolPolicyConfigMapKey}}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false, false, mount, env, nil, nil)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false, nil, mount, env, nil, nil)
 
 	e, ok := envValue(c, envToolPolicyFile)
 	require.True(t, ok, "a tool-policy agent's sidecar carries TOOL_POLICY_FILE")
@@ -287,12 +287,12 @@ func TestEgressSidecar_TimeoutEnvIsSetOnlyWhenConfigured(t *testing.T) {
 	const routesJSON = `[{"name":"echo"}]`
 	withTimeouts := egressSidecarContainer(OBOEgressConfig{
 		SidecarImage: "img", ResponseHeaderTimeout: "30s", StreamIdleTimeout: "45s",
-	}, "ns", "ns/agent", "", routesJSON, false, false, nil, nil, nil, nil)
+	}, "ns", "ns/agent", "", routesJSON, false, nil, nil, nil, nil, nil)
 	env := envByNameC(withTimeouts.Env)
 	assert.Equal(t, "30s", env["EGRESS_RESPONSE_HEADER_TIMEOUT"])
 	assert.Equal(t, "45s", env["EGRESS_STREAM_IDLE_TIMEOUT"])
 
-	bare := egressSidecarContainer(OBOEgressConfig{SidecarImage: "img"}, "ns", "ns/agent", "", routesJSON, false, false, nil, nil, nil, nil)
+	bare := egressSidecarContainer(OBOEgressConfig{SidecarImage: "img"}, "ns", "ns/agent", "", routesJSON, false, nil, nil, nil, nil, nil)
 	bareEnv := envByNameC(bare.Env)
 	_, hasHeader := bareEnv["EGRESS_RESPONSE_HEADER_TIMEOUT"]
 	_, hasIdle := bareEnv["EGRESS_STREAM_IDLE_TIMEOUT"]

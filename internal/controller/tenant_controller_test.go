@@ -204,11 +204,11 @@ func TestTenant_InjectsQuotaEnvAndRepointsGateway(t *testing.T) {
 
 	// The gateway proxy is interposed even with NO per-agent budget — tenant caps alone repoint it.
 	assert.Equal(t, budgetProxyURL, env["MODEL_GATEWAY_URL"], "tenant caps must repoint MODEL_GATEWAY_URL at the proxy")
-	assert.Equal(t, litellmGatewayURL, env["GATEWAY_UPSTREAM_URL"])
+	assert.Equal(t, defaultPlatform.gatewayURL(), env["GATEWAY_UPSTREAM_URL"])
 	assert.Equal(t, "injectco", env["TENANT_ID"])
 	assert.Equal(t, "100.00", env["TENANT_BUDGET_USD"])
 	assert.Equal(t, "600", env["TENANT_RPM"])
-	assert.Equal(t, memoryDefaultAddr, env["TENANT_QUOTA_ADDR"], "the shared Valkey addr for cross-pod coordination")
+	assert.Equal(t, defaultPlatform.statelayerAddr(), env["TENANT_QUOTA_ADDR"], "the shared Valkey addr for cross-pod coordination")
 
 	// Without a configured proxy the pod-identity token is NOT injected.
 	_, hasTokenPath := env["STATELAYER_TOKEN_PATH"]

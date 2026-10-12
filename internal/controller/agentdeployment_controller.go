@@ -108,12 +108,6 @@ const ceTypeAttribute = "type"
 // the DEV-ONLY deterministic credentials are injected as STATIC env: they are public
 // constants (ADR 0083), so a Secret reference would hide nothing.
 const (
-	// objectStoreAddr is the cluster address of the dedicated dev MinIO Service
-	// (config/objectstore/, wired into config/default). It mirrors the S3 API
-	// port; the launcher connects to it plain-HTTP in-cluster (dev posture, like
-	// the dev Valkey). One store serves every registry member.
-	objectStoreAddr = "ctxmesh-objectstore.ctxmesh.svc:9000"
-
 	// objectStoreDevAccessKey / objectStoreDevSecretKey are the DETERMINISTIC
 	// DEV-ONLY credentials for the dev MinIO — fixed values committed as such
 	// (identical posture to the dev Langfuse / Valkey: NOT a real credential,
@@ -141,12 +135,12 @@ const (
 // the dev object-store creds into agent pods — a record-capable agent there then C2-fails-closed on
 // the absent store rather than pointing at a Service that does not exist (production has not
 // provisioned a durable store, so record/blob-offload is feature-off).
-func objectStoreEnv(devObjectStore bool) []corev1.EnvVar {
+func objectStoreEnv(devObjectStore bool, platform platformServices) []corev1.EnvVar {
 	if !devObjectStore {
 		return nil
 	}
 	return []corev1.EnvVar{
-		{Name: envObjectStoreAddr, Value: objectStoreAddr},
+		{Name: envObjectStoreAddr, Value: platform.objectStoreAddr()},
 		{Name: envObjectStoreAccessKey, Value: objectStoreDevAccessKey},
 		{Name: envObjectStoreSecretKey, Value: objectStoreDevSecretKey},
 	}
@@ -159,14 +153,6 @@ func (r *AgentDeploymentReconciler) devObjectStore() bool {
 }
 
 const (
-	// litellmGatewayURL is the in-cluster address of the LiteLLM model gateway.
-	// It is the DEFAULT MODEL_GATEWAY_URL for an unbudgeted agent (the agent calls
-	// LiteLLM directly, the M2 path). For a BUDGETED agent (spec.budget set) the
-	// controller repoints MODEL_GATEWAY_URL at the launcher's local budget proxy
-	// (budgetProxyURL) and passes this address through as GATEWAY_UPSTREAM_URL so
-	// the proxy still forwards to LiteLLM after enforcing the cost cap.
-	litellmGatewayURL = "http://ctxmesh-gateway.ctxmesh.svc:4000"
-
 	// budgetProxyURL is where MODEL_GATEWAY_URL points when a budget is set: the
 	// launcher's OWN outbound gateway proxy (:2996, cmd/launcher/gateway.go). The
 	// proxy runs inside the same pod, so localhost. Its port must match
@@ -346,6 +332,11 @@ type AgentDeploymentReconciler struct {
 	// they treat as feature-off, instead of an address no Service answers.
 	DevObjectStoreOff bool
 
+	// PlatformNamespace is the namespace the platform is installed into, the controller's own; every
+	// platform address an agent is given is derived from it (platform_services.go). Empty means
+	// DefaultPlatformNamespace.
+	PlatformNamespace string
+
 	// StatelayerProxyURL, when set (from the controller's STATELAYER_PROXY_URL env),
 	// is injected into memory-bound agents so the launcher reverse-proxies session/
 	// shared memory to the control-plane state-layer proxy instead of Valkey directly
@@ -432,6 +423,11 @@ type AgentDeploymentReconciler struct {
 // registryReader returns the configured RegistryReader. REQUIRED post-retirement
 // (ADR 0044) — there is no CRD to fall back to (main.go wires the Postgres reader;
 // envtests inject a memstore-backed one).
+// platformServices are the addresses of the platform this controller belongs to.
+func (r *AgentDeploymentReconciler) platformServices() platformServices {
+	return newPlatformServices(r.PlatformNamespace)
+}
+
 func (r *AgentDeploymentReconciler) registryReader() RegistryReader {
 	return r.Registry
 }
@@ -1132,10 +1128,11 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// An agent with none of those reasons gets the plain LiteLLM URL and no proxy env.
 	recordCapable := deploy.Spec.Record
 
-	gatewayURL := litellmGatewayURL
+	platform := r.platformServices()
+	gatewayURL := platform.gatewayURL()
 	if deploy.Spec.Budget != nil || tenantQuota || gr.referenced || recordCapable {
 		gatewayURL = budgetProxyURL
-		env = append(env, corev1.EnvVar{Name: envGatewayUpstreamURL, Value: litellmGatewayURL})
+		env = append(env, corev1.EnvVar{Name: envGatewayUpstreamURL, Value: platform.gatewayURL()})
 	}
 	if deploy.Spec.Budget != nil {
 		env = append(
@@ -1174,7 +1171,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// agent's code sees it (ADR 0124), and guardrail audits and delegation call the BFF too. An agent
 	// without it would hand its code a bearer capability anyone could bind first.
 	if !envVarPresent(env, envBFFInternalURL) {
-		env = append(env, corev1.EnvVar{Name: envBFFInternalURL, Value: bffInternalURL})
+		env = append(env, corev1.EnvVar{Name: envBFFInternalURL, Value: platform.bffInternalURL()})
 	}
 
 	// Record mode (M78, ADR 0071 §1): a record-capable agent gets RECORD_CAPABLE=true, which flips
@@ -1188,7 +1185,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	if recordCapable {
 		env = append(env, corev1.EnvVar{Name: envRecordCapable, Value: gatewaySyncValue})
 		if !envVarPresent(env, envObjectStoreAddr) {
-			env = append(env, objectStoreEnv(r.devObjectStore())...)
+			env = append(env, objectStoreEnv(r.devObjectStore(), platform)...)
 		}
 	}
 
@@ -1368,7 +1365,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// MEMORY_BACKEND_ADDR, MEMORY_PORT and MEMORY_KEY_NAMESPACE (pod namespace); keys are composed
 	// with the base env's AGENT_NAME. The single-writer rule applies: only this reconciler
 	// writes the pod template.
-	memAddr, memScope, hasMemory := resolveMemory(deploy)
+	memAddr, memScope, hasMemory := resolveMemory(deploy, platform)
 	if hasMemory {
 		// MEMORY_BACKEND_ADDR is the DIRECT Valkey path. Injected ONLY when the
 		// state-layer proxy is NOT configured; once the proxy is on (the m53.7
@@ -1548,7 +1545,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 				// the proxy is on (the m53.7 cutover, phase 3), this is NOT injected — the
 				// agent has no direct Valkey path; quota flows through the proxy on the
 				// SAME accumulator.
-				env = append(env, corev1.EnvVar{Name: envTenantQuotaAddr, Value: memoryDefaultAddr})
+				env = append(env, corev1.EnvVar{Name: envTenantQuotaAddr, Value: platform.statelayerAddr()})
 			}
 		}
 	}
@@ -1571,7 +1568,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			// connection. Injected for every registry member; the BFF only serves the edge when an async
 			// backend is actually configured, so an install without one answers 404 and the launcher's
 			// `?mode=async` degrades to an honest refusal rather than a silent no-op.
-			corev1.EnvVar{Name: envAsyncPublishURL, Value: bffInternalURL + "/api/internal/async/publish"},
+			corev1.EnvVar{Name: envAsyncPublishURL, Value: platform.asyncPublishURL()},
 		)
 		// Shared memory scope (ADR 0035, m33.3): a sessionMemory scope=shared keys the team
 		// scratchpad under this registry (mem:shared:{registry}:{conversationId}), so agents in the
@@ -1610,7 +1607,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			return podTemplate{}, fmt.Errorf("resolving supervised team: %w", tErr)
 		}
 		if team != nil {
-			for _, e := range delegateEnv(team) {
+			for _, e := range delegateEnv(team, platform) {
 				// Every agent already has BFF_INTERNAL_URL; the rest are delegate-only.
 				if !envVarPresent(env, e.Name) {
 					env = append(env, e)
@@ -1628,7 +1625,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 				}
 				injectPodToken = true
 			} else if !envVarPresent(env, envTenantQuotaAddr) {
-				env = append(env, corev1.EnvVar{Name: envTenantQuotaAddr, Value: memoryDefaultAddr})
+				env = append(env, corev1.EnvVar{Name: envTenantQuotaAddr, Value: platform.statelayerAddr()})
 			}
 			// The delegate spawn guard needs the run-capability verifier to recover THIS supervisor's run id
 			// as the spawn-tree ROOT when the X-Ctxmesh-Spawn-Root header doesn't propagate (L11) — the case
@@ -1663,7 +1660,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// record-mode block above — inject only when not already present (last-write
 		// semantics would otherwise leave a duplicate env entry).
 		if !envVarPresent(env, envObjectStoreAddr) {
-			env = append(env, objectStoreEnv(r.devObjectStore())...)
+			env = append(env, objectStoreEnv(r.devObjectStore(), platform)...)
 		}
 
 		// (Async dedup through the proxy needs the same pod token; it is now set by the
@@ -1846,7 +1843,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		agentIdentity := deploy.Namespace + "/" + deploy.Name
 		containers = append(containers, egressSidecarContainer(
 			r.OBOEgress, deploy.Namespace, agentIdentity, agentEgressBoundary(deploy, membership),
-			egressRoutesJSON(egressRoutes), recordCapable, r.devObjectStore(), toolPolicyMount, toolPolicyEnv,
+			egressRoutesJSON(egressRoutes), recordCapable, objectStoreEnv(r.devObjectStore(), platform), toolPolicyMount, toolPolicyEnv,
 			routesMount, routesEnv))
 	}
 
@@ -1929,8 +1926,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		memDigest = fmt.Sprintf("%x", sum[:])[:8]
 	}
 	// The object-store (blob-offload) env is injected 1:1 with membership.IsMember
-	// and its values are package constants (objectStoreAddr + the dev creds,
-	// identical for every member), so it needs no digest component of its own: the
+	// and its values are the same for every member of an install (the platform's
+	// store + the dev creds), so it needs no digest component of its own: the
 	// registry-membership digest already rolls the revision on join/leave — exactly
 	// when OBJECT_STORE_ADDR + the creds appear/disappear. If the store address
 	// ever becomes per-agent it must fold into registryMembershipDigest.
@@ -2095,6 +2092,15 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		supersededDigests = append(supersededDigests, combinedDigest,
 			foldDigest(combinedDigest, ampAttestationFold(r.OBOEgress, !require)))
 		combinedDigest = foldDigest(combinedDigest, ampAttestationFold(r.OBOEgress, require))
+	}
+
+	// The platform's addresses are read by no digest, so an install outside the default namespace moves
+	// the revision name here; otherwise an agent a previous controller pointed at the default namespace
+	// keeps those addresses. The pod named without it is the same pod renamed. A default install's
+	// names do not move.
+	if platform.namespace != DefaultPlatformNamespace {
+		supersededDigests = append(supersededDigests, combinedDigest)
+		combinedDigest = foldDigest(combinedDigest, "|platform-namespace:"+platform.namespace)
 	}
 
 	return podTemplate{

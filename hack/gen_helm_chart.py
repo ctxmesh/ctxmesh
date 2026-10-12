@@ -937,6 +937,14 @@ def main() -> None:
 
         # Apply substitutions to every doc uniformly (image + namespace fields).
         doc = substitute(doc)
+        # A platform address that still names the default namespace points every install outside it
+        # at a Service that does not exist; each one needs a rule in substitute().
+        fixed = re.search(rf"[\w.-]*\.{re.escape(NS_KUSTOMIZE)}\.svc[\w.:/-]*", doc)
+        if fixed:
+            raise SystemExit(
+                f"{kind} {name_of(doc)}: {fixed.group(0)} names the install namespace; "
+                "template it from .Values.namespace in substitute()"
+            )
         if kind in WORKLOAD_KINDS:
             doc = template_third_party_images(doc)
             doc = inject_pull_secrets(doc)

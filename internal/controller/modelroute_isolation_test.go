@@ -171,7 +171,7 @@ func TestModelRoute_ForeignSecretAtMirrorNameExcludesRoute(t *testing.T) {
 	ensureNS(t, tenant)
 	createProviderSecret(t, tenant, "provider-key", "api-key", "tenant-value")
 	createBinding(t, tenant, "openai", "provider-key", "api-key")
-	createProviderSecret(t, gwNS, gateway.MirrorSecretName(tenant, "provider-key"), "api-key", "SQUATTER")
+	createProviderSecret(t, gwNS, gateway.MirrorSecretName(gwNS, tenant, "provider-key"), "api-key", "SQUATTER")
 	createBoundRoute(t, tenant, "squat-route", "openai", "")
 
 	reconcileMR(t, newMRReconciler(), tenant, "squat-route")
@@ -180,6 +180,6 @@ func TestModelRoute_ForeignSecretAtMirrorNameExcludesRoute(t *testing.T) {
 	assert.False(t, rendered, "a route whose mirror was not written must not render")
 	var squat corev1.Secret
 	require.NoError(t, k8sClient.Get(testCtx,
-		types.NamespacedName{Name: gateway.MirrorSecretName(tenant, "provider-key"), Namespace: gwNS}, &squat))
+		types.NamespacedName{Name: gateway.MirrorSecretName(gwNS, tenant, "provider-key"), Namespace: gwNS}, &squat))
 	assert.Equal(t, "SQUATTER", string(squat.Data["api-key"]), "a Secret the controller did not write is never overwritten")
 }

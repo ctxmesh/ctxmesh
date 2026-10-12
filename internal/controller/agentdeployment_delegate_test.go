@@ -64,14 +64,14 @@ func teamWithRoster(budget *agentsv1beta1.SpawnBudget) *agentsv1beta1.AgentTeam 
 }
 
 func TestDelegateEnv_FromBudget(t *testing.T) {
-	env := delegateEnv(teamWithRoster(&agentsv1beta1.SpawnBudget{MaxFanOut: 2, MaxSpawnDepth: 5, MaxTotalSpawns: 11}))
+	env := delegateEnv(teamWithRoster(&agentsv1beta1.SpawnBudget{MaxFanOut: 2, MaxSpawnDepth: 5, MaxTotalSpawns: 11}), defaultPlatform)
 	m := envToMap(env)
 
 	assert.Equal(t, "true", m["DELEGATE_ENABLED"])
 	assert.Equal(t, "2", m["SPAWN_MAX_FANOUT"])
 	assert.Equal(t, "5", m["SPAWN_MAX_DEPTH"])
 	assert.Equal(t, "11", m["SPAWN_MAX_TOTAL"])
-	assert.Equal(t, bffInternalURL, m["BFF_INTERNAL_URL"])
+	assert.Equal(t, defaultPlatform.bffInternalURL(), m["BFF_INTERNAL_URL"])
 
 	var roster []map[string]string
 	require.NoError(t, json.Unmarshal([]byte(m["DELEGATE_ROSTER"]), &roster))
@@ -82,7 +82,7 @@ func TestDelegateEnv_FromBudget(t *testing.T) {
 }
 
 func TestDelegateEnv_Defaults(t *testing.T) {
-	m := envToMap(delegateEnv(teamWithRoster(nil))) // budget omitted → CRD defaults
+	m := envToMap(delegateEnv(teamWithRoster(nil), defaultPlatform)) // budget omitted → CRD defaults
 	assert.Equal(t, "4", m["SPAWN_MAX_FANOUT"])
 	assert.Equal(t, "3", m["SPAWN_MAX_DEPTH"])
 	assert.Equal(t, "20", m["SPAWN_MAX_TOTAL"])

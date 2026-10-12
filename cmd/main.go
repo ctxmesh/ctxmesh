@@ -175,9 +175,10 @@ const (
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,namespace=ctxmesh,verbs=create;update
 
-// managerNamespace resolves the manager's install namespace (where the cert Secret lives +
-// the webhook Service resolves): POD_NAMESPACE (downward API) first, then the ServiceAccount
-// namespace file, then the install default. Used by the cert-controller (ADR 0102).
+// managerNamespace resolves the manager's install namespace: POD_NAMESPACE (downward API) first, then
+// the ServiceAccount namespace file, then the chart's default. The cert-controller keeps its Secret
+// there and the webhook Service resolves there (ADR 0102); every platform service runs there too, so
+// the reconcilers derive the addresses they give agents from it.
 func managerNamespace() string {
 	if ns := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); ns != "" {
 		return ns
@@ -187,7 +188,7 @@ func managerNamespace() string {
 			return ns
 		}
 	}
-	return "ctxmesh"
+	return controller.DefaultPlatformNamespace
 }
 
 // selfControllerUsername asks the API server for the manager's OWN identity via SelfSubjectReview
@@ -567,8 +568,10 @@ func main() {
 			"group", "eventing.knative.dev/v1")
 	}
 
+	platformNamespace := managerNamespace()
 	deployments := &controller.AgentDeploymentReconciler{
 		EventingAvailable: eventingAvailable,
+		PlatformNamespace: platformNamespace,
 		Client:            mgr.GetClient(),
 		APIReader:         mgr.GetAPIReader(), // uncached telemetry-Secret read (collector env stability)
 		Scheme:            mgr.GetScheme(),
@@ -627,7 +630,8 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.ModelRouteReconciler{
-		Client: mgr.GetClient(),
+		Client:            mgr.GetClient(),
+		PlatformNamespace: platformNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "modelroute")
 		os.Exit(1)
@@ -648,6 +652,7 @@ func main() {
 		EventingAvailable: eventingAvailable,
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
+		PlatformNamespace: platformNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agentregistry")
 		os.Exit(1)
@@ -695,7 +700,8 @@ func main() {
 		// owned member namespaces into a small (namespace, tenant) index so the m73.4 catalog resolves
 		// membership without the BFF reading namespaces (ADR 0011). The manager's existing cpDB store
 		// (mirrors the KnowledgeBase / regression-detector wiring); nil-safe if cpDB were absent.
-		NamespaceTenant: namespacetenant.NewPostgresStore(cpDB),
+		NamespaceTenant:   namespacetenant.NewPostgresStore(cpDB),
+		PlatformNamespace: platformNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "tenant")
 		os.Exit(1)

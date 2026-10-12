@@ -34,11 +34,6 @@ import (
 // agent is unchanged). All values are known at reconcile time → static env, NEVER valueFrom (the ksvc
 // webhook rejects it, the m5.7 landmine).
 
-// bffInternalURL is the in-cluster BFF base the launcher calls for the capability-authorized spawn +
-// await endpoints (the same operator-namespace convention as memoryDefaultAddr). The BFF Service is
-// ctxmesh-bff:9090.
-const bffInternalURL = "http://ctxmesh-bff.ctxmesh.svc.cluster.local:9090"
-
 // Spawn-budget defaults (mirror the AgentTeam CRD's kubebuilder defaults) — used when spec.spawnBudget
 // (or a field) is omitted, so the injected env is always complete.
 const (
@@ -87,7 +82,7 @@ func resolveSpawnBudget(team *agentsv1beta1.AgentTeam) (fanOut, depth, total int
 	return fanOut, depth, total
 }
 
-func delegateEnv(team *agentsv1beta1.AgentTeam) []corev1.EnvVar {
+func delegateEnv(team *agentsv1beta1.AgentTeam, platform platformServices) []corev1.EnvVar {
 	fanOut, depth, total := resolveSpawnBudget(team)
 
 	roster := make([]map[string]string, 0, len(team.Spec.Roster))
@@ -103,6 +98,6 @@ func delegateEnv(team *agentsv1beta1.AgentTeam) []corev1.EnvVar {
 		{Name: envSpawnMaxFanout, Value: strconv.Itoa(fanOut)},
 		{Name: envSpawnMaxDepth, Value: strconv.Itoa(depth)},
 		{Name: envSpawnMaxTotal, Value: strconv.Itoa(total)},
-		{Name: envBFFInternalURL, Value: bffInternalURL},
+		{Name: envBFFInternalURL, Value: platform.bffInternalURL()},
 	}
 }

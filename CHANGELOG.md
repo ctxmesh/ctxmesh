@@ -89,6 +89,19 @@ no caller: the chat page never offered it, and no SDK, script or page of the doc
 with the run-store query behind it. A run an end-user owns is still readable at
 `GET /api/runs/{id}`.
 
+**Fixed: an install outside the `ctxmesh` namespace gave its agents addresses that did not exist.**
+The controller wrote the `ctxmesh` namespace into every platform address it gave an agent
+(`MODEL_GATEWAY_URL`, `GATEWAY_UPSTREAM_URL`, `BFF_INTERNAL_URL`, `ASYNC_PUBLISH_URL`, the state
+layer in `MEMORY_BACKEND_ADDR` and `TENANT_QUOTA_ADDR`, and `OBJECT_STORE_ADDR`), into the egress
+rule of every registry and tenant network policy, into the namespace a Tenant may never claim, and
+into where it wrote the model gateway's config and provider Secret mirrors. The chart lets
+`namespace` change, so on any other install every model call, memory read and capability bind went
+to a Service that was not there, and the gateway was never configured. All of them now come from the
+controller's own namespace, which it reads through the downward API: the chart installs every
+platform service there. The chart generator refuses a platform address that names the default
+namespace, and a test fails on one in the controller. Agents of a default install are unchanged;
+agents of any other install roll one new revision, and an approval carries to it.
+
 **Fixed: a `spec.env` name the platform also sets put the variable in the pod twice.** Beyond the
 identity variables, the controller sets 48 variables on the agent container, and for most of them
 (`MODEL_GATEWAY_URL`, `AGENT_PORT`, the `BUDGET_*` and `TENANT_*` caps, `MEMORY_PORT`,

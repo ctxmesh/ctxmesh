@@ -71,13 +71,18 @@ const (
 // cheap, always-on guardrail; the complementary spoofable-namespace-label ValidatingWebhook (so only the
 // Tenant controller can set the tenant label) is the bigger half, carded to m52.
 var protectedSystemNamespaces = map[string]bool{
-	kubeSystemNamespace:        true, // cluster DNS (CoreDNS) + control-plane comms — a default-deny here is a cluster outage
-	"kube-public":              true,
-	"kube-node-lease":          true,
-	agentEngineSystemNamespace: true, // the platform: controllers, BFF, state-layer, model gateway
-	kourierSystemNamespace:     true, // Knative ingress
-	"knative-serving":          true, // Knative control plane (agent data plane depends on it)
-	langfuseNamespace:          true, // telemetry plane
+	kubeSystemNamespace:    true, // cluster DNS (CoreDNS) + control-plane comms — a default-deny here is a cluster outage
+	"kube-public":          true,
+	"kube-node-lease":      true,
+	kourierSystemNamespace: true, // Knative ingress
+	"knative-serving":      true, // Knative control plane (agent data plane depends on it)
+	langfuseNamespace:      true, // telemetry plane
+}
+
+// protectedNamespace reports whether a Tenant must never claim ns: a system namespace, or the one the
+// platform (controllers, BFF, state layer, model gateway) is installed into.
+func (r *TenantReconciler) protectedNamespace(ns string) bool {
+	return protectedSystemNamespaces[ns] || ns == newPlatformServices(r.PlatformNamespace).namespace
 }
 
 // TenantReconciler reconciles a Tenant (ADR 0046, M47). A Tenant groups namespaces
@@ -93,6 +98,10 @@ type TenantReconciler struct {
 	// the BFF reading namespaces (forbidden by ADR 0011). Optional/typed-nil-safe: nil ⇒ the mirror is
 	// skipped (envtests without a control-plane DB), mirroring how the other optional stores are treated.
 	NamespaceTenant namespacetenant.Store
+
+	// PlatformNamespace is the namespace the platform is installed into: never claimable by a Tenant,
+	// and admitted by its members' egress policy. Empty means DefaultPlatformNamespace.
+	PlatformNamespace string
 }
 
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=tenants,verbs=get;list;watch;update;patch
@@ -222,7 +231,7 @@ func (r *TenantReconciler) resolveOwnership(ctx context.Context, tenant *agentsv
 		// System-namespace denylist (audit P1-3): a protected system/platform namespace is NEVER claimed
 		// or stamped — stamping a default-deny NetworkPolicy on it would break the cluster/platform. Route
 		// it to `denied` (a status condition) BEFORE any ownership logic, regardless of labels/listers.
-		if protectedSystemNamespaces[ns] {
+		if r.protectedNamespace(ns) {
 			denied = append(denied, ns)
 			continue
 		}
@@ -379,7 +388,7 @@ func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *a
 					// to be dropped from the registry-member NP too, since NP rules are additive and
 					// a supervisor is a registry member. The remaining layer is the
 					// statelayer-ingress NP, which admits :6379 only from the proxy/BFF namespace.
-					To: []networkingv1.NetworkPolicyPeer{platformNS(agentEngineSystemNamespace)},
+					To: []networkingv1.NetworkPolicyPeer{platformNS(newPlatformServices(r.PlatformNamespace).namespace)},
 					Ports: []networkingv1.NetworkPolicyPort{
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(modelGatewayPort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(objectStorePort)},

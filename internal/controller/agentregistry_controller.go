@@ -110,7 +110,7 @@ const (
 	langfuseNamespace = "langfuse"
 	langfusePort      = 3000
 
-	// agentEngineSystemNamespace hosts the platform backends the agent pod's
+	// The platform namespace (platformServices) hosts the backends the agent pod's
 	// launcher reaches on the model/memory/object-store/proxy paths:
 	//   - the LiteLLM model gateway (ctxmesh-gateway :4000) — MODEL_GATEWAY_URL;
 	//     breaking it breaks every LLM call.
@@ -126,12 +126,11 @@ const (
 	//     (ADR 0045); omitting it breaks per-user long-term memory for members.
 	// All live in this one namespace, so a single namespace-scoped egress peer
 	// (restricted to these ports) covers them.
-	agentEngineSystemNamespace = "ctxmesh"
-	modelGatewayPort           = 4000
-	memoryBackendPort          = 6379
-	objectStorePort            = 9000
-	statelayerProxyPort        = 8080
-	tokenServicePort           = 8443
+	modelGatewayPort    = 4000
+	memoryBackendPort   = 6379
+	objectStorePort     = 9000
+	statelayerProxyPort = 8080
+	tokenServicePort    = 8443
 	// bffPort is the BFF's API port. A team SUPERVISOR's launcher calls the BFF's capability-authorized
 	// spawn edge (POST /api/internal/spawn) here (M64, ADR 0057); a registry member's default-deny egress
 	// must allow it or the spawn silently fails closed. Every member gets it (cheap, single port) — a
@@ -217,6 +216,10 @@ type AgentRegistryReconciler struct {
 
 	client.Client
 	Scheme *runtime.Scheme
+
+	// PlatformNamespace is the namespace the platform is installed into, which members' egress policy
+	// admits. Empty means DefaultPlatformNamespace.
+	PlatformNamespace string
 }
 
 // RBAC — STANDALONE marker block. Markers inside a type's doc comment are
@@ -473,7 +476,7 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 					// through the pod-authed :8080 proxy now.
 					To: []networkingv1.NetworkPolicyPeer{
 						{NamespaceSelector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{namespaceNameLabel: agentEngineSystemNamespace},
+							MatchLabels: map[string]string{namespaceNameLabel: newPlatformServices(r.PlatformNamespace).namespace},
 						}},
 					},
 					Ports: []networkingv1.NetworkPolicyPort{

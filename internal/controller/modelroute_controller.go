@@ -67,6 +67,15 @@ const (
 //   - Status updates use optimistic locking; transient conflicts are non-fatal.
 type ModelRouteReconciler struct {
 	client.Client
+
+	// PlatformNamespace is the namespace the platform is installed into, where the gateway runs and
+	// provider Secrets are mirrored. Empty means DefaultPlatformNamespace.
+	PlatformNamespace string
+}
+
+// gatewayNamespace is where the gateway's ConfigMap, Deployment and Secret mirrors live.
+func (r *ModelRouteReconciler) gatewayNamespace() string {
+	return newPlatformServices(r.PlatformNamespace).namespace
 }
 
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=modelroutes,verbs=get;list;watch;create;update;patch;delete
@@ -75,8 +84,8 @@ type ModelRouteReconciler struct {
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=secretbindings,verbs=get;list;watch
 // SEC-3: cluster-wide READ (provider-key Secrets live in arbitrary tenant namespaces —
 // unavoidable, same posture as cert-manager/ESO) but the WRITES (the gateway-Secret mirror,
-// syncGatewaySecrets) only ever land in ctxmesh, so scope create/update/delete
-// to a namespaced Role there — a compromised manager can't write Secrets cluster-wide.
+// syncGatewaySecrets) only ever land in the platform namespace, so scope create/update/delete
+// to a namespaced Role there (ctxmesh below; the chart renders it into its install namespace) — a compromised manager can't write Secrets cluster-wide.
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=secrets,namespace=ctxmesh,verbs=create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch
@@ -168,8 +177,8 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 			secretRVs[secretKey] = secret.ResourceVersion
 			// Mirror the resolved Secret into the gateway namespace unless it already
 			// lives there — otherwise the gateway pod's secretKeyRef can't mount it.
-			if mr.Namespace != gateway.GatewayNamespace {
-				mirrors[gateway.MirrorSecretName(mr.Namespace, sb.Spec.SecretRef.Name)] = gatewayMirror{
+			if mr.Namespace != r.gatewayNamespace() {
+				mirrors[gateway.MirrorSecretName(r.gatewayNamespace(), mr.Namespace, sb.Spec.SecretRef.Name)] = gatewayMirror{
 					source: secretKey, secret: secret,
 				}
 			}
@@ -195,13 +204,13 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	renderResult := gateway.Render(mrList.Items, bindings, secretRVs, otel)
+	renderResult := gateway.Render(r.gatewayNamespace(), mrList.Items, bindings, secretRVs, otel)
 
 	// ── 4. CreateOrUpdate gateway ConfigMap ───────────────────────────────────
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      gateway.GatewayConfigMapName,
-			Namespace: gateway.GatewayNamespace,
+			Namespace: r.gatewayNamespace(),
 		},
 	}
 	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, cm, func() error {
@@ -350,7 +359,7 @@ const (
 // export was on; the caller deletes it once the Deployment no longer references it, so a
 // credential does not outlive the Secret it came from.
 func (r *ModelRouteReconciler) resolveOTelConfig(ctx context.Context) (gateway.OTelConfig, bool, error) {
-	derivedKey := client.ObjectKey{Namespace: gateway.GatewayNamespace, Name: gatewayOTelHeadersSecret}
+	derivedKey := client.ObjectKey{Namespace: r.gatewayNamespace(), Name: gatewayOTelHeadersSecret}
 	var existing corev1.Secret
 	derivedExists := false
 	switch err := r.Get(ctx, derivedKey, &existing); {
@@ -367,7 +376,7 @@ func (r *ModelRouteReconciler) resolveOTelConfig(ctx context.Context) (gateway.O
 
 	var sec corev1.Secret
 	if err := r.Get(ctx, client.ObjectKey{
-		Namespace: gateway.GatewayNamespace, Name: telemetry.LangfuseSecretName,
+		Namespace: r.gatewayNamespace(), Name: telemetry.LangfuseSecretName,
 	}, &sec); err != nil {
 		if apierrors.IsNotFound(err) {
 			return gateway.OTelConfig{}, derivedExists, nil
@@ -378,7 +387,7 @@ func (r *ModelRouteReconciler) resolveOTelConfig(ctx context.Context) (gateway.O
 	}
 	if missing := telemetry.MissingLangfuseKeys(sec.Data); len(missing) > 0 {
 		logf.FromContext(ctx).Info("langfuse-otlp Secret is incomplete; gateway tracing stays off",
-			"namespace", gateway.GatewayNamespace, "missing", missing)
+			"namespace", r.gatewayNamespace(), "missing", missing)
 		return gateway.OTelConfig{}, derivedExists, nil
 	}
 
@@ -409,7 +418,7 @@ func (r *ModelRouteReconciler) resolveOTelConfig(ctx context.Context) (gateway.O
 // referencing it. It re-checks the label rather than trusting the earlier read.
 func (r *ModelRouteReconciler) deleteStaleOTelHeaders(ctx context.Context) error {
 	var sec corev1.Secret
-	if err := r.Get(ctx, client.ObjectKey{Namespace: gateway.GatewayNamespace, Name: gatewayOTelHeadersSecret}, &sec); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: r.gatewayNamespace(), Name: gatewayOTelHeadersSecret}, &sec); err != nil {
 		return client.IgnoreNotFound(err)
 	}
 	if sec.Labels[gatewayOTelRoleLabel] != gatewayOTelRoleValue {
@@ -446,7 +455,7 @@ func (r *ModelRouteReconciler) syncGatewaySecrets(ctx context.Context, mirrors m
 	for name, m := range mirrors {
 		referenced[name] = true
 		var cur corev1.Secret
-		err := r.Get(ctx, client.ObjectKey{Namespace: gateway.GatewayNamespace, Name: name}, &cur)
+		err := r.Get(ctx, client.ObjectKey{Namespace: r.gatewayNamespace(), Name: name}, &cur)
 		switch {
 		case err == nil && cur.Labels[gatewaySyncLabel] != gatewaySyncValue:
 			log.Info("gateway namespace already has an un-synced Secret of this name; its routes are excluded",
@@ -458,7 +467,7 @@ func (r *ModelRouteReconciler) syncGatewaySecrets(ctx context.Context, mirrors m
 		}
 		data := m.secret.Data
 		source := m.source
-		mirror := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gateway.GatewayNamespace}}
+		mirror := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: r.gatewayNamespace()}}
 		if _, err := ctrl.CreateOrUpdate(ctx, r.Client, mirror, func() error {
 			if mirror.Labels == nil {
 				mirror.Labels = map[string]string{}
@@ -479,7 +488,7 @@ func (r *ModelRouteReconciler) syncGatewaySecrets(ctx context.Context, mirrors m
 	// GC: remove synced mirrors no longer referenced by any route.
 	var existing corev1.SecretList
 	if err := r.List(ctx, &existing,
-		client.InNamespace(gateway.GatewayNamespace),
+		client.InNamespace(r.gatewayNamespace()),
 		client.MatchingLabels{gatewaySyncLabel: gatewaySyncValue}); err != nil {
 		return nil, fmt.Errorf("listing synced gateway Secrets: %w", err)
 	}
@@ -502,7 +511,7 @@ func (r *ModelRouteReconciler) syncGatewaySecrets(ctx context.Context, mirrors m
 func (r *ModelRouteReconciler) syncGatewayDeployment(ctx context.Context, result gateway.Result) (gatewayState, error) {
 	var deploy appsv1.Deployment
 	if err := r.Get(ctx, client.ObjectKey{
-		Namespace: gateway.GatewayNamespace,
+		Namespace: r.gatewayNamespace(),
 		Name:      gateway.GatewayDeploymentName,
 	}, &deploy); err != nil {
 		if apierrors.IsNotFound(err) {

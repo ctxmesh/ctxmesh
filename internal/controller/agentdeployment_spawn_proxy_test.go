@@ -82,7 +82,7 @@ func TestReconcile_SupervisorSpawnGuard_ProxyVsDirect(t *testing.T) {
 	t.Run("no proxy → direct Valkey addr (pre-cutover)", func(t *testing.T) {
 		env := supervisorKsvcEnv(t, newReconciler(), "sup-direct", "sup-direct-reg", "sup-direct-team")
 		assert.Equal(t, "true", env["DELEGATE_ENABLED"])
-		assert.Equal(t, memoryDefaultAddr, env["TENANT_QUOTA_ADDR"], "proxy-less: the guard uses direct Valkey")
+		assert.Equal(t, defaultPlatform.statelayerAddr(), env["TENANT_QUOTA_ADDR"], "proxy-less: the guard uses direct Valkey")
 	})
 
 	// M119: a supervisor needs the capability public key so the spawn guard's verifier can recover THIS

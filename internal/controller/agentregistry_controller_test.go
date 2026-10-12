@@ -233,8 +233,8 @@ func TestRegistry_TwoMembers_NetworkPolicyAndStatus(t *testing.T) {
 		"Langfuse egress must allow the langfuse-web :3000 port")
 
 	// Platform backends: model gateway / object store / state-layer PROXY / token-service
-	// all live in ctxmesh.
-	assert.True(t, egressNS[agentEngineSystemNamespace],
+	// all live in the platform namespace, the default for a reconciler built without one.
+	assert.True(t, egressNS[DefaultPlatformNamespace],
 		"egress must allow the platform backends (gateway/object-store/proxy)")
 	assert.True(t, egressTCPPorts[modelGatewayPort], "egress must allow the model gateway :4000")
 	// M97 (audit P1-A): raw Valkey :6379 MUST NOT be in the registry-member egress — mirrors the M94 tenant-NP

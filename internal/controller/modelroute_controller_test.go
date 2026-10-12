@@ -38,8 +38,9 @@ import (
 )
 
 const (
-	// gwNS is the namespace where the gateway ConfigMap and Deployment live.
-	gwNS = gateway.GatewayNamespace // "ctxmesh"
+	// gwNS is the namespace where the gateway ConfigMap and Deployment live: the platform's, which a
+	// reconciler built without one takes as the default.
+	gwNS = DefaultPlatformNamespace
 )
 
 // newMRReconciler constructs a ModelRouteReconciler backed by the envtest API server.
@@ -348,7 +349,7 @@ func TestModelRoute_GatewaySecretSync(t *testing.T) {
 	// The provider Secret is mirrored into the gateway namespace with the same data.
 	var mirror corev1.Secret
 	require.NoError(t, k8sClient.Get(testCtx,
-		types.NamespacedName{Name: gateway.MirrorSecretName(srcNS, secretName), Namespace: gwNS}, &mirror),
+		types.NamespacedName{Name: gateway.MirrorSecretName(gwNS, srcNS, secretName), Namespace: gwNS}, &mirror),
 		"the provider Secret must be mirrored into the gateway namespace")
 	assert.Equal(t, apiKey, string(mirror.Data["api-key"]), "the mirror carries the same key data")
 	assert.Equal(t, gatewaySyncValue, mirror.Labels[gatewaySyncLabel], "the mirror is labelled for GC")
@@ -359,7 +360,7 @@ func TestModelRoute_GatewaySecretSync(t *testing.T) {
 	routeDeleted = true
 	reconcileMR(t, r, srcNS, routeName)
 
-	err := k8sClient.Get(testCtx, types.NamespacedName{Name: gateway.MirrorSecretName(srcNS, secretName), Namespace: gwNS}, &corev1.Secret{})
+	err := k8sClient.Get(testCtx, types.NamespacedName{Name: gateway.MirrorSecretName(gwNS, srcNS, secretName), Namespace: gwNS}, &corev1.Secret{})
 	assert.True(t, apierrors.IsNotFound(err), "the mirror must be GC'd when no route references it")
 }
 

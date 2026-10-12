@@ -1046,8 +1046,8 @@ spec:
                       addr:
                         description: |-
                           addr is the host:port of the Valkey backend.
-                          If omitted the controller defaults to
-                          {{ .Values.statelayer.externalAddr | default (printf "ctxmesh-statelayer.%s.svc:6379" .Values.namespace) }}.
+                          If omitted the controller defaults to the platform's state layer,
+                          ctxmesh-statelayer.<platform namespace>.svc:6379.
                         maxLength: 256
                         type: string
                     type: object
