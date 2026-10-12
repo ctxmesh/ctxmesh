@@ -226,6 +226,10 @@ func TestCapabilitiesBatchesTheMatrix(t *testing.T) {
 			want[probe{res, verb, "prod", agentsAPIGroup}] = true
 		}
 	}
+	// The read-gated resources (the Approvals and Alerts nav gates) are asked about list only.
+	for _, res := range readGatedResources {
+		want[probe{res, verbList, "prod", agentsAPIGroup}] = true
+	}
 	want[probe{"pods", "get", "prod", ""}] = true // the logs subresource probe (core group)
 	// The core-group Secret verbs are DERIVED from the flow registry, not hardcoded: connect
 	// needs create, and rotate needs update because upsertObject falls back to Update when the
@@ -251,7 +255,8 @@ func TestCapabilitiesBatchesTheMatrix(t *testing.T) {
 	var body CapabilitiesResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, "prod", body.Namespace)
-	require.Len(t, body.Allowed, len(goldenResources)+3) // golden kinds + "logs" + "secrets" + "tenants"
+	// golden kinds + read-gated kinds + "logs" + "secrets" + "tenants"
+	require.Len(t, body.Allowed, len(goldenResources)+len(readGatedResources)+3)
 	for _, res := range goldenResources {
 		require.Contains(t, body.Allowed, res)
 		for _, verb := range goldenVerbs {
@@ -265,6 +270,42 @@ func TestCapabilitiesBatchesTheMatrix(t *testing.T) {
 	require.Contains(t, body.Allowed, resSecrets)
 	assert.True(t, body.Allowed[resSecrets][verbCreate], "the secrets capability should reflect the core-group SSAR")
 	assert.True(t, body.Allowed[resourceTenants][verbList], "the tenants capability should reflect the cluster-scoped SSAR")
+	for _, res := range readGatedResources {
+		assert.Equal(t, map[string]bool{verbList: true}, body.Allowed[res], "%s is probed for list alone", res)
+	}
+}
+
+// TestCapabilitiesReadGatedResourcesTrackTheCaller proves the Approvals and Alerts gates hide
+// for a caller who cannot list workflows or alertpolicies: the cell is a definite false, which
+// the console reads as a deny, and not a missing cell, which it reads as allowed.
+func TestCapabilitiesReadGatedResourcesTrackTheCaller(t *testing.T) {
+	for _, denied := range readGatedResources {
+		t.Run(denied, func(t *testing.T) {
+			c := fake.NewClientBuilder().
+				WithScheme(testScheme(t)).
+				WithInterceptorFuncs(ssarInterceptor(func(resource, _, _ string) bool {
+					return resource != denied
+				})).
+				Build()
+			s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/api/capabilities?namespace=prod", nil)
+			req.Header.Set("Authorization", "Bearer t")
+			s.Handler().ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			var body CapabilitiesResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			require.Contains(t, body.Allowed[denied], verbList, "a missing cell reads as allowed in the console")
+			assert.False(t, body.Allowed[denied][verbList])
+			for _, other := range readGatedResources {
+				if other != denied {
+					assert.True(t, body.Allowed[other][verbList], "%s must not follow %s's answer", other, denied)
+				}
+			}
+		})
+	}
 }
 
 // TestCapabilitiesProbesLogsGate proves the synthetic `logs` capability tracks the caller's

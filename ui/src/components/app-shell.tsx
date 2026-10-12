@@ -25,6 +25,7 @@ import { useDevMode } from "@/lib/dev-mode";
 import {
   buildCrumbs,
   NAV_SECTIONS,
+  navCountGate,
   type NavCountTone,
   type NavItem,
 } from "@/lib/nav";
@@ -444,7 +445,8 @@ function useNavCounts(): { counts: NavCounts; refresh: () => void } {
   const devMode = useDevMode();
   const [counts, setCounts] = React.useState<NavCounts>({});
   const [nonce, setNonce] = React.useState(0);
-  const canApprovals = can("workflows", "list");
+  const approvalsGate = navCountGate("approvals");
+  const canApprovals = !approvalsGate || can(approvalsGate.resource, approvalsGate.verb);
 
   React.useEffect(() => {
     // In dev mode (`ctxmesh dev --ui`, ADR 0021) these are cluster surfaces that

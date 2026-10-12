@@ -22,10 +22,6 @@ import (
 // The fix is not a longer conjunction in the UI. It is moving the question to the only party
 // that knows the answer: the handler that performs the writes. The UI asks "may I run this
 // flow?" and never enumerates resources again, so the two cannot drift.
-//
-// The same drift already existed elsewhere and had gone unnoticed: goldenResources omits
-// `workflows` and `alertpolicies` while nav gated on them, and an unprobed cell reads as
-// optimistic-true — so those gates never gated anything at all.
 
 // flowNeed is one resource the flow writes, and every verb it may need on it.
 type flowNeed struct {

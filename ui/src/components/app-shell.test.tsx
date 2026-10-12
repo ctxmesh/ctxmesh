@@ -4,7 +4,8 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { AppShell } from "@/components/app-shell";
 import { ToastProvider } from "@/components/kit";
-import { buildCrumbs } from "@/lib/nav";
+import { buildCrumbs, NAV_ITEMS } from "@/lib/nav";
+import census from "@/test/contract/capabilities.json";
 import { THEME_STORAGE_KEY } from "@/lib/theme";
 
 // The console FRAME (M151 §4.2). These tests pin, in order:
@@ -221,6 +222,44 @@ describe("AppShell — the approved IA", () => {
     expect(within(picker).queryByText("prod")).not.toBeNull();
     expect(within(picker).queryByText("All workspaces")).not.toBeNull();
   });
+});
+
+// Every gated destination, one at a time: a caller denied exactly that cell loses exactly the
+// items gated on it. The allow map is the BFF's own census (TestCapabilityCensus), so each cell
+// here is one the probe really answers — a gate on an unprobed cell could never be denied.
+function censusAllowing(deny: { resource: string; verb: string }) {
+  const allowed: Record<string, Record<string, boolean>> = {};
+  for (const [resource, verbs] of Object.entries(census as Record<string, string[]>)) {
+    allowed[resource] = Object.fromEntries(
+      verbs.map((verb) => [verb, !(resource === deny.resource && verb === deny.verb)]),
+    );
+  }
+  return allowed;
+}
+
+const GATED = NAV_ITEMS.filter((i) => i.requiresCapability);
+
+describe("AppShell — every capability gate hides its destination", () => {
+  it.each(GATED.map((i) => [i.id, i] as const))(
+    "%s hides for a caller denied its cell, and nothing else does",
+    async (_id, item) => {
+      const gate = item.requiresCapability!;
+      installFetch({
+        ok: true,
+        namespaces: [{ name: "team-a" }],
+        body: { namespace: "team-a", allowed: censusAllowing(gate) },
+      });
+      renderShell();
+      const nav = await screen.findByRole("navigation", { name: "Sections" });
+      await waitFor(() => expect(nav.querySelector(`a[href="${item.route}"]`)).toBeNull());
+      for (const other of GATED) {
+        const same =
+          other.requiresCapability!.resource === gate.resource &&
+          other.requiresCapability!.verb === gate.verb;
+        expect(nav.querySelector(`a[href="${other.route}"]`) === null, other.id).toBe(same);
+      }
+    },
+  );
 });
 
 // The fit contract. This is the whole reason the frame was rebuilt, so it is

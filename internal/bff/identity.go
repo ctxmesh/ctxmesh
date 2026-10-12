@@ -116,7 +116,31 @@ var (
 		resKnowledgeBases,
 	}
 	goldenVerbs = []string{verbGet, verbList, verbCreate, verbUpdate, "delete"}
+
+	// readGatedResources are agents-group resources the console gates only on reading, so each
+	// is probed with list alone: the Approvals queue and its nav count (list workflows, the
+	// resource GET /api/approvals authorizes against) and the Alerts feed (list alertpolicies,
+	// GET /api/alerts). Left unprobed, their cells read as allowed and the gates hid nothing.
+	readGatedResources = []string{resourceWorkflows, resourceAlerts}
 )
+
+// probeCell is one agents-group (resource, verb) question the capability probe asks.
+type probeCell struct{ resource, verb string }
+
+// agentsGroupProbes is every agents-group cell the capability probe asks about: the golden
+// cross product, and list on each read-gated resource.
+func agentsGroupProbes() []probeCell {
+	cells := make([]probeCell, 0, len(goldenResources)*len(goldenVerbs)+len(readGatedResources))
+	for _, res := range goldenResources {
+		for _, verb := range goldenVerbs {
+			cells = append(cells, probeCell{res, verb})
+		}
+	}
+	for _, res := range readGatedResources {
+		cells = append(cells, probeCell{res, verbList})
+	}
+	return cells
+}
 
 // handleWhoAmI serves GET /api/whoami — the caller's identity (username +
 // groups) as the API server reports it. It issues a SelfSubjectReview
@@ -191,19 +215,21 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// probeCapabilities runs one SelfSubjectAccessReview per golden resource × verb
+// probeCapabilities runs one SelfSubjectAccessReview per agents-group probe cell
 // against the caller-scoped client and folds them into resource → verb →
 // allowed. The SSARs run concurrently (each is an independent read-only probe);
 // the first true API error (not an allowed/denied answer) is returned so the
 // handler can surface it honestly. The result map is fully populated for every
-// resource × verb (an errored request never yields a partial matrix).
+// cell (an errored request never yields a partial matrix).
 func probeCapabilities(ctx context.Context, caller client.Client, namespace string) (map[string]map[string]bool, error) {
-	// Pre-size and pre-seed the result so concurrent writers only ever touch
-	// their own (resource, verb) cell — no map-growth race, no shared verb map
-	// written by two goroutines.
-	allowed := make(map[string]map[string]bool, len(goldenResources)+1)
-	for _, res := range goldenResources {
-		allowed[res] = make(map[string]bool, len(goldenVerbs))
+	cells := agentsGroupProbes()
+	// Pre-seed every resource's verb map before the fan-out, so no goroutine
+	// ever grows the outer map.
+	allowed := make(map[string]map[string]bool, len(goldenResources)+len(readGatedResources)+3)
+	for _, c := range cells {
+		if allowed[c.resource] == nil {
+			allowed[c.resource] = make(map[string]bool, len(goldenVerbs))
+		}
 	}
 	// The synthetic `logs` capability is a SINGLE `get pods/log` probe (core group + subresource),
 	// distinct from the agents-group golden cross-product — seed its own cell.
@@ -217,23 +243,21 @@ func probeCapabilities(ctx context.Context, caller client.Client, namespace stri
 		mu       sync.Mutex
 		firstErr error
 	)
-	for _, res := range goldenResources {
-		for _, verb := range goldenVerbs {
-			wg.Add(1)
-			go func(res, verb string) {
-				defer wg.Done()
-				ok, err := reviewAccess(ctx, caller, namespace, res, verb)
-				mu.Lock()
-				defer mu.Unlock()
-				if err != nil {
-					if firstErr == nil {
-						firstErr = err
-					}
-					return
+	for _, c := range cells {
+		wg.Add(1)
+		go func(res, verb string) {
+			defer wg.Done()
+			ok, err := reviewAccess(ctx, caller, namespace, res, verb)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
 				}
-				allowed[res][verb] = ok
-			}(res, verb)
-		}
+				return
+			}
+			allowed[res][verb] = ok
+		}(c.resource, c.verb)
 	}
 	wg.Wait()
 

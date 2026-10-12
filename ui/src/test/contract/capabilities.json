@@ -1,0 +1,96 @@
+{
+  "agentdeployments": [
+    "create",
+    "delete",
+    "get",
+    "list",
+    "update"
+  ],
+  "agentregistries": [
+    "create",
+    "delete",
+    "get",
+    "list",
+    "update"
+  ],
+  "agentscalingpolicies": [
+    "create",
+    "delete",
+    "get",
+    "list",
+    "update"
+  ],
+  "alertpolicies": [
+    "list"
+  ],
+  "auditlogs": [
+    "create",
+    "delete",
+    "get",
+    "list",
+    "update"
+  ],
+  "evalsuites": [
+    "create",
+    "delete",
+    "get",
+    "list",
+    "update"
+  ],
+  "knowledgebases": [
+    "create",
+    "delete",
+    "get",
+    "list",
+    "update"
+  ],
+  "logs": [
+    "get"
+  ],
+  "mcptoolbindings": [
+    "create",
+    "delete",
+    "get",
+    "list",
+    "update"
+  ],
+  "modelroutes": [
+    "create",
+    "delete",
+    "get",
+    "list",
+    "update"
+  ],
+  "promptversions": [
+    "create",
+    "delete",
+    "get",
+    "list",
+    "update"
+  ],
+  "secretbindings": [
+    "create",
+    "delete",
+    "get",
+    "list",
+    "update"
+  ],
+  "secrets": [
+    "create",
+    "update"
+  ],
+  "tenants": [
+    "create",
+    "list"
+  ],
+  "toolregistries": [
+    "create",
+    "delete",
+    "get",
+    "list",
+    "update"
+  ],
+  "workflows": [
+    "list"
+  ]
+}

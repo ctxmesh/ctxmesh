@@ -64,6 +64,14 @@ not delivering a hop whose sender has left the registry. A producer publishing s
 registry's Knative Broker must attach its own attestation, fetched from
 `POST /api/internal/amp/attestation` with the sending agent's pod token.
 
+**Fixed: the Approvals and Alerts nav entries showed to people who could not open them.** Their
+gates asked about `list workflows` and `list alertpolicies`, which `/api/capabilities` never probed,
+and the console reads a permission nobody asked about as allowed. Both are now probed, for `list`
+only, so `/api/capabilities` reports `workflows` and `alertpolicies`; the Approvals count is no
+longer polled for someone who cannot see the queue. A console test now fails when a nav gate names a
+permission the BFF does not probe, checked against a census the BFF's own test writes from the probe
+it runs.
+
 **Removed: the console's design gallery.** `ui/src/design` held the M13 wireframes, served at
 `/design` only by the dev server or a `VITE_DESIGN_GALLERY=1` build. Nothing the console ships used
 them, and every screen they drew has since been built. `VITE_DESIGN_GALLERY` no longer does

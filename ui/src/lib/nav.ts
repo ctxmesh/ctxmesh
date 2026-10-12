@@ -33,9 +33,11 @@ import type { LucideIcon } from "lucide-react";
 // (ui-foundation §6 re-housing). The shell's sidebar, its drawer, the command
 // palette, the breadcrumbs and Home's first-run checklist all read it.
 //
-// The golden CRD resources the console probes capabilities for — the plural
-// names the BFF's SelfSubjectAccessReview uses (internal/bff/identity.go). A nav
-// item or action gates on `capabilities.allowed[resource][verb]`.
+// The resources GET /api/capabilities answers for — the plural names the BFF's
+// SelfSubjectAccessReview uses (internal/bff/identity.go). A nav item or action
+// gates on `capabilities.allowed[resource][verb]`. A cell the BFF does not probe
+// reads as allowed, so a gate on it hides nothing: nav-gates.test.ts fails on one,
+// against the census the BFF's own test writes (ui/src/test/contract/capabilities.json).
 export const RES_AGENTS = "agentdeployments";
 export const RES_ROUTES = "modelroutes";
 export const RES_SECRETS = "secretbindings";
@@ -51,11 +53,12 @@ export const RES_TENANTS = "tenants";
 // resource: only the operator persona's ClusterRole grants `list auditlogs`, so the
 // nav item hides for developer/viewer chrome (display-only; the API still enforces).
 export const RES_AUDITLOGS = "auditlogs";
-// RES_GUARDRAIL is the plural resource name for GuardrailPolicies (m66.10, ADR 0059).
-export const RES_GUARDRAIL = "guardrailpolicies";
-// RES_ALERTPOLICIES gates the Alerts feed (M70, ADR 0063 D2). The caller-scoped SSAR
-// authorizes against `list alertpolicies` — the same resource the CRD path enforced.
+// RES_ALERTPOLICIES gates the Alerts feed (M70, ADR 0063 D2): GET /api/alerts
+// authorizes against `list alertpolicies`, and the BFF probes list alone.
 export const RES_ALERTPOLICIES = "alertpolicies";
+// RES_WORKFLOWS gates the Approvals queue and its count: GET /api/approvals
+// authorizes against `list workflows`, and the BFF probes list alone.
+export const RES_WORKFLOWS = "workflows";
 // RES_KNOWLEDGEBASES gates the Knowledge Bases nav item (M99 C2): a persona that can't
 // `list knowledgebases` (e.g. developer) must not see a nav item that then 403s. The BFF
 // probes it in the golden set; display-only, the API still enforces.
@@ -266,13 +269,13 @@ export const NAV_SECTIONS: NavSection[] = [
     items: [
       {
         // Approvals (V5/V15) — the namespace-scoped queue of runs paused on
-        // plan_approval OR a mid-run approval step. Gated on `list workflows`.
-        // Its count is the console's "someone is waiting on you" signal.
+        // plan_approval OR a mid-run approval step. Gated on `list workflows`,
+        // and so is its count, the console's "someone is waiting on you" signal.
         id: "approvals",
         label: "Approvals",
         icon: CheckSquare,
         route: "/approvals",
-        requiresCapability: { resource: "workflows", verb: "list" },
+        requiresCapability: { resource: RES_WORKFLOWS, verb: "list" },
         count: { source: "approvals", tone: "waiting" },
       },
       {
@@ -351,9 +354,8 @@ export const NAV_SECTIONS: NavSection[] = [
         route: "/runs",
       },
       {
-        // Alerts (M70, ADR 0063 D2) — fired AlertPolicy conditions. Gated on
-        // `list alertpolicies` so a caller without that RBAC sees an honest 403
-        // rather than an empty list.
+        // Alerts (M70, ADR 0063 D2) — fired AlertPolicy conditions. Hidden from a
+        // caller who cannot list alertpolicies, whom the feed would refuse.
         id: "alerts",
         label: "Alerts",
         icon: Bell,
@@ -427,6 +429,12 @@ export const NAV_SECTIONS: NavSection[] = [
 
 // NAV_ITEMS is the flat list (every section's items) — handy for route/lookup.
 export const NAV_ITEMS: NavItem[] = NAV_SECTIONS.flatMap((s) => s.items);
+
+// navCountGate is the capability a live count is fetched under: the gate of the item
+// that shows it, so a caller who cannot see the item never polls its backend.
+export function navCountGate(source: NavCountSource): NavItem["requiresCapability"] {
+  return NAV_ITEMS.find((i) => i.count?.source === source)?.requiresCapability;
+}
 
 // navRoute resolves a nav item's router path by id — the single lookup so any
 // route the console references stays anchored to the IA source of truth above. It
