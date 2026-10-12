@@ -247,6 +247,9 @@ func buildResolver(log logr.Logger, getenv func(string) string) (credresolve.Cre
 	if err != nil {
 		return nil, err
 	}
+	if httpClient, err = withTokenServiceCredential(httpClient, getenv); err != nil {
+		return nil, err
+	}
 	log.Info("egress-sidecar resolving credentials through the token service", "url", tokenServiceURL)
 	return credplane.NewClient(tokenServiceURL, httpClient), nil
 }

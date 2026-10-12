@@ -48,9 +48,16 @@ func TestBuildResolverRequiresTheTokenService(t *testing.T) {
 	}
 
 	env := map[string]string{"TOKEN_SERVICE_URL": "http://token-service.ctxmesh.svc:8443"}
+	_, err = buildResolver(logr.Discard(), func(k string) string { return env[k] })
+	if err == nil || !strings.Contains(err.Error(), envTokenServiceTokenPath) {
+		t.Fatalf("no %s: the token service refuses every call without it, want a startup error naming it, got %v",
+			envTokenServiceTokenPath, err)
+	}
+
+	env[envTokenServiceTokenPath] = "/var/run/secrets/ctxmesh-token-service/token"
 	r, err := buildResolver(logr.Discard(), func(k string) string { return env[k] })
 	if err != nil {
-		t.Fatalf("with TOKEN_SERVICE_URL: %v", err)
+		t.Fatalf("with TOKEN_SERVICE_URL and %s: %v", envTokenServiceTokenPath, err)
 	}
 	if _, ok := r.(*credplane.Client); !ok {
 		t.Fatalf("resolver is %T, want the token-service client", r)
