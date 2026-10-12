@@ -64,6 +64,35 @@ not delivering a hop whose sender has left the registry. A producer publishing s
 registry's Knative Broker must attach its own attestation, fetched from
 `POST /api/internal/amp/attestation` with the sending agent's pod token.
 
+**Changed: an agent's launcher serves its tools; the tool-discovery sidecar is gone.** A tool-bound
+agent's pod has one container fewer. The agent container mounts its tool manifest at
+`/etc/agent/tools/tools.json` (named by `TOOLS_JSON_PATH`) and the launcher serves it on
+`localhost:2999` (`GET /tools`, `GET /events`) as the sidecar did. A binding change reaches a running
+agent when the kubelet projects the updated ConfigMap, usually within a minute, instead of through an
+HTTP push from the controller to every pod; the controller no longer reads pods. This is the same path
+the egress sidecar's route table already took, so a newly bound remote tool now appears in the
+manifest when its route does, not up to a minute before it. An agent image built on an older launcher
+still finds its tools: the Python and TypeScript SDKs read `TOOLS_JSON_PATH` when `:2999` does not
+answer. Removed: the `agent-discovery` image, the controller's `DISCOVERY_IMAGE` and the chart value
+`controllerManager.injectedImages.discovery`. `ctxmesh dev` runs no discovery container either.
+
+**Changed: the egress sidecar resolves tool credentials only through the token service.** Its
+embedded Kubernetes backend, used only when `TOKEN_SERVICE_URL` was unset, which no install path
+does and which could not have authenticated if one did, is removed, and the sidecar image carries no
+Kubernetes client. The sidecar refuses to start without `TOKEN_SERVICE_URL`, and the controller
+refuses to deploy a tool-bound agent on an install without one, naming the setting, rather than
+deploy a pod whose sidecar crash-loops. The controller no longer reads `MCP_CREDENTIAL_NAMESPACE`.
+
+**Changed: every sidecar the platform injects has CPU and memory limits.** The egress sidecar is
+limited to 500m and 256Mi, with `GOMEMLIMIT` below that, sized from a load measurement of the
+sidecar; the trace collector gains a 250m CPU limit beside its 256Mi. Every agent takes one new
+revision on upgrade so the limits reach running pods.
+
+**Changed: `scaling.concurrency` above 1 requires `resources.cpu` and `resources.memory`.** One
+replica then runs several agent runs at once, and the scheduler places it only by what it declares,
+so the API server refuses such a spec without both. `scaling.concurrency` is new in this release, so
+no existing object is affected.
+
 **Changed: before its first agent, a workspace's sidebar shows Home, Agents and Providers.** With no
 agent the other pages have nothing to show: no runs, no cost, nothing waiting for approval, nothing
 to stop. The sidebar now lists only the destinations Home's first-run checklist walks through, says
