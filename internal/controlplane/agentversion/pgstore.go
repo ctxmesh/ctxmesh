@@ -190,7 +190,11 @@ func (s *pgStore) DeleteAgent(ctx context.Context, namespace, agent string) erro
 	return nil
 }
 
-func (s *pgStore) ImportOnce(ctx context.Context, load func(context.Context) ([]Version, int, error)) (ImportResult, error) {
+// importBatch is how many emitted versions the import buffers before writing them to its staging
+// table: it bounds the import's memory, not its size.
+const importBatch = 200
+
+func (s *pgStore) ImportOnce(ctx context.Context, load ImportLoader) (ImportResult, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return ImportResult{}, fmt.Errorf("agent version import: begin: %w", err)
@@ -210,24 +214,67 @@ func (s *pgStore) ImportOnce(ctx context.Context, load func(context.Context) ([]
 		return ImportResult{}, nil
 	}
 
-	versions, skipped, err := load(ctx)
+	// Versions are staged as they arrive and ordered by the database, so an import of any size
+	// holds at most one batch in memory.
+	if _, err := tx.ExecContext(ctx, `
+		CREATE TEMP TABLE agent_version_import_staging (
+		    namespace  text        NOT NULL,
+		    agent      text        NOT NULL,
+		    agent_uid  text        NOT NULL,
+		    version    text        NOT NULL,
+		    snapshot   text        NOT NULL,
+		    created_at timestamptz
+		) ON COMMIT DROP`); err != nil {
+		return ImportResult{}, fmt.Errorf("agent version import: staging table: %w", err)
+	}
+	var batch stagingBatch
+	flush := func() error {
+		if batch.len() == 0 {
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO agent_version_import_staging (namespace, agent, agent_uid, version, snapshot, created_at)
+			SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::timestamptz[])`,
+			batch.ns, batch.agent, batch.uid, batch.name, batch.snapshot, batch.createdAt); err != nil {
+			return fmt.Errorf("agent version import: stage: %w", err)
+		}
+		batch = stagingBatch{}
+		return nil
+	}
+	skipped, err := load(ctx, func(v Version) error {
+		if err := validate(v); err != nil {
+			return err
+		}
+		if err := batch.add(v); err != nil {
+			return err
+		}
+		if batch.len() >= importBatch {
+			return flush()
+		}
+		return nil
+	})
 	if err != nil {
 		return ImportResult{}, err
 	}
-	imported := 0
-	for _, v := range versions {
-		if err := validate(v); err != nil {
-			return ImportResult{}, err
-		}
-		v.Source = SourceImport
-		inserted, err := record(ctx, tx, v)
-		if err != nil {
-			return ImportResult{}, err
-		}
-		if inserted {
-			imported++
-		}
+	if err := flush(); err != nil {
+		return ImportResult{}, err
 	}
+
+	// Identity values are assigned as the ordered rows are inserted, so seq follows creation order.
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO agent_versions (namespace, agent, agent_uid, version, snapshot, source, created_at)
+		SELECT namespace, agent, agent_uid, version, snapshot::jsonb, 'import', COALESCE(created_at, now())
+		FROM agent_version_import_staging
+		ORDER BY created_at, namespace, version
+		ON CONFLICT (namespace, agent_uid, version) DO NOTHING`)
+	if err != nil {
+		return ImportResult{}, fmt.Errorf("agent version import: insert: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return ImportResult{}, fmt.Errorf("agent version import: rows affected: %w", err)
+	}
+	imported := int(n)
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO agent_version_import (imported, skipped, completed_at) VALUES ($1, $2, $3)`,
 		imported, skipped, time.Now().UTC()); err != nil {
@@ -237,4 +284,31 @@ func (s *pgStore) ImportOnce(ctx context.Context, load func(context.Context) ([]
 		return ImportResult{}, fmt.Errorf("agent version import: commit: %w", err)
 	}
 	return ImportResult{Ran: true, Imported: imported, Skipped: skipped}, nil
+}
+
+// stagingBatch is a batch of imported versions as columns, for one unnest insert.
+type stagingBatch struct {
+	ns, agent, uid, name, snapshot []string
+	createdAt                      []*time.Time
+}
+
+func (b *stagingBatch) len() int { return len(b.name) }
+
+func (b *stagingBatch) add(v Version) error {
+	snap, err := json.Marshal(v.Snapshot)
+	if err != nil {
+		return fmt.Errorf("agent version import: marshal snapshot %s/%s: %w", v.Namespace, v.Name, err)
+	}
+	var at *time.Time
+	if !v.CreatedAt.IsZero() {
+		t := v.CreatedAt.UTC()
+		at = &t
+	}
+	b.ns = append(b.ns, v.Namespace)
+	b.agent = append(b.agent, v.Agent)
+	b.uid = append(b.uid, v.AgentUID)
+	b.name = append(b.name, v.Name)
+	b.snapshot = append(b.snapshot, string(snap))
+	b.createdAt = append(b.createdAt, at)
+	return nil
 }

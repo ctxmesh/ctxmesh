@@ -164,22 +164,32 @@ func (s *memStore) DeleteAgent(_ context.Context, namespace, agent string) error
 	return nil
 }
 
-func (s *memStore) ImportOnce(ctx context.Context, load func(context.Context) ([]Version, int, error)) (ImportResult, error) {
+func (s *memStore) ImportOnce(ctx context.Context, load ImportLoader) (ImportResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.imported != nil {
 		return ImportResult{}, nil
 	}
-	versions, skipped, err := load(ctx)
+	var versions []Version
+	skipped, err := load(ctx, func(v Version) error {
+		if err := validate(v); err != nil {
+			return err
+		}
+		versions = append(versions, v)
+		return nil
+	})
 	if err != nil {
 		return ImportResult{}, err
 	}
-	for _, v := range versions {
-		if err := validate(v); err != nil {
-			return ImportResult{}, err
+	slices.SortStableFunc(versions, func(a, b Version) int {
+		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
+			return c
 		}
-	}
-	// Validated first so a bad row leaves nothing written, as the Postgres transaction does.
+		if c := cmp.Compare(a.Namespace, b.Namespace); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Name, b.Name)
+	})
 	imported := 0
 	for _, v := range versions {
 		v.Source = SourceImport

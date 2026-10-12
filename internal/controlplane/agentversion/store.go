@@ -109,12 +109,18 @@ type Store interface {
 	// DeleteAgent deletes every row of the named agent, all incarnations.
 	DeleteAgent(ctx context.Context, namespace, agent string) error
 
-	// ImportOnce runs load and records what it returns, in order, as SourceImport, unless an
-	// import has already completed. It holds a lock across replicas while it runs, and the rows
-	// and the completion marker are written together: an error from load or from a write leaves
-	// no marker and no rows, so the next start retries.
-	ImportOnce(ctx context.Context, load func(context.Context) (versions []Version, skipped int, err error)) (ImportResult, error)
+	// ImportOnce runs load unless an import has already completed, and records every version load
+	// passes to emit as SourceImport, ordered by (CreatedAt, Namespace, Name) whatever order they
+	// were emitted in. Emitted versions are not held in the caller's memory: load can stream any
+	// number of them. It holds a lock across replicas while it runs, and the rows and the
+	// completion marker are written together: an error from load, emit or a write leaves no marker
+	// and no rows, so the next start retries.
+	ImportOnce(ctx context.Context, load ImportLoader) (ImportResult, error)
 }
+
+// ImportLoader produces the versions of a one-time import by calling emit for each, and returns how
+// many it skipped. An error from emit must be returned.
+type ImportLoader func(ctx context.Context, emit func(Version) error) (skipped int, err error)
 
 // validate checks the identity a caller supplies.
 func validate(v Version) error {

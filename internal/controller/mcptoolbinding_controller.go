@@ -187,7 +187,7 @@ func (r *MCPToolBindingReconciler) ensureOwnedByAgent(
 ) error {
 	for i := range binding.OwnerReferences {
 		o := &binding.OwnerReferences[i]
-		if o.Kind == "AgentDeployment" && o.Name == binding.Spec.AgentRef {
+		if o.Kind == kindAgentDeployment && o.Name == binding.Spec.AgentRef {
 			return nil // already owned by this agent
 		}
 	}

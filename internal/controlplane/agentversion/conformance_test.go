@@ -19,6 +19,7 @@ package agentversion
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -236,25 +237,33 @@ func runConformance(t *testing.T, newStore func(t *testing.T) Store) {
 		}
 	})
 
-	t.Run("the import runs once, in order, and records its source", func(t *testing.T) {
+	t.Run("the import runs once, ordered by creation, and records its source", func(t *testing.T) {
 		s := newStore(t)
 		calls := 0
-		load := func(context.Context) ([]Version, int, error) {
+		at := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+		load := func(_ context.Context, emit func(Version) error) (int, error) {
 			calls++
-			a, b := ver("imp-a", "img:a"), ver("imp-b", "img:b")
-			a.CreatedAt = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
-			b.CreatedAt = a.CreatedAt // a tie: the order given is the order kept
-			return []Version{a, b}, 1, nil
+			// Emitted newest first; a tie in time falls back to the namespace, then the name.
+			late, b, a := ver("imp-late", "img"), ver("imp-b", "img:b"), ver("imp-a", "img:a")
+			late.CreatedAt = at.Add(time.Hour)
+			b.CreatedAt, a.CreatedAt = at, at
+			for _, v := range []Version{late, b, a} {
+				if err := emit(v); err != nil {
+					return 0, err
+				}
+			}
+			return 1, nil
 		}
 		res, err := s.ImportOnce(ctx, load)
 		require.NoError(t, err)
-		assert.Equal(t, ImportResult{Ran: true, Imported: 2, Skipped: 1}, res)
-		assert.Equal(t, []string{"imp-b", "imp-a"}, names(t, s, ns, uid))
+		assert.Equal(t, ImportResult{Ran: true, Imported: 3, Skipped: 1}, res)
+		assert.Equal(t, []string{"imp-late", "imp-b", "imp-a"}, names(t, s, ns, uid))
 		got, ok, err := s.Get(ctx, ns, uid, "imp-a")
 		require.NoError(t, err)
 		require.True(t, ok)
 		assert.Equal(t, SourceImport, got.Source)
-		assert.True(t, got.CreatedAt.Equal(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)))
+		assert.Equal(t, "img:a", got.Snapshot.Image)
+		assert.True(t, got.CreatedAt.Equal(at))
 
 		res, err = s.ImportOnce(ctx, load)
 		require.NoError(t, err)
@@ -265,22 +274,56 @@ func runConformance(t *testing.T, newStore func(t *testing.T) Store) {
 	t.Run("a failed import writes nothing and runs again", func(t *testing.T) {
 		s := newStore(t)
 		boom := errors.New("api server unavailable")
-		_, err := s.ImportOnce(ctx, func(context.Context) ([]Version, int, error) { return nil, 0, boom })
+		_, err := s.ImportOnce(ctx, func(_ context.Context, emit func(Version) error) (int, error) {
+			if err := emit(ver("imp-a", "img")); err != nil {
+				return 0, err
+			}
+			return 0, boom
+		})
 		require.ErrorIs(t, err, boom)
+		assert.Empty(t, names(t, s, ns, uid), "versions emitted before the failure are not kept")
 
-		bad := ver("", "img")
-		_, err = s.ImportOnce(ctx, func(context.Context) ([]Version, int, error) {
-			return []Version{ver("imp-a", "img"), bad}, 0, nil
+		_, err = s.ImportOnce(ctx, func(_ context.Context, emit func(Version) error) (int, error) {
+			for _, v := range []Version{ver("imp-a", "img"), ver("", "img")} {
+				if err := emit(v); err != nil {
+					return 0, err
+				}
+			}
+			return 0, nil
 		})
 		require.ErrorIs(t, err, controlplane.ErrInvalid)
 		assert.Empty(t, names(t, s, ns, uid), "a partial import leaves no rows")
 
-		res, err := s.ImportOnce(ctx, func(context.Context) ([]Version, int, error) {
-			return []Version{ver("imp-a", "img")}, 0, nil
+		res, err := s.ImportOnce(ctx, func(_ context.Context, emit func(Version) error) (int, error) {
+			return 0, emit(ver("imp-a", "img"))
 		})
 		require.NoError(t, err)
 		assert.True(t, res.Ran, "the import is retried after a failure")
 		assert.Equal(t, []string{"imp-a"}, names(t, s, ns, uid))
+	})
+
+	t.Run("an import larger than one batch keeps every version in order", func(t *testing.T) {
+		s := newStore(t)
+		const n = 3*importBatch + 7
+		at := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+		res, err := s.ImportOnce(ctx, func(_ context.Context, emit func(Version) error) (int, error) {
+			// Emitted newest first, so storing in emission order would reverse the history.
+			for i := n - 1; i >= 0; i-- {
+				v := ver(fmt.Sprintf("v%04d", i), "img")
+				v.CreatedAt = at.Add(time.Duration(i) * time.Second)
+				if err := emit(v); err != nil {
+					return 0, err
+				}
+			}
+			return 0, nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, n, res.Imported)
+		got := names(t, s, ns, uid)
+		require.Len(t, got, n)
+		for i, name := range got {
+			require.Equal(t, fmt.Sprintf("v%04d", n-1-i), name, "position %d", i)
+		}
 	})
 
 	t.Run("two replicas starting together import once", func(t *testing.T) {
@@ -291,10 +334,10 @@ func runConformance(t *testing.T, newStore func(t *testing.T) Store) {
 		errs := make([]error, 2)
 		for i := range 2 {
 			wg.Go(func() {
-				results[i], errs[i] = s.ImportOnce(ctx, func(context.Context) ([]Version, int, error) {
+				results[i], errs[i] = s.ImportOnce(ctx, func(_ context.Context, emit func(Version) error) (int, error) {
 					calls.Add(1)
 					time.Sleep(50 * time.Millisecond) // hold the lock while the other replica arrives
-					return []Version{ver("imp-a", "img")}, 0, nil
+					return 0, emit(ver("imp-a", "img"))
 				})
 			})
 		}
@@ -307,12 +350,12 @@ func runConformance(t *testing.T, newStore func(t *testing.T) Store) {
 
 	t.Run("an import that finds nothing still completes", func(t *testing.T) {
 		s := newStore(t)
-		res, err := s.ImportOnce(ctx, func(context.Context) ([]Version, int, error) { return nil, 0, nil })
+		res, err := s.ImportOnce(ctx, func(context.Context, func(Version) error) (int, error) { return 0, nil })
 		require.NoError(t, err)
 		assert.Equal(t, ImportResult{Ran: true}, res)
-		res, err = s.ImportOnce(ctx, func(context.Context) ([]Version, int, error) {
+		res, err = s.ImportOnce(ctx, func(context.Context, func(Version) error) (int, error) {
 			t.Fatal("a completed import must not load again")
-			return nil, 0, nil
+			return 0, nil
 		})
 		require.NoError(t, err)
 		assert.False(t, res.Ran)
