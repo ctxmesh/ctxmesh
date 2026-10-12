@@ -1509,6 +1509,16 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		}
 	}
 
+	// The launcher's memory and knowledge proxies authenticate to the token service with this pod's
+	// agent-audience token (ADR 0154). The platform points them at it only for long-term memory or
+	// knowledge bases, so its address on this container is the condition.
+	mountAgentTokenServiceToken := envVarPresent(env, envTokenServiceURL)
+	if mountAgentTokenServiceToken {
+		env = append(env, corev1.EnvVar{
+			Name: envTokenServiceTokenPath, Value: tokenServiceAgentTokenMountPath + "/" + projectedTokenFile,
+		})
+	}
+
 	if err := r.syncModelRouteCondition(ctx, deploy); err != nil {
 		return podTemplate{}, err
 	}
@@ -1708,6 +1718,9 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			Name: bffPodTokenVolume, MountPath: bffPodTokenMountPath, ReadOnly: true,
 		})
 	}
+	if mountAgentTokenServiceToken {
+		userMounts = append(userMounts, agentTokenServiceTokenMount())
+	}
 	if injectPodToken {
 		// Mount the projected proxy token read-only (M53). The launcher runs in this
 		// container (baked into the agent image), so the token is co-resident with agent
@@ -1790,6 +1803,9 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	if mountBFFPodToken {
 		volumes = append(volumes, bffPodTokenVolumeSpec())
 	}
+	if mountAgentTokenServiceToken {
+		volumes = append(volumes, agentTokenServiceTokenVolume())
+	}
 	if injectPodToken {
 		// Projected serviceAccountToken bound to the proxy audience (M53, ADR 0050 Amд 3).
 		// A projected VOLUME (not valueFrom) — Knative admits it (verified on 1.22.1). The
@@ -1856,10 +1872,12 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 				deploy.Namespace, deploy.Name, len(egressRoutes))
 		}
 		agentIdentity := deploy.Namespace + "/" + deploy.Name
-		containers = append(containers, egressSidecarContainer(
+		sidecar := egressSidecarContainer(
 			r.OBOEgress, deploy.Namespace, agentIdentity, agentEgressBoundary(deploy, membership),
 			egressRoutesJSON(egressRoutes), recordCapable, objectStoreEnv(r.devObjectStore(), platform), toolPolicyMount, toolPolicyEnv,
-			routesMount, routesEnv))
+			routesMount, routesEnv)
+		volumes = append(volumes, withSidecarTokenServiceToken(&sidecar))
+		containers = append(containers, sidecar)
 	}
 
 	// Combined structural digest: "" when no binding/membership resolves (bare
@@ -2107,6 +2125,13 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		supersededDigests = append(supersededDigests, combinedDigest,
 			foldDigest(combinedDigest, ampAttestationFold(r.OBOEgress, !require)))
 		combinedDigest = foldDigest(combinedDigest, ampAttestationFold(r.OBOEgress, require))
+	}
+
+	// The token-service tokens (ADR 0154) are read by no digest either. The pod named without them is the
+	// same pod renamed, so an approval carries across the upgrade that adds them.
+	if fold := tokenServiceTokenFold(len(egressRoutes) > 0, mountAgentTokenServiceToken); fold != "" {
+		supersededDigests = append(supersededDigests, combinedDigest)
+		combinedDigest = foldDigest(combinedDigest, fold)
 	}
 
 	// The platform's addresses are read by no digest, so an install outside the default namespace moves

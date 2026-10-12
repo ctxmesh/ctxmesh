@@ -170,7 +170,8 @@ type KnowledgeBaseRef struct {
 	Name string `json:"name"`
 
 	// namespace is the namespace of the KnowledgeBase CR. When omitted, the AgentDeployment's
-	// own namespace is used (the most common case — same-namespace KBs need no namespace field).
+	// own namespace is used. An agent searches only knowledge bases in its own namespace, so a
+	// reference to another namespace is not searchable.
 	// +kubebuilder:validation:MaxLength=63
 	// +optional
 	Namespace string `json:"namespace,omitempty"`

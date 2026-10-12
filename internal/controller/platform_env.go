@@ -174,6 +174,7 @@ var platformEnv = []platformEnvVar{
 	{envStatelayerProxyURL, envPlatformWhenSet},
 	{envStatelayerTokenPath, envPlatformWhenSet},
 	{envTokenServiceURL, envPlatformWhenSet},
+	{envTokenServiceTokenPath, envPlatformWhenSet},
 	// spec.knowledgeBases: the roster the launcher admits searches against.
 	{envKnowledgeBaseEnabled, envPlatformWhenSet},
 	{envKnowledgeBases, envPlatformWhenSet},
