@@ -345,12 +345,11 @@ func sidecarPortEnv(t *testing.T, c corev1.Container) string {
 	return ""
 }
 
-// countInPodToolContainers counts the sidecar-mode TOOL containers ("tool-<bindingName>"), EXCLUDING
-// the discovery sidecar ("tool-discovery"), which also carries the "tool-" prefix.
+// countInPodToolContainers counts the sidecar-mode TOOL containers ("tool-<bindingName>").
 func countInPodToolContainers(containers []corev1.Container) int {
 	n := 0
 	for _, c := range containers {
-		if len(c.Name) > 5 && c.Name[:5] == "tool-" && c.Name != DiscoveryContainerName {
+		if len(c.Name) > 5 && c.Name[:5] == "tool-" {
 			n++
 		}
 	}

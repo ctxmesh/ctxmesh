@@ -2,7 +2,6 @@ import sys, yaml
 doc = yaml.safe_load(open(sys.argv[1])) or {}
 bad = []
 for key in ("controllerManager.injectedImages.collector",
-            "controllerManager.injectedImages.discovery",
             "controllerManager.oboEgress.sidecarImage",
             "bff.managedAgentImage"):
     cur = doc

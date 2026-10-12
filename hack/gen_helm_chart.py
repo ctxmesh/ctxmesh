@@ -373,23 +373,14 @@ OIDC_CLIENT_ID_ENV_HELM = (
 # OPS-4a — the controller-injected sidecar images + the OBO egress-sidecar config (ADR 0030) ->
 # Helm values. config/manager hardcodes each to its os.Getenv code default (empty image / off), so
 # the DEFAULT render == kustomize (no drift); the chart templates them from controllerManager.* so a
-# real install points the injected collector/discovery/egress images at its registry (they
-# ImagePullBackOff off dev.local — OPS-1) and enables OBO egress. MCP_CREDENTIAL_NAMESPACE is NOT
-# here: the manager shares the BFF's locked namespace via the existing bff.mcp.credentialNamespace
-# replace below (one namespace across the BFF + the controller's OBO injection, by construction).
+# real install points the injected collector/egress images at its registry (they
+# ImagePullBackOff off dev.local — OPS-1) and enables OBO egress.
 COLLECTOR_IMAGE_ENV_KUSTOMIZE = (
     '        - name: COLLECTOR_IMAGE\n' '          value: ""'
 )
 COLLECTOR_IMAGE_ENV_HELM = (
     "        - name: COLLECTOR_IMAGE\n"
     '          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.injectedImages.collector "ctx" $) | quote }}'
-)
-DISCOVERY_IMAGE_ENV_KUSTOMIZE = (
-    '        - name: DISCOVERY_IMAGE\n' '          value: ""'
-)
-DISCOVERY_IMAGE_ENV_HELM = (
-    "        - name: DISCOVERY_IMAGE\n"
-    '          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.injectedImages.discovery "ctx" $) | quote }}'
 )
 MCP_OBO_EGRESS_ENABLED_ENV_KUSTOMIZE = (
     '        - name: MCP_OBO_EGRESS_ENABLED\n' '          value: "false"'
@@ -826,10 +817,9 @@ def substitute(doc: str) -> str:
     doc = doc.replace(OIDC_CLIENT_ID_ENV_KUSTOMIZE, OIDC_CLIENT_ID_ENV_HELM)
     # OPS-4a — the controller's injected-image + OBO-egress env -> Helm values. All default
     # empty/false render == the config/manager literals (no drift); a real install points the
-    # injected collector/discovery/egress-sidecar images at its registry + enables OBO egress
+    # injected collector/egress-sidecar images at its registry + enables OBO egress
     # (ADR 0030). Manager-only literals, so these never collide with the BFF/token-service docs.
     doc = doc.replace(COLLECTOR_IMAGE_ENV_KUSTOMIZE, COLLECTOR_IMAGE_ENV_HELM)
-    doc = doc.replace(DISCOVERY_IMAGE_ENV_KUSTOMIZE, DISCOVERY_IMAGE_ENV_HELM)
     doc = doc.replace(MCP_OBO_EGRESS_ENABLED_ENV_KUSTOMIZE, MCP_OBO_EGRESS_ENABLED_ENV_HELM)
     doc = doc.replace(EGRESS_SIDECAR_IMAGE_ENV_KUSTOMIZE, EGRESS_SIDECAR_IMAGE_ENV_HELM)
     # MCP_CAPABILITY_PUBLIC_KEY is now a secretKeyRef in config/manager, copied verbatim (no replace).

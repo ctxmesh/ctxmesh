@@ -722,24 +722,17 @@ func TestReconcile_NotFound(t *testing.T) {
 	assert.Equal(t, ctrl.Result{}, result)
 }
 
-// TestSidecarImageOverride proves the OPS-1 override: COLLECTOR_IMAGE / DISCOVERY_IMAGE
-// (Reconciler fields) replace the dev.local default constants on the injected sidecars,
-// so agents are schedulable off a kind cluster. Empty ⇒ the project defaults.
+// TestSidecarImageOverride proves the OPS-1 override: COLLECTOR_IMAGE (a Reconciler field)
+// replaces the dev.local default constant on the injected collector, so agents are schedulable
+// off a kind cluster. Empty ⇒ the project default.
 func TestSidecarImageOverride(t *testing.T) {
 	def := &AgentDeploymentReconciler{}
 	assert.Equal(t, telemetry.CollectorImage, def.collectorImage(), "empty ⇒ collector default")
-	assert.Equal(t, DiscoveryImage, def.discoveryImage(), "empty ⇒ discovery default")
 
-	ov := &AgentDeploymentReconciler{
-		CollectorImage: "reg.example.com/collector:1.2",
-		DiscoveryImage: "reg.example.com/discovery:3.4",
-	}
+	ov := &AgentDeploymentReconciler{CollectorImage: "reg.example.com/collector:1.2"}
 	assert.Equal(t, "reg.example.com/collector:1.2", ov.collectorImage())
-	assert.Equal(t, "reg.example.com/discovery:3.4", ov.discoveryImage())
 	assert.Equal(t, "reg.example.com/collector:1.2",
 		telemetry.Container("cm", ov.collectorImage()).Image, "override flows to the collector sidecar")
-	assert.Equal(t, "reg.example.com/discovery:3.4",
-		discoverySidecarContainer(ov.discoveryImage()).Image, "override flows to the discovery sidecar")
 }
 
 // TestReconcile_RuntimeInjection verifies the M65.2 runtime env injection: when

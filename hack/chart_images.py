@@ -54,7 +54,6 @@ FIRST_PARTY_SEAMS = {
     "tokenService.image.repository": "token-service",
     "statelayerProxy.image.repository": "statelayer-proxy",
     "controllerManager.injectedImages.collector": "collector",
-    "controllerManager.injectedImages.discovery": "discovery",
     "controllerManager.oboEgress.sidecarImage": "egress-sidecar",
     "bff.managedAgentImage": "managed-agent",
 }

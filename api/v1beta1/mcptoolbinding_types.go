@@ -75,9 +75,9 @@ type MCPToolBindingStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// conditions reflect the binding's reconciliation state. Ready=True means
-	// the tool is registered, pin-matched, rendered into the agent's manifest,
-	// and pushed to the discovery sidecar. Failure reasons include
-	// UnregisteredTool and RegistryMismatch.
+	// the tool is registered, pin-matched and written to the agent's tool
+	// manifest, which the agent's launcher serves on localhost:2999. Failure
+	// reasons include UnregisteredTool and RegistryMismatch.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -94,8 +94,8 @@ type MCPToolBindingStatus struct {
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 
 // MCPToolBinding is the Schema for the mcptoolbindings API — it binds an MCP
-// tool server (sidecar or remote) to an agent and drives the discovery
-// sidecar's manifest (specs/mcp-tools.md).
+// tool server (sidecar or remote) to an agent and adds the tool to the agent's
+// tool manifest (specs/mcp-tools.md).
 type MCPToolBinding struct {
 	metav1.TypeMeta `json:",inline"`
 

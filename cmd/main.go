@@ -591,7 +591,6 @@ func main() {
 			ExcludeCIDRs: splitCommaList(os.Getenv("EGRESS_REDIRECT_EXCLUDE_CIDRS")),
 		},
 		CollectorImage: strings.TrimSpace(os.Getenv("COLLECTOR_IMAGE")),
-		DiscoveryImage: strings.TrimSpace(os.Getenv("DISCOVERY_IMAGE")),
 		// Dev data plane gate (OPS-2): whether to inject the DEV-ONLY object-store + Langfuse
 		// feedback creds into agent pods. From DEV_DATA_PLANE, which the chart templates from
 		// .Values.devDataPlane.enabled (true == the kustomize dev posture; profile=production sets

@@ -38,8 +38,10 @@ import (
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/skill"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/ctxmesh/internal/prompt"
 	"github.com/ctxmesh/ctxmesh/internal/telemetry"
+	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
 
 func TestWithSpecEnv(t *testing.T) {
@@ -84,12 +86,12 @@ func TestWithSpecEnv(t *testing.T) {
 }
 
 // envVarLiteralsOutsideAgentContainer are the variables the package sets only on other containers: the
-// egress sidecar, the discovery sidecar and in-pod tool containers, and the gateway Deployment. spec.env
-// never reaches those containers, so these need no class.
+// egress sidecar and in-pod tool containers, and the gateway Deployment. spec.env never reaches those
+// containers, so these need no class.
 var envVarLiteralsOutsideAgentContainer = []string{
 	envEgressAgent, envEgressListenAddr, envEgressRoutes, envEgressBoundary,
 	envEgressResponseHeaderTimeout, envEgressStreamIdleTimeout, envToolPolicyFile, envEgressRoutesFile,
-	"DISCOVERY_PORT", "TOOLS_JSON_PATH", "PORT",
+	"PORT",
 }
 
 // TestEveryPlatformVariableHasAClass is the census: every environment variable this package names in an
@@ -295,7 +297,20 @@ func (f platformEnvFixture) build(t *testing.T, env []corev1.EnvVar) (*AgentDepl
 				telemetry.LangfuseKeySecret:   []byte("sk"),
 			},
 		},
+		// A tool binding: the agent container mounts the tool manifest and is told where it is.
+		&agentsv1beta1.MCPToolBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "everything-search", Namespace: ns},
+			Spec: agentsv1beta1.MCPToolBindingSpec{
+				AgentRef: "everything", RegistryRef: "tools", ToolName: "search", Mode: toolmanifest.ModeRemote,
+				Server: agentsv1beta1.ToolServer{URL: "http://search.tools.svc/mcp"},
+			},
+		},
 	}
+	tools := toolregistry.NewMemStore()
+	_, err = tools.Upsert(context.Background(), toolregistry.ToolRegistry{
+		Namespace: ns, Name: "tools", Tools: []toolregistry.ToolEntry{{Name: "search", URL: "http://search.tools.svc/mcp"}},
+	})
+	require.NoError(t, err)
 	if f.member {
 		objs = append(objs,
 			&agentsv1beta1.AgentRegistry{
@@ -315,6 +330,7 @@ func (f platformEnvFixture) build(t *testing.T, env []corev1.EnvVar) (*AgentDepl
 		)
 	}
 	r := identityReconciler(t, deploy, objs...)
+	r.Registry = NewPostgresRegistryReader(tools)
 	r.DevDataPlane = true
 	r.Skills = digestSkills{}
 	r.OBOEgress = OBOEgressConfig{

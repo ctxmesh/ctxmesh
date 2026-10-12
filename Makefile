@@ -88,7 +88,7 @@ manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and Cust
 	# upstream package (controller-runtime API version conflict). Exclude it from
 	# CRD/webhook generation — the KEDA CRD comes from keda-crds.yaml, not here.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook \
-		paths="{./api/...,./cmd/...,./internal/controller/...,./internal/gateway/...,./internal/telemetry/...,./internal/toolmanifest/...,./internal/toolpush/...}" \
+		paths="{./api/...,./cmd/...,./internal/controller/...,./internal/gateway/...,./internal/telemetry/...,./internal/toolmanifest/...}" \
 		output:crd:artifacts:config=config/crd/bases
 
 .PHONY: generate
@@ -320,10 +320,6 @@ docker-build-bff: ## Build the BFF image (bff:latest) — builds the Vite SPA (b
 .PHONY: docker-build-statelayer-proxy
 docker-build-statelayer-proxy: ## Build the state-layer proxy image (statelayer-proxy:latest) — server-side tenant isolation (M51, ADR 0050).
 	$(CONTAINER_TOOL) build -t statelayer-proxy:latest -f Dockerfile.statelayer-proxy .
-
-.PHONY: docker-build-discovery
-docker-build-discovery: ## Build the tool-discovery sidecar image (dev.local/agent-discovery:0.1.0) from Dockerfile.discovery.
-	$(CONTAINER_TOOL) build -t dev.local/agent-discovery:0.1.0 -f Dockerfile.discovery .
 
 .PHONY: docker-build-example
 docker-build-example: ## Build the echo-agent example image (echo-agent:latest) from examples/echo-agent/Dockerfile.

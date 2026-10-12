@@ -34,6 +34,7 @@ import (
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
 
@@ -43,10 +44,7 @@ import (
 var testRegStore = toolregistry.NewMemStore()
 
 // newBindingReconciler builds an MCPToolBindingReconciler on the envtest client,
-// with the ToolRegistry reader backed by the in-memory store (no CRD). The Pusher
-// is left nil — the push path is NOT exercised in envtest (no kubelet schedules
-// pods, so pushToReadyPods lists zero ready pods and never dials). The live push is
-// proven by the m4.7 e2e slice instead.
+// with the ToolRegistry reader backed by the in-memory store (no CRD).
 func newBindingReconciler() *MCPToolBindingReconciler {
 	return &MCPToolBindingReconciler{
 		Client:   k8sClient,
@@ -136,6 +134,14 @@ func containerByName(containers []corev1.Container, name string) (corev1.Contain
 	return corev1.Container{}, false
 }
 
+func containerNames(containers []corev1.Container) []string {
+	names := make([]string, 0, len(containers))
+	for _, c := range containers {
+		names = append(names, c.Name)
+	}
+	return names
+}
+
 func volumeByName(vols []corev1.Volume, name string) (corev1.Volume, bool) {
 	for _, v := range vols {
 		if v.Name == name {
@@ -146,7 +152,7 @@ func volumeByName(vols []corev1.Volume, name string) (corev1.Volume, bool) {
 }
 
 // TestBinding_ValidRemote_InjectionAndConfigMap: a valid remote binding →
-// AgentDeployment renders the discovery sidecar + CM volume + the ALWAYS-ON egress sidecar
+// AgentDeployment mounts the tools CM into the agent container and injects the ALWAYS-ON egress sidecar
 // (M82, ADR 0074 §1 — front-all-tools is now the only manifest mode) into the ksvc, and
 // the binding reconciler writes the <agent>-tools ConfigMap with the tool endpoint fronted
 // THROUGH the egress sidecar (no longer verbatim). Ready=True.
@@ -164,7 +170,7 @@ func TestBinding_ValidRemote_InjectionAndConfigMap(t *testing.T) {
 		Server:      agentsv1beta1.ToolServer{URL: url},
 	})
 
-	// AgentDeployment reconcile → ksvc with the discovery sidecar + volume.
+	// AgentDeployment reconcile → ksvc with the tools volume mounted into the agent container.
 	reconcileNN(t, newReconciler(), agent.Name, ns)
 	// Binding reconcile → status + ConfigMap.
 	reconcileBinding(t, newBindingReconciler(), binding.Name, ns)
@@ -172,23 +178,19 @@ func TestBinding_ValidRemote_InjectionAndConfigMap(t *testing.T) {
 	ksvc := getKsvc(t, agent.Name, ns)
 	containers := ksvc.Spec.Template.Spec.Containers
 
-	// user + collector + discovery + egress-sidecar = 4 (M82: the egress sidecar is now injected for
-	// EVERY tool-having agent — front-all is always-on). No sidecar-mode tool container for a remote.
-	require.Len(t, containers, 4, "user + collector + discovery + egress sidecar")
-	_, hasEgress := containerByName(containers, egressSidecarContainerName)
-	require.True(t, hasEgress, "M82: the always-on egress sidecar is injected for a tool-having agent")
-	disc, ok := containerByName(containers, DiscoveryContainerName)
-	require.True(t, ok, "discovery sidecar must be injected")
-	assert.Equal(t, DiscoveryImage, disc.Image, "discovery image")
-	assert.Empty(t, disc.Ports, "discovery sidecar must declare NO container ports (Knative single-port rule)")
-	require.Len(t, disc.VolumeMounts, 1, "discovery mounts the tools CM")
-	assert.Equal(t, toolsMountPath, disc.VolumeMounts[0].MountPath)
-	envMap := map[string]string{}
-	for _, e := range disc.Env {
-		envMap[e.Name] = e.Value
-	}
-	assert.Equal(t, "2999", envMap["DISCOVERY_PORT"], "DISCOVERY_PORT env")
-	assert.Equal(t, toolsMountPath+"/tools.json", envMap["TOOLS_JSON_PATH"], "TOOLS_JSON_PATH env")
+	// user + collector + egress-sidecar = 3 (M82: the egress sidecar is injected for EVERY
+	// tool-having agent). The launcher in the agent container serves tool discovery, so there is no
+	// discovery container. No sidecar-mode tool container for a remote.
+	require.Len(t, containers, 3, "user + collector + egress sidecar")
+	assert.Equal(t, []string{"user-container", telemetry.CollectorContainerName, egressSidecarContainerName},
+		containerNames(containers))
+	user := containers[0]
+	assert.Contains(t, user.VolumeMounts, corev1.VolumeMount{
+		Name: toolsVolumeName, MountPath: "/etc/agent/tools", ReadOnly: true,
+	}, "the agent container mounts the tools ConfigMap as a whole volume (a subPath mount never updates)")
+	toolsPath, ok := envValue(user, "TOOLS_JSON_PATH")
+	require.True(t, ok, "TOOLS_JSON_PATH tells the launcher and the SDKs where the manifest is")
+	assert.Equal(t, "/etc/agent/tools/tools.json", toolsPath.Value)
 
 	// CM volume must be present and reference <agent>-tools.
 	vol, ok := volumeByName(ksvc.Spec.Template.Spec.Volumes, toolsVolumeName)
@@ -289,7 +291,7 @@ func TestBinding_AdoptionDeferredUntilAgentExists(t *testing.T) {
 }
 
 // TestBinding_ValidSidecar_ToolContainerInjected: a valid sidecar binding →
-// AgentDeployment injects the discovery sidecar AND a sidecar-mode tool
+// AgentDeployment mounts the tools CM AND injects a sidecar-mode tool
 // container; the manifest endpoint is the assigned localhost port + /mcp.
 func TestBinding_ValidSidecar_ToolContainerInjected(t *testing.T) {
 	const ns = "default"
@@ -310,9 +312,9 @@ func TestBinding_ValidSidecar_ToolContainerInjected(t *testing.T) {
 
 	ksvc := getKsvc(t, agent.Name, ns)
 	containers := ksvc.Spec.Template.Spec.Containers
-	// user + collector + discovery + tool + egress-sidecar = 5 (M82: front-all is always-on, so even
-	// an in-pod sidecar-mode tool is fronted through the injected egress sidecar).
-	require.Len(t, containers, 5, "user + collector + discovery + sidecar tool + egress sidecar")
+	// user + collector + tool + egress-sidecar = 4 (M82: front-all is always-on, so even an in-pod
+	// sidecar-mode tool is fronted through the injected egress sidecar; discovery is the launcher's).
+	require.Len(t, containers, 4, "user + collector + sidecar tool + egress sidecar")
 	_, hasEgress := containerByName(containers, egressSidecarContainerName)
 	require.True(t, hasEgress, "M82: the always-on egress sidecar is injected for a tool-having agent")
 
@@ -344,7 +346,7 @@ func TestBinding_ValidSidecar_ToolContainerInjected(t *testing.T) {
 
 // TestBinding_UnregisteredTool_ReadyFalseAndExcluded: a binding whose toolName
 // is not in the registry → Ready=False/UnregisteredTool, excluded from the
-// manifest, and (being the only binding) the agent gets NO discovery sidecar.
+// manifest, and (being the only binding) the agent gets NO tools volume.
 func TestBinding_UnregisteredTool_ReadyFalseAndExcluded(t *testing.T) {
 	const ns = "default"
 	agent := mkAgent(t, "bad-tool-agent", ns)
@@ -372,10 +374,12 @@ func TestBinding_UnregisteredTool_ReadyFalseAndExcluded(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(cm.Data["tools.json"]), &m))
 	assert.Empty(t, m.Tools, "invalid binding must be excluded from the manifest")
 
-	// No valid bindings → no discovery sidecar; ksvc keeps the bare spec-hash rev.
+	// No valid bindings → no tools mount; ksvc keeps the bare spec-hash rev.
 	ksvc := getKsvc(t, agent.Name, ns)
-	_, has := containerByName(ksvc.Spec.Template.Spec.Containers, DiscoveryContainerName)
-	assert.False(t, has, "an agent with no VALID binding must not get the discovery sidecar")
+	_, has := volumeByName(ksvc.Spec.Template.Spec.Volumes, toolsVolumeName)
+	assert.False(t, has, "an agent with no VALID binding must not get the tools volume")
+	_, hasPath := envValue(ksvc.Spec.Template.Spec.Containers[0], "TOOLS_JSON_PATH")
+	assert.False(t, hasPath, "nor TOOLS_JSON_PATH, so its launcher starts no :2999 listener")
 	hash, _ := specHash(agent.Spec)
 	assert.Equal(t, agent.Name+"-"+hash+bareIdentitySuffix, ksvc.Spec.Template.Name,
 		"no valid bindings → revision name is the spec-hash (+ the C7b identity-SA suffix)")
@@ -605,8 +609,8 @@ func TestBinding_Deletion_ReconvergesAgent(t *testing.T) {
 		"removing a binding (structural change) must change the revision name")
 	_, hasTool := containerByName(ksvc.Spec.Template.Spec.Containers, "tool-"+b2.Name)
 	assert.False(t, hasTool, "the deleted binding's tool container must be gone")
-	_, hasDisc := containerByName(ksvc.Spec.Template.Spec.Containers, DiscoveryContainerName)
-	assert.True(t, hasDisc, "discovery sidecar stays while the sibling binding remains")
+	_, hasTools := volumeByName(ksvc.Spec.Template.Spec.Volumes, toolsVolumeName)
+	assert.True(t, hasTools, "the tools volume stays while the sibling binding remains")
 
 	// (c) The sibling is untouched: still Ready=True/Bound.
 	assertBindingReady(t, b1.Name, ns, metav1.ConditionTrue, reasonBound)
@@ -626,8 +630,10 @@ func TestBinding_Deletion_ReconvergesAgent(t *testing.T) {
 	require.NoError(t, herr)
 	assert.Equal(t, agent.Name+"-"+hash+bareIdentitySuffix, ksvc.Spec.Template.Name,
 		"revision name reverts to the spec-hash (+ the C7b identity-SA suffix) when no bindings remain")
-	_, hasDisc = containerByName(ksvc.Spec.Template.Spec.Containers, DiscoveryContainerName)
-	assert.False(t, hasDisc, "discovery sidecar must be removed with the last binding")
+	_, hasTools = volumeByName(ksvc.Spec.Template.Spec.Volumes, toolsVolumeName)
+	assert.False(t, hasTools, "the tools volume must be removed with the last binding")
+	assert.NotContains(t, ksvc.Spec.Template.Spec.Containers[0].VolumeMounts, toolsMount(),
+		"and its mount on the agent container")
 }
 
 // TestBinding_AgentDeletedFirst_NoCMLeakAndFinalizerReleases is the m4.5

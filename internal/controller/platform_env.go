@@ -160,6 +160,8 @@ var platformEnv = []platformEnvVar{
 	{envSkillRefs, envPlatformWhenSet},
 	{envSkillDescriptions, envPlatformWhenSet},
 	{envSkillDir, envPlatformWhenSet},
+	// MCP tool bindings: the mounted manifest the launcher serves on :2999.
+	{envToolsJSONPath, envPlatformWhenSet},
 	// spec.sessionMemory and spec.longTermMemory: where memory lives, its key prefix and its scope.
 	{envMemoryBackendAddr, envPlatformWhenSet},
 	{envMemoryPort, envPlatformWhenSet},

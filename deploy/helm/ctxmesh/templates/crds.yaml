@@ -3639,8 +3639,8 @@ spec:
       openAPIV3Schema:
         description: |-
           MCPToolBinding is the Schema for the mcptoolbindings API — it binds an MCP
-          tool server (sidecar or remote) to an agent and drives the discovery
-          sidecar's manifest (specs/mcp-tools.md).
+          tool server (sidecar or remote) to an agent and adds the tool to the agent's
+          tool manifest (specs/mcp-tools.md).
         properties:
           apiVersion:
             description: |-
@@ -3718,9 +3718,9 @@ spec:
               conditions:
                 description: |-
                   conditions reflect the binding's reconciliation state. Ready=True means
-                  the tool is registered, pin-matched, rendered into the agent's manifest,
-                  and pushed to the discovery sidecar. Failure reasons include
-                  UnregisteredTool and RegistryMismatch.
+                  the tool is registered, pin-matched and written to the agent's tool
+                  manifest, which the agent's launcher serves on localhost:2999. Failure
+                  reasons include UnregisteredTool and RegistryMismatch.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

@@ -117,7 +117,7 @@ console-authz;^internal/enduseroidc/;flow-completability tier0 tier1
 install;^internal/(bootstrap|preflight)/;install-truth tier0 tier1
 api;^internal/webhook/;tier0 tier1 tier2
 runtime;^internal/(asyncbus|discovery|guardrail|ingest|ingestion|ocr|objectstore)/;tier0 tier1 tier2
-runtime;^internal/(audit|dbpool|eval|kedatypes|prompt|promql|runtimelimit|toolmanifest|toolpush|workflow)/;tier0 tier1
+runtime;^internal/(audit|dbpool|eval|kedatypes|prompt|promql|runtimelimit|toolmanifest|workflow)/;tier0 tier1
 # The DEPENDENCY surface. go.mod/go.sum were unmapped, so a dependency bump required NOTHING --
 # found 2026-10-03 by gates-owed.sh, which propagates the fail-closed exit of this script. That is
 # change class most likely to introduce a supply-chain problem, and the one that had just shipped a

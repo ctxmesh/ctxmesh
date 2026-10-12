@@ -156,16 +156,11 @@ controllerManager:
   # it (the controller reads each as env). All default empty/off ⇒ the DEFAULT render == kustomize
   # (helm-verify no-drift), so this block is inert until an operator sets it.
   #
-  # injectedImages: the collector + tool-discovery sidecar images the controller injects into EVERY
-  # agent pod. Empty ⇒ the controller's dev.local defaults, which ImagePullBackOff off a real
-  # cluster — a PRODUCTION install MUST point these at your registry, digest-pinned (OPS-1).
-  # Empty ⇒ the controller's compiled-in dev.local constants, which ImagePullBackOff on any real
-  # cluster. Both are now PUBLISHED and defaulted here, because "empty" meant a default install
-  # could not run a single agent to Ready: the collector is injected into EVERY agent pod and the
-  # discovery sidecar into every tool-having one. PRODUCTION: pin to an immutable digest (OPS-1).
+  # injectedImages: the collector image the controller injects into EVERY agent pod. Empty ⇒ the
+  # controller's compiled-in dev.local constant, which ImagePullBackOffs on any real cluster, so it
+  # is PUBLISHED and defaulted here. PRODUCTION: point it at your registry, digest-pinned (OPS-1).
   injectedImages:
     collector: ghcr.io/ctxmesh/agent-otel-collector
-    discovery: ghcr.io/ctxmesh/agent-discovery
 
   # oboEgress: on-behalf-of egress-sidecar injection (ADR 0030) — injects an egress sidecar into agents
   # with remote OBO tools so tool calls are made as the end-user. For a WORKING OBO install set

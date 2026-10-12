@@ -373,7 +373,6 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - pods
   - secrets
   verbs:
   - get
@@ -1036,8 +1035,6 @@ spec:
           value: {{ .Values.bff.consoleURL | default "" | quote }}
         - name: COLLECTOR_IMAGE
           value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.injectedImages.collector "ctx" $) | quote }}
-        - name: DISCOVERY_IMAGE
-          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.injectedImages.discovery "ctx" $) | quote }}
         - name: MCP_OBO_EGRESS_ENABLED
           value: {{ .Values.controllerManager.oboEgress.enabled | quote }}
         - name: EGRESS_SIDECAR_IMAGE

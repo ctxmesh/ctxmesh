@@ -81,7 +81,7 @@ func newDevCmd() *cobra.Command {
 		Short: "Run the agent locally with the full runtime contract + a mock gateway",
 		Long: `dev runs the SAME launcher + your agent locally on Docker Compose with the
 full runtime contract (the traced proxy on AGENT_PORT, memory :2998, feedback
-:2995, and the tool-discovery sidecar :2999), so your inner loop matches
+:2995, and tool discovery :2999, all served by the launcher), so your inner loop matches
 production. The model gateway points at a deterministic MOCK provider by default
 (every completion is "MOCK_OK…"); pass --provider real to use a real provider.
 
@@ -91,7 +91,6 @@ It reads the same simplified agent.yaml the ` + "`expand`" + ` command consumes
 
 Prerequisites (built once via the engine Makefile):
   - the agent image referenced by agent.yaml (e.g. make docker-build-example)
-  - the discovery sidecar image: make docker-build-discovery
 
 Provider modes:
   --provider mock   (default) gateway returns MOCK_OK — no key, deterministic, fast.

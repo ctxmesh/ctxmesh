@@ -308,13 +308,11 @@ type AgentDeploymentReconciler struct {
 	// through the CALLER's client and therefore never needed the mirror.
 	KillScopeStore killscope.Store
 
-	// CollectorImage / DiscoveryImage override the injected OTel-collector / tool-discovery
-	// sidecar images (audit OPS-1; from COLLECTOR_IMAGE / DISCOVERY_IMAGE env, mirror of
-	// EGRESS_SIDECAR_IMAGE). Empty ⇒ the project-default constants — which are dev.local/*
-	// and ImagePullBackOff off a kind cluster, so a real install MUST set these to a
+	// CollectorImage overrides the injected OTel-collector sidecar image (audit OPS-1; from
+	// COLLECTOR_IMAGE env, mirror of EGRESS_SIDECAR_IMAGE). Empty ⇒ the project-default constant —
+	// which is dev.local/* and ImagePullBackOff off a kind cluster, so a real install MUST set it to a
 	// reachable registry (wired through the chart, OPS-4).
 	CollectorImage string
-	DiscoveryImage string
 
 	// DevDataPlane gates injection of the DEV-ONLY blob-offload/record object-store creds and the
 	// dev Langfuse feedback-scores creds into agent pods (OPS-2). Set from the controller's
@@ -1272,10 +1270,10 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	}
 	env = append(env, promptEnv...)
 
-	// MCP tools (M4): resolve the agent's valid bindings. When ≥1 exists, inject
-	// the discovery sidecar + tools ConfigMap volume + (sidecar-mode) tool
-	// containers. The binding controller owns the CM CONTENT and the push; this
-	// reconciler is the single writer of the pod template.
+	// MCP tools (M4): resolve the agent's valid bindings. When ≥1 exists, mount the
+	// tools ConfigMap into the agent container and inject the (sidecar-mode) tool
+	// containers. The binding controller owns the CM CONTENT; this reconciler is the
+	// single writer of the pod template.
 	validBindings, _, err := resolveAgentBindings(ctx, r.Client, r.registryReader(), deploy.Namespace, deploy.Name)
 	if err != nil {
 		return podTemplate{}, fmt.Errorf("resolving tool bindings: %w", err)
@@ -1307,6 +1305,11 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 
 	renderedManifest, sidecarTools := toolmanifest.Render(validBindings)
 	hasBindings := len(validBindings) > 0
+	if hasBindings {
+		// The launcher serves this file on :2999 and follows its updates; the SDKs read it directly
+		// when :2999 is not answering.
+		env = append(env, corev1.EnvVar{Name: envToolsJSONPath, Value: toolsMountPath + "/" + toolsConfigMapKey})
+	}
 
 	// Tool-call governance (M82, ADR 0074 §1): front-all-tools is now the ONLY manifest mode —
 	// always-on, no flag. EVERY tool of EVERY tool-having agent is fronted through the per-pod
@@ -1694,6 +1697,9 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// the prompt CM). No image change — a pod-VOLUME + config change only.
 		userMounts = append(userMounts, *guardrailMount)
 	}
+	if hasBindings {
+		userMounts = append(userMounts, toolsMount())
+	}
 	// The BFF-audience pod token: a guarded agent's audit edge (m184.7) and a registry member's AMP
 	// attestation (ADR 0153) both present it. One volume however many need it.
 	mountBFFPodToken := guardrailMount != nil || membership.IsMember
@@ -1807,7 +1813,6 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	}
 
 	if hasBindings {
-		containers = append(containers, discoverySidecarContainer(r.discoveryImage()))
 		// Sidecar-mode tool containers, in the deterministic binding-name order
 		// Render assigned (matches the manifest's localhost ports).
 		for _, st := range sidecarTools {
@@ -2747,22 +2752,14 @@ func (r *AgentDeploymentReconciler) autoscalingAnnotations(
 	return annotations, nil
 }
 
-// collectorImage / discoveryImage resolve the injected sidecar images: the configured
-// override (COLLECTOR_IMAGE / DISCOVERY_IMAGE, OPS-1) or the project-default constant. The
-// defaults are dev.local/* (ImagePullBackOff off a kind cluster), so a real install sets
-// these — wired through the chart (OPS-4).
+// collectorImage resolves the injected collector image: the configured override (COLLECTOR_IMAGE,
+// OPS-1) or the project-default constant. The default is dev.local/* (ImagePullBackOff off a kind
+// cluster), so a real install sets it — wired through the chart (OPS-4).
 func (r *AgentDeploymentReconciler) collectorImage() string {
 	if r.CollectorImage != "" {
 		return r.CollectorImage
 	}
 	return telemetry.CollectorImage
-}
-
-func (r *AgentDeploymentReconciler) discoveryImage() string {
-	if r.DiscoveryImage != "" {
-		return r.DiscoveryImage
-	}
-	return DiscoveryImage
 }
 
 // reconcileCollector ensures the per-agent collector-config ConfigMap and

@@ -41,13 +41,13 @@ import (
 //
 //	agent     — the user's image (launcher = PID 1, execs the user entrypoint).
 //	            The launcher's OWN in-process listeners come up from the injected
-//	            env: memory :2998 (MEMORY_BACKEND_ADDR→valkey) and feedback :2995
-//	            (LANGFUSE_HOST). The traced proxy owns AGENT_PORT.
+//	            env: memory :2998 (MEMORY_BACKEND_ADDR→valkey), feedback :2995
+//	            (LANGFUSE_HOST) and tool discovery :2999 (TOOLS_JSON_PATH, the
+//	            mounted tools.json). The traced proxy owns AGENT_PORT.
 //	gateway   — a mock LiteLLM (the SAME mock approach production uses:
 //	            internal/gateway.MockResponse "MOCK_OK…" via LiteLLM mock_response).
 //	            No new provider is built; --provider real repoints at a real base
 //	            URL + key instead.
-//	discovery — the tool-discovery sidecar (:2999) serving tools.json (§ contract).
 //	memory    — Valkey, the backend the launcher's :2998 endpoint talks to.
 //
 // This is parity-by-construction: the container images and the contract env are
@@ -71,9 +71,6 @@ const (
 
 	// gatewayInternalPort is the port LiteLLM listens on inside its container.
 	gatewayInternalPort = 4000
-
-	// discoveryPort is the tool-discovery sidecar port (contract: :2999).
-	discoveryPort = 2999
 
 	// memoryPort is the launcher's in-process memory endpoint (contract: :2998).
 	memoryPort = 2998
@@ -171,7 +168,7 @@ type devPlan struct {
 	ComposeYAML string
 	// GatewayConfigYAML is the rendered LiteLLM config.yaml (the mock or real route).
 	GatewayConfigYAML string
-	// ToolsJSON is the tools.json served by the discovery sidecar. In normal dev it is
+	// ToolsJSON is the tools.json the launcher serves on :2999. In normal dev it is
 	// the empty manifest; in replay mode it lists the fixture's recorded tools with
 	// endpoints pointing at the replay mock's /mcp channel (so the agent's tool calls
 	// are served from the fixture).
@@ -257,12 +254,12 @@ func buildDevPlan(dy *devYAML, flags devFlags, replayToolNames []string) (*devPl
 	return plan, nil
 }
 
-// emptyToolsJSON is the discovery sidecar's cold-start manifest. An agent that
+// emptyToolsJSON is the cold-start manifest. An agent that
 // reads :2999 gets a valid (empty) manifest — the discovery contract is present
 // locally exactly as it is in-cluster before any ToolBinding is reconciled.
 const emptyToolsJSON = `{"version":"0","tools":[]}` + "\n"
 
-// replayToolEndpoint is the MCP endpoint the discovery sidecar advertises for a replayed tool: the
+// replayToolEndpoint is the MCP endpoint the manifest advertises for a replayed tool: the
 // swapped `gateway` service's /mcp channel (the model channel stays on the same host at /v1, per
 // ADR 0071 §3a "keep the model channel on the existing gateway hostname"). Reachable over the
 // compose network by service name — never loopback, so no Linux-CI host-gateway trap.
@@ -270,7 +267,7 @@ func replayToolEndpoint() string {
 	return fmt.Sprintf("http://gateway:%d/mcp", gatewayInternalPort)
 }
 
-// renderReplayToolsJSON renders the discovery sidecar's tools.json for replay mode: one remote,
+// renderReplayToolsJSON renders tools.json for replay mode: one remote,
 // streamable-http tool per recorded tool name, all pointing at the replay mock's /mcp endpoint.
 // The version is content-addressed via the toolmanifest normalizer so identical tool sets render
 // identically (deterministic golden output). An empty name list renders the empty manifest (a
@@ -359,9 +356,8 @@ func renderCompose(p *devPlan) string {
 		// contract is present (feedback POSTs get a connection, not a missing route).
 		"LANGFUSE_HOST": "http://localhost:3000",
 		"FEEDBACK_PORT": fmt.Sprintf("%d", feedbackPort),
-		// Discovery sidecar (:2999) — a separate container the agent reads for tools.
-		"DISCOVERY_HOST": "discovery",
-		"DISCOVERY_PORT": fmt.Sprintf("%d", discoveryPort),
+		// Tool discovery (:2999) — the launcher serves the mounted tools.json, as in-cluster.
+		"TOOLS_JSON_PATH": devToolsJSONPath,
 		// Tracing: no collector in the dev loop; the launcher's OTel init is
 		// best-effort and no-ops when the endpoint is unreachable.
 		"OTEL_EXPORTER_OTLP_ENDPOINT": "localhost:4317",
@@ -381,10 +377,11 @@ func renderCompose(p *devPlan) string {
 	fmt.Fprintf(&b, "    ports:\n      - \"%d:8080\"\n", p.HostPort)
 	b.WriteString("    environment:\n")
 	writeSortedEnv(&b, agentEnv, "      ")
+	b.WriteString("    volumes:\n")
+	fmt.Fprintf(&b, "      - ./tools.json:%s:ro\n", devToolsJSONPath)
 	b.WriteString("    depends_on:\n")
 	b.WriteString("      - gateway\n")
 	b.WriteString("      - memory\n")
-	b.WriteString("      - discovery\n")
 	b.WriteString("    restart: \"no\"\n")
 
 	// ── gateway (mock/real LiteLLM — or the replay mock in --replay mode) ────────
@@ -412,23 +409,12 @@ func renderCompose(p *devPlan) string {
 	fmt.Fprintf(&b, "    image: %s\n", valkeyImage)
 	b.WriteString("    restart: \"no\"\n")
 
-	// ── discovery sidecar ──────────────────────────────────────────────────────
-	b.WriteString("  discovery:\n")
-	fmt.Fprintf(&b, "    image: %s\n", discoveryImageRef)
-	b.WriteString("    environment:\n")
-	fmt.Fprintf(&b, "      DISCOVERY_PORT: \"%d\"\n", discoveryPort)
-	b.WriteString("      TOOLS_JSON_PATH: /etc/agent/tools.json\n")
-	b.WriteString("    volumes:\n")
-	b.WriteString("      - ./tools.json:/etc/agent/tools.json:ro\n")
-	b.WriteString("    restart: \"no\"\n")
-
 	return b.String()
 }
 
-// discoveryImageRef is the tool-discovery sidecar image tag (matches the
-// Makefile docker-build-discovery target). `dev` requires it to be built locally
-// (documented in the command help + the preflight in dev.go).
-const discoveryImageRef = "dev.local/agent-discovery:0.1.0"
+// devToolsJSONPath is where tools.json is mounted in the agent container, the path the controller
+// mounts it at in-cluster (internal/controller toolsMountPath).
+const devToolsJSONPath = "/etc/agent/tools/tools.json"
 
 // renderReplayGatewayService renders the swapped `gateway` service for replay mode (ADR 0071
 // §3a): the replay-serve container under the SAME service name + internal port 4000, so the
