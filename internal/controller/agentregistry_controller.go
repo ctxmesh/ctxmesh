@@ -302,10 +302,9 @@ func (r *AgentRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 }
 
 // resolveMembers lists the AgentDeployments in the registry's namespace that
-// match spec.memberSelector. It filters client-side after a namespace List so
-// the same code path serves the cached manager client and the raw envtest
-// client alike (mirrors listAgentBindings — no field index, no label selector
-// pushed to the apiserver, which lets an empty selector still behave sanely).
+// belong to it (isRegistryMember). The selector is still parsed so a malformed
+// one is reported as InvalidSelector; membership itself is decided once, by the
+// AgentDeployment controller, so an agent two registries select is listed by one.
 //
 // An empty memberSelector ({}) matches nothing rather than every agent: an
 // all-selecting registry would be a footgun (it would network-isolate every
@@ -330,11 +329,29 @@ func (r *AgentRegistryReconciler) resolveMembers(
 	}
 	out := make([]agentsv1beta1.AgentDeployment, 0, len(all.Items))
 	for i := range all.Items {
-		if selector.Matches(labels.Set(all.Items[i].Labels)) {
+		if isRegistryMember(&all.Items[i], registry.Name) {
 			out = append(out, all.Items[i])
 		}
 	}
 	return out, nil
+}
+
+// isRegistryMember reports whether the agent belongs to the named registry: the one the
+// AgentDeployment controller resolved for the agent's revision and recorded in
+// status.registryRef. Every reader of membership uses it rather than evaluating
+// memberSelectors, so an agent that two registries select is a member of exactly one.
+func isRegistryMember(agent *agentsv1beta1.AgentDeployment, registryName string) bool {
+	return registryName != "" && agent.Status.RegistryRef == registryName
+}
+
+// notRegistryMemberMessage explains why an agent is outside the registry a team or workflow
+// names as its trust boundary (what is "the workflow" or "the team").
+func notRegistryMemberMessage(agent *agentsv1beta1.AgentDeployment, registryName, what string) string {
+	if agent.Status.RegistryRef == "" {
+		return fmt.Sprintf("agent %q is not a member of registry %q (%s's trust boundary)", agent.Name, registryName, what)
+	}
+	return fmt.Sprintf("agent %q is a member of registry %q, not %q (%s's trust boundary)",
+		agent.Name, agent.Status.RegistryRef, registryName, what)
 }
 
 // reconcileNetworkPolicy CreateOrUpdate's the single per-registry NetworkPolicy,

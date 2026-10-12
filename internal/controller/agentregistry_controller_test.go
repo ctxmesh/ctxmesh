@@ -103,6 +103,16 @@ func mkLabeledAgent(t *testing.T, name, namespace string, lbls map[string]string
 	return a
 }
 
+// mkMemberAgent creates a labelled agent and reconciles it once, which records the registry it
+// belongs to in status.registryRef: the membership every other controller reads.
+func mkMemberAgent(t *testing.T, name, namespace string, lbls map[string]string) *agentsv1beta1.AgentDeployment {
+	t.Helper()
+	a := mkLabeledAgent(t, name, namespace, lbls)
+	reconcileNN(t, newReconciler(), name, namespace)
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(a), a))
+	return a
+}
+
 // getNetworkPolicy fetches the per-registry NetworkPolicy (<registry>-registry).
 func getNetworkPolicy(t *testing.T, registryName, namespace string) networkingv1.NetworkPolicy {
 	t.Helper()
@@ -130,6 +140,9 @@ func TestRegistry_TwoMembers_NetworkPolicyAndStatus(t *testing.T) {
 	mkLabeledAgent(t, "np-agent-outsider", namespace, map[string]string{"registry": "other"})
 
 	reg := mkRegistryMesh(t, regName, namespace, registryID, registryID)
+	for _, agent := range []string{"np-agent-bravo", "np-agent-alpha", "np-agent-outsider"} {
+		reconcileNN(t, newReconciler(), agent, namespace)
+	}
 
 	r := newRegistryReconciler()
 	reconcileRegistry(t, r, regName, namespace)
@@ -767,8 +780,8 @@ func TestRegistry_MemberRemoved(t *testing.T) {
 	)
 
 	mkRegistryMesh(t, regName, namespace, registryID, registryID)
-	a1 := mkLabeledAgent(t, "churn-stay", namespace, map[string]string{"registry": registryID})
-	a2 := mkLabeledAgent(t, "churn-leave", namespace, map[string]string{"registry": registryID})
+	a1 := mkMemberAgent(t, "churn-stay", namespace, map[string]string{"registry": registryID})
+	a2 := mkMemberAgent(t, "churn-leave", namespace, map[string]string{"registry": registryID})
 
 	r := newRegistryReconciler()
 	reconcileRegistry(t, r, regName, namespace)
@@ -783,6 +796,7 @@ func TestRegistry_MemberRemoved(t *testing.T) {
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(a2), a2))
 	a2.Labels = map[string]string{"registry": "gone"}
 	require.NoError(t, k8sClient.Update(testCtx, a2))
+	reconcileNN(t, newReconciler(), "churn-leave", namespace)
 
 	reconcileRegistry(t, r, regName, namespace)
 
@@ -889,6 +903,46 @@ func TestRegistry_DuplicateIDInOneNamespaceIsRefused(t *testing.T) {
 	assert.Equal(t, metav1.ConditionTrue, ready.Status, "with the holder gone the id is this registry's")
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(agent), agent))
 	assert.Equal(t, "dup-id-b", agent.Status.RegistryRef)
+}
+
+// TestMembership_AgentSelectedByTwoRegistriesBelongsToOne: an agent that two registries select joins
+// one, recorded in status.registryRef, and every controller agrees: the registry's members, a team's
+// roster check and a workflow's step check all read that record rather than the selectors.
+func TestMembership_AgentSelectedByTwoRegistriesBelongsToOne(t *testing.T) {
+	const ns = "default"
+	mkRegistryMesh(t, "both-b", ns, "both-b", "both")
+	mkRegistryMesh(t, "both-a", ns, "both-a", "both")
+	agent := mkMemberAgent(t, "both-worker", ns, map[string]string{"registry": "both"})
+	require.Equal(t, "both-a", agent.Status.RegistryRef, "the first registry by name")
+
+	for _, name := range []string{"both-a", "both-b"} {
+		reconcileRegistry(t, newRegistryReconciler(), name, ns)
+	}
+	var regA, regB agentsv1beta1.AgentRegistry
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "both-a", Namespace: ns}, &regA))
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "both-b", Namespace: ns}, &regB))
+	assert.Equal(t, []string{"both-worker"}, regA.Status.Members)
+	assert.Empty(t, regB.Status.Members, "the other registry's selector matches, but the agent is not its member")
+
+	mkAgentTeam(t, "both-team-a", ns, "both-a", "both-worker", map[string]string{"w": "both-worker"})
+	mkAgentTeam(t, "both-team-b", ns, "both-b", "both-worker", map[string]string{"w": "both-worker"})
+	reconcileTeam(t, newTeamReconciler(), "both-team-a", ns)
+	reconcileTeam(t, newTeamReconciler(), "both-team-b", ns)
+	assert.Equal(t, metav1.ConditionTrue, teamReadyCond(t, "both-team-a", ns).Status)
+	teamB := teamReadyCond(t, "both-team-b", ns)
+	assert.Equal(t, metav1.ConditionFalse, teamB.Status)
+	assert.Equal(t, reasonNotRegistryMember, teamB.Reason)
+	assert.Contains(t, teamB.Message, `a member of registry "both-a", not "both-b"`)
+
+	steps := []agentsv1beta1.WorkflowStep{{Name: "a", AgentRef: "both-worker"}}
+	mkWorkflow(t, "both-wf-a", ns, "both-a", steps)
+	mkWorkflow(t, "both-wf-b", ns, "both-b", steps)
+	reconcileWorkflow(t, newWorkflowReconciler(), "both-wf-a", ns)
+	reconcileWorkflow(t, newWorkflowReconciler(), "both-wf-b", ns)
+	assert.Equal(t, metav1.ConditionTrue, wfValidatedCond(t, "both-wf-a", ns).Status)
+	wfB := wfValidatedCond(t, "both-wf-b", ns)
+	assert.Equal(t, metav1.ConditionFalse, wfB.Status)
+	assert.Equal(t, reasonWorkflowNotMember, wfB.Reason)
 }
 
 // TestRegistry_EmptySelectorNoMembers verifies an empty memberSelector selects

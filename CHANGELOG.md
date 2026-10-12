@@ -132,7 +132,11 @@ name of the AgentRegistry an agent belongs to, the one its current revision was 
 trust boundary a personal grant is scoped to, instead of listing the namespace's registries and
 matching their selectors itself, so the two can no longer disagree about membership. Until the
 controller has reconciled an agent once after an upgrade, which it does for every agent when it
-starts, that agent's runs use its own boundary.
+starts, that agent's runs use its own boundary. An AgentRegistry's `status.members`, an AgentTeam's
+roster check, a Workflow's step check and an inline workflow run's check read it too: an agent two
+registries select is a member of the one it joined, and a team or workflow naming the other is not
+Ready, with a message naming the registry the agent belongs to. Before, each of those matched the
+selectors itself and counted the agent in both.
 
 **Removed: `GET /api/end-user/runs`.** The end-user "my runs" list at an agent's own hostname had
 no caller: the chat page never offered it, and no SDK, script or page of the docs named it. It goes

@@ -74,9 +74,9 @@ func teamReadyCond(t *testing.T, name, namespace string) *metav1.Condition {
 func TestTeam_ValidTeamIsReady(t *testing.T) {
 	const ns, reg = "default", "team-ok"
 	mkRegistryMesh(t, reg, ns, reg, reg)
-	mkLabeledAgent(t, "sup", ns, map[string]string{"registry": reg})
-	mkLabeledAgent(t, "worker-a", ns, map[string]string{"registry": reg})
-	mkLabeledAgent(t, "worker-b", ns, map[string]string{"registry": reg})
+	mkMemberAgent(t, "sup", ns, map[string]string{"registry": reg})
+	mkMemberAgent(t, "worker-a", ns, map[string]string{"registry": reg})
+	mkMemberAgent(t, "worker-b", ns, map[string]string{"registry": reg})
 
 	mkAgentTeam(t, "ok", ns, reg, "sup", map[string]string{"a": "worker-a", "b": "worker-b"})
 	reconcileTeam(t, newTeamReconciler(), "ok", ns)
@@ -95,8 +95,8 @@ func TestTeam_ValidTeamIsReady(t *testing.T) {
 func TestTeam_NonMemberRosterEntryIsNotReady(t *testing.T) {
 	const ns, reg = "default", "team-nonmember"
 	mkRegistryMesh(t, reg, ns, reg, reg)
-	mkLabeledAgent(t, "sup2", ns, map[string]string{"registry": reg})
-	mkLabeledAgent(t, "outsider", ns, map[string]string{"registry": "other"}) // exists but NOT a member
+	mkMemberAgent(t, "sup2", ns, map[string]string{"registry": reg})
+	mkMemberAgent(t, "outsider", ns, map[string]string{"registry": "other"}) // exists but NOT a member
 
 	mkAgentTeam(t, "nm", ns, reg, "sup2", map[string]string{"x": "outsider"})
 	reconcileTeam(t, newTeamReconciler(), "nm", ns)
@@ -111,7 +111,7 @@ func TestTeam_NonMemberRosterEntryIsNotReady(t *testing.T) {
 // TestTeam_MissingRegistryIsNotReady — registryRef doesn't exist → NotReady/RegistryNotFound.
 func TestTeam_MissingRegistryIsNotReady(t *testing.T) {
 	const ns = "default"
-	mkLabeledAgent(t, "sup3", ns, map[string]string{"registry": "team-missing"})
+	mkMemberAgent(t, "sup3", ns, map[string]string{"registry": "team-missing"})
 	mkAgentTeam(t, "mr", ns, "team-missing", "sup3", map[string]string{"a": "sup3"})
 	reconcileTeam(t, newTeamReconciler(), "mr", ns)
 
@@ -125,7 +125,7 @@ func TestTeam_MissingRegistryIsNotReady(t *testing.T) {
 func TestTeam_MissingMemberIsNotReady(t *testing.T) {
 	const ns, reg = "default", "team-missingmember"
 	mkRegistryMesh(t, reg, ns, reg, reg)
-	mkLabeledAgent(t, "sup4", ns, map[string]string{"registry": reg})
+	mkMemberAgent(t, "sup4", ns, map[string]string{"registry": reg})
 
 	mkAgentTeam(t, "mm", ns, reg, "sup4", map[string]string{"ghost": "does-not-exist"})
 	reconcileTeam(t, newTeamReconciler(), "mm", ns)

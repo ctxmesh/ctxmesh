@@ -71,9 +71,9 @@ func wfOutputSchema() *k8sruntime.RawExtension {
 func TestWorkflow_ValidIsValidated(t *testing.T) {
 	const ns, reg = "default", "wf-ok"
 	mkRegistryMesh(t, reg, ns, reg, reg)
-	mkLabeledAgent(t, "classifier", ns, map[string]string{"registry": reg})
-	mkLabeledAgent(t, "billing-agent", ns, map[string]string{"registry": reg})
-	mkLabeledAgent(t, "general-agent", ns, map[string]string{"registry": reg})
+	mkMemberAgent(t, "classifier", ns, map[string]string{"registry": reg})
+	mkMemberAgent(t, "billing-agent", ns, map[string]string{"registry": reg})
+	mkMemberAgent(t, "general-agent", ns, map[string]string{"registry": reg})
 
 	steps := []agentsv1beta1.WorkflowStep{
 		{
@@ -101,8 +101,8 @@ func TestWorkflow_ValidIsValidated(t *testing.T) {
 func TestWorkflow_MissingOutputSchemaIsInvalid(t *testing.T) {
 	const ns, reg = "default", "wf-noschema"
 	mkRegistryMesh(t, reg, ns, reg, reg)
-	mkLabeledAgent(t, "classifier2", ns, map[string]string{"registry": reg})
-	mkLabeledAgent(t, "router2", ns, map[string]string{"registry": reg})
+	mkMemberAgent(t, "classifier2", ns, map[string]string{"registry": reg})
+	mkMemberAgent(t, "router2", ns, map[string]string{"registry": reg})
 
 	steps := []agentsv1beta1.WorkflowStep{
 		{Name: "classify", AgentRef: "classifier2", Next: "route"}, // NO outputSchema
@@ -124,7 +124,7 @@ func TestWorkflow_MissingOutputSchemaIsInvalid(t *testing.T) {
 func TestWorkflow_BadCELIsInvalid(t *testing.T) {
 	const ns, reg = "default", "wf-badcel"
 	mkRegistryMesh(t, reg, ns, reg, reg)
-	mkLabeledAgent(t, "agent-badcel", ns, map[string]string{"registry": reg})
+	mkMemberAgent(t, "agent-badcel", ns, map[string]string{"registry": reg})
 
 	steps := []agentsv1beta1.WorkflowStep{
 		{Name: "a", AgentRef: "agent-badcel", Branches: []agentsv1beta1.WorkflowBranch{
@@ -144,7 +144,7 @@ func TestWorkflow_BadCELIsInvalid(t *testing.T) {
 func TestWorkflow_DanglingEdgeIsInvalid(t *testing.T) {
 	const ns, reg = "default", "wf-dangling"
 	mkRegistryMesh(t, reg, ns, reg, reg)
-	mkLabeledAgent(t, "agent-dangling", ns, map[string]string{"registry": reg})
+	mkMemberAgent(t, "agent-dangling", ns, map[string]string{"registry": reg})
 
 	steps := []agentsv1beta1.WorkflowStep{
 		{Name: "a", AgentRef: "agent-dangling", Next: "ghost"},
@@ -163,8 +163,8 @@ func TestWorkflow_DanglingEdgeIsInvalid(t *testing.T) {
 func TestWorkflow_NonMemberAgentIsInvalid(t *testing.T) {
 	const ns, reg = "default", "wf-nonmember"
 	mkRegistryMesh(t, reg, ns, reg, reg)
-	mkLabeledAgent(t, "wf-member", ns, map[string]string{"registry": reg})
-	mkLabeledAgent(t, "wf-outsider", ns, map[string]string{"registry": "other"}) // exists but not a member
+	mkMemberAgent(t, "wf-member", ns, map[string]string{"registry": reg})
+	mkMemberAgent(t, "wf-outsider", ns, map[string]string{"registry": "other"}) // exists but not a member
 
 	steps := []agentsv1beta1.WorkflowStep{
 		{Name: "a", AgentRef: "wf-member", Next: "b"},
@@ -183,7 +183,7 @@ func TestWorkflow_NonMemberAgentIsInvalid(t *testing.T) {
 // TestWorkflow_MissingRegistryIsInvalid — registryRef doesn't exist → Invalid=False / RegistryNotFound.
 func TestWorkflow_MissingRegistryIsInvalid(t *testing.T) {
 	const ns = "default"
-	mkLabeledAgent(t, "wf-agent-mr", ns, map[string]string{"registry": "wf-missing"})
+	mkMemberAgent(t, "wf-agent-mr", ns, map[string]string{"registry": "wf-missing"})
 	steps := []agentsv1beta1.WorkflowStep{{Name: "a", AgentRef: "wf-agent-mr"}}
 	mkWorkflow(t, "mr", ns, "wf-missing", steps)
 	reconcileWorkflow(t, newWorkflowReconciler(), "mr", ns)

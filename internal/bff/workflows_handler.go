@@ -51,8 +51,6 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v5"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -351,8 +349,9 @@ func parseInlineWorkflowRunRequest(w http.ResponseWriter, r *http.Request) (Inli
 
 // resolveWorkflowMembership enforces the workflow's trust boundary at run-create time: registryRef must
 // resolve to an AgentRegistry (same namespace) and EVERY step's agentRef must be an EXISTING
-// AgentDeployment that MATCHES the registry's memberSelector. This is the exact check the CR controller
-// (m67.1) runs at admission; the inline path runs it here because a runtime plan has no controller. Reads
+// AgentDeployment whose status.registryRef names it, the membership the controller resolved. This is the
+// exact check the CR controller (m67.1) runs at admission; the inline path runs it here because a runtime
+// plan has no controller. Reads
 // go through the CALLER-SCOPED client (ADR 0011 — the caller's own RBAC gates the registry/agent reads,
 // so an inline plan cannot escalate past what the user may see). Returns ok=true when the boundary holds;
 // otherwise (code, message, false) — a NotFound/non-member is a 422 (the plan is well-formed but its
@@ -379,10 +378,6 @@ func (s *Server) resolveWorkflowMembership(
 			return http.StatusInternalServerError, "failed to resolve the workflow's registryRef", false
 		}
 	}
-	selector, err := metav1.LabelSelectorAsSelector(&registry.Spec.MemberSelector)
-	if err != nil {
-		return http.StatusUnprocessableEntity, fmt.Sprintf("registry %q has an invalid memberSelector: %v", spec.RegistryRef, err), false
-	}
 
 	// Dedup the agent names (the same agent may back several nodes).
 	want := make([]string, 0, len(spec.Steps))
@@ -407,9 +402,15 @@ func (s *Server) resolveWorkflowMembership(
 				return http.StatusInternalServerError, fmt.Sprintf("failed to resolve step agent %q", name), false
 			}
 		}
-		if !selector.Matches(labels.Set(agent.Labels)) {
+		switch agent.Status.RegistryRef {
+		case registry.Name:
+		case "":
 			return http.StatusUnprocessableEntity,
 				fmt.Sprintf("agent %q is not a member of registry %q (the workflow's trust boundary)", name, spec.RegistryRef), false
+		default:
+			return http.StatusUnprocessableEntity,
+				fmt.Sprintf("agent %q is a member of registry %q, not %q (the workflow's trust boundary)",
+					name, agent.Status.RegistryRef, spec.RegistryRef), false
 		}
 	}
 	return 0, "", true

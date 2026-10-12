@@ -26,7 +26,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -90,11 +89,6 @@ func (r *WorkflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching registryRef: %w", err)
 	}
-	selector, err := metav1.LabelSelectorAsSelector(&registry.Spec.MemberSelector)
-	if err != nil {
-		return ctrl.Result{}, r.setStatus(ctx, &wf, metav1.ConditionFalse, reasonWorkflowNotMember,
-			fmt.Sprintf("registry %q has an invalid memberSelector: %v", wf.Spec.RegistryRef, err))
-	}
 
 	// ── 3. every step's agentRef must be an EXISTING AgentDeployment that is a MEMBER of the registry ─
 	// Dedup the agent names (the same agent may appear on several nodes).
@@ -114,9 +108,9 @@ func (r *WorkflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			}
 			return ctrl.Result{}, fmt.Errorf("fetching step agent %q: %w", name, err)
 		}
-		if !selector.Matches(labels.Set(agent.Labels)) {
+		if !isRegistryMember(&agent, registry.Name) {
 			return ctrl.Result{}, r.setStatus(ctx, &wf, metav1.ConditionFalse, reasonWorkflowNotMember,
-				fmt.Sprintf("agent %q is not a member of registry %q (the workflow's trust boundary)", name, wf.Spec.RegistryRef))
+				notRegistryMemberMessage(&agent, wf.Spec.RegistryRef, "the workflow"))
 		}
 	}
 

@@ -24,7 +24,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -77,11 +76,6 @@ func (r *AgentTeamReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching registryRef: %w", err)
 	}
-	selector, err := metav1.LabelSelectorAsSelector(&registry.Spec.MemberSelector)
-	if err != nil {
-		return ctrl.Result{}, r.setStatus(ctx, &team, nil, metav1.ConditionFalse, reasonNotRegistryMember,
-			fmt.Sprintf("registry %q has an invalid memberSelector: %v", team.Spec.RegistryRef, err))
-	}
 
 	// ── the supervisor + every roster member must be an EXISTING AgentDeployment
 	//    that is a MEMBER of the registry ──────────────────────────────────────
@@ -104,9 +98,9 @@ func (r *AgentTeamReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			}
 			return ctrl.Result{}, fmt.Errorf("fetching roster member %q: %w", name, err)
 		}
-		if !selector.Matches(labels.Set(agent.Labels)) {
+		if !isRegistryMember(&agent, registry.Name) {
 			return ctrl.Result{}, r.setStatus(ctx, &team, nil, metav1.ConditionFalse, reasonNotRegistryMember,
-				fmt.Sprintf("agent %q is not a member of registry %q (the team's trust boundary)", name, team.Spec.RegistryRef))
+				notRegistryMemberMessage(&agent, team.Spec.RegistryRef, "the team"))
 		}
 		members = append(members, name)
 		if agent.Status.URL != "" { // a live ksvc endpoint ⇒ summonable
