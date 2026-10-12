@@ -8,6 +8,10 @@
 # nosniff`, and must drop the agent's Set-Cookie (a sandbox does not stop the browser storing one,
 # and the OAuth binding cookie lives on, or next to, the agent host), with ext-auth on or off. The
 # chatbox route (`agents-app`) must not be sandboxed, or the chatbox cannot run.
+#
+# The same route must drop, from the request, the caller's bearer and every header that claims to be
+# an agent (ADR 0153): the AMP envelope under both names and the attestation. A registry member admits
+# an attested AMP call, so anything outside that could send them could claim to be one of its peers.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -41,6 +45,17 @@ def fail(msg):
     print(f"FAIL ({label}): {msg}", file=sys.stderr)
     sys.exit(1)
 
+def request_removed(route):
+    """Per rule, the lower-cased header names a RequestHeaderModifier removes."""
+    out = []
+    for rule in route["spec"]["rules"]:
+        removed = set()
+        for f in rule.get("filters") or []:
+            if f.get("type") == "RequestHeaderModifier":
+                removed |= {n.lower() for n in (f.get("requestHeaderModifier") or {}).get("remove") or []}
+        out.append(removed)
+    return out
+
 def response_mods(route):
     """Per rule, (headers a ResponseHeaderModifier sets as lower-cased name -> value, lower-cased
     names it removes)."""
@@ -72,11 +87,19 @@ for i, (got, removed) in enumerate(response_mods(routes["agents"])):
         fail(f"agents rule {i} does not remove Set-Cookie; a sandboxed response can still plant a cookie, "
              "such as an OAuth binding cookie, at or beside the agent host")
 
+must_strip = {"authorization", "x-amp-envelope", "x-a2a-envelope", "x-amp-attestation"}
+for i, removed in enumerate(request_removed(routes["agents"])):
+    missing = sorted(must_strip - removed)
+    if missing:
+        fail(f"agents rule {i} forwards {', '.join(missing)} from the caller to the agent; a caller outside "
+             "the mesh could then present a bearer the agent must not see, or claim to be one of its AMP peers")
+
 for i, (got, _) in enumerate(response_mods(routes["agents-app"])):
     if "content-security-policy" in got:
         fail(f"agents-app rule {i} sets a Content-Security-Policy; the chatbox SPA needs its scripts and the BFF sets its own CSP")
 
-print(f"  ok ({label}): agents sets CSP sandbox + nosniff and drops Set-Cookie; agents-app is not sandboxed")
+print(f"  ok ({label}): agents sets CSP sandbox + nosniff, drops Set-Cookie, and strips the bearer and the AMP "
+      "headers from requests; agents-app is not sandboxed")
 PY
 done
 echo "RESULT: PASS (edge-truth)"
