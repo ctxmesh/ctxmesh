@@ -91,6 +91,14 @@ would ship used to lead to `/soon/<id>`, a page naming the milestone it would ar
 destination has since shipped and nothing linked there any more; an old `/soon/…` link now shows the
 console's not-found page.
 
+**Changed: model routes, secret bindings and agent registries open on one detail page.** The three
+pages were copies of one another that had drifted: an agent registry loaded with a bare "Loading…"
+line, answered a missing registry with a different empty state, and had no Retry when its read
+failed. They now share one page: the same header with its status and Edit and Delete, the record in
+a rail beside what the resource does, the same loading, not-found, permission and retry states, the
+edit drawer at `?edit=1` and the typed-name delete at `?delete=1`. Every field and action each page
+showed is still there, and Edit and Delete are still asked of the item's own namespace.
+
 **Security: a registry in one namespace could share another namespace's team scratchpad and
 credential boundary by copying its `registryId`.** A registry's id is chosen by its author and was
 the whole key for what its members share: the shared scratchpad (`sessionMemory.scope: shared`)

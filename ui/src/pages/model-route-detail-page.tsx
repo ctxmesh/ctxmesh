@@ -1,23 +1,15 @@
 import * as React from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 
+import { ResourceDetailPage, type ResourceDetailKind } from "@/components/resource-detail";
 import { UsedBySection } from "@/components/used-by-section";
-import { Pencil, Plus, Trash2, X } from "lucide-react";
+import { Plus, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, PanelHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-// One import for the whole module. The create wizard below briefly carried its
-// own second `@/components/kit` statement so the two surfaces could be edited
-// independently; TypeScript scopes imports per MODULE, so the moment both
-// surfaces needed `PageHeader` that became a duplicate-identifier error. The
-// components are still independently editable — the import list is not the
-// seam that keeps them so.
 import {
   ComboSelect,
-  ConfirmDialog,
-  DetailDrawer,
-  ErrorState,
   ForbiddenInline,
   KeyValueList,
   Meter,
@@ -27,8 +19,6 @@ import {
   QuietNote,
   ResourceLink,
   SectionHeader,
-  Skeleton,
-  SkeletonCard,
   StatusBadge,
   UNKNOWN,
   Wizard,
@@ -49,8 +39,8 @@ import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_ROUTES } from "@/lib/nav";
 
-// ModelRouteDetailPage — the route reader + its edit form (M151 §6.1 archetype
-// A2, form-edit variant). Route: /routes/:ns/:name
+// ModelRouteDetailPage — the route reader + its edit form, on the shared
+// ResourceDetailPage (M151 §6.1 archetype A2, form-edit variant). Route: /routes/:ns/:name
 //
 // ── THE PAGE'S ONE IDEA: A ROUTE IS AN ORDER, NOT A SET ─────────────────────
 // A ModelRoute's providers are not a bag of options; they are a ranked list,
@@ -89,473 +79,211 @@ import { RES_ROUTES } from "@/lib/nav";
 //   route-edit-error       — a non-403 save failure (422 included)
 //   route-edit-unsaved     — the unsaved-changes line in the edit form
 
-/** The A2 breadcrumb — the same trail in every state, so a failed load still
- *  offers the way back the ready page offers. */
-const CRUMBS = (name: string) => [
-  { label: "Model routes", to: "/routes" },
-  { label: name },
-];
-
 /** How the failover order reads. Past the third entry the eyebrow is the rank. */
 const RANK = ["First choice", "Falls back to", "Then to"];
 
-type Load =
-  | { kind: "loading" }
-  | { kind: "ready"; detail: ModelRouteDetail }
-  | { kind: "error"; message: string; status?: number; forbidden: boolean };
+/** The providers in the order the route tries them. Ties keep their declared order. */
+function failoverOrder(detail: ModelRouteDetail): ModelRouteProviderDTO[] {
+  return [...detail.providers].sort((a, b) => a.priority - b.priority);
+}
 
-export function ModelRouteDetailPage() {
-  const { ns = "", name = "" } = useParams();
-  const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [state, setState] = React.useState<Load>({ kind: "loading" });
-  // Edit and Delete act in the route's namespace, whatever the shell has selected.
-  const { can } = useCapabilitiesIn(ns);
-
-  const editOpen = searchParams.get("edit") === "1";
-  const deleteOpen = searchParams.get("delete") === "1";
-
-  function openEdit() {
-    setSearchParams((p) => {
-      p.set("edit", "1");
-      return p;
-    });
-  }
-  function closeEdit() {
-    setSearchParams((p) => {
-      p.delete("edit");
-      return p;
-    });
-  }
-  function openDelete() {
-    setSearchParams((p) => {
-      p.set("delete", "1");
-      return p;
-    });
-  }
-  function closeDelete() {
-    setSearchParams((p) => {
-      p.delete("delete");
-      return p;
-    });
-  }
-
-  const load = React.useCallback(() => {
-    const controller = new AbortController();
-    setState({ kind: "loading" });
-    api
-      .modelRouteDetail(ns, name, controller.signal)
-      .then((detail) => {
-        if (controller.signal.aborted) return;
-        setState({ kind: "ready", detail });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        const apiErr = err instanceof ApiError ? err : null;
-        setState({
-          kind: "error",
-          message:
-            err instanceof Error
-              ? err.message
-              : "couldn't load the model route",
-          status: apiErr?.status,
-          forbidden: apiErr?.isForbidden ?? false,
-        });
-      });
-    return () => controller.abort();
-  }, [ns, name]);
-
-  React.useEffect(() => load(), [load]);
-
-  // The §7 A2 loading shape: the header band instantly, a SkeletonCard where the
-  // panel will be, and kv-line bars in the rail — so nothing re-lays-out under
-  // the reader when the answer arrives.
-  if (state.kind === "loading") {
-    return (
-      <div className="min-w-0 space-y-6" data-testid="route-detail-loading">
-        <PageHeader
-          breadcrumb={CRUMBS(name)}
-          title={name || "Model route"}
-          titleMono
-          loading
-        />
-        <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
-          <SkeletonCard className="min-w-0" />
-          <Card className="min-w-0">
-            <PanelHeader title="The record" />
-            <CardContent>
-              <div
-                role="status"
-                aria-busy="true"
-                aria-label="Loading the route's record"
-              >
-                {[0, 1, 2, 3, 4, 5].map((i) => (
-                  <Skeleton decorative key={i} className="mb-3 h-3.5 w-full" />
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-    );
-  }
-
-  if (state.kind === "error") {
-    // §7 A2: a permission boundary replaces the page under the header — calm,
-    // resource-named, and never the raw RBAC string (M100 UI99-403).
-    if (state.forbidden) {
-      return (
-        <div className="min-w-0 space-y-6">
-          <PageHeader breadcrumb={CRUMBS(name)} title={name} titleMono />
-          <ForbiddenInline
-            title={`You don't have permission to view ${name}.`}
-            resource="model routes"
-            detail={state.message}
-          />
-        </div>
-      );
-    }
-    if (state.status === 404) {
-      return (
-        <div className="min-w-0 space-y-6" data-testid="route-not-found">
-          <PageHeader
-            breadcrumb={[{ label: "Model routes", to: "/routes" }]}
-            title="Model route not found"
-            lede="Nothing in this workspace answers to that name."
-          />
-          <QuietNote title="No model route with this name was found.">
-            There is no ModelRoute{" "}
-            <span className="font-mono text-xs">{name}</span> in{" "}
-            <span className="font-mono text-xs">{ns || "this namespace"}</span>.
-            It may have been deleted, or the link may name a route from another
-            cluster. Nothing is missing from this page — there is simply no route
-            to show.
-            <span className="mt-3 block">
-              <NextStepLink label="Back to routes" to="/routes" />
-            </span>
-          </QuietNote>
-        </div>
-      );
-    }
-    return (
-      <div className="min-w-0 space-y-6" data-testid="route-detail-error">
-        <PageHeader breadcrumb={CRUMBS(name)} title={name} titleMono />
-        <ErrorState
-          title="The model route didn't load."
-          description="Nothing has changed about the route itself — only this page failed to read it."
-          detail={state.message}
-          onRetry={() => load()}
-        />
-      </div>
-    );
-  }
-
-  const detail = state.detail;
-
+function RouteFailoverOrder({ detail, canEdit }: { detail: ModelRouteDetail; canEdit: boolean }) {
+  const ordered = failoverOrder(detail);
+  const count = ordered.length;
   return (
-    <RouteDetailContent
-      detail={detail}
-      editOpen={editOpen}
-      deleteOpen={deleteOpen}
-      onOpenEdit={openEdit}
-      onCloseEdit={closeEdit}
-      onOpenDelete={openDelete}
-      onCloseDelete={closeDelete}
-      onDeleted={() => navigate("/routes")}
-      onSaved={() => {
-        closeEdit();
-        load();
-      }}
-      can={can}
-    />
+    <>
+      <Card className="min-w-0">
+        <PanelHeader
+          title="The failover order"
+          meta={count > 0 ? `${count} provider${count === 1 ? "" : "s"}` : undefined}
+        />
+        <CardContent>
+          {count === 0 ? (
+            // A route with no providers is not an empty list, it is a route that cannot
+            // serve anything, and the copy says which.
+            <QuietNote title="This route has no providers yet.">
+              Nothing serves its traffic: an agent pointed at this route has nowhere to send a
+              model call. Add at least one provider — the first one you add becomes its first
+              choice.
+              {canEdit && (
+                <span className="mt-3 block">
+                  <NextStepLink
+                    label="Add a provider"
+                    to={`/routes/${encodeURIComponent(detail.namespace)}/${encodeURIComponent(detail.name)}?edit=1`}
+                  />
+                </span>
+              )}
+            </QuietNote>
+          ) : (
+            <>
+              <p className="mb-2 max-w-[64ch] text-sm text-secondary-foreground">
+                The route tries these in priority order. The first one that answers serves the
+                request; the rest are what it falls back to when it can&rsquo;t.
+              </p>
+              <ol>
+                {ordered.map((p, i) => (
+                  <li
+                    key={`${p.provider}/${p.model}/${i}`}
+                    className="border-b border-border-soft py-4 last:border-0"
+                    data-testid={`provider-row-${i}`}
+                  >
+                    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                      {/* The rank names a POSITION, not a status, so no semantic hue
+                          may claim it (§2.2). */}
+                      <span className="font-mono text-2xs uppercase tracking-wide text-faint">
+                        {RANK[i] ?? `Then to (${i + 1})`}
+                      </span>
+                      <span
+                        className="min-w-0 truncate font-mono text-sm font-medium"
+                        title={`${p.provider} / ${p.model}`}
+                      >
+                        <span>{p.provider}</span>
+                        <span aria-hidden="true" className="text-ghost">
+                          {" / "}
+                        </span>
+                        <span>{p.model}</span>
+                      </span>
+                      <span className="ml-auto whitespace-nowrap font-mono text-xs tabular-nums text-faint">
+                        priority {p.priority}
+                      </span>
+                    </div>
+                    <KeyValueList
+                      className="mt-1"
+                      items={[
+                        {
+                          key: "Credential",
+                          value: p.secretBindingRef ? (
+                            <ResourceLink
+                              kind="secretbinding"
+                              namespace={detail.namespace}
+                              name={p.secretBindingRef}
+                              className="text-sm"
+                            />
+                          ) : undefined,
+                          absent: "not attached",
+                          title:
+                            "No SecretBinding is attached to this provider. The CRD requires one, or an API base, for every non-mock provider.",
+                          mono: false,
+                        },
+                        {
+                          key: "API base",
+                          value: p.apiBase ? (
+                            <span className="block truncate" title={p.apiBase}>
+                              {p.apiBase}
+                            </span>
+                          ) : undefined,
+                          absent: "the provider default",
+                          title: "No override is set, so calls go to the provider's own endpoint.",
+                        },
+                      ]}
+                    />
+                  </li>
+                ))}
+              </ol>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* The agents that route through this ModelRoute (m18.9). */}
+      <UsedBySection
+        kind="modelroute"
+        name={detail.name}
+        namespace={detail.namespace}
+        title="Used by agents"
+      />
+    </>
   );
 }
 
-// Separate component so hooks are always called (not conditional on state).
-function RouteDetailContent({
-  detail,
-  editOpen,
-  deleteOpen,
-  onOpenEdit,
-  onCloseEdit,
-  onOpenDelete,
-  onCloseDelete,
-  onDeleted,
-  onSaved,
-  can,
-}: {
-  detail: ModelRouteDetail;
-  editOpen: boolean;
-  deleteOpen: boolean;
-  onOpenEdit: () => void;
-  onCloseEdit: () => void;
-  onOpenDelete: () => void;
-  onCloseDelete: () => void;
-  onDeleted: () => void;
-  onSaved: () => void;
-  can: (res: string, verb: string) => boolean;
-}) {
-  const canEdit = can(RES_ROUTES, "update");
-  const canDelete = can(RES_ROUTES, "delete");
-
-  // The order IS the fact, so it is established once, here, rather than trusted
-  // to whatever order the array happened to arrive in. Ties keep their relative
-  // position (a stable sort), so two providers at the same priority read in the
-  // order the CR declares them.
-  const ordered = [...detail.providers].sort((a, b) => a.priority - b.priority);
-  const count = ordered.length;
-  const first = ordered[0];
-
-  // The rail: the bound facts, in the kv register. No table here — §4.7.
-  const facts: KeyValueItem[] = [
-    { key: "Route", value: detail.name, title: detail.name },
-    { key: "Workspace", value: detail.namespace, absent: "not recorded" },
-    {
-      key: "Providers",
-      value: <QuantityValue value={count} />,
-      mono: false,
-    },
-    {
-      key: "First choice",
-      value: first ? (
-        <span
-          className="block truncate"
-          title={`${first.provider} / ${first.model}`}
-        >
-          {first.provider} / {first.model}
-        </span>
-      ) : undefined,
-      absent: "none declared",
-      title: "This route declares no providers, so nothing serves its traffic.",
-    },
-  ];
-
+function RouteRateCap({ detail }: { detail: ModelRouteDetail }) {
   return (
-    <div className="min-w-0 space-y-6" data-testid="route-detail-page">
-      <PageHeader
-        breadcrumb={CRUMBS(detail.name)}
-        title={detail.name}
-        titleMono
-        status={<StatusBadge ready={detail.ready} phase={detail.phase} />}
-        meta={`${detail.namespace} · ${count} provider${count === 1 ? "" : "s"}`}
-        actionsSlot={
-          canEdit || canDelete ? (
-            <>
-              {canEdit && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="text-sm"
-                  onClick={onOpenEdit}
-                  data-testid="edit-route-button"
-                >
-                  <Pencil className="h-4 w-4" />
-                  Edit
-                </Button>
-              )}
-              {canDelete && (
-                // Crit as an ACTION colour is §2.3's one sanctioned exception:
-                // a destructive control, told apart from a crit STATUS by form
-                // (a filled button, never an uppercase mono tag).
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  className="text-sm"
-                  onClick={onOpenDelete}
-                  data-testid="delete-route-button"
-                >
-                  <Trash2 className="h-4 w-4" />
-                  Delete
-                </Button>
-              )}
-            </>
-          ) : undefined
-        }
-      />
-
-      {/* §4.7 hub grid: the order on the left, the bound facts in the 300px
-          rail, which stacks UNDER the main column below `lg`. */}
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
-        <div className="min-w-0 space-y-5">
-          <Card className="min-w-0">
-            <PanelHeader
-              title="The failover order"
-              meta={count > 0 ? `${count} provider${count === 1 ? "" : "s"}` : undefined}
-            />
-            <CardContent>
-              {count === 0 ? (
-                // §7 A2: a missing SECTION teaches rather than sitting blank.
-                // A route with no providers is not an empty list, it is a route
-                // that cannot serve anything, and the copy says which.
-                <QuietNote title="This route has no providers yet.">
-                  Nothing serves its traffic: an agent pointed at this route has
-                  nowhere to send a model call. Add at least one provider — the
-                  first one you add becomes its first choice.
-                  {canEdit && (
-                    <span className="mt-3 block">
-                      <NextStepLink
-                        label="Add a provider"
-                        to={`/routes/${encodeURIComponent(detail.namespace)}/${encodeURIComponent(detail.name)}?edit=1`}
-                      />
-                    </span>
-                  )}
-                </QuietNote>
-              ) : (
-                <>
-                  <p className="mb-2 max-w-[64ch] text-sm text-secondary-foreground">
-                    The route tries these in priority order. The first one that
-                    answers serves the request; the rest are what it falls back
-                    to when it can&rsquo;t.
-                  </p>
-                  <ol>
-                    {ordered.map((p, i) => (
-                      <li
-                        key={`${p.provider}/${p.model}/${i}`}
-                        className="border-b border-border-soft py-4 last:border-0"
-                        data-testid={`provider-row-${i}`}
-                      >
-                        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                          {/* The rank is the eyebrow, not a Tag: it names a
-                              POSITION, and a position is not a status — no
-                              semantic hue may claim it (§2.2). */}
-                          <span className="font-mono text-2xs uppercase tracking-wide text-faint">
-                            {RANK[i] ?? `Then to (${i + 1})`}
-                          </span>
-                          <span
-                            className="min-w-0 truncate font-mono text-sm font-medium"
-                            title={`${p.provider} / ${p.model}`}
-                          >
-                            <span>{p.provider}</span>
-                            <span aria-hidden="true" className="text-ghost">
-                              {" / "}
-                            </span>
-                            <span>{p.model}</span>
-                          </span>
-                          <span className="ml-auto whitespace-nowrap font-mono text-xs tabular-nums text-faint">
-                            priority {p.priority}
-                          </span>
-                        </div>
-                        <KeyValueList
-                          className="mt-1"
-                          items={[
-                            {
-                              key: "Credential",
-                              value: p.secretBindingRef ? (
-                                // If it names a resource, it is a link (M22).
-                                <ResourceLink
-                                  kind="secretbinding"
-                                  namespace={detail.namespace}
-                                  name={p.secretBindingRef}
-                                  className="text-sm"
-                                />
-                              ) : undefined,
-                              absent: "not attached",
-                              title:
-                                "No SecretBinding is attached to this provider. The CRD requires one, or an API base, for every non-mock provider.",
-                              mono: false,
-                            },
-                            {
-                              key: "API base",
-                              value: p.apiBase ? (
-                                <span className="block truncate" title={p.apiBase}>
-                                  {p.apiBase}
-                                </span>
-                              ) : undefined,
-                              absent: "the provider default",
-                              title:
-                                "No override is set, so calls go to the provider's own endpoint.",
-                            },
-                          ]}
-                        />
-                      </li>
-                    ))}
-                  </ol>
-                </>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Reverse-lookup: the agents that route through this ModelRoute
-              (m18.9). A list of links, so it stays in the main column — §4.7
-              rails carry kv-lists and meters only. */}
-          <UsedBySection
-            kind="modelroute"
-            name={detail.name}
-            namespace={detail.namespace}
-            title="Used by agents"
+    <Card className="min-w-0">
+      <PanelHeader title="The tenant rate cap" />
+      <CardContent>
+        {detail.rateLimit ? (
+          // A known cap with no known usage: the Meter draws the bound (it is real) and
+          // omits the fill (it is not). A zero-width bar labelled 0 would claim this route
+          // has served nothing.
+          <Meter
+            label="Requests per minute"
+            used={UNKNOWN}
+            cap={detail.rateLimit.tenantRPM}
+            format={(n) => `${formatCount(n)}/min`}
+            thing="route"
           />
-        </div>
-
-        <div className="min-w-0 space-y-5">
-          <Card className="min-w-0">
-            <PanelHeader title="The record" />
-            <CardContent>
-              <KeyValueList items={facts} />
-            </CardContent>
-          </Card>
-
-          <Card className="min-w-0">
-            <PanelHeader title="The tenant rate cap" />
-            <CardContent>
-              {detail.rateLimit ? (
-                // A known cap with no known usage: the Meter draws the bound
-                // (it is real) and omits the fill (it is not). A zero-width bar
-                // labelled 0 would claim this route has served nothing.
-                <Meter
-                  label="Requests per minute"
-                  used={UNKNOWN}
-                  cap={detail.rateLimit.tenantRPM}
-                  format={(n) => `${formatCount(n)}/min`}
-                  thing="route"
-                />
-              ) : (
-                <KeyValueList
-                  items={[
-                    {
-                      key: "Requests per minute",
-                      absent: "not capped",
-                      title:
-                        "This route sets no per-tenant rate cap, so requests are bounded only by the provider's own limits.",
-                    },
-                  ]}
-                />
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-
-      {/* Edit wizard */}
-      <DetailDrawer
-        open={editOpen}
-        onClose={onCloseEdit}
-        title={`Edit ${detail.name}`}
-        subtitle="Repoints the route — which providers it tries, and in what order"
-        size="lg"
-      >
-        {editOpen && (
-          <RouteEditWizard
-            detail={detail}
-            onClose={onCloseEdit}
-            onSaved={onSaved}
+        ) : (
+          <KeyValueList
+            items={[
+              {
+                key: "Requests per minute",
+                absent: "not capped",
+                title:
+                  "This route sets no per-tenant rate cap, so requests are bounded only by the provider's own limits.",
+              },
+            ]}
           />
         )}
-      </DetailDrawer>
-
-      {/* Delete dialog */}
-      {deleteOpen && (
-        <RouteDeleteDialog
-          detail={detail}
-          onClose={onCloseDelete}
-          onDeleted={onDeleted}
-        />
-      )}
-    </div>
+      </CardContent>
+    </Card>
   );
 }
 
-// The page's bespoke kv row is gone: `KeyValueList` (§5.25) is the console's
-// one fact-row vocabulary, and a second one here is how a design system decays.
+const MODEL_ROUTE: ResourceDetailKind<ModelRouteDetail> = {
+  noun: "Model route",
+  short: "route",
+  plural: "model routes",
+  crdKind: "ModelRoute",
+  list: { to: "/routes", label: "Model routes", back: "Back to routes" },
+  resource: RES_ROUTES,
+  testids: {
+    page: "route-detail-page",
+    loading: "route-detail-loading",
+    error: "route-detail-error",
+    notFound: "route-not-found",
+    edit: "edit-route-button",
+    delete: "delete-route-button",
+  },
+  read: (ns, name, signal) => api.modelRouteDetail(ns, name, signal),
+  status: (d) => <StatusBadge ready={d.ready} phase={d.phase} />,
+  meta: (d) => `${d.namespace} · ${d.providers.length} provider${d.providers.length === 1 ? "" : "s"}`,
+  Main: RouteFailoverOrder,
+  facts: (d) => {
+    const first = failoverOrder(d)[0];
+    return [
+      { key: "Route", value: d.name, title: d.name },
+      { key: "Workspace", value: d.namespace, absent: "not recorded" },
+      { key: "Providers", value: <QuantityValue value={d.providers.length} />, mono: false },
+      {
+        key: "First choice",
+        value: first ? (
+          <span className="block truncate" title={`${first.provider} / ${first.model}`}>
+            {first.provider} / {first.model}
+          </span>
+        ) : undefined,
+        absent: "none declared",
+        title: "This route declares no providers, so nothing serves its traffic.",
+      },
+    ];
+  },
+  Rail: RouteRateCap,
+  edit: {
+    subtitle: () => "Repoints the route — which providers it tries, and in what order",
+    Wizard: RouteEditWizard,
+  },
+  remove: {
+    call: (ns, name) => api.removeModelRoute(ns, name),
+    description: (d) =>
+      `This will permanently delete the ModelRoute "${d.name}" and any traffic routing it provided.`,
+    confirmLabel: "Delete route",
+    toastTitle: "Model route deleted",
+  },
+};
+
+export function ModelRouteDetailPage() {
+  return <ResourceDetailPage kind={MODEL_ROUTE} />;
+}
+
 
 // ── Edit Wizard ───────────────────────────────────────────────────────────────
 
@@ -1020,57 +748,6 @@ function RouteEditWizard({
       // An edit that has diverged from the record routes Cancel/Esc through the
       // discard guard, so an unsaved change cannot vanish on a stray keystroke.
       dirty={dirty}
-    />
-  );
-}
-
-// ── Delete Dialog ─────────────────────────────────────────────────────────────
-
-function RouteDeleteDialog({
-  detail,
-  onClose,
-  onDeleted,
-}: {
-  detail: ModelRouteDetail;
-  onClose: () => void;
-  onDeleted: () => void;
-}) {
-  const { toast } = useToast();
-  const { reprobe } = useCapabilitiesIn(detail.namespace);
-  const [deleting, setDeleting] = React.useState(false);
-
-  async function onConfirm() {
-    setDeleting(true);
-    try {
-      await api.removeModelRoute(detail.namespace, detail.name);
-      toast({
-        variant: "success",
-        title: "Model route deleted",
-        description: `${detail.name} removed.`,
-      });
-      onDeleted();
-    } catch (err) {
-      if (err instanceof ApiError && err.isForbidden) reprobe();
-      toast({
-        variant: "error",
-        title: "Delete failed",
-        description: err instanceof Error ? err.message : "delete failed",
-      });
-      setDeleting(false);
-      onClose();
-    }
-  }
-
-  return (
-    <ConfirmDialog
-      open={true}
-      onCancel={onClose}
-      onConfirm={onConfirm}
-      title={`Delete ${detail.name}?`}
-      description={`This will permanently delete the ModelRoute "${detail.name}" and any traffic routing it provided.`}
-      confirmText={detail.name}
-      confirmLabel="Delete route"
-      busy={deleting}
     />
   );
 }

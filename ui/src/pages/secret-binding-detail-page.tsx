@@ -1,24 +1,17 @@
 import * as React from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 
+import { ResourceDetailPage, type ResourceDetailKind } from "@/components/resource-detail";
 import { UsedBySection } from "@/components/used-by-section";
-import { Pencil, Trash2 } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, PanelHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
-  ConfirmDialog,
-  DetailDrawer,
-  ErrorState,
   ForbiddenInline,
   KeyValueList,
-  NextStepLink,
   PageHeader,
   QuietNote,
   SectionHeader,
-  Skeleton,
-  SkeletonCard,
   StatusBadge,
   Wizard,
   type KeyValueItem,
@@ -30,8 +23,8 @@ import { api, ApiError, type SecretBindingDetail } from "@/lib/api";
 import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { RES_SECRETS } from "@/lib/nav";
 
-// SecretBindingDetailPage — the binding reader + its edit form (M151 §6.1
-// archetype A2, form-edit variant). Route: /secrets/:ns/:name
+// SecretBindingDetailPage — the binding reader + its edit form, on the shared
+// ResourceDetailPage (M151 §6.1 archetype A2, form-edit variant). Route: /secrets/:ns/:name
 //
 // ── THE STANDING INVARIANT: THIS PAGE NEVER RENDERS A SECRET VALUE ──────────
 // Not in the body, not in a `title`, not in a placeholder, not after a
@@ -68,201 +61,14 @@ import { RES_SECRETS } from "@/lib/nav";
 //   no-value-form-note     — the same invariant, stated in the edit form
 //   edit-secret-button / delete-secret-button — the header actions
 
-/** The A2 breadcrumb — the same trail in every state, so a failed load still
- *  offers the way back the ready page offers. */
-const CRUMBS = (name: string) => [
-  { label: "Secret bindings", to: "/secrets" },
-  { label: name },
-];
-
-type Load =
-  | { kind: "loading" }
-  | { kind: "ready"; detail: SecretBindingDetail }
-  | { kind: "error"; message: string; status?: number; forbidden: boolean };
-
-export function SecretBindingDetailPage() {
-  const { ns = "", name = "" } = useParams();
-  const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [state, setState] = React.useState<Load>({ kind: "loading" });
-
-  const editOpen = searchParams.get("edit") === "1";
-  const deleteOpen = searchParams.get("delete") === "1";
-
-  function openEdit() {
-    setSearchParams((p) => { p.set("edit", "1"); return p; });
-  }
-  function closeEdit() {
-    setSearchParams((p) => { p.delete("edit"); return p; });
-  }
-  function openDelete() {
-    setSearchParams((p) => { p.set("delete", "1"); return p; });
-  }
-  function closeDelete() {
-    setSearchParams((p) => { p.delete("delete"); return p; });
-  }
-
-  const load = React.useCallback(() => {
-    const controller = new AbortController();
-    setState({ kind: "loading" });
-    api
-      .secretBindingDetail(ns, name, controller.signal)
-      .then((detail) => {
-        if (controller.signal.aborted) return;
-        setState({ kind: "ready", detail });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        const apiErr = err instanceof ApiError ? err : null;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load the secret binding",
-          status: apiErr?.status,
-          forbidden: apiErr?.isForbidden ?? false,
-        });
-      });
-    return () => controller.abort();
-  }, [ns, name]);
-
-  React.useEffect(() => load(), [load]);
-
-  // The §7 A2 loading shape: the header band instantly, a SkeletonCard where the
-  // panel will be, and kv-line bars where the rail's facts will be — so the page
-  // does not re-lay-out under the reader when the answer arrives.
-  if (state.kind === "loading") {
-    return (
-      <div className="min-w-0 space-y-6" data-testid="secret-detail-loading">
-        <PageHeader
-          breadcrumb={CRUMBS(name)}
-          title={name || "Secret binding"}
-          titleMono
-          loading
-        />
-        <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
-          <SkeletonCard className="min-w-0" />
-          <Card className="min-w-0">
-            <PanelHeader title="The record" />
-            <CardContent>
-              <div
-                role="status"
-                aria-busy="true"
-                aria-label="Loading the binding's record"
-              >
-                {[0, 1, 2, 3, 4, 5].map((i) => (
-                  <Skeleton decorative key={i} className="mb-3 h-3.5 w-full" />
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-    );
-  }
-
-  if (state.kind === "error") {
-    // §7 A2: a permission boundary replaces the whole page under the header —
-    // calm, resource-named, and never the raw RBAC string (M100 UI99-403).
-    if (state.forbidden) {
-      return (
-        <div className="min-w-0 space-y-6">
-          <PageHeader breadcrumb={CRUMBS(name)} title={name} titleMono />
-          <ForbiddenInline
-            title={`You don't have permission to view ${name}.`}
-            resource="secret bindings"
-            detail={state.message}
-          />
-        </div>
-      );
-    }
-    if (state.status === 404) {
-      return (
-        <div className="min-w-0 space-y-6" data-testid="secret-not-found">
-          <PageHeader
-            breadcrumb={[{ label: "Secret bindings", to: "/secrets" }]}
-            title="Secret binding not found"
-            lede="Nothing in this workspace answers to that name."
-          />
-          <QuietNote title="No secret binding with this name was found.">
-            There is no SecretBinding{" "}
-            <span className="font-mono text-xs">{name}</span> in{" "}
-            <span className="font-mono text-xs">{ns || "this namespace"}</span>. It
-            may have been deleted, or the link may name a binding from another
-            cluster. Nothing is missing from this page — there is simply no
-            binding to show.
-            <span className="mt-3 block">
-              <NextStepLink label="Back to bindings" to="/secrets" />
-            </span>
-          </QuietNote>
-        </div>
-      );
-    }
-    return (
-      <div className="min-w-0 space-y-6" data-testid="secret-detail-error">
-        <PageHeader breadcrumb={CRUMBS(name)} title={name} titleMono />
-        <ErrorState
-          title="The secret binding didn't load."
-          description="Nothing has changed about the binding itself — only this page failed to read it."
-          detail={state.message}
-          onRetry={() => load()}
-        />
-      </div>
-    );
-  }
-
-  const detail = state.detail;
-  return (
-    <SecretBindingDetailContent
-      detail={detail}
-      editOpen={editOpen}
-      deleteOpen={deleteOpen}
-      onOpenEdit={openEdit}
-      onCloseEdit={closeEdit}
-      onOpenDelete={openDelete}
-      onCloseDelete={closeDelete}
-      onDeleted={() => navigate("/secrets")}
-      onSaved={() => { closeEdit(); load(); }}
-    />
-  );
-}
-
-function SecretBindingDetailContent({
-  detail,
-  editOpen,
-  deleteOpen,
-  onOpenEdit,
-  onCloseEdit,
-  onOpenDelete,
-  onCloseDelete,
-  onDeleted,
-  onSaved,
-}: {
-  detail: SecretBindingDetail;
-  editOpen: boolean;
-  deleteOpen: boolean;
-  onOpenEdit: () => void;
-  onCloseEdit: () => void;
-  onOpenDelete: () => void;
-  onCloseDelete: () => void;
-  onDeleted: () => void;
-  onSaved: () => void;
-}) {
-  // Edit and Delete act in the binding's namespace, whatever the shell has selected.
-  const { can } = useCapabilitiesIn(detail.namespace);
-  const canEdit = can(RES_SECRETS, "update");
-  const canDelete = can(RES_SECRETS, "delete");
-
-  // What it points at. Both values are machine strings, so both truncate on ONE
-  // line with the full value in `title` (§4.5) — a K8s name is never break-all'd.
-  // Absence is a real state here (a malformed binding): "not set", not a blank.
+function SecretReference({ detail }: { detail: SecretBindingDetail }) {
+  // Both values are machine strings, so both truncate on ONE line with the full value in
+  // `title` (§4.5). Absence is a real state here (a malformed binding): "not set".
   const reference: KeyValueItem[] = [
     {
       key: "K8s Secret",
       value: detail.secretRef.name ? (
-        <span
-          className="block truncate"
-          data-testid="secret-ref-name"
-          title={detail.secretRef.name}
-        >
+        <span className="block truncate" data-testid="secret-ref-name" title={detail.secretRef.name}>
           {detail.secretRef.name}
         </span>
       ) : undefined,
@@ -272,11 +78,7 @@ function SecretBindingDetailContent({
     {
       key: "Key in that Secret",
       value: detail.secretRef.key ? (
-        <span
-          className="block truncate"
-          data-testid="secret-ref-key"
-          title={detail.secretRef.key}
-        >
+        <span className="block truncate" data-testid="secret-ref-key" title={detail.secretRef.key}>
           {detail.secretRef.key}
         </span>
       ) : undefined,
@@ -285,144 +87,92 @@ function SecretBindingDetailContent({
     },
   ];
 
-  // The rail: the bound facts, ending on the deliberate absence. The last row is
-  // the load-bearing one — a reader scanning a rail for values finds, in the
+  return (
+    <>
+      {/* The reference — and only the reference. NO value field. */}
+      <Card className="min-w-0" data-testid="secret-detail-panel">
+        <PanelHeader title="What this points at" />
+        <CardContent>
+          <p className="mb-4 max-w-[64ch] text-sm text-secondary-foreground">
+            A binding is a pointer, not a store. It names the Kubernetes Secret that holds the
+            credential and the key inside it; the controller follows that pointer in the cluster
+            when an agent needs it.
+          </p>
+          <KeyValueList items={reference} />
+          {/* A QuietNote and not an alert because nothing is wrong: the value is absent by
+              design, and dressing a deliberate absence as a failure teaches operators to
+              ignore real failures. */}
+          <div className="mt-4" data-testid="no-value-note">
+            <QuietNote title="The credential value is never shown here.">
+              Everything on this page is the reference — which Secret, which key. The console
+              never displays or transmits secret values; the value itself is read inside the
+              cluster, by the controller that resolves this binding. It is not absent because
+              we could not read it. It is absent because reading it here would be the leak.
+            </QuietNote>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* The ModelRoutes whose providers reference this binding. */}
+      <UsedBySection
+        kind="secretbinding"
+        name={detail.name}
+        namespace={detail.namespace}
+        title="Used by model routes"
+      />
+    </>
+  );
+}
+
+const SECRET_BINDING: ResourceDetailKind<SecretBindingDetail> = {
+  noun: "Secret binding",
+  short: "binding",
+  plural: "secret bindings",
+  crdKind: "SecretBinding",
+  list: { to: "/secrets", label: "Secret bindings", back: "Back to bindings" },
+  resource: RES_SECRETS,
+  testids: {
+    page: "secret-detail-page",
+    loading: "secret-detail-loading",
+    error: "secret-detail-error",
+    notFound: "secret-not-found",
+    edit: "edit-secret-button",
+    delete: "delete-secret-button",
+  },
+  read: (ns, name, signal) => api.secretBindingDetail(ns, name, signal),
+  status: (d) => <StatusBadge ready={d.ready} phase={d.phase} />,
+  meta: (d) => `${d.namespace} · ${d.backend}`,
+  Main: SecretReference,
+  // The rail ends on the deliberate absence: a reader scanning it for values finds, in the
   // place a value would be, the reason there will never be one.
-  const facts: KeyValueItem[] = [
-    { key: "Binding", value: detail.name, title: detail.name },
-    { key: "Workspace", value: detail.namespace, absent: "not recorded" },
-    { key: "Backend", value: detail.backend, absent: "not recorded" },
+  facts: (d) => [
+    { key: "Binding", value: d.name, title: d.name },
+    { key: "Workspace", value: d.namespace, absent: "not recorded" },
+    { key: "Backend", value: d.backend, absent: "not recorded" },
     {
       key: "Credential value",
       absent: "never read here",
       title:
         "The console never reads or displays credential values — only the reference to them. This absence is deliberate, not a figure we failed to fetch.",
     },
-  ];
+  ],
+  edit: {
+    subtitle: () => "Updates the Secret reference — never the credential value",
+    Wizard: SecretBindingEditWizard,
+  },
+  remove: {
+    call: (ns, name) => api.removeSecretBinding(ns, name),
+    description: (d) =>
+      `This will permanently delete the SecretBinding "${d.name}". Any ModelRoute that references it will lose its credential link.`,
+    confirmLabel: "Delete binding",
+    toastTitle: "Secret binding deleted",
+  },
+};
 
-  return (
-    <div className="min-w-0 space-y-6" data-testid="secret-detail-page">
-      <PageHeader
-        breadcrumb={CRUMBS(detail.name)}
-        title={detail.name}
-        titleMono
-        status={<StatusBadge ready={detail.ready} phase={detail.phase} />}
-        meta={`${detail.namespace} · ${detail.backend}`}
-        actionsSlot={
-          canEdit || canDelete ? (
-            <>
-              {canEdit && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="text-sm"
-                  onClick={onOpenEdit}
-                  data-testid="edit-secret-button"
-                >
-                  <Pencil className="h-4 w-4" />
-                  Edit
-                </Button>
-              )}
-              {canDelete && (
-                // Crit as an ACTION colour is §2.3's one sanctioned exception:
-                // a destructive control, distinguished from a crit status by
-                // form (a filled button, never an uppercase mono tag).
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  className="text-sm"
-                  onClick={onOpenDelete}
-                  data-testid="delete-secret-button"
-                >
-                  <Trash2 className="h-4 w-4" />
-                  Delete
-                </Button>
-              )}
-            </>
-          ) : undefined
-        }
-      />
-
-      {/* §4.7 hub grid: the subject on the left, the bound facts in the 300px
-          rail, which stacks UNDER the main column below `lg`. */}
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
-        <div className="min-w-0 space-y-5">
-          {/* The reference — and only the reference. NO value field. */}
-          <Card className="min-w-0" data-testid="secret-detail-panel">
-            <PanelHeader title="What this points at" />
-            <CardContent>
-              <p className="mb-4 max-w-[64ch] text-sm text-secondary-foreground">
-                A binding is a pointer, not a store. It names the Kubernetes
-                Secret that holds the credential and the key inside it; the
-                controller follows that pointer in the cluster when an agent
-                needs it.
-              </p>
-              <KeyValueList items={reference} />
-              {/* The invariant, said where the values would be. It is a
-                  QuietNote and not an alert because nothing is wrong: the value
-                  is absent by design, and dressing a deliberate absence as a
-                  failure teaches operators to ignore real failures. */}
-              <div className="mt-4" data-testid="no-value-note">
-                <QuietNote title="The credential value is never shown here.">
-                  Everything on this page is the reference — which Secret, which
-                  key. The console never displays or transmits secret values; the
-                  value itself is read inside the cluster, by the controller that
-                  resolves this binding. It is not absent because we could not
-                  read it. It is absent because reading it here would be the leak.
-                </QuietNote>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Reverse-lookup: the ModelRoutes whose providers reference this
-              binding. A list of links, so it stays in the main column — §4.7
-              rails carry kv-lists and meters only. */}
-          <UsedBySection
-            kind="secretbinding"
-            name={detail.name}
-            namespace={detail.namespace}
-            title="Used by model routes"
-          />
-        </div>
-
-        <div className="min-w-0 space-y-5">
-          <Card className="min-w-0">
-            <PanelHeader title="The record" />
-            <CardContent>
-              <KeyValueList items={facts} />
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-
-      {/* Edit wizard */}
-      <DetailDrawer
-        open={editOpen}
-        onClose={onCloseEdit}
-        title={`Edit ${detail.name}`}
-        subtitle="Updates the Secret reference — never the credential value"
-        size="lg"
-      >
-        {editOpen && (
-          <SecretBindingEditWizard
-            detail={detail}
-            onClose={onCloseEdit}
-            onSaved={onSaved}
-          />
-        )}
-      </DetailDrawer>
-
-      {/* Delete dialog */}
-      {deleteOpen && (
-        <SecretBindingDeleteDialog
-          detail={detail}
-          onClose={onCloseDelete}
-          onDeleted={onDeleted}
-        />
-      )}
-    </div>
-  );
+export function SecretBindingDetailPage() {
+  return <ResourceDetailPage kind={SECRET_BINDING} />;
 }
+
 
 // ── Edit Wizard ───────────────────────────────────────────────────────────────
 // SECURITY: the form edits ONLY secretRef.name + secretRef.key (and backend).
@@ -675,53 +425,6 @@ function SecretBindingEditWizard({
       // An edit that has diverged from the record routes Cancel/Esc through the
       // discard guard, so the unsaved change cannot vanish on a stray keystroke.
       dirty={dirty}
-    />
-  );
-}
-
-// ── Delete Dialog ─────────────────────────────────────────────────────────────
-
-function SecretBindingDeleteDialog({
-  detail,
-  onClose,
-  onDeleted,
-}: {
-  detail: SecretBindingDetail;
-  onClose: () => void;
-  onDeleted: () => void;
-}) {
-  const { toast } = useToast();
-  const { reprobe } = useCapabilitiesIn(detail.namespace);
-  const [deleting, setDeleting] = React.useState(false);
-
-  async function onConfirm() {
-    setDeleting(true);
-    try {
-      await api.removeSecretBinding(detail.namespace, detail.name);
-      toast({ variant: "success", title: "Secret binding deleted", description: `${detail.name} removed.` });
-      onDeleted();
-    } catch (err) {
-      if (err instanceof ApiError && err.isForbidden) reprobe();
-      toast({
-        variant: "error",
-        title: "Delete failed",
-        description: err instanceof Error ? err.message : "delete failed",
-      });
-      setDeleting(false);
-      onClose();
-    }
-  }
-
-  return (
-    <ConfirmDialog
-      open={true}
-      onCancel={onClose}
-      onConfirm={onConfirm}
-      title={`Delete ${detail.name}?`}
-      description={`This will permanently delete the SecretBinding "${detail.name}". Any ModelRoute that references it will lose its credential link.`}
-      confirmText={detail.name}
-      confirmLabel="Delete binding"
-      busy={deleting}
     />
   );
 }
