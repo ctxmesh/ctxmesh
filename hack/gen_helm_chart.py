@@ -852,6 +852,8 @@ def substitute(doc: str) -> str:
     doc = doc.replace(MCP_OBO_EGRESS_ENABLED_ENV_KUSTOMIZE, MCP_OBO_EGRESS_ENABLED_ENV_HELM)
     doc = doc.replace(EGRESS_SIDECAR_IMAGE_ENV_KUSTOMIZE, EGRESS_SIDECAR_IMAGE_ENV_HELM)
     # MCP_CAPABILITY_PUBLIC_KEY is now a secretKeyRef in config/manager, copied verbatim (no replace).
+    # MCP_CAPABILITY_AUDIENCE is not manager-only: the BFF and the token service carry the same literal,
+    # and every one takes the same value (hack/capability_audience.py).
     doc = doc.replace(MCP_CAPABILITY_AUDIENCE_ENV_KUSTOMIZE, MCP_CAPABILITY_AUDIENCE_ENV_HELM)
     doc = doc.replace(TOKEN_SERVICE_URL_ENV_KUSTOMIZE, TOKEN_SERVICE_URL_ENV_HELM)
     doc = doc.replace(COST_ROLLUP_ENABLED_ENV_KUSTOMIZE, COST_ROLLUP_ENABLED_ENV_HELM + RUNCAP_REQUIRE_POP_ENV_HELM)

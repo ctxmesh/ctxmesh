@@ -190,6 +190,8 @@ spec:
           value: {{ .Values.bff.natsCredentialsFile | default "" | quote }}
         - name: MCP_OBO_REQUIRED
           value: {{ .Values.controllerManager.oboEgress.enabled | quote }}
+        - name: MCP_CAPABILITY_AUDIENCE
+          value: {{ .Values.controllerManager.oboEgress.capabilityAudience | default "" | quote }}
         - name: MCP_GRANT_HMAC_KEY
           valueFrom:
             secretKeyRef:

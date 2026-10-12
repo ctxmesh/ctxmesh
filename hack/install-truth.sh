@@ -178,6 +178,17 @@ sys.exit(1 if bad else 0)
 PY
 ok "the durable run path (bff.runStore.enabled=true) consumes nothing the chart does not create"
 
+# 9b. Every workload that mints or verifies run capabilities uses the same audience (ADR 0154).
+#
+# The BFF and the run-worker mint them, the controller's injected sidecars and the token service
+# verify them. The chart templated the audience into the verifiers only, so setting it refused
+# every tool credential as invalid_capability. Rendered with the run-worker on and a probe value.
+helm template ctxmesh "$CHART" -n ctxmesh --set bff.runStore.enabled=true \
+    --set controllerManager.oboEgress.capabilityAudience=ctxmesh-audience-probe 2>/dev/null \
+  | python3 hack/capability_audience.py ctxmesh-audience-probe \
+  || fail "the run-capability audience differs between the components that mint and verify capabilities"
+ok "every component that mints or verifies run capabilities takes the same audience"
+
 # N. The demo login must be able to complete the flow the console advertises.
 #
 # Found from a real install (M177): with the demo login on, the chart bound ONLY

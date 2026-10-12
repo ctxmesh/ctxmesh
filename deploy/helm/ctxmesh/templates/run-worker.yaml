@@ -79,6 +79,10 @@ spec:
             # absent, refuse to start rather than let sub-runs silently use the shared org/public credential.
             - name: MCP_OBO_REQUIRED
               value: {{ .Values.controllerManager.oboEgress.enabled | quote }}
+            # The audience the worker re-mints capabilities for: the one the BFF mints for and the
+            # controller and token service verify against (hack/capability_audience.py).
+            - name: MCP_CAPABILITY_AUDIENCE
+              value: {{ .Values.controllerManager.oboEgress.capabilityAudience | default "" | quote }}
             # The grant HMAC key, from the same Secret as the BFF's (ADR 0154). The worker re-mints run
             # capabilities, and a capability whose user hash is keyed differently from the grant the
             # BFF stored resolves nobody's credential.
