@@ -185,9 +185,11 @@ func (r *RegressionDetectorReconciler) evaluate(
 
 	baseline, ok, err := r.priorVersion(ctx, deploy, serving)
 	if err != nil {
-		// A read error is infra — surface Unknown but let the reconcile requeue normally.
+		// A read error is infra — surface Unknown but let the reconcile requeue normally. The
+		// message says what happened; the error, which names the database, goes to the log.
+		logf.FromContext(ctx).Error(err, "Could not read version history for the regression baseline")
 		return onlinescore.RegressionVerdict{}, metav1.ConditionUnknown, reasonNoBaseline,
-			fmt.Sprintf("could not resolve the prior version baseline: %v", err)
+			"could not resolve the prior version baseline: " + msgStoreUnavailable
 	}
 	if !ok {
 		return onlinescore.RegressionVerdict{}, metav1.ConditionUnknown, reasonNoBaseline,
@@ -198,8 +200,9 @@ func (r *RegressionDetectorReconciler) evaluate(
 	// filter to each version so the detector compares like-for-like.
 	all, err := r.OnlineScore.ListAggregates(ctx, deploy.Namespace, deploy.Name, 0)
 	if err != nil {
+		logf.FromContext(ctx).Error(err, "Could not read online-score aggregates")
 		return onlinescore.RegressionVerdict{}, metav1.ConditionUnknown, reasonInsufficientData,
-			fmt.Sprintf("could not read online-score aggregates: %v", err)
+			"could not read online-score aggregates: " + msgStoreUnavailable
 	}
 	currentWindows := filterByVersion(all, serving)
 	baselineWindows := filterByVersion(all, baseline)

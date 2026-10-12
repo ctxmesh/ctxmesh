@@ -39,7 +39,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # The number of rows the table holds. Raise it with the rows; lowering it is a visible edit to a claim.
-FLOOR=160
+FLOOR=163
 
 SITE="${CTXMESH_SITE:-../ctxmesh.github.io}"
 SITE_OK=0
@@ -368,6 +368,9 @@ row m184.37 test internal/controller/agent_version_store_test.go TestRollback_Hu
 row m184.37 test internal/controller/agentversion_import_test.go TestImportAgentVersions "an upgrade imports existing AgentVersion objects once, and rolls back to them"
 row m184.37 test internal/bff/agent_version_diff_test.go TestAgentVersionDiff_WithoutTheGrantIs403 "the version diff is authorized as the caller"
 row m184.37 has config/rbac/ctxmesh_viewer_role.yaml '  - agentversions' "the viewer persona keeps the grant the version-history SSAR checks"
+row m184.37 test internal/controller/agentversion_import_memory_test.go TestImportAgentVersions_StreamsWithinAMemoryBound "the upgrade import streams instead of holding every object"
+row m184.37 test internal/controller/agent_version_store_test.go TestVersion_PruneKeepsTheServingVersionBehindBlockedCandidates "pruning never removes the version that serves"
+row m184.37 test internal/controller/agent_version_store_test.go TestConditionMessagesKeepStoreDetailsOut "no condition message carries the store's connection details"
 
 # ── verdict ───────────────────────────────────────────────────────────────────
 if [ "$total" -eq 0 ]; then

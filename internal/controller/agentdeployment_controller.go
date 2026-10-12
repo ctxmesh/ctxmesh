@@ -398,6 +398,9 @@ type AgentDeploymentReconciler struct {
 	// recorded holds, per "<namespace>/<name>", the recordedVersion this process last recorded.
 	recorded sync.Map
 
+	// clock replaces time.Now for the version cache's expiry (tests). Nil ⇒ time.Now.
+	clock func() time.Time
+
 	// OnlineConfig publishes each agent's online-scoring policy to cpDB (m84.3, ADR 0062 Fork 2 / ADR 0011):
 	// the controller resolves spec.evalSuiteRef → EvalSuite.spec.online and UPSERTS/DELETES the per-(ns,
 	// agent) config row that the BFF online-scoring worker READS (cpDB, no agent-CRD RBAC on the BFF SA).
@@ -978,8 +981,11 @@ func specHash(spec agentsv1beta1.AgentDeploymentSpec) (string, error) {
 		return "", fmt.Errorf("marshalling spec to JSON: %w", err)
 	}
 	sum := sha256.Sum256(data)
-	return fmt.Sprintf("%x", sum[:])[:8], nil
+	return fmt.Sprintf("%x", sum[:])[:specHashLen], nil
 }
+
+// specHashLen is the length of the spec hash in a version name.
+const specHashLen = 8
 
 // agentVersionName is the version a spec is served as: status.latestVersion, the AGENT_VERSION its
 // pods carry, the prefix of its revision name, and its name in the version history.

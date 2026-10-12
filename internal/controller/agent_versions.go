@@ -19,12 +19,16 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
@@ -53,6 +57,9 @@ const (
 	// versionHistoryKeep is how many of an agent's newest versions pruning keeps, besides the pinned
 	// ones (pruneVersions).
 	versionHistoryKeep = 20
+
+	// versionRecordedTTL is how long recordVersion trusts its memory of a recorded version.
+	versionRecordedTTL = 10 * time.Minute
 )
 
 var versionRecordFailures = prometheus.NewCounter(prometheus.CounterOpts{
@@ -74,15 +81,25 @@ func retrySoon(result ctrl.Result, err error) ctrl.Result {
 	return result
 }
 
-// recordedVersion is the last version this process recorded for an agent.
-type recordedVersion struct{ uid, name string }
+// recordedVersion is the last version this process recorded for an agent, and when.
+type recordedVersion struct {
+	uid, name string
+	at        time.Time
+}
+
+// msgStoreUnavailable says in product terms why something that needs the control-plane store did not
+// happen. Condition messages are readable by anyone who can read the object; the error itself, which
+// names the database host, user and database, goes to the controller log only.
+const msgStoreUnavailable = "the control-plane store is unavailable"
 
 // recordVersion records the version the spec is served as and reports whether it is recorded. A
 // store error never stops the reconcile: it is logged, counted and put on status, and the caller
 // requeues. A new version prunes the agent's history.
 //
-// The last version recorded per agent is remembered, so a reconcile of an unchanged spec costs no
-// store round trip. Only the current version is remembered, and pruning never removes it.
+// The last version recorded per agent is remembered for versionRecordedTTL, so a reconcile of an
+// unchanged spec costs no store round trip. After that the record is written again (a no-op when
+// the row exists), so a row lost outside this process (a restore, a failover, a manual cleanup) is
+// recorded again and VersionRecorded does not stay True on a memory.
 func (r *AgentDeploymentReconciler) recordVersion(
 	ctx context.Context,
 	deploy *agentsv1beta1.AgentDeployment,
@@ -92,10 +109,13 @@ func (r *AgentDeploymentReconciler) recordVersion(
 		return true
 	}
 	key := deploy.Namespace + "/" + deploy.Name
-	want := recordedVersion{uid: string(deploy.UID), name: versionName}
-	if last, ok := r.recorded.Load(key); ok && last == want {
-		r.setVersionRecorded(ctx, deploy, nil)
-		return true
+	now := r.now()
+	if v, ok := r.recorded.Load(key); ok {
+		if last, _ := v.(recordedVersion); last.uid == string(deploy.UID) && last.name == versionName &&
+			now.Sub(last.at) < versionRecordedTTL {
+			setVersionRecorded(deploy, "")
+			return true
+		}
 	}
 	inserted, err := r.Versions.Record(ctx, agentversion.Version{
 		Namespace: deploy.Namespace,
@@ -109,24 +129,32 @@ func (r *AgentDeploymentReconciler) recordVersion(
 		versionRecordFailures.Inc()
 		logf.FromContext(ctx).Error(err, "Could not record the agent's version; deploying anyway and retrying",
 			"version", versionName, "retryIn", versionStoreRetry.String())
-		r.setVersionRecorded(ctx, deploy, fmt.Errorf(
-			"version %q could not be recorded in the control-plane store (%w); the deploy went ahead. "+
-				"A rollback to it is not possible until it is recorded; retrying every %s",
-			versionName, err, versionStoreRetry))
+		setVersionRecorded(deploy, fmt.Sprintf(
+			"version %q could not be recorded: %s. The deploy went ahead; a rollback to this version is "+
+				"not possible until it is recorded. Retrying every %s.",
+			versionName, msgStoreUnavailable, versionStoreRetry))
 		return false
 	}
-	r.recorded.Store(key, want)
-	r.setVersionRecorded(ctx, deploy, nil)
+	r.recorded.Store(key, recordedVersion{uid: string(deploy.UID), name: versionName, at: now})
+	setVersionRecorded(deploy, "")
 	if inserted {
 		r.pruneVersions(ctx, deploy, versionName)
 	}
 	return true
 }
 
-// setVersionRecorded sets VersionRecorded: True when failure is nil, else False with its message.
-// It writes only on a change. A failed write is logged: the reconcile's own status write follows,
-// and carries the condition.
-func (r *AgentDeploymentReconciler) setVersionRecorded(ctx context.Context, deploy *agentsv1beta1.AgentDeployment, failure error) {
+// now is the reconciler's clock (tests set clock).
+func (r *AgentDeploymentReconciler) now() time.Time {
+	if r.clock != nil {
+		return r.clock()
+	}
+	return time.Now()
+}
+
+// setVersionRecorded sets VersionRecorded on deploy in memory: True when failure is empty, else False
+// with it. It is not written here: the reconcile's own status write carries it, so recording a version
+// adds no status write of its own (an extra write would make a later write from a cached read conflict).
+func setVersionRecorded(deploy *agentsv1beta1.AgentDeployment, failure string) {
 	cond := metav1.Condition{
 		Type:               conditionVersionRecorded,
 		Status:             metav1.ConditionTrue,
@@ -134,35 +162,50 @@ func (r *AgentDeploymentReconciler) setVersionRecorded(ctx context.Context, depl
 		Message:            "The serving spec's version is recorded; it can be rolled back to.",
 		ObservedGeneration: deploy.Generation,
 	}
-	if failure != nil {
-		cond.Status, cond.Reason, cond.Message = metav1.ConditionFalse, reasonVersionNotRecorded, failure.Error()
+	if failure != "" {
+		cond.Status, cond.Reason, cond.Message = metav1.ConditionFalse, reasonVersionNotRecorded, failure
 	}
-	if !apimeta.SetStatusCondition(&deploy.Status.Conditions, cond) {
-		return
-	}
-	if err := r.Status().Update(ctx, deploy); err != nil {
-		logf.FromContext(ctx).Error(err, "Could not update the VersionRecorded condition")
+	apimeta.SetStatusCondition(&deploy.Status.Conditions, cond)
+}
+
+// carryVersionRecorded copies the VersionRecorded condition set on the reconciled object onto a
+// freshly read one that is about to be written in its place.
+func carryVersionRecorded(from, to *agentsv1beta1.AgentDeployment) {
+	if c := apimeta.FindStatusCondition(from.Status.Conditions, conditionVersionRecorded); c != nil {
+		apimeta.SetStatusCondition(&to.Status.Conditions, *c)
 	}
 }
 
 // pruneVersions keeps the agent's newest versionHistoryKeep versions and every version that may still
-// be needed: the current one, the serving one and its prior (the automatic rollback target and the
-// detector's baseline), and every version the rollback history names (the flap guard reads them).
-// It also removes the versions of an earlier agent of the same name. Best effort: a failure is logged
-// and the next new version prunes again.
+// be needed: the current one, the latest one and its prior (the automatic rollback target and the
+// detector's baseline), every version a revision of the agent's Knative Service is built from (a
+// held, blocked or canaried candidate moves status.latestVersion while an older version keeps
+// serving), and every version the gate, the rollout or the rollback history names. It also removes
+// the versions of an earlier agent of the same name. Best effort: a failure is logged, nothing is
+// pruned, and the next new version prunes again.
 func (r *AgentDeploymentReconciler) pruneVersions(ctx context.Context, deploy *agentsv1beta1.AgentDeployment, current string) {
 	log := logf.FromContext(ctx)
 	uid := string(deploy.UID)
 	pinned := []string{current}
-	if serving := deploy.Status.LatestVersion; serving != "" {
-		pinned = append(pinned, serving)
-		prior, ok, err := r.Versions.Prior(ctx, deploy.Namespace, uid, serving)
+	if latest := deploy.Status.LatestVersion; latest != "" {
+		pinned = append(pinned, latest)
+		prior, ok, err := r.Versions.Prior(ctx, deploy.Namespace, uid, latest)
 		if err != nil {
 			log.Error(err, "Could not prune version history", "version", current)
 			return
 		}
 		if ok {
 			pinned = append(pinned, prior)
+		}
+	}
+	served, err := r.servedRevisions(ctx, deploy)
+	if err != nil {
+		log.Error(err, "Could not prune version history: the serving revisions are unknown", "version", current)
+		return
+	}
+	for _, rev := range served {
+		if v, ok := versionOfRevision(deploy.Name, rev); ok {
+			pinned = append(pinned, v)
 		}
 	}
 	if rb := deploy.Status.Rollback; rb != nil {
@@ -179,6 +222,45 @@ func (r *AgentDeploymentReconciler) pruneVersions(ctx context.Context, deploy *a
 	if removed > 0 {
 		log.Info("Pruned version history", "removed", removed, "kept", versionHistoryKeep)
 	}
+}
+
+// servedRevisions names every revision the agent's Knative Service applies, routes traffic to, or has
+// created, and the revisions the gate and the rollout name. An agent without a Service (a job, or one
+// not deployed yet) has only the latter.
+func (r *AgentDeploymentReconciler) servedRevisions(ctx context.Context, deploy *agentsv1beta1.AgentDeployment) ([]string, error) {
+	var revs []string
+	if g := deploy.Status.Gate; g != nil {
+		revs = append(revs, g.ScoredRevision)
+	}
+	if ro := deploy.Status.Rollout; ro != nil {
+		revs = append(revs, ro.CandidateRevision)
+	}
+	var ksvc servingv1.Service
+	err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: deploy.Name}, &ksvc)
+	if apierrors.IsNotFound(err) {
+		return revs, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading the Knative Service: %w", err)
+	}
+	revs = append(revs, ksvc.Spec.Template.Name, ksvc.Status.LatestReadyRevisionName, ksvc.Status.LatestCreatedRevisionName)
+	for _, t := range ksvc.Spec.Traffic {
+		revs = append(revs, t.RevisionName)
+	}
+	for _, t := range ksvc.Status.Traffic {
+		revs = append(revs, t.RevisionName)
+	}
+	return revs, nil
+}
+
+// versionOfRevision returns the version a revision of the named agent is built from. Revisions are
+// named "<version>" or "<version>-h<digest>", and a version is "<agent>-<spec-hash-8>".
+func versionOfRevision(agent, revision string) (string, bool) {
+	prefix := agent + "-"
+	if !strings.HasPrefix(revision, prefix) || len(revision) < len(prefix)+specHashLen {
+		return "", false
+	}
+	return revision[:len(prefix)+specHashLen], true
 }
 
 // deleteVersions removes a deleted agent's history. Best effort: a failure is logged, and the

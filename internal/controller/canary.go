@@ -599,6 +599,7 @@ func (r *AgentDeploymentReconciler) recordCanaryPhase(
 	fresh.Status.Gate = &gs
 	fresh.Status.LatestVersion = versionName
 	fresh.Status.Rollout = rollout
+	carryVersionRecorded(deploy, &fresh)
 	apimeta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{
 		Type:               conditionReady,
 		Status:             condStatus,

@@ -170,6 +170,7 @@ func (r *AgentDeploymentReconciler) maybeRollback(
 		return r.autoRollback(ctx, deploy)
 	}
 
+	r.clearRollbackWaiting(ctx, deploy)
 	return false, false, nil // no rollback requested
 }
 
@@ -273,8 +274,30 @@ func (r *AgentDeploymentReconciler) rollbackUnavailable(
 	}
 	logf.FromContext(ctx).Error(cause, "Version history unavailable; the rollback is retried", "target", target)
 	return r.recordRolledBack(ctx, deploy, metav1.ConditionUnknown, reasonVersionStoreUnavailable, fmt.Sprintf(
-		"%s is waiting: version history could not be read (%v); retrying every %s",
-		what, cause, versionStoreRetry))
+		"%s is waiting: version history cannot be read because %s; retrying every %s",
+		what, msgStoreUnavailable, versionStoreRetry))
+}
+
+// clearRollbackWaiting removes a RolledBack=Unknown left by rollbackUnavailable once no rollback is
+// pending: the annotation was removed, or the automatic path no longer fires. Otherwise it would keep
+// saying a rollback is waiting. A failed write is logged; the next reconcile clears it.
+func (r *AgentDeploymentReconciler) clearRollbackWaiting(ctx context.Context, deploy *agentsv1beta1.AgentDeployment) {
+	c := apimeta.FindStatusCondition(deploy.Status.Conditions, conditionRolledBack)
+	if c == nil || c.Status != metav1.ConditionUnknown || c.Reason != reasonVersionStoreUnavailable {
+		return
+	}
+	var fresh agentsv1beta1.AgentDeployment
+	if err := r.Get(ctx, client.ObjectKeyFromObject(deploy), &fresh); err != nil {
+		logf.FromContext(ctx).Error(err, "Could not clear a rollback that is no longer pending")
+		return
+	}
+	base := fresh.DeepCopy()
+	apimeta.RemoveStatusCondition(&fresh.Status.Conditions, conditionRolledBack)
+	if err := r.Status().Patch(ctx, &fresh, client.MergeFrom(base)); err != nil {
+		logf.FromContext(ctx).Error(err, "Could not clear a rollback that is no longer pending")
+		return
+	}
+	fresh.DeepCopyInto(deploy)
 }
 
 // refuseAutoRollback records an auto-path refusal and returns handled=false, so the ordinary
