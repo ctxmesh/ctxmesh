@@ -372,6 +372,11 @@ func TestAuth_Memory(t *testing.T) {
 			perUser("hash-bob"), http.StatusForbidden,
 		},
 		{
+			"per-user, a capability whose agent is in another namespace",
+			withCapability(agent(), f.StandaloneCapability("hash-alice", "other", testAgent)),
+			perUser("hash-alice"), http.StatusForbidden,
+		},
+		{
 			"per-user, a forged capability", withCapability(agent(), f.ForgedCapability("hash-alice", testAgentNS, testAgent)),
 			perUser("hash-alice"), http.StatusUnauthorized,
 		},
@@ -446,6 +451,11 @@ func TestAuth_Knowledge(t *testing.T) {
 			withCapability(agent(), f.StandaloneCapability("hash-alice", testAgentNS, testAgent)), perUser("hash-alice"), http.StatusOK,
 		},
 		{"an agent, per-user without a capability", agent(), perUser("hash-alice"), http.StatusUnauthorized},
+		{
+			"an agent, per-user with a capability whose agent is in another namespace",
+			withCapability(agent(), f.StandaloneCapability("hash-alice", "other", testAgent)),
+			perUser("hash-alice"), http.StatusForbidden,
+		},
 		{
 			"an agent, per-user as a foreign subject",
 			withCapability(agent(), f.StandaloneCapability("hash-alice", testAgentNS, testAgent)), perUser("hash-bob"), http.StatusForbidden,
@@ -539,4 +549,17 @@ func TestAuth_ResolveNamesAMissingBoundary(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code, boundary)
 		assert.Contains(t, rec.Body.String(), "no namespaced boundary", boundary)
 	}
+}
+
+// An endpoint that admits no audience is a programming error, refused rather than indexed past.
+func TestAuth_NoAudienceIsRefused(t *testing.T) {
+	f := newAuthFixture()
+	s, _ := fullServer(t, f)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, pathResolve, nil)
+	req.Header.Set("Authorization", "Bearer "+f.SidecarToken(testAgentNS, testAgent))
+	_, ok := s.authenticate(rec, req)
+	assert.False(t, ok)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Equal(t, errCodeAuthUnavailable, refusalCode(t, rec))
 }

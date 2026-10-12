@@ -179,8 +179,8 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 }
 
 // memoryScopeAllowed refuses a memory request outside the calling agent's own partition: the namespace and
-// agent are the reviewed token's, and a per-user subject is the run capability's user. Agent-wide memory
-// has no subject.
+// agent are the reviewed token's, and a per-user subject is the user of a run capability whose agent is in
+// the caller's namespace. Agent-wide memory has no subject.
 func (s *Server) memoryScopeAllowed(
 	w http.ResponseWriter, r *http.Request, c caller, namespace, agentName, scope, subject string,
 ) bool {
@@ -207,8 +207,8 @@ func (s *Server) memoryScopeAllowed(
 	if !ok {
 		return false
 	}
-	if subject != cp.User {
-		s.forbid(w, r, c, "the request names another user than the run capability")
+	if why := userScopeError(c, cp, subject); why != "" {
+		s.forbid(w, r, c, why)
 		return false
 	}
 	return true

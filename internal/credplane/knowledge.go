@@ -441,8 +441,8 @@ func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 // knowledgeScopeAllowed refuses a search outside the caller's reach. An agent searches only its own
-// namespace, and a per-user subject only as the run capability's user. The BFF's test query may search any
-// namespace; it derives the subject itself.
+// namespace, and a per-user subject only as the user of a run capability whose agent is in that
+// namespace. The BFF's test query may search any namespace; it derives the subject itself.
 func (s *Server) knowledgeScopeAllowed(w http.ResponseWriter, r *http.Request, c caller, req knowledgeSearchRequest) bool {
 	if c.platform {
 		return true
@@ -461,8 +461,8 @@ func (s *Server) knowledgeScopeAllowed(w http.ResponseWriter, r *http.Request, c
 	if !ok {
 		return false
 	}
-	if req.Subject != cp.User {
-		s.forbid(w, r, c, "the request names another user than the run capability")
+	if why := userScopeError(c, cp, req.Subject); why != "" {
+		s.forbid(w, r, c, why)
 		return false
 	}
 	return true

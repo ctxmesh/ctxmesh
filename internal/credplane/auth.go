@@ -105,6 +105,11 @@ type caller struct {
 // false when it fails. With two audiences the token's own unverified aud claim picks which to review it
 // for; the review is what decides.
 func (s *Server) authenticate(w http.ResponseWriter, r *http.Request, audiences ...string) (caller, bool) {
+	if len(audiences) == 0 {
+		s.log.Error(errors.New("no audience to review the token for"), "credplane: endpoint misconfigured", "path", r.URL.Path)
+		s.refuse(w, r, http.StatusServiceUnavailable, errCodeAuthUnavailable, "the endpoint admits no audience")
+		return caller{}, false
+	}
 	token, ok := bearerToken(r)
 	if !ok {
 		s.refuse(w, r, http.StatusUnauthorized, errCodeUnauthenticated, fmt.Sprintf(
@@ -231,6 +236,18 @@ func unverifiedAudiences(token string) []string {
 		return []string{one}
 	}
 	return nil
+}
+
+// userScopeError is why caller c may not act for subject with capability cp, or "". The capability's
+// agent must be in the caller's namespace, as for a resolve, and the subject must be its user.
+func userScopeError(c caller, cp runcap.Capability, subject string) string {
+	switch {
+	case actorNamespace(cp) != c.Namespace:
+		return "the run capability's agent is in another namespace"
+	case subject != cp.User:
+		return "the request names another user than the run capability"
+	}
+	return ""
 }
 
 // actorNamespace is the namespace of a capability's acting agent ("<namespace>/<agent>").
