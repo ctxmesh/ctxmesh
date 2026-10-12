@@ -219,11 +219,14 @@ type Server struct {
 	killScopes killscope.Store
 	// killFilter memoises the expanded claim exclusion for killFilterTTL — the claim loop runs
 	// continuously and the kill set is normally empty.
-	killFilter  killFilterCache
-	runcapBind  RuncapBindStore
-	podAuth     statelayer.PodAuthenticator
-	proofOnce   sync.Once
-	popVerifier *runcap.ProofVerifier
+	killFilter killFilterCache
+	runcapBind RuncapBindStore
+	podAuth    statelayer.PodAuthenticator
+	// refusedPodTokens spares the API server a TokenReview for a pod token the attestation edge has just
+	// seen rejected.
+	refusedPodTokens refusedPodTokens
+	proofOnce        sync.Once
+	popVerifier      *runcap.ProofVerifier
 	// proofSpender shares the proof-replay set across replicas (M149 m149.4). Nil ⇒ the
 	// verifier's in-process map, which is correct at one replica and silently permissive
 	// at several.

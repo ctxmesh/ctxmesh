@@ -35,7 +35,9 @@ against a key of their own. The edge also removes `Ce-Ampattestation`, and the p
 Gateway now removes `X-Ctxmesh-Run-Capability` and `X-Ctxmesh-Run-Proof` from every request before
 ext-auth runs: ext-auth replaced a caller's capability header only when it minted one, so on any
 allow without a capability, or with ext-auth off, the caller's own reached the agent. This adds a
-`ClientTrafficPolicy` to the edge chart and needs Envoy Gateway v1.2 or later. The edge removes
+`ClientTrafficPolicy` to the edge chart and needs Envoy Gateway v1.2 or later. The BFF's
+attestation edge remembers a rejected pod token for a minute, so repeating one does not cost a
+TokenReview each time. The edge removes
 `X-AMP-Envelope`, `X-A2A-Envelope` and `X-AMP-Attestation` from inbound requests. An agent whose
 launcher cannot get an attestation fails the hop with HTTP 503 `attestation_unavailable` instead of
 sending it unattested. Every agent's launcher, member or not, refuses with HTTP 401 a capability

@@ -17,11 +17,13 @@ limitations under the License.
 package bff
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -48,7 +50,45 @@ const (
 	ampAttestationTTL = 5 * time.Minute
 	// maxAMPAttestationRequest bounds the request body, which carries one agent name.
 	maxAMPAttestationRequest = 1 << 10
+
+	// refusedPodTokenTTL is how long a token the review rejected is refused without another review. A
+	// rejected pod token stays rejected, so this bounds only memory, not correctness.
+	refusedPodTokenTTL = time.Minute
+	// maxRefusedPodTokens bounds the refused tokens remembered. Past it the record is cleared: forgetting
+	// a refusal costs one more review, never an admission.
+	maxRefusedPodTokens = 4096
 )
+
+// refusedPodTokens remembers, by hash, pod tokens the review rejected, so a launcher retrying with a
+// stale token, or a pod repeating one it made up, costs the API server one TokenReview a minute rather
+// than one per request. The zero value is ready to use.
+type refusedPodTokens struct {
+	mu    sync.Mutex
+	until map[[sha256.Size]byte]time.Time
+}
+
+func (c *refusedPodTokens) refused(tok string, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	until, ok := c.until[sha256.Sum256([]byte(tok))]
+	return ok && now.Before(until)
+}
+
+func (c *refusedPodTokens) refuse(tok string, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.until == nil || len(c.until) >= maxRefusedPodTokens {
+		for k, until := range c.until {
+			if !now.Before(until) {
+				delete(c.until, k)
+			}
+		}
+		if c.until == nil || len(c.until) >= maxRefusedPodTokens {
+			c.until = map[[sha256.Size]byte]time.Time{}
+		}
+	}
+	c.until[sha256.Sum256([]byte(tok))] = now.Add(refusedPodTokenTTL)
+}
 
 // ampAttestationRequest names the agent the attestation is for: an agent in the caller's namespace.
 type ampAttestationRequest struct {
@@ -91,9 +131,14 @@ func (s *Server) handleAMPAttestation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "the receiver must be an agent name: "+strings.Join(errs, "; "))
 		return
 	}
+	if s.refusedPodTokens.refused(tok, time.Now()) {
+		writeError(w, http.StatusUnauthorized, "the pod token did not authenticate")
+		return
+	}
 	id, err := s.podAuth.Identity(r.Context(), tok)
 	switch {
 	case errors.Is(err, statelayer.ErrTokenRejected):
+		s.refusedPodTokens.refuse(tok, time.Now())
 		writeError(w, http.StatusUnauthorized, "the pod token did not authenticate")
 		return
 	case err != nil:

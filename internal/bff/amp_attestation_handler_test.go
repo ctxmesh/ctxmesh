@@ -203,3 +203,44 @@ func TestAMPAttestation_RouteNeedsAllThreeDependencies(t *testing.T) {
 		assert.Empty(t, pattern, "no %s, no edge", name)
 	}
 }
+
+// countingPodAuth counts the reviews it is asked for.
+type countingPodAuth struct {
+	tokenPodAuth
+	reviews *int
+}
+
+func (a countingPodAuth) Identity(ctx context.Context, tok string) (statelayer.PodIdentity, error) {
+	*a.reviews++
+	return a.tokenPodAuth.Identity(ctx, tok)
+}
+
+// A token the review rejected is refused again without another review, so repeating it costs the API
+// server nothing; a token that authenticates is unaffected.
+func TestAMPAttestation_ARejectedTokenIsNotReviewedAgain(t *testing.T) {
+	s, _ := newAttestationServer(t)
+	reviews := 0
+	s.podAuth = countingPodAuth{tokenPodAuth: s.podAuth.(tokenPodAuth), reviews: &reviews}
+
+	for range 3 {
+		assert.Equal(t, http.StatusUnauthorized, postAttestation(t, s, "Bearer forged", `{"receiver":"writer"}`).Code)
+	}
+	assert.Equal(t, 1, reviews, "a rejected token is reviewed once")
+	assert.Equal(t, http.StatusOK, postAttestation(t, s, "Bearer planner-token", `{"receiver":"writer"}`).Code)
+	assert.Equal(t, http.StatusOK, postAttestation(t, s, "Bearer planner-token", `{"receiver":"writer"}`).Code)
+	assert.Equal(t, 3, reviews, "an authenticated token is never refused from the record")
+}
+
+func TestRefusedPodTokensExpireAndStayBounded(t *testing.T) {
+	var c refusedPodTokens
+	now := time.Now()
+	assert.False(t, c.refused("t", now))
+	c.refuse("t", now)
+	assert.True(t, c.refused("t", now.Add(refusedPodTokenTTL-time.Second)))
+	assert.False(t, c.refused("t", now.Add(refusedPodTokenTTL)), "a refusal is remembered for its TTL only")
+
+	for i := range maxRefusedPodTokens + 10 {
+		c.refuse(fmt.Sprint(i), now)
+	}
+	assert.LessOrEqual(t, len(c.until), maxRefusedPodTokens)
+}
