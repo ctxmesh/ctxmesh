@@ -22,6 +22,15 @@ function useNamespacedLoad(ns: string, ask: (ns: string, signal: AbortSignal) =>
   return useLoad(fetcher);
 }
 
+/** A question that waits on another answer: no fetcher until `who` is known. */
+function useWhenKnown(who: string, ask: (who: string, signal: AbortSignal) => Promise<string>) {
+  const fetcher = React.useMemo(
+    () => (who ? (signal: AbortSignal) => ask(who, signal) : null),
+    [who, ask],
+  );
+  return useLoad(fetcher);
+}
+
 describe("useLoad", () => {
   it("is loading until the fetcher answers, then ready with its data", async () => {
     const d = deferred<string[]>();
@@ -49,6 +58,20 @@ describe("useLoad", () => {
     const fetcher = () => Promise.reject(new ApiError("not wired", 501));
     const { result } = renderHook(() => useLoad(fetcher));
     await waitFor(() => expect(result.current.state).toMatchObject({ kind: "error", status: 501, forbidden: false }));
+  });
+
+  it("keeps the BFF's reason code, so a page can branch on it rather than the message", async () => {
+    const fetcher = () => Promise.reject(new ApiError("no spans yet", 404, "trace_pending"));
+    const { result } = renderHook(() => useLoad(fetcher));
+    await waitFor(() =>
+      expect(result.current.state).toEqual({
+        kind: "error",
+        message: "no spans yet",
+        status: 404,
+        forbidden: false,
+        code: "trace_pending",
+      }),
+    );
   });
 
   it("reports a network failure without a status", async () => {
@@ -150,6 +173,27 @@ describe("useLoad", () => {
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(result.current.state).toEqual({ kind: "ready", data: "team-b rows" });
+  });
+
+  it("asks nothing while the fetcher is null, and asks once it is given", async () => {
+    const calls: string[] = [];
+    const ask = (who: string, signal: AbortSignal) => {
+      void signal;
+      calls.push(who);
+      return Promise.resolve(`runs of ${who}`);
+    };
+    const { result, rerender } = renderHook(
+      ({ who }: { who: string }) => useWhenKnown(who, ask),
+      { initialProps: { who: "" } },
+    );
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(result.current.state).toEqual({ kind: "loading" });
+    expect(calls).toEqual([]);
+    rerender({ who: "supervisor" });
+    await waitFor(() => expect(result.current.state).toEqual({ kind: "ready", data: "runs of supervisor" }));
+    expect(calls).toEqual(["supervisor"]);
   });
 
   it("aborts the request on unmount", () => {

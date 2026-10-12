@@ -17,7 +17,8 @@ import {
   type KeyValueItem,
   type TimelineStep,
 } from "@/components/kit";
-import { api, ApiError, type SharedRunView } from "@/lib/api";
+import { api, type SharedRunView } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 import { formatDateTime, formatLatency } from "@/lib/format";
 
 // SharedRunPage — the PUBLIC run reader (m75.4; M151 §6.1 archetype A5, public
@@ -244,33 +245,21 @@ type PageState =
 
 function SharedRunPageInner() {
   const { token = "" } = useParams();
-  const [state, setPageState] = React.useState<PageState>({ kind: "loading" });
-
-  React.useEffect(() => {
-    if (!token) {
-      setPageState({ kind: "unavailable" });
-      return;
-    }
-    const controller = new AbortController();
-    setPageState({ kind: "loading" });
-
-    api
-      .getSharedRun(token, controller.signal)
-      .then((view) => {
-        if (controller.signal.aborted) return;
-        setPageState({ kind: "ready", view });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        // Any error (404, expired, revoked, network) → uniform unavailable.
-        // The backend returns 404 uniformly for bad/expired/revoked tokens;
-        // we must not distinguish them (per spec).
-        void (err instanceof ApiError); // type-check only
-        setPageState({ kind: "unavailable" });
-      });
-
-    return () => controller.abort();
-  }, [token]);
+  const fetchShared = React.useCallback(
+    (signal: AbortSignal) =>
+      token ? api.getSharedRun(token, signal) : Promise.reject(new Error("no share token")),
+    [token],
+  );
+  const { state: answer } = useLoad(fetchShared);
+  // Any failure (404, expired, revoked, network, no token) is one uniform "unavailable":
+  // the backend answers 404 alike for a bad, expired or revoked token, and the page must
+  // not tell them apart either.
+  const state: PageState =
+    answer.kind === "ready"
+      ? { kind: "ready", view: answer.data }
+      : answer.kind === "loading"
+        ? answer
+        : { kind: "unavailable" };
 
   return (
     <div data-testid="shared-run-page" className="min-h-screen bg-background">

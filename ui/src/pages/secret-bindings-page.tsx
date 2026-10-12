@@ -23,7 +23,8 @@ import {
   type NextStepTone,
   type StatusTone,
 } from "@/components/kit";
-import { api, ApiError, type SecretBindingSummary } from "@/lib/api";
+import { api, type SecretBindingSummary } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_SECRETS } from "@/lib/nav";
@@ -282,11 +283,6 @@ function RowActions({
   );
 }
 
-type Load =
-  | { kind: "loading" }
-  | { kind: "ready"; items: SecretBindingSummary[]; nextCursor: string }
-  | { kind: "error"; message: string; forbidden: boolean };
-
 export function SecretBindingsPage() {
   const navigate = useNavigate();
   const { namespace } = useNamespace();
@@ -298,45 +294,23 @@ export function SecretBindingsPage() {
   const [query, setQuery] = useState("");
   const [view, setView] = useState<ViewId>("all");
   const [pageStack, setPageStack] = useState<string[]>([""]);
-  const [state, setState] = useState<Load>({ kind: "loading" });
-  const abortRef = useRef<AbortController | null>(null);
 
   const cursor = pageStack[pageStack.length - 1] ?? "";
 
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setState({ kind: "loading" });
-    api
-      .listSecretBindings(
+  const fetchPage = useCallback(
+    (signal: AbortSignal) =>
+      api.listSecretBindings(
         {
           limit: PAGE_LIMIT,
           cursor: cursor || undefined,
           q: query || undefined,
           namespace: namespace || undefined,
         },
-        controller.signal,
-      )
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setState({ kind: "ready", items: res.items, nextCursor: res.nextCursor });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        const forbidden = err instanceof ApiError && err.isForbidden;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden,
-        });
-      });
-  }, [cursor, query, namespace]);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+        signal,
+      ),
+    [cursor, query, namespace],
+  );
+  const { state, reload } = useLoad(fetchPage);
 
   const resetPaging = useCallback(() => setPageStack([""]), []);
 
@@ -354,10 +328,10 @@ export function SecretBindingsPage() {
   }, [namespace, resetPaging]);
 
   const items = useMemo(
-    () => (state.kind === "ready" ? state.items : []),
+    () => (state.kind === "ready" ? state.data.items : []),
     [state],
   );
-  const nextCursor = state.kind === "ready" ? state.nextCursor : "";
+  const nextCursor = state.kind === "ready" ? state.data.nextCursor : "";
   // hasNext keys off the CURSOR (BFF), never items.length — a page-windowed `q`
   // filter can empty a page while later pages still match.
   const hasNext = nextCursor !== "";
@@ -411,7 +385,7 @@ export function SecretBindingsPage() {
           message: state.message,
           forbidden: state.forbidden,
           resource: "secret bindings",
-          onRetry: state.forbidden ? undefined : load,
+          onRetry: state.forbidden ? undefined : () => reload(),
         }
       : null;
 

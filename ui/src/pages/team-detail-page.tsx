@@ -29,12 +29,12 @@ import {
 } from "@/components/kit";
 import {
   api,
-  ApiError,
   type AgentSummary,
   type AgentTeamSummary,
   type RunTree,
   type RunTreeNode,
 } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 import { formatDateTime, formatRelativeTime } from "@/lib/format";
 // The console has ONE run-status vocabulary (M144.1) and it lives on the run
 // reader. Importing it is deliberate: a second copy of the status→hue map here
@@ -524,9 +524,6 @@ export function TeamDetailPage() {
   const ns = params.ns ?? "";
   const name = params.name ?? "";
 
-  const [teamState, setTeamState] = React.useState<TeamLoad>({ kind: "loading" });
-  const [agentsState, setAgentsState] = React.useState<AgentsLoad>({ kind: "loading" });
-  const [runState, setRunState] = React.useState<RunLoad>({ kind: "loading" });
   const [rosterOpen, setRosterOpen] = React.useState(true);
   const [runExpanded, setRunExpanded] = React.useState<Set<string>>(new Set());
   const [runShowAll, setRunShowAll] = React.useState<Set<string>>(new Set());
@@ -534,120 +531,87 @@ export function TeamDetailPage() {
   // ── The team itself. There is no GET /api/teams/{ns}/{name}; the list is the
   // only read, so the page narrows it to the team's namespace. A name that is not
   // in the caller's list is a 404 for this page, not an empty detail.
-  const loadTeam = React.useCallback(() => {
-    const controller = new AbortController();
-    setTeamState({ kind: "loading" });
-    api
-      .listTeams(ns, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        const found = res.items.find((t) => t.namespace === ns && t.name === name);
-        setTeamState(found ? { kind: "ready", team: found } : { kind: "notfound" });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setTeamState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-    return () => controller.abort();
-  }, [ns, name]);
-
-  React.useEffect(() => loadTeam(), [loadTeam]);
+  const fetchTeam = React.useCallback(
+    (signal: AbortSignal) =>
+      api
+        .listTeams(ns, signal)
+        .then((res) => res.items.find((t) => t.namespace === ns && t.name === name) ?? null),
+    [ns, name],
+  );
+  const { state: teamRead, reload: reloadTeam } = useLoad(fetchTeam);
+  const loadTeam = React.useCallback(() => reloadTeam(), [reloadTeam]);
+  const teamState = React.useMemo((): TeamLoad => {
+    if (teamRead.kind === "loading") return teamRead;
+    if (teamRead.kind === "error") {
+      return { kind: "error", message: teamRead.message, forbidden: teamRead.forbidden };
+    }
+    return teamRead.data ? { kind: "ready", team: teamRead.data } : { kind: "notfound" };
+  }, [teamRead]);
 
   // ── Member readiness. Walks the namespace's agent pages so a roster member
   // that lives past page 1 is not reported as a gap.
-  React.useEffect(() => {
-    const controller = new AbortController();
-    let cancelled = false;
-    setAgentsState({ kind: "loading" });
-    (async () => {
-      const map = new Map<string, AgentSummary>();
+  const fetchAgents = React.useCallback(
+    async (signal: AbortSignal) => {
+      const agents = new Map<string, AgentSummary>();
       let cursor = "";
       let exhausted = false;
-      try {
-        for (let page = 0; page < AGENT_MAX_PAGES; page++) {
-          const res = await api.listAgents(
-            {
-              namespace: ns || undefined,
-              limit: AGENT_PAGE_LIMIT,
-              cursor: cursor || undefined,
-              // A roster may legitimately name a draft agent; hiding drafts here
-              // would render a real agent as a missing one.
-              includeDrafts: true,
-            },
-            controller.signal,
-          );
-          for (const a of res.items) map.set(a.name, a);
-          cursor = res.nextCursor ?? "";
-          if (!cursor) {
-            exhausted = true;
-            break;
-          }
-        }
-      } catch (err: unknown) {
-        if (cancelled || controller.signal.aborted) return;
-        setAgentsState({
-          kind: "unavailable",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-        return;
-      }
-      if (cancelled || controller.signal.aborted) return;
-      setAgentsState({ kind: "ready", agents: map, exhausted });
-    })();
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, [ns]);
-
-  // ── The delegation tree of the supervisor's most recent recorded run.
-  const supervisor = teamState.kind === "ready" ? teamState.team.supervisor : "";
-  React.useEffect(() => {
-    if (!supervisor) return;
-    const controller = new AbortController();
-    let cancelled = false;
-    setRunState({ kind: "loading" });
-    (async () => {
-      try {
-        const list = await api.runsFiltered(
-          { agent: `${ns}/${supervisor}`, limit: 1 },
-          controller.signal,
+      for (let page = 0; page < AGENT_MAX_PAGES; page++) {
+        const res = await api.listAgents(
+          {
+            namespace: ns || undefined,
+            limit: AGENT_PAGE_LIMIT,
+            cursor: cursor || undefined,
+            // A roster may legitimately name a draft agent; hiding drafts here
+            // would render a real agent as a missing one.
+            includeDrafts: true,
+          },
+          signal,
         );
-        if (cancelled || controller.signal.aborted) return;
-        // null = 501: the trace backend is not wired. Calm, not an error.
-        if (list === null) {
-          setRunState({ kind: "unconfigured" });
-          return;
+        for (const a of res.items) agents.set(a.name, a);
+        cursor = res.nextCursor ?? "";
+        if (!cursor) {
+          exhausted = true;
+          break;
         }
-        const first = list.runs[0];
-        if (!first) {
-          setRunState({ kind: "none" });
-          return;
-        }
-        // A run-store row (no trace backend, ADR 0150) has no traceId until the run finishes; the
-        // tree and the run page both resolve a run id.
-        const runKey = first.runId ?? first.traceId;
-        const tree = await api.getRunTree(runKey, controller.signal);
-        if (cancelled || controller.signal.aborted) return;
-        setRunState({ kind: "ready", tree, index: indexRunTree(tree), traceId: runKey });
-      } catch (err: unknown) {
-        if (cancelled || controller.signal.aborted) return;
-        setRunState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
       }
-    })();
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, [ns, supervisor]);
+      return { agents, exhausted };
+    },
+    [ns],
+  );
+  const { state: agentsRead } = useLoad(fetchAgents);
+  const agentsState = React.useMemo((): AgentsLoad => {
+    if (agentsRead.kind === "ready") return { kind: "ready", ...agentsRead.data };
+    if (agentsRead.kind === "loading") return agentsRead;
+    return { kind: "unavailable", forbidden: agentsRead.forbidden };
+  }, [agentsRead]);
+
+  // ── The delegation tree of the supervisor's most recent recorded run. It waits on
+  // the team, which names the supervisor.
+  const supervisor = teamState.kind === "ready" ? teamState.team.supervisor : "";
+  const fetchRun = React.useMemo(
+    () =>
+      supervisor
+        ? async (signal: AbortSignal): Promise<Exclude<RunLoad, { kind: "loading" | "error" }>> => {
+            const list = await api.runsFiltered({ agent: `${ns}/${supervisor}`, limit: 1 }, signal);
+            // null = 501: the trace backend is not wired. Calm, not an error.
+            if (list === null) return { kind: "unconfigured" };
+            const first = list.runs[0];
+            if (!first) return { kind: "none" };
+            // A run-store row (no trace backend, ADR 0150) has no traceId until the run
+            // finishes; the tree and the run page both resolve a run id.
+            const runKey = first.runId ?? first.traceId;
+            const tree = await api.getRunTree(runKey, signal);
+            return { kind: "ready", tree, index: indexRunTree(tree), traceId: runKey };
+          }
+        : null,
+    [ns, supervisor],
+  );
+  const { state: runRead } = useLoad(fetchRun);
+  const runState = React.useMemo((): RunLoad => {
+    if (runRead.kind === "ready") return runRead.data;
+    if (runRead.kind === "loading") return runRead;
+    return { kind: "error", message: runRead.message, forbidden: runRead.forbidden };
+  }, [runRead]);
 
   // The tree opens on what needs a person; everything else stays behind a chevron.
   React.useEffect(() => {

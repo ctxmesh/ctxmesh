@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Sparkles, Waypoints } from "lucide-react";
 
@@ -21,8 +21,9 @@ import {
   type NextStepTone,
   type StatusTone,
 } from "@/components/kit";
-import { api, ApiError, type AgentTeamSummary } from "@/lib/api";
+import { api, type AgentTeamSummary } from "@/lib/api";
 import { useNamespace } from "@/lib/namespace";
+import { useLoad } from "@/lib/use-load";
 
 // TeamsPage — the AgentTeam index (M151 §6.1 archetype A1, §4.4 "Teams index"
 // budget). A team is a supervisor plus the roster of sub-agents it may summon,
@@ -156,45 +157,17 @@ export function teamsClosingLine(rows: TriagedTeam[]): string | null {
   return `${needs} of the ${total} teams need${needs === 1 ? "s" : ""} a person. The other ${quiet} resolved cleanly and can summon their rosters.`;
 }
 
-type Load =
-  | { kind: "loading" }
-  | { kind: "ready"; teams: AgentTeamSummary[] }
-  | { kind: "error"; message: string; forbidden: boolean };
-
 export function TeamsPage() {
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
-  const [state, setState] = useState<Load>({ kind: "loading" });
-  const abortRef = useRef<AbortController | null>(null);
   const { namespace } = useNamespace();
+  const fetchTeams = useCallback(
+    (signal: AbortSignal) => api.listTeams(namespace, signal).then((res) => res.items),
+    [namespace],
+  );
+  const { state, reload } = useLoad(fetchTeams);
 
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setState({ kind: "loading" });
-    api
-      .listTeams(namespace, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setState({ kind: "ready", teams: res.items });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-  }, [namespace]);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
-
-  const items = state.kind === "ready" ? state.teams : [];
+  const items = state.kind === "ready" ? state.data : [];
 
   // Triage once, sort once — attention first, then name.
   //
@@ -230,7 +203,7 @@ export function TeamsPage() {
           message: state.message,
           forbidden: state.forbidden,
           resource: "agent teams",
-          onRetry: state.forbidden ? undefined : load,
+          onRetry: state.forbidden ? undefined : () => reload(),
         }
       : null;
 

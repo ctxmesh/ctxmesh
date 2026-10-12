@@ -38,6 +38,7 @@ import {
   type McpServerSummary,
   type TemplateEntry,
 } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 import { useCapabilities } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_AGENTS } from "@/lib/nav";
@@ -440,7 +441,6 @@ function TemplatesTab() {
   const canFork = can(RES_AGENTS, "create");
   // The gallery is what the working namespace can see, and a fork lands there.
   const { workingNamespace } = useNamespace();
-  const [state, setState] = React.useState<TemplateState>({ kind: "loading" });
   const [view, setView] = React.useState<TemplateView>("all");
   // U12: forkingEntry tracks the unique key of the entry currently in flight for per-entry spinner.
   const [forkingEntry, setForkingEntry] = React.useState<string | null>(null);
@@ -450,32 +450,18 @@ function TemplatesTab() {
     defaultName: string;
   } | null>(null);
 
-  const load = React.useCallback((signal?: AbortSignal) => {
-    setState({ kind: "loading" });
-    api
-      .getTemplates(workingNamespace || undefined, signal)
-      .then((entries) => {
-        if (signal?.aborted) return;
-        setState({ kind: "ready", entries });
-      })
-      .catch((err: unknown) => {
-        if (signal?.aborted) return;
-        if (err instanceof ApiError && err.isForbidden) {
-          setState({ kind: "forbidden", message: err.message });
-          return;
-        }
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-        });
-      });
-  }, [workingNamespace]);
-
-  React.useEffect(() => {
-    const c = new AbortController();
-    load(c.signal);
-    return () => c.abort();
-  }, [load]);
+  const fetchTemplates = React.useCallback(
+    (signal: AbortSignal) => api.getTemplates(workingNamespace || undefined, signal),
+    [workingNamespace],
+  );
+  const { state: read, reload: load } = useLoad(fetchTemplates);
+  const state = React.useMemo((): TemplateState => {
+    if (read.kind === "ready") return { kind: "ready", entries: read.data };
+    if (read.kind === "loading") return read;
+    return read.forbidden
+      ? { kind: "forbidden", message: read.message }
+      : { kind: "error", message: read.message };
+  }, [read]);
 
   // doFork is called with an optional `localName` override (U11 rename-on-fork).
   async function doFork(entry: TemplateEntry, localName?: string) {
@@ -758,7 +744,6 @@ export function catalogClosingLine(
 function McpCatalogTab() {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const [state, setState] = React.useState<CatalogState>({ kind: "loading" });
   const [connectingEntry, setConnectingEntry] = React.useState<string | null>(null);
   const [view, setView] = React.useState<CatalogView>("all");
   // T12 catalog search filter
@@ -766,39 +751,28 @@ function McpCatalogTab() {
   // The catalog is what the working namespace can discover, and a connect lands there.
   const { workingNamespace } = useNamespace();
 
-  const load = React.useCallback((signal?: AbortSignal) => {
-    setState({ kind: "loading" });
-
-    // T10: fetch catalog AND owned servers in parallel; cross-check by name+ns.
-    Promise.all([
-      api.getCatalog(workingNamespace || undefined, signal),
-      api.listMcpServers(workingNamespace, signal),
-    ])
-      .then(([catalogRes, ownedRes]) => {
-        if (signal?.aborted) return;
+  // T10: fetch the catalog AND the caller's owned servers in parallel, and key the owned
+  // ones "<ns>/<name>" to cross-check which entries are already connected.
+  const fetchCatalog = React.useCallback(
+    (signal: AbortSignal) =>
+      Promise.all([
+        api.getCatalog(workingNamespace || undefined, signal),
+        api.listMcpServers(workingNamespace, signal),
+      ]).then(([catalogRes, ownedRes]) => {
         const owned = ownedRes.items ?? ownedRes.servers ?? [];
-        // Build a key set of the caller's owned servers: "<ns>/<name>"
         const ownedKeys = new Set(owned.map((s: McpServerSummary) => `${s.namespace}/${s.name}`));
-        setState({ kind: "ready", entries: catalogRes.entries ?? [], ownedKeys });
-      })
-      .catch((err: unknown) => {
-        if (signal?.aborted) return;
-        if (err instanceof ApiError && err.isForbidden) {
-          setState({ kind: "forbidden", message: err.message });
-          return;
-        }
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-        });
-      });
-  }, [workingNamespace]);
-
-  React.useEffect(() => {
-    const c = new AbortController();
-    load(c.signal);
-    return () => c.abort();
-  }, [load]);
+        return { entries: catalogRes.entries ?? [], ownedKeys };
+      }),
+    [workingNamespace],
+  );
+  const { state: read, reload: load } = useLoad(fetchCatalog);
+  const state = React.useMemo((): CatalogState => {
+    if (read.kind === "ready") return { kind: "ready", ...read.data };
+    if (read.kind === "loading") return read;
+    return read.forbidden
+      ? { kind: "forbidden", message: read.message }
+      : { kind: "error", message: read.message };
+  }, [read]);
 
   async function handleConnect(entry: CatalogEntry) {
     const key = `${entry.namespace}/${entry.name}`;

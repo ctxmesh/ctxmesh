@@ -23,7 +23,8 @@ import {
   type NextStepTone,
   type StatusTone,
 } from "@/components/kit";
-import { api, ApiError, type ModelRouteSummary } from "@/lib/api";
+import { api, type ModelRouteSummary } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_ROUTES } from "@/lib/nav";
@@ -248,11 +249,6 @@ function RowActions({
   );
 }
 
-type Load =
-  | { kind: "loading" }
-  | { kind: "ready"; items: ModelRouteSummary[]; nextCursor: string }
-  | { kind: "error"; message: string; forbidden: boolean };
-
 export function ModelRoutesPage() {
   const navigate = useNavigate();
   const { namespace } = useNamespace();
@@ -264,45 +260,23 @@ export function ModelRoutesPage() {
   const [query, setQuery] = useState("");
   const [view, setView] = useState<ViewId>("all");
   const [pageStack, setPageStack] = useState<string[]>([""]);
-  const [state, setState] = useState<Load>({ kind: "loading" });
-  const abortRef = useRef<AbortController | null>(null);
 
   const cursor = pageStack[pageStack.length - 1] ?? "";
 
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setState({ kind: "loading" });
-    api
-      .listModelRoutes(
+  const fetchPage = useCallback(
+    (signal: AbortSignal) =>
+      api.listModelRoutes(
         {
           limit: PAGE_LIMIT,
           cursor: cursor || undefined,
           q: query || undefined,
           namespace: namespace || undefined,
         },
-        controller.signal,
-      )
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setState({ kind: "ready", items: res.items, nextCursor: res.nextCursor });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        const forbidden = err instanceof ApiError && err.isForbidden;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden,
-        });
-      });
-  }, [cursor, query, namespace]);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+        signal,
+      ),
+    [cursor, query, namespace],
+  );
+  const { state, reload } = useLoad(fetchPage);
 
   const resetPaging = useCallback(() => setPageStack([""]), []);
 
@@ -319,8 +293,8 @@ export function ModelRoutesPage() {
     }
   }, [namespace, resetPaging]);
 
-  const items = state.kind === "ready" ? state.items : [];
-  const nextCursor = state.kind === "ready" ? state.nextCursor : "";
+  const items = state.kind === "ready" ? state.data.items : [];
+  const nextCursor = state.kind === "ready" ? state.data.nextCursor : "";
   const hasNext = nextCursor !== "";
   const hasPrev = pageStack.length > 1;
   const pageNumber = pageStack.length;
@@ -370,7 +344,7 @@ export function ModelRoutesPage() {
           message: state.message,
           forbidden: state.forbidden,
           resource: "model routes",
-          onRetry: state.forbidden ? undefined : load,
+          onRetry: state.forbidden ? undefined : () => reload(),
         }
       : null;
 

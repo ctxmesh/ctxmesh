@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback } from "react";
 import { Link } from "react-router-dom";
 
 import { api, type UsedByRef } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 
 // UsedBySection renders the reverse-lookup "Used by" list for a resource (m18.9),
 // consuming GET /api/usedby (m18.8). It turns the detail pages from islands into a
@@ -22,22 +23,13 @@ export function UsedBySection({
   namespace: string;
   title?: string;
 }) {
-  const [items, setItems] = useState<UsedByRef[] | null>(null);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setItems(null);
-    api
-      .usedBy(kind, name, namespace, controller.signal)
-      .then((res) => {
-        if (!controller.signal.aborted) setItems(res.items);
-      })
-      .catch(() => {
-        // Supplementary section — a read failure just hides it.
-        if (!controller.signal.aborted) setItems([]);
-      });
-    return () => controller.abort();
-  }, [kind, name, namespace]);
+  const fetchUsedBy = useCallback(
+    (signal: AbortSignal) => api.usedBy(kind, name, namespace, signal).then((res) => res.items),
+    [kind, name, namespace],
+  );
+  // Supplementary section — a read failure just hides it.
+  const { state } = useLoad(fetchUsedBy);
+  const items = state.kind === "ready" ? state.data : null;
 
   if (!items || items.length === 0) return null;
 

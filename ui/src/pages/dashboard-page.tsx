@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import { BUCKETS, type Bucket, bucketOf } from "@/lib/lifecycle";
@@ -32,12 +32,12 @@ import {
   ApiError,
   type ActiveStop,
   type AgentSummary,
-  type CensusResponse,
   type AlertSummary,
   type ApprovalQueueItem,
   type TenantSummary,
   type TenantUsageItem,
 } from "@/lib/api";
+import { useLoad, type Loaded } from "@/lib/use-load";
 import { useCapabilities } from "@/lib/capabilities";
 import {
   firstRunPlaygroundLink,
@@ -149,6 +149,21 @@ function toFailure(err: unknown): Failure {
     kind: "error",
     message: err instanceof Error ? err.message : "request failed",
   };
+}
+
+/** A read's state as a panel shows it: 501 and 403 are their own calm states. */
+function asPanel<T>(read: Loaded<T>): Load<T> {
+  if (read.kind !== "error") return read;
+  if (read.status === 501) return { kind: "unavailable" };
+  if (read.forbidden) return { kind: "forbidden" };
+  return { kind: "error", message: read.message };
+}
+
+/** One feed of the page: its read, as a panel shows it. */
+function usePanel<T>(fetcher: (signal: AbortSignal) => Promise<T>) {
+  const { state, reload } = useLoad(fetcher);
+  const panel = useMemo(() => asPanel(state), [state]);
+  return { panel, reload };
 }
 
 function isReady<T>(l: Load<T>): l is { kind: "ready"; data: T } {
@@ -719,159 +734,101 @@ export function DashboardPage() {
   // ABSENT, never a button that 403s when pressed.
   const canConnectProvider = canFlow("connectProvider");
 
-  const [stops, setStops] = useState<Load<ActiveStop[]>>({ kind: "loading" });
-  const [fleet, setFleet] = useState<
-    Load<{ items: AgentSummary[]; complete: boolean }>
-  >({ kind: "loading" });
-  const [queue, setQueue] = useState<QueueLoad>({ kind: "loading" });
-  const [tenants, setTenants] = useState<Load<TenantSummary[]>>({ kind: "loading" });
-  const [usage, setUsage] = useState<Load<TenantUsageItem[]>>({ kind: "loading" });
-  const [alerts, setAlerts] = useState<Load<AlertSummary[]>>({ kind: "loading" });
-  // True when the alert feed held more than we asked for, so every count derived
-  // from it is a lower bound and must be rendered as one.
-  const [alertsTruncated, setAlertsTruncated] = useState(false);
+  // Every feed lands independently: one panel's 403 or 501 must never take the
+  // page down with it (§7 A11, panel isolation).
+  const stopsFeed = usePanel(useCallback((signal: AbortSignal) => api.listStops(signal), []));
+  // The fleet, scoped by the shell's workspace picker. `complete` is the whole
+  // authority story: one page, and no cursor after it.
+  const fleetFeed = usePanel(
+    useCallback(
+      (signal: AbortSignal) =>
+        api
+          .listAgents(
+            { limit: FLEET_WINDOW, includeDrafts: true, namespace: namespace || undefined },
+            signal,
+          )
+          .then((res) => ({ items: res.items, complete: res.nextCursor === "" })),
+      [namespace],
+    ),
+  );
   // The whole-fleet census. listAgents can only ever see one page, and its window
   // IS the server's ceiling, so the counts on this page come from here instead.
-  const [fleetCensus, setFleetCensus] = useState<Load<CensusResponse>>({
-    kind: "loading",
-  });
+  const censusFeed = usePanel(
+    useCallback(
+      (signal: AbortSignal) => api.agentCensus(namespace || undefined, signal),
+      [namespace],
+    ),
+  );
+  const queueRead = useLoad(
+    useCallback((signal: AbortSignal) => readQueue(namespace, signal), [namespace]),
+  );
+  const tenantsFeed = usePanel(
+    useCallback((signal: AbortSignal) => api.listTenants(signal).then((res) => res.items), []),
+  );
+  const usageFeed = usePanel(
+    useCallback((signal: AbortSignal) => api.listTenantUsage(signal).then((res) => res.items), []),
+  );
+  const alertsRead = useLoad(
+    useCallback(
+      (signal: AbortSignal) =>
+        api.listAlerts({ limit: 50, ...(namespace ? { namespace } : {}) }, signal),
+      [namespace],
+    ),
+  );
   // Providers + runs drive ONLY the first-run checklist. They are fetched for
   // that gate and nothing else — this page shows no provider list and no runs.
-  const [providers, setProviders] = useState<Load<number>>({ kind: "loading" });
-  const [runs, setRuns] = useState<Load<number>>({ kind: "loading" });
-  const [refreshing, setRefreshing] = useState(false);
-
-  const abortRef = useRef<AbortController | null>(null);
-
-  const load = useCallback(
-    (silent = false) => {
-      abortRef.current?.abort();
-      const controller = new AbortController();
-      abortRef.current = controller;
-      const live = () => !controller.signal.aborted;
-      if (!silent) {
-        setStops({ kind: "loading" });
-        setFleet({ kind: "loading" });
-        setFleetCensus({ kind: "loading" });
-        setQueue({ kind: "loading" });
-        setTenants({ kind: "loading" });
-        setUsage({ kind: "loading" });
-        setAlerts({ kind: "loading" });
-        setProviders({ kind: "loading" });
-        setRuns({ kind: "loading" });
-      }
-
-      // Every feed lands independently: one panel's 403 or 501 must never take
-      // the page down with it (§7 A11, panel isolation).
-
-      api
-        .listStops(controller.signal)
-        .then((data) => {
-          if (live()) setStops({ kind: "ready", data });
-        })
-        .catch((err: unknown) => {
-          if (live()) setStops(toFailure(err));
-        });
-
-      // The fleet, scoped by the shell's workspace picker. `complete` is the
-      // whole authority story: one page, and no cursor after it.
-      api
-        .listAgents(
-          {
-            limit: FLEET_WINDOW,
-            includeDrafts: true,
-            namespace: namespace || undefined,
-          },
-          controller.signal,
-        )
-        .then((res) => {
-          if (!live()) return;
-          setFleet({
-            kind: "ready",
-            data: { items: res.items, complete: res.nextCursor === "" },
-          });
-        })
-        .catch((err: unknown) => {
-          if (live()) setFleet(toFailure(err));
-        });
-
-      api
-        .agentCensus(namespace || undefined, controller.signal)
-        .then((res) => {
-          if (live()) setFleetCensus({ kind: "ready", data: res });
-        })
-        .catch((err: unknown) => {
-          if (live()) setFleetCensus(toFailure(err));
-        });
-
-      loadQueue(controller, namespace, (q) => {
-        if (live()) setQueue(q);
-      });
-
-      api
-        .listTenants(controller.signal)
-        .then((res) => {
-          if (live()) setTenants({ kind: "ready", data: res.items });
-        })
-        .catch((err: unknown) => {
-          if (live()) setTenants(toFailure(err));
-        });
-
-      api
-        .listTenantUsage(controller.signal)
-        .then((res) => {
-          if (live()) setUsage({ kind: "ready", data: res.items });
-        })
-        .catch((err: unknown) => {
-          if (live()) setUsage(toFailure(err));
-        });
-
-      api
-        .listAlerts(
-          { limit: 50, ...(namespace ? { namespace } : {}) },
-          controller.signal,
-        )
-        .then((res) => {
-          if (!live()) return;
-          // null is the client's calm 501 sentinel: no alert store on this
-          // install. That is neither an error nor "no alerts are firing".
-          setAlertsTruncated(res?.truncated === true);
-          setAlerts(
-            res === null
-              ? { kind: "unavailable" }
-              : { kind: "ready", data: res.items ?? [] },
-          );
-        })
-        .catch((err: unknown) => {
-          if (live()) setAlerts(toFailure(err));
-        });
-
-      api
-        .listProviders(workingNamespace, controller.signal)
-        .then((res) => {
-          if (live()) setProviders({ kind: "ready", data: res.providers.length });
-        })
-        .catch((err: unknown) => {
-          if (live()) setProviders(toFailure(err));
-        });
-
-      api
-        .runs(namespace, controller.signal)
-        .then((res) => {
-          if (live()) setRuns({ kind: "ready", data: res.runs.length });
-        })
-        .catch((err: unknown) => {
-          if (live()) setRuns(toFailure(err));
-        });
-    },
-    [namespace, workingNamespace],
+  const providersFeed = usePanel(
+    useCallback(
+      (signal: AbortSignal) =>
+        api.listProviders(workingNamespace, signal).then((res) => res.providers.length),
+      [workingNamespace],
+    ),
+  );
+  const runsFeed = usePanel(
+    useCallback(
+      (signal: AbortSignal) => api.runs(namespace, signal).then((res) => res.runs.length),
+      [namespace],
+    ),
   );
 
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+  const stops = stopsFeed.panel;
+  const fleet = fleetFeed.panel;
+  const fleetCensus = censusFeed.panel;
+  const tenants = tenantsFeed.panel;
+  const usage = usageFeed.panel;
+  const providers = providersFeed.panel;
+  const runs = runsFeed.panel;
+  const queue = useMemo(
+    (): QueueLoad => (queueRead.state.kind === "ready" ? queueRead.state.data : asPanel(queueRead.state)),
+    [queueRead.state],
+  );
+  // null is the client's calm 501 sentinel: no alert store on this install. That
+  // is neither an error nor "no alerts are firing".
+  const alerts = useMemo((): Load<AlertSummary[]> => {
+    const a = alertsRead.state;
+    if (a.kind !== "ready") return asPanel(a);
+    return a.data === null ? { kind: "unavailable" } : { kind: "ready", data: a.data.items ?? [] };
+  }, [alertsRead.state]);
+  // True when the alert feed held more than we asked for, so every count derived
+  // from it is a lower bound and must be rendered as one.
+  const alertsTruncated = alertsRead.state.kind === "ready" && alertsRead.state.data?.truncated === true;
 
+  const reloads = [
+    stopsFeed.reload,
+    fleetFeed.reload,
+    censusFeed.reload,
+    queueRead.reload,
+    tenantsFeed.reload,
+    usageFeed.reload,
+    alertsRead.reload,
+    providersFeed.reload,
+    runsFeed.reload,
+  ];
+  function load() {
+    for (const reload of reloads) reload();
+  }
+
+  const [refreshing, setRefreshing] = useState(false);
   function refresh() {
     setRefreshing(true);
     load();
@@ -1240,75 +1197,53 @@ export function DashboardPage() {
  * swallowed: a 403 folded into `[]` renders as "nothing is waiting on you",
  * which is the one lie this panel cannot afford.
  */
-function loadQueue(
-  controller: AbortController,
-  namespace: string,
-  set: (q: QueueLoad) => void,
-) {
+/**
+ * The approval queue for the Home panel, as the panel shows it. A workspace that refuses
+ * is counted, not swallowed; when none answers, why is the point.
+ */
+async function readQueue(namespace: string, signal: AbortSignal): Promise<QueueLoad> {
   if (namespace) {
-    api
-      .listApprovals(namespace, controller.signal)
-      .then((items) => set({ kind: "ready", data: { items, unreadable: 0 } }))
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        set(toFailure(err));
-      });
-    return;
+    try {
+      const items = await api.listApprovals(namespace, signal);
+      return { kind: "ready", data: { items, unreadable: 0 } };
+    } catch (err) {
+      return toFailure(err);
+    }
   }
-
-  api
-    .namespaces(controller.signal)
-    .then(async (resp) => {
-      // Bounded: this runs on the landing page, and an install with sixty
-      // workspaces used to open sixty concurrent requests on every load.
-      const outcomes = await mapLimit(
-        resp.namespaces,
-        NAMESPACE_SCAN_CONCURRENCY,
-        (ns) =>
-          api
-            .listApprovals(ns.name, controller.signal)
-            .then((items) => ({ ok: true as const, items }))
-            .catch((err: unknown) => ({ ok: false as const, failure: toFailure(err) })),
-      );
-      if (controller.signal.aborted) return;
-      const answered = outcomes.filter(
-        (o): o is { ok: true; items: ApprovalQueueItem[] } => o.ok,
-      );
-      if (outcomes.length > 0 && answered.length === 0) {
-        // Nothing answered, and WHY nothing answered is the point: an install
-        // without the queue and a caller without the grant are different truths.
-        const first = outcomes.find((o) => !o.ok);
-        set(
-          first && !first.ok
-            ? first.failure
-            : { kind: "error", message: "no workspace answered" },
-        );
-        return;
-      }
-      const items: ApprovalQueueItem[] = [];
-      const seen = new Set<string>();
-      for (const o of answered) {
-        for (const item of o.items) {
-          if (seen.has(item.runId)) continue;
-          seen.add(item.runId);
-          items.push(item);
-        }
-      }
-      set({
-        kind: "ready",
-        data: { items, unreadable: outcomes.length - answered.length },
-      });
-    })
-    .catch((err: unknown) => {
-      if (controller.signal.aborted) return;
-      // Cannot even enumerate the workspaces. That is neither "nothing is
-      // waiting" nor "you may not read approvals" — it is its own state.
-      if (err instanceof ApiError && err.isForbidden) {
-        set({ kind: "unscoped" });
-        return;
-      }
-      set(toFailure(err));
-    });
+  let resp;
+  try {
+    resp = await api.namespaces(signal);
+  } catch (err) {
+    // Cannot even enumerate the workspaces. That is neither "nothing is waiting"
+    // nor "you may not read approvals" — it is its own state.
+    if (err instanceof ApiError && err.isForbidden) return { kind: "unscoped" };
+    return toFailure(err);
+  }
+  // Bounded: this runs on the landing page, and an install with sixty
+  // workspaces used to open sixty concurrent requests on every load.
+  const outcomes = await mapLimit(resp.namespaces, NAMESPACE_SCAN_CONCURRENCY, (ns) =>
+    api
+      .listApprovals(ns.name, signal)
+      .then((items) => ({ ok: true as const, items }))
+      .catch((err: unknown) => ({ ok: false as const, failure: toFailure(err) })),
+  );
+  const answered = outcomes.filter((o): o is { ok: true; items: ApprovalQueueItem[] } => o.ok);
+  if (outcomes.length > 0 && answered.length === 0) {
+    // Nothing answered, and WHY nothing answered is the point: an install
+    // without the queue and a caller without the grant are different truths.
+    const first = outcomes.find((o) => !o.ok);
+    return first && !first.ok ? first.failure : { kind: "error", message: "no workspace answered" };
+  }
+  const items: ApprovalQueueItem[] = [];
+  const seen = new Set<string>();
+  for (const o of answered) {
+    for (const item of o.items) {
+      if (seen.has(item.runId)) continue;
+      seen.add(item.runId);
+      items.push(item);
+    }
+  }
+  return { kind: "ready", data: { items, unreadable: outcomes.length - answered.length } };
 }
 
 /**

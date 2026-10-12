@@ -36,6 +36,7 @@ import {
   type PromptDiffResponse,
   type PromptVersionSummary,
 } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 import { RES_PROMPTVERSIONS } from "@/lib/nav";
 
 // PromptsPage — archetype A1 (index/table) plus the diff reader the §6.2
@@ -84,11 +85,6 @@ import { RES_PROMPTVERSIONS } from "@/lib/nav";
 //   prompt-diff-unreadable      — a 200 whose body carried no line array
 
 // ---- discriminated state types -----------------------------------------------
-
-type PageState =
-  | { kind: "loading" }
-  | { kind: "ready"; versions: PromptVersionSummary[]; nextCursor: string }
-  | { kind: "error"; message: string; forbidden: boolean };
 
 // DiffState captures the full discriminated outcome for the diff reader.
 // Each status-code outcome is DISTINCT — no fabricated diffs at any branch.
@@ -269,7 +265,6 @@ export function closingLine(rows: Decorated[], complete: boolean): string | null
 // ---- main page ----------------------------------------------------------------
 
 export function PromptsPage() {
-  const [page, setPage] = React.useState<PageState>({ kind: "loading" });
   const [query, setQuery] = React.useState("");
   const [view, setView] = React.useState<PromptView>("all");
   const [diffState, setDiffState] = React.useState<DiffState>({ kind: "idle" });
@@ -290,40 +285,19 @@ export function PromptsPage() {
   const canCreate = can(RES_PROMPTVERSIONS, "create");
   const canDelete = can(RES_PROMPTVERSIONS, "delete");
 
-  const load = React.useCallback(
-    (signal?: AbortSignal) => {
-      setPage({ kind: "loading" });
-      api
-        .listPromptVersions({ namespace: shellNs || undefined }, signal)
-        .then((res) => {
-          if (signal?.aborted) return;
-          setPage({ kind: "ready", versions: res.items, nextCursor: res.nextCursor });
-        })
-        .catch((err: unknown) => {
-          if (signal?.aborted) return;
-          setPage({
-            kind: "error",
-            message: err instanceof Error ? err.message : "request failed",
-            forbidden: err instanceof ApiError && err.isForbidden,
-          });
-        });
-    },
+  const fetchVersions = React.useCallback(
+    (signal: AbortSignal) => api.listPromptVersions({ namespace: shellNs || undefined }, signal),
     [shellNs],
   );
-
-  React.useEffect(() => {
-    const controller = new AbortController();
-    load(controller.signal);
-    return () => controller.abort();
-  }, [load]);
+  const { state: page, reload: load } = useLoad(fetchVersions);
 
   const all = React.useMemo(
-    () => (page.kind === "ready" ? page.versions : []),
+    () => (page.kind === "ready" ? page.data.items : []),
     [page],
   );
   // The loaded window IS the whole list only when no cursor follows it — the one
   // condition under which counting the rows in hand is a fact, not a guess.
-  const complete = page.kind === "ready" && page.nextCursor === "";
+  const complete = page.kind === "ready" && page.data.nextCursor === "";
 
   const decorated = React.useMemo(() => decorate(all), [all]);
 

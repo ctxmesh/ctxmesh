@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { ChatPanel } from "@/components/agent-chat";
 import { ErrorState, Skeleton } from "@/components/kit";
-import { api, ApiError, type AgentDetailResponse } from "@/lib/api";
+import { api } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 
 // AgentChatboxPage — one agent, no console (m37; M151 §6.1 archetype A10, §6.2
 // row `agent-chatbox-page.tsx`: "chrome-less; both origins").
@@ -64,32 +65,28 @@ export function AgentChatboxPage({
   const ns = nsProp ?? params.ns ?? "default";
   const name = nameProp ?? params.name ?? "";
   const navigate = useNavigate();
-  const [load, setLoad] = useState<Load>({ kind: "loading" });
   const endUser = useMemo(isAgentOrigin, []);
 
-  useEffect(() => {
-    const controller = new AbortController();
-    api
-      .agentDetail(ns, name, controller.signal)
-      .then((d: AgentDetailResponse) =>
-        setLoad({
-          kind: "ready",
-          ready: d.ready,
-          memoryBound: d.bindings.some((b) => b.kind === "memory"),
-        }),
-      )
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        // A genuinely-missing agent is an honest error; any other lookup hiccup shouldn't
-        // block chatting, so default to ready + no-memory and let the invoke be the real gate.
-        if (err instanceof ApiError && err.isNotFound) {
-          setLoad({ kind: "error", message: `Agent "${ns}/${name}" not found.` });
-        } else {
-          setLoad({ kind: "ready", ready: true, memoryBound: false });
-        }
-      });
-    return () => controller.abort();
-  }, [ns, name]);
+  const fetchAgent = useCallback(
+    (signal: AbortSignal) => api.agentDetail(ns, name, signal),
+    [ns, name],
+  );
+  const { state: read } = useLoad(fetchAgent);
+  const load = useMemo((): Load => {
+    if (read.kind === "loading") return read;
+    if (read.kind === "ready") {
+      return {
+        kind: "ready",
+        ready: read.data.ready,
+        memoryBound: read.data.bindings.some((b) => b.kind === "memory"),
+      };
+    }
+    // A genuinely-missing agent is an honest error; any other lookup hiccup shouldn't
+    // block chatting, so default to ready + no-memory and let the invoke be the real gate.
+    return read.status === 404
+      ? { kind: "error", message: `Agent "${ns}/${name}" not found.` }
+      : { kind: "ready", ready: true, memoryBound: false };
+  }, [read, ns, name]);
 
   const onTraced = useCallback(
     (traceId: string) => navigate(`/traces/${encodeURIComponent(traceId)}`),

@@ -26,7 +26,8 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { api, ApiError, runHref, type RunSummary, type RunsFilteredParams } from "@/lib/api";
+import { api, runHref, type RunSummary, type RunsFilteredParams } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 import { useNamespace } from "@/lib/namespace";
 import { formatDateTime, formatLatency, formatRelativeTime } from "@/lib/format";
 
@@ -390,73 +391,47 @@ export function RunsPage() {
 
   // Cursor pagination: stack of cursors, one per page. [""] = page 0.
   const [pageStack, setPageStack] = useState<string[]>([""]);
-  const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
-
-  const abortRef = useRef<AbortController | null>(null);
   const cursor = pageStack[pageStack.length - 1] ?? "";
 
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setLoadState({ kind: "loading" });
+  const fetchRuns = useCallback(
+    (signal: AbortSignal) => {
+      // The <input type="datetime-local"> value is "YYYY-MM-DDTHH:MM" in LOCAL time
+      // (no seconds, no timezone) — the BFF's runs filter requires RFC3339, so
+      // sending it raw 400s ("from must be RFC3339"). Convert local -> UTC RFC3339.
+      const fromRfc = toRFC3339(fromFilter);
+      const toRfc = toRFC3339(toFilter);
+      const params: RunsFilteredParams = {
+        limit: PAGE_LIMIT,
+        // The Runs browser opts into per-trace enrichment (ADR 0081) so each row shows REAL
+        // tokens + an ok/error status the list API can't carry. The dashboard's recent-runs
+        // peek deliberately does NOT (it only needs cost/latency — the cheap path).
+        enrich: true,
+        ...(cursor ? { cursor } : {}),
+        ...(agentFilter ? { agent: agentFilter } : {}),
+        ...(fromRfc ? { from: fromRfc } : {}),
+        ...(toRfc ? { to: toRfc } : {}),
+        ...(query ? { q: query } : {}),
+        ...(namespace ? { namespace } : {}),
+      };
+      return api.runsFiltered(params, signal);
+    },
+    [cursor, agentFilter, fromFilter, toFilter, query, namespace],
+  );
+  const { state, reload } = useLoad(fetchRuns);
 
-    // The <input type="datetime-local"> value is "YYYY-MM-DDTHH:MM" in LOCAL time
-    // (no seconds, no timezone) — the BFF's runs filter requires RFC3339, so
-    // sending it raw 400s ("from must be RFC3339"). Convert local -> UTC RFC3339.
-    const fromRfc = toRFC3339(fromFilter);
-    const toRfc = toRFC3339(toFilter);
-
-    const params: RunsFilteredParams = {
-      limit: PAGE_LIMIT,
-      // The Runs browser opts into per-trace enrichment (ADR 0081) so each row shows REAL
-      // tokens + an ok/error status the list API can't carry. The dashboard's recent-runs
-      // peek deliberately does NOT (it only needs cost/latency — the cheap path).
-      enrich: true,
-      ...(cursor ? { cursor } : {}),
-      ...(agentFilter ? { agent: agentFilter } : {}),
-      ...(fromRfc ? { from: fromRfc } : {}),
-      ...(toRfc ? { to: toRfc } : {}),
-      ...(query ? { q: query } : {}),
-      ...(namespace ? { namespace } : {}),
-    };
-
-    api
-      .runsFiltered(params, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        // null = 501 (trace backend not configured) — calm degrade, NOT an error.
-        if (res === null) {
-          setLoadState({ kind: "unavailable" });
-          return;
-        }
-        // A `notice` means the trace store is transiently down (200 + empty, m23.6):
-        // show "temporarily unavailable — retry", NOT the misleading "No runs yet".
-        if (res.notice) {
-          setLoadState({ kind: "degraded", message: res.notice });
-          return;
-        }
-        setLoadState({
-          kind: "ready",
-          runs: res.runs,
-          nextCursor: res.nextCursor ?? "",
-        });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        // 502 and other non-501 errors surface as a real error (retryable).
-        setLoadState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-  }, [cursor, agentFilter, fromFilter, toFilter, query, namespace]);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+  const loadState = useMemo((): LoadState => {
+    if (state.kind === "loading") return state;
+    // 502 and other non-501 errors surface as a real error (retryable).
+    if (state.kind === "error") {
+      return { kind: "error", message: state.message, forbidden: state.forbidden };
+    }
+    // null = 501 (trace backend not configured) — calm degrade, NOT an error.
+    if (state.data === null) return { kind: "unavailable" };
+    // A `notice` means the trace store is transiently down (200 + empty, m23.6):
+    // show "temporarily unavailable — retry", NOT the misleading "No runs yet".
+    if (state.data.notice) return { kind: "degraded", message: state.data.notice };
+    return { kind: "ready", runs: state.data.runs, nextCursor: state.data.nextCursor ?? "" };
+  }, [state]);
 
   // Reset to page 0 whenever any server-side filter changes or q changes.
   const resetPaging = useCallback(() => setPageStack([""]), []);
@@ -551,7 +526,7 @@ export function RunsPage() {
           message: loadState.message,
           forbidden: loadState.forbidden,
           resource: "runs",
-          onRetry: loadState.forbidden ? undefined : load,
+          onRetry: loadState.forbidden ? undefined : () => reload(),
         }
       : null;
 
@@ -779,7 +754,7 @@ export function RunsPage() {
             title="The trace store didn’t answer."
             description="The feed is temporarily unreadable. Nothing has been lost — the runs are still recorded."
             detail={loadState.message}
-            onRetry={load}
+            onRetry={() => reload()}
           />
         </div>
       </div>

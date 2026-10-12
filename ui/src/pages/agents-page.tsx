@@ -28,7 +28,8 @@ import {
   type NextStepTone,
   type StatusTone,
 } from "@/components/kit";
-import { api, ApiError, type AgentSummary } from "@/lib/api";
+import { api, type AgentSummary } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 import { BUCKETS, HALTED, type Bucket, bucketOf } from "@/lib/lifecycle";
 import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
@@ -340,11 +341,6 @@ function RowActions({
   );
 }
 
-type Load =
-  | { kind: "loading" }
-  | { kind: "ready"; items: AgentSummary[]; nextCursor: string }
-  | { kind: "error"; message: string; forbidden: boolean };
-
 export function AgentsPage() {
   const navigate = useNavigate();
   const { namespace } = useNamespace();
@@ -378,43 +374,18 @@ export function AgentsPage() {
   );
   // The page stack: the cursor used to fetch each page. [""] = we're on page 0.
   const [pageStack, setPageStack] = useState<string[]>([""]);
-  const [state, setState] = useState<Load>({ kind: "loading" });
-
-  // Keep the live request abortable so a rapid namespace/filter/page change
-  // doesn't race a stale response into the UI.
-  const abortRef = useRef<AbortController | null>(null);
 
   const cursor = pageStack[pageStack.length - 1] ?? "";
 
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setState({ kind: "loading" });
-    api
-      .listAgents(
+  const fetchPage = useCallback(
+    (signal: AbortSignal) =>
+      api.listAgents(
         { limit: PAGE_LIMIT, cursor: cursor || undefined, q: query || undefined, namespace: namespace || undefined, includeDrafts: includeDrafts || undefined },
-        controller.signal,
-      )
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setState({ kind: "ready", items: res.items, nextCursor: res.nextCursor });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        const forbidden = err instanceof ApiError && err.isForbidden;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden,
-        });
-      });
-  }, [cursor, query, namespace, includeDrafts]);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+        signal,
+      ),
+    [cursor, query, namespace, includeDrafts],
+  );
+  const { state, reload } = useLoad(fetchPage);
 
   // A new filter or namespace scope resets to page 0 (a fresh cursor stack). The
   // effect above then refetches. Guard against resetting when already at page 0
@@ -435,8 +406,8 @@ export function AgentsPage() {
     }
   }, [namespace, resetPaging]);
 
-  const items = state.kind === "ready" ? state.items : [];
-  const nextCursor = state.kind === "ready" ? state.nextCursor : "";
+  const items = state.kind === "ready" ? state.data.items : [];
+  const nextCursor = state.kind === "ready" ? state.data.nextCursor : "";
   // hasNext keys off the CURSOR (BFF), never items.length — an empty filtered
   // window with more pages must keep Next live (the cursor-vs-q rule).
   const hasNext = nextCursor !== "";
@@ -502,7 +473,7 @@ export function AgentsPage() {
           message: state.message,
           forbidden: state.forbidden,
           resource: "agents",
-          onRetry: state.forbidden ? undefined : load,
+          onRetry: state.forbidden ? undefined : () => reload(),
         }
       : null;
 

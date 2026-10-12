@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Filter, ScrollText } from "lucide-react";
 
@@ -27,7 +27,8 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { useNamespace } from "@/lib/namespace";
 import { formatDateTime, formatRelativeTime } from "@/lib/format";
-import { api, ApiError, type AuditEvent, type AuditListParams } from "@/lib/api";
+import { api, type AuditEvent, type AuditListParams } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 
 // AuditPage — the compliance trail, on the editorial ACTIVITY-FEED archetype
 // (m63.5, ADR 0056 §4; M151 §6.1 A1 composition, §4.4 activity-feed budget:
@@ -502,67 +503,45 @@ export function AuditPage() {
 
   // Cursor pagination: a stack of keyset cursors, one per page. [""] = page 0.
   const [pageStack, setPageStack] = useState<string[]>([""]);
-  const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
 
   // Detail drawer — null when closed.
   const [drawerEvent, setDrawerEvent] = useState<AuditEvent | null>(null);
 
-  const abortRef = useRef<AbortController | null>(null);
   const cursor = pageStack[pageStack.length - 1] ?? "";
 
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setLoadState({ kind: "loading" });
+  const fetchAudit = useCallback(
+    (signal: AbortSignal) => {
+      // The <input type="datetime-local"> value is "YYYY-MM-DDTHH:MM" in LOCAL time
+      // (no seconds/zone). Convert to UTC RFC3339 before sending to the BFF.
+      const fromRfc = toRFC3339(fromFilter);
+      const toRfc = toRFC3339(toFilter);
+      const params: AuditListParams = {
+        limit: PAGE_LIMIT,
+        ...(namespace ? { namespace } : {}),
+        ...(cursor ? { cursor } : {}),
+        ...(actorFilter ? { actor: actorFilter } : {}),
+        ...(actionFilter ? { action: actionFilter } : {}),
+        ...(kindFilter ? { kind: kindFilter } : {}),
+        ...(fromRfc ? { from: fromRfc } : {}),
+        ...(toRfc ? { to: toRfc } : {}),
+      };
+      return api.listAudit(params, signal);
+    },
+    [namespace, cursor, actorFilter, actionFilter, kindFilter, fromFilter, toFilter],
+  );
+  const { state, reload } = useLoad(fetchAudit);
 
-    // The <input type="datetime-local"> value is "YYYY-MM-DDTHH:MM" in LOCAL time
-    // (no seconds/zone). Convert to UTC RFC3339 before sending to the BFF.
-    const fromRfc = toRFC3339(fromFilter);
-    const toRfc = toRFC3339(toFilter);
-
-    const params: AuditListParams = {
-      limit: PAGE_LIMIT,
-      ...(namespace ? { namespace } : {}),
-      ...(cursor ? { cursor } : {}),
-      ...(actorFilter ? { actor: actorFilter } : {}),
-      ...(actionFilter ? { action: actionFilter } : {}),
-      ...(kindFilter ? { kind: kindFilter } : {}),
-      ...(fromRfc ? { from: fromRfc } : {}),
-      ...(toRfc ? { to: toRfc } : {}),
-    };
-
-    api
-      .listAudit(params, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        // null = 501 (audit store not configured) — calm degrade, NOT an error.
-        if (res === null) {
-          setLoadState({ kind: "unavailable" });
-          return;
-        }
-        setLoadState({
-          kind: "ready",
-          items: res.items,
-          nextCursor: res.nextCursor ?? "",
-        });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        // 403 (no operator persona) + 500 (DB) surface as a real error; 403 renders
-        // the forbidden variant (never a fake empty list).
-        setLoadState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-  }, [namespace, cursor, actorFilter, actionFilter, kindFilter, fromFilter, toFilter]);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+  const loadState = useMemo((): LoadState => {
+    if (state.kind === "loading") return state;
+    // 403 (no operator persona) + 500 (DB) surface as a real error; 403 renders
+    // the forbidden variant (never a fake empty list).
+    if (state.kind === "error") {
+      return { kind: "error", message: state.message, forbidden: state.forbidden };
+    }
+    // null = 501 (audit store not configured) — calm degrade, NOT an error.
+    if (state.data === null) return { kind: "unavailable" };
+    return { kind: "ready", items: state.data.items, nextCursor: state.data.nextCursor ?? "" };
+  }, [state]);
 
   // Reset to page 0 whenever a filter (or the global namespace) changes.
   const resetPaging = useCallback(() => setPageStack([""]), []);
@@ -651,7 +630,7 @@ export function AuditPage() {
           message: loadState.message,
           forbidden: loadState.forbidden,
           resource: "the audit log",
-          onRetry: loadState.forbidden ? undefined : load,
+          onRetry: loadState.forbidden ? undefined : () => reload(),
         }
       : null;
 

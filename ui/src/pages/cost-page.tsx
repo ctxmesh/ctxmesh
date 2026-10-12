@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Coins, Download, Filter } from "lucide-react";
 
@@ -27,12 +27,13 @@ import {
 } from "@/components/kit";
 import {
   api,
-  ApiError,
   type AgentCostItem,
+  type CostBreakdownResponse,
   type CostForecastResponse,
   type CostSummary,
   type TenantSummary,
 } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 
 // CostPage — the money page (m16.10; re-housed on the editorial system in M151,
 // spec §6.2 "stat-band variant": stat band + budget Meter above the table, the
@@ -459,6 +460,9 @@ type TenantsState =
   | { kind: "forbidden" }
   | { kind: "error"; message: string };
 
+/** The breakdown's answer when there is no tenant to ask about yet. */
+const NO_TENANT = Symbol("no tenant");
+
 // emptyCostSummary is the zero-value CostSummary used while loading.
 const emptyCostSummary: CostSummary = {
   totalCostUSD: 0,
@@ -475,18 +479,8 @@ export function CostPage() {
   // in-page picker writes it back here so the view stays linkable/refreshable.
   const tenant = searchParams.get("tenant") ?? "";
 
-  const [tenantsState, setTenantsState] = useState<TenantsState>({ kind: "loading" });
   const [view, setView] = useState<ViewId>("all");
   const [query, setQuery] = useState("");
-  // Bumped by the tenant-list retry so the fetch below can be re-run without a
-  // page reload (a reload would be a bigger hammer than the failure deserves).
-  const [tenantsAttempt, setTenantsAttempt] = useState(0);
-
-  // Forecast: null = 501 (no ledger) or no tenant; undefined = not yet loaded.
-  const [forecast, setForecast] = useState<CostForecastResponse | null | undefined>(
-    undefined,
-  );
-
   // setTenant drives the view by writing the selection into ?tenant= (replace,
   // not push — flipping the tenant is not a distinct history step).
   const setTenant = useCallback(
@@ -506,28 +500,17 @@ export function CostPage() {
 
   // Load the tenant list once for the picker. Best-effort: a 403 (a viewer who
   // cannot list tenants) is an honest "forbidden", distinct from an empty list.
-  useEffect(() => {
-    const controller = new AbortController();
-    setTenantsState({ kind: "loading" });
-    api
-      .listTenants(controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setTenantsState({ kind: "ready", tenants: res.items ?? [] });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        if (err instanceof ApiError && err.isForbidden) {
-          setTenantsState({ kind: "forbidden" });
-          return;
-        }
-        setTenantsState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load tenants",
-        });
-      });
-    return () => controller.abort();
-  }, [tenantsAttempt]);
+  const fetchTenants = useCallback(
+    (signal: AbortSignal) => api.listTenants(signal).then((res) => res.items ?? []),
+    [],
+  );
+  const { state: tenantsRead, reload: reloadTenants } = useLoad(fetchTenants);
+  const tenantsState = useMemo((): TenantsState => {
+    if (tenantsRead.kind === "ready") return { kind: "ready", tenants: tenantsRead.data };
+    if (tenantsRead.kind === "loading") return tenantsRead;
+    if (tenantsRead.forbidden) return { kind: "forbidden" };
+    return { kind: "error", message: tenantsRead.message };
+  }, [tenantsRead]);
 
   // tenantRequired: the BFF answered `tenant_required` to a breakdown with no
   // tenant, so this caller reads cost cluster-wide and spend is grouped by
@@ -546,9 +529,6 @@ export function CostPage() {
 
   // Cursor pagination: stack of cursors, one per page. [""] = page 0.
   const [pageStack, setPageStack] = useState<string[]>([""]);
-  const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
-
-  const abortRef = useRef<AbortController | null>(null);
   const cursor = pageStack[pageStack.length - 1] ?? "";
 
   // Switching tenant resets pagination — a cursor from one tenant is
@@ -557,92 +537,59 @@ export function CostPage() {
     setPageStack([""]);
   }, [tenant]);
 
-  // `load` depends on nothing from the tenant list: the breakdown is fetched
-  // without a tenant and the BFF decides its scope. Depending on the list
-  // re-created `load` when the list merely finished loading, which fired a
-  // SECOND identical breakdown fetch and flashed already-rendered rows away
-  // (m52.G8).
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
+  // The breakdown depends on nothing from the tenant list: it is fetched without a
+  // tenant and the BFF decides its scope. Depending on the list re-created the read
+  // when the list merely finished loading, which fired a SECOND identical breakdown
+  // fetch and flashed already-rendered rows away (m52.G8). Once told to name a tenant,
+  // it answers no-tenant without asking again until default-to-first picks one.
+  const fetchBreakdown = useCallback(
+    (signal: AbortSignal): Promise<CostBreakdownResponse | null | typeof NO_TENANT> =>
+      !tenant && tenantRequired
+        ? Promise.resolve(NO_TENANT)
+        : api.costBreakdown(tenant, { limit: PAGE_LIMIT, ...(cursor ? { cursor } : {}) }, signal),
+    [cursor, tenant, tenantRequired],
+  );
+  const { state: breakdown, reload: load } = useLoad(fetchBreakdown);
 
-    // Already told to name a tenant: hold the calm no-tenant state until
-    // default-to-first picks one, rather than asking again.
-    if (!tenant && tenantRequired) {
-      setLoadState({ kind: "no-tenant" });
-      return;
-    }
-
-    setLoadState({ kind: "loading" });
-
-    api
-      .costBreakdown(
-        tenant,
-        { limit: PAGE_LIMIT, ...(cursor ? { cursor } : {}) },
-        controller.signal,
-      )
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        // null = 501 (no trace backend) — calm degrade, NOT an error.
-        if (res === null) {
-          setLoadState({ kind: "unavailable" });
-          return;
-        }
-        // A `notice` means the trace store is transiently down (200 + empty,
-        // m23.6): show a retryable outage, NOT the "no cost data yet" empty
-        // (which would claim zero activity when the source merely timed out).
-        if (res.notice) {
-          setLoadState({ kind: "degraded", message: res.notice });
-          return;
-        }
-        setLoadState({
-          kind: "ready",
-          agents: res.agents,
-          total: res.total,
-          nextCursor: res.nextCursor,
-          namespaces: res.namespaces,
-        });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        if (!tenant && err instanceof ApiError && err.code === "tenant_required") {
-          setTenantRequired(true);
-          setLoadState({ kind: "no-tenant" });
-          return;
-        }
-        // 502 and other non-501 errors surface as a real, retryable error.
-        setLoadState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-  }, [cursor, tenant, tenantRequired]);
-
+  // The BFF answered `tenant_required` to a breakdown with no tenant: this caller reads
+  // cost cluster-wide, grouped by tenant.
+  const askedForTenant = !tenant && breakdown.kind === "error" && breakdown.code === "tenant_required";
   useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+    if (askedForTenant) setTenantRequired(true);
+  }, [askedForTenant]);
+
+  const loadState = useMemo((): LoadState => {
+    if (breakdown.kind === "loading") return breakdown;
+    if (breakdown.kind === "error") {
+      if (askedForTenant) return { kind: "no-tenant" };
+      // 502 and other non-501 errors surface as a real, retryable error.
+      return { kind: "error", message: breakdown.message, forbidden: breakdown.forbidden };
+    }
+    const res = breakdown.data;
+    if (res === NO_TENANT) return { kind: "no-tenant" };
+    // null = 501 (no trace backend) — calm degrade, NOT an error.
+    if (res === null) return { kind: "unavailable" };
+    // A `notice` means the trace store is transiently down (200 + empty, m23.6): show
+    // a retryable outage, NOT the "no cost data yet" empty (which would claim zero
+    // activity when the source merely timed out).
+    if (res.notice) return { kind: "degraded", message: res.notice };
+    return {
+      kind: "ready",
+      agents: res.agents,
+      total: res.total,
+      nextCursor: res.nextCursor,
+      namespaces: res.namespaces,
+    };
+  }, [breakdown, askedForTenant]);
 
   // Forecast: fetched when ?tenant= is present. 501 → null (calm). Errors are
   // absorbed — the breakdown is the primary surface and the band is secondary.
-  useEffect(() => {
-    if (!tenant) {
-      setForecast(null);
-      return;
-    }
-    const ctrl = new AbortController();
-    api
-      .costForecast(tenant, ctrl.signal)
-      .then((res) => {
-        if (!ctrl.signal.aborted) setForecast(res);
-      })
-      .catch(() => {
-        if (!ctrl.signal.aborted) setForecast(null);
-      });
-    return () => ctrl.abort();
-  }, [tenant]);
+  const fetchForecast = useMemo(
+    () => (tenant ? (signal: AbortSignal) => api.costForecast(tenant, signal) : null),
+    [tenant],
+  );
+  const { state: forecastRead } = useLoad(fetchForecast);
+  const forecast = forecastRead.kind === "ready" ? forecastRead.data : null;
 
   const agents = useMemo(
     () => (loadState.kind === "ready" ? loadState.agents : []),
@@ -724,7 +671,7 @@ export function CostPage() {
           message: loadState.message,
           forbidden: loadState.forbidden,
           resource: "cost data",
-          onRetry: loadState.forbidden ? undefined : load,
+          onRetry: loadState.forbidden ? undefined : () => load(),
         }
       : null;
 
@@ -905,7 +852,7 @@ export function CostPage() {
                 variant="outline"
                 size="sm"
                 className="mt-3"
-                onClick={() => setTenantsAttempt((n) => n + 1)}
+                onClick={() => reloadTenants()}
                 data-testid="cost-retry-tenants"
               >
                 Try again
@@ -959,7 +906,7 @@ export function CostPage() {
           <ErrorState
             title="The trace store didn’t answer"
             description={loadState.message}
-            onRetry={load}
+            onRetry={() => load()}
           />
         </div>
       </div>

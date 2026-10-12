@@ -24,6 +24,7 @@ import { TraceExplorer } from "@/components/dashboard/trace-explorer";
 import { FixtureStepper } from "@/components/dashboard/fixture-stepper";
 import { FeedbackPanel } from "@/components/dashboard/feedback-panel";
 import { api, ApiError, type SpanSummary, type TraceDetailResponse } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 import { formatDateTime, formatLatency, formatUSD } from "@/lib/format";
 import { useNamespace } from "@/lib/namespace";
 import { settleNotice, useSettlingTrace } from "@/lib/trace-settle";
@@ -226,11 +227,7 @@ function failedSpans(spans: SpanSummary[]): number {
 
 export function TracePage() {
   const { id = "" } = useParams();
-  const [state, setState] = React.useState<PageState>({ kind: "loading" });
   const [shareOpen, setShareOpen] = React.useState(false);
-  // Retry is a re-run of the same effect, not a second fetch path — §7 A5's
-  // "ErrorState + Retry" with exactly one place that knows how to load a trace.
-  const [attempt, setAttempt] = React.useState(0);
   // How many times the pending state has re-checked. Also the flicker guard: the fetch effect
   // resets to "loading", so without it the panel would blink between "still recording" and a
   // spinner every few seconds.
@@ -240,60 +237,40 @@ export function TracePage() {
     setPendingTries(0);
   }, [id]);
 
+  // Fetch detail + Langfuse link-out in parallel. If the link-out fails we simply don't
+  // show the button (best-effort, matching RunInspector). Retry re-asks the same read —
+  // §7 A5's "ErrorState + Retry" with exactly one place that knows how to load a trace.
+  const fetchTrace = React.useCallback(
+    (signal: AbortSignal) =>
+      Promise.all([
+        api.traceDetail(id, signal),
+        api.traceLink(id, signal).catch(() => null),
+      ]).then(([detail, linkRes]) => ({ detail, langfuseUrl: linkRes?.url ?? null })),
+    [id],
+  );
+  const { state: read, reload } = useLoad(fetchTrace);
+  const state = React.useMemo((): PageState => {
+    if (read.kind === "loading") return read;
+    if (read.kind === "ready") return { kind: "ready", ...read.data };
+    // 501 → no trace backend wired: calm "not configured", never a red error.
+    if (read.status === 501) return { kind: "unconfigured" };
+    // A 404 the BFF marked trace_pending is "not yet", not "never": the id resolved to a run
+    // the caller may read, and only the spans are missing. This is the ordinary state seconds
+    // after a first run on a cold pod, where the agent's OTLP exporter is still backing off
+    // against a collector that was not listening yet (m52.G30). Showing "The trace didn't
+    // load" there tells a new user their first run broke, immediately after it succeeded.
+    if (read.code === TRACE_PENDING_CODE) return { kind: "pending" };
+    return { kind: "error", message: read.message, forbidden: read.forbidden };
+  }, [read]);
+
   React.useEffect(() => {
     if (state.kind !== "pending" || pendingTries >= PENDING_MAX_TRIES) return;
     const t = window.setTimeout(() => {
       setPendingTries((n) => n + 1);
-      setAttempt((n) => n + 1);
+      reload();
     }, PENDING_POLL_MS);
     return () => window.clearTimeout(t);
-  }, [state.kind, pendingTries]);
-
-  React.useEffect(() => {
-    if (!id) return;
-    const controller = new AbortController();
-    setState({ kind: "loading" });
-
-    // Fetch detail + Langfuse link-out in parallel. If the link-out fails we
-    // simply don't show the button (best-effort, matching RunInspector).
-    Promise.all([
-      api.traceDetail(id, controller.signal),
-      api.traceLink(id, controller.signal).catch(() => null),
-    ])
-      .then(([detail, linkRes]) => {
-        if (controller.signal.aborted) return;
-        setState({
-          kind: "ready",
-          detail,
-          langfuseUrl: linkRes?.url ?? null,
-        });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        // 501 → no trace backend wired: calm "not configured", never a red error.
-        if (err instanceof ApiError && err.isNotImplemented) {
-          setState({ kind: "unconfigured" });
-          return;
-        }
-        // A 404 the BFF marked trace_pending is "not yet", not "never": the id resolved to a run
-        // the caller may read, and only the spans are missing. This is the ordinary state seconds
-        // after a first run on a cold pod, where the agent's OTLP exporter is still backing off
-        // against a collector that was not listening yet (m52.G30). Showing "The trace didn't
-        // load" there tells a new user their first run broke, immediately after it succeeded.
-        if (err instanceof ApiError && err.code === TRACE_PENDING_CODE) {
-          setState({ kind: "pending" });
-          return;
-        }
-        const forbidden = err instanceof ApiError && err.isForbidden;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load the trace",
-          forbidden,
-        });
-      });
-
-    return () => controller.abort();
-  }, [id, attempt]);
+  }, [state.kind, pendingTries, reload]);
 
   // A fresh run's trace lands in pieces, so the loaded trace is re-read, bounded, until it matches
   // what the run recorded (lib/trace-settle).
@@ -318,7 +295,7 @@ export function TracePage() {
           record arrives.
         </QuietNote>
         {gaveUp && (
-          <Button variant="outline" onClick={() => setAttempt((n) => n + 1)}>
+          <Button variant="outline" onClick={() => reload()}>
             Check again
           </Button>
         )}
@@ -389,7 +366,7 @@ export function TracePage() {
           title="The trace didn't load."
           description="The run itself is unaffected — only its forensic record failed to read."
           detail={state.message}
-          onRetry={() => setAttempt((n) => n + 1)}
+          onRetry={() => reload()}
         />
       </div>
     );

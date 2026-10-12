@@ -916,26 +916,19 @@ function DeleteMcpDialog({
   onDeleted: () => void;
 }) {
   const { toast } = useToast();
-  const [refs, setRefs] = React.useState<RefsLoad>({ kind: "loading" });
   const [deleting, setDeleting] = React.useState(false);
 
-  React.useEffect(() => {
-    const c = new AbortController();
-    api
-      .mcpServerReferences(server.namespace, server.name, c.signal)
-      .then((res) => {
-        if (c.signal.aborted) return;
-        setRefs({ kind: "ready", references: res.references });
-      })
-      .catch((err: unknown) => {
-        if (c.signal.aborted) return;
-        setRefs({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load delete impact",
-        });
-      });
-    return () => c.abort();
-  }, [server.namespace, server.name]);
+  const fetchRefs = React.useCallback(
+    (signal: AbortSignal) =>
+      api.mcpServerReferences(server.namespace, server.name, signal).then((res) => res.references),
+    [server.namespace, server.name],
+  );
+  const { state: refsRead } = useLoad(fetchRefs);
+  const refs = React.useMemo((): RefsLoad => {
+    if (refsRead.kind === "ready") return { kind: "ready", references: refsRead.data };
+    if (refsRead.kind === "loading") return refsRead;
+    return { kind: "error", message: refsRead.message };
+  }, [refsRead]);
 
   async function onConfirm() {
     setDeleting(true);

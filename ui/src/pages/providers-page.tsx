@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useId, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Filter, PlugZap, Plus, RotateCw, Sparkles, Trash2 } from "lucide-react";
 
@@ -27,6 +27,7 @@ import {
   type NextStepTone,
 } from "@/components/kit";
 import { api, ApiError, type ProviderSummary } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 import { useCapabilities } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_SECRETS } from "@/lib/nav";
@@ -258,43 +259,24 @@ export function ProvidersPage() {
   const { toast } = useToast();
   const [query, setQuery] = useState("");
   const [view, setView] = useState<ViewId>("all");
-  const [state, setState] = useState<Load>({ kind: "loading" });
   const [action, setAction] = useState<Action>({ kind: "idle" });
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
 
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setState({ kind: "loading" });
-    api
-      .listProviders(workingNamespace, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        // Read `items` (the console key), fall back to `providers`, default [].
-        setState({ kind: "ready", items: res.items ?? res.providers ?? [] });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        if (err instanceof ApiError && err.status === 404) {
-          setState({ kind: "disabled" });
-          return;
-        }
-        const forbidden = err instanceof ApiError && err.isForbidden;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden,
-        });
-      });
-  }, [workingNamespace]);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+  // Read `items` (the console key), fall back to `providers`, default [].
+  const fetchProviders = useCallback(
+    (signal: AbortSignal) =>
+      api.listProviders(workingNamespace, signal).then((res) => res.items ?? res.providers ?? []),
+    [workingNamespace],
+  );
+  const { state: answer, reload } = useLoad(fetchProviders);
+  const state = useMemo((): Load => {
+    if (answer.kind === "ready") return { kind: "ready", items: answer.data };
+    if (answer.kind === "loading") return answer;
+    // 404 = the connect kill-switch: this install does not offer providers.
+    if (answer.status === 404) return { kind: "disabled" };
+    return { kind: "error", message: answer.message, forbidden: answer.forbidden };
+  }, [answer]);
 
   const all = useMemo(
     () => (state.kind === "ready" ? state.items : []),
@@ -352,7 +334,7 @@ export function ProvidersPage() {
         description: "The provider key was validated and updated server-side.",
       });
       closeAction();
-      load();
+      reload();
     } catch (err) {
       if (err instanceof ApiError && err.isForbidden) reprobe();
       setActionError(err instanceof Error ? err.message : "rotate failed");
@@ -372,7 +354,7 @@ export function ProvidersPage() {
         description: "The provider's route, binding, and secret were removed.",
       });
       closeAction();
-      load();
+      reload();
     } catch (err) {
       if (err instanceof ApiError && err.isForbidden) reprobe();
       setActionError(err instanceof Error ? err.message : "disconnect failed");
@@ -387,7 +369,7 @@ export function ProvidersPage() {
           message: state.message,
           forbidden: state.forbidden,
           resource: "connected providers",
-          onRetry: state.forbidden ? undefined : load,
+          onRetry: state.forbidden ? undefined : () => reload(),
         }
       : null;
 

@@ -85,6 +85,7 @@ import {
   type OnlineScoreWindow,
   type PublishTemplateResponse,
 } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 
 // Fork provenance labels (ADR 0068 §6) — forwarded from the AgentDeployment CR.
 // Used for lineage display (U12, m76.3) and banner repair links (U5).
@@ -1628,30 +1629,23 @@ function DeleteDialog({
 }) {
   const { toast } = useToast();
   const { reprobe } = useCapabilitiesIn(detail.namespace);
-  const [refs, setRefs] = React.useState<RefsLoad>({ kind: "loading" });
   const [deleting, setDeleting] = React.useState(false);
   // U4: when this agent is published, offer to ALSO unpublish its template — pre-checked (the common
   // intent), but visible + uncheckable to preserve ADR 0068's publish-then-delete-the-dev-agent flow.
   const isPublished = detail.published != null;
   const [alsoUnpublish, setAlsoUnpublish] = React.useState(true);
 
-  React.useEffect(() => {
-    const controller = new AbortController();
-    api
-      .agentReferences(detail.namespace, detail.name, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setRefs({ kind: "ready", references: res.references });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setRefs({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load delete impact",
-        });
-      });
-    return () => controller.abort();
-  }, [detail.namespace, detail.name]);
+  const fetchRefs = React.useCallback(
+    (signal: AbortSignal) =>
+      api.agentReferences(detail.namespace, detail.name, signal).then((res) => res.references),
+    [detail.namespace, detail.name],
+  );
+  const { state: refsRead } = useLoad(fetchRefs);
+  const refs = React.useMemo((): RefsLoad => {
+    if (refsRead.kind === "ready") return { kind: "ready", references: refsRead.data };
+    if (refsRead.kind === "loading") return refsRead;
+    return { kind: "error", message: refsRead.message };
+  }, [refsRead]);
 
   async function onConfirm() {
     setDeleting(true);
@@ -2619,37 +2613,23 @@ function AgentRunsTab({
   onInspect: (traceId: string) => void;
 }) {
   const navigate = useNavigate();
-  const [state, setState] = React.useState<
+  const fetchRuns = React.useCallback(
+    (signal: AbortSignal) => api.agentRuns(ns, name, 50, signal),
+    [ns, name],
+  );
+  const { state: runsRead } = useLoad(fetchRuns);
+  const state = React.useMemo(():
     | { kind: "loading" }
     | { kind: "ready"; runs: AgentRunSummary[] }
     | { kind: "unavailable" } // 501 — no trace backend configured
-    | { kind: "error"; message: string; forbidden: boolean }
-  >({ kind: "loading" });
-
-  React.useEffect(() => {
-    const controller = new AbortController();
-    setState({ kind: "loading" });
-    api
-      .agentRuns(ns, name, 50, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        // null = 501 (no trace backend wired) — degrade calmly.
-        if (res === null) {
-          setState({ kind: "unavailable" });
-          return;
-        }
-        setState({ kind: "ready", runs: res.runs });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load runs",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-    return () => controller.abort();
-  }, [ns, name]);
+    | { kind: "error"; message: string; forbidden: boolean } => {
+    if (runsRead.kind === "loading") return runsRead;
+    if (runsRead.kind === "error") {
+      return { kind: "error", message: runsRead.message, forbidden: runsRead.forbidden };
+    }
+    // null = 501 (no trace backend wired) — degrade calmly.
+    return runsRead.data === null ? { kind: "unavailable" } : { kind: "ready", runs: runsRead.data.runs };
+  }, [runsRead]);
 
   // §4.4 activity-feed budget: identity and the next step never drop; the
   // numerics go at 1024 and the timestamp at 768.
@@ -3173,27 +3153,18 @@ function LongTermMemoryConfigPanel({ ns, agentName }: { ns: string; agentName: s
 }
 
 function LongTermMemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
-  const [load, setLoad] = React.useState<LongTermLoad>({ kind: "loading" });
-
-  React.useEffect(() => {
-    const controller = new AbortController();
-    setLoad({ kind: "loading" });
-    api
-      .agentMemory(ns, agentName, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setLoad(res === null ? { kind: "unavailable" } : { kind: "ready", items: res.items });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setLoad({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load long-term memory",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-    return () => controller.abort();
-  }, [ns, agentName]);
+  const fetchMemory = React.useCallback(
+    (signal: AbortSignal) => api.agentMemory(ns, agentName, signal),
+    [ns, agentName],
+  );
+  const { state: memoryRead } = useLoad(fetchMemory);
+  const load = React.useMemo((): LongTermLoad => {
+    if (memoryRead.kind === "loading") return memoryRead;
+    if (memoryRead.kind === "error") {
+      return { kind: "error", message: memoryRead.message, forbidden: memoryRead.forbidden };
+    }
+    return memoryRead.data === null ? { kind: "unavailable" } : { kind: "ready", items: memoryRead.data.items };
+  }, [memoryRead]);
 
   // Unavailable (no store wired) — hide the section entirely, like other degraded surfaces.
   if (load.kind === "unavailable") return null;
@@ -3305,38 +3276,25 @@ function ScalingPanel({ ns, agentName }: { ns: string; agentName: string }) {
   const canUpdate = can(RES_SCALING, "update");
   const canDelete = can(RES_SCALING, "delete");
 
-  const [load, setLoad] = React.useState<ScalingPanelLoad>({ kind: "loading" });
   const [action, setAction] = React.useState<ScalingActionState>({ kind: "idle" });
   const [form, setForm] = React.useState<ScalingForm>({ minReplicas: "0", maxReplicas: "3", mode: "static", schedule: "" });
   // Keep-warm (m32.5): a one-switch view over the agent's min-replicas floor — "warm" iff any
   // attached policy holds ≥1 replica, so a latency-sensitive agent avoids Knative cold-starts.
   const [keepWarmBusy, setKeepWarmBusy] = React.useState(false);
 
-  const fetchPolicies = React.useCallback(() => {
-    const controller = new AbortController();
-    setLoad({ kind: "loading" });
-    api
-      .listAgentScalingPolicies({ namespace: ns }, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        const mine = res.items.filter((p) => p.agentRef === agentName);
-        setLoad({ kind: "ready", policies: mine });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setLoad({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load scaling policies",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-    return () => controller.abort();
-  }, [ns, agentName]);
-
-  React.useEffect(() => {
-    const cancel = fetchPolicies();
-    return cancel;
-  }, [fetchPolicies]);
+  const fetchScaling = React.useCallback(
+    (signal: AbortSignal) =>
+      api
+        .listAgentScalingPolicies({ namespace: ns }, signal)
+        .then((res) => res.items.filter((p) => p.agentRef === agentName)),
+    [ns, agentName],
+  );
+  const { state: scalingRead, reload: fetchPolicies } = useLoad(fetchScaling);
+  const load = React.useMemo((): ScalingPanelLoad => {
+    if (scalingRead.kind === "ready") return { kind: "ready", policies: scalingRead.data };
+    if (scalingRead.kind === "loading") return scalingRead;
+    return { kind: "error", message: scalingRead.message, forbidden: scalingRead.forbidden };
+  }, [scalingRead]);
 
   function openAttach() {
     setForm({ minReplicas: "0", maxReplicas: "3", mode: "static", schedule: "" });
@@ -3875,33 +3833,20 @@ function ImprovementLoopSection({
   versions: string[];
 }) {
   const { toast } = useToast();
-  const [scoreLoad, setScoreLoad] = React.useState<OnlineScoreLoad>({ kind: "loading" });
   const [rollbackTarget, setRollbackTarget] = React.useState<string>("");
   const [confirmOpen, setConfirmOpen] = React.useState(false);
   const [rolling, setRolling] = React.useState(false);
 
-  React.useEffect(() => {
-    const controller = new AbortController();
-    setScoreLoad({ kind: "loading" });
-    api
-      .agentOnlineScore(ns, name, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        if (res === null) {
-          setScoreLoad({ kind: "unavailable" });
-          return;
-        }
-        setScoreLoad({ kind: "ready", data: res });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setScoreLoad({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load online score",
-        });
-      });
-    return () => controller.abort();
-  }, [ns, name]);
+  const fetchScore = React.useCallback(
+    (signal: AbortSignal) => api.agentOnlineScore(ns, name, signal),
+    [ns, name],
+  );
+  const { state: scoreRead } = useLoad(fetchScore);
+  const scoreLoad = React.useMemo((): OnlineScoreLoad => {
+    if (scoreRead.kind === "loading") return scoreRead;
+    if (scoreRead.kind === "error") return { kind: "error", message: scoreRead.message };
+    return scoreRead.data === null ? { kind: "unavailable" } : { kind: "ready", data: scoreRead.data };
+  }, [scoreRead]);
 
   // RegressionDetected condition from status.conditions.
   const regressionCond = conditions.find((c) => c.type === "RegressionDetected");
