@@ -1820,13 +1820,6 @@ export interface EvalSuiteCreateRequest {
   threshold?: number;
 }
 
-export interface EvalSuiteUpdateRequest {
-  datasetRef?: string;
-  scorers?: string[];
-  gate?: string;
-  threshold?: number;
-}
-
 // --- PromptVersion DTOs (m17.8) -----------------------------------------------
 // A PromptVersion pins a named prompt to a version ref. The diff endpoint
 // returns a textual line diff (resolveMode="textual" — ALWAYS explicit).
@@ -1927,11 +1920,6 @@ export interface PromptVersionCreateRequest {
   namespace?: string;
   ref: string;
   promptName: string;
-  content?: string;
-}
-
-export interface PromptVersionUpdateRequest {
-  ref?: string;
   content?: string;
 }
 
@@ -2054,13 +2042,6 @@ export interface MCPToolBindingCreateRequest {
   toolName: string;
   mode?: MCPToolMode;
   server?: MCPToolServer;
-}
-
-// MCPToolBindingListParams are the list-contract query params for bindings.
-export interface MCPToolBindingListParams {
-  limit?: number;
-  cursor?: string;
-  namespace?: string;
 }
 
 // --- Create-from-prompt generation (POST /api/agents/generate, ADR 0014) -----
@@ -3226,8 +3207,6 @@ function listQuery(params: AgentListParams = {}): string {
 }
 
 export const api = {
-  health: (signal?: AbortSignal) =>
-    getJSON<HealthResponse>("/api/health", signal),
   // devMode probes whether the console runs under `ctxmesh dev --ui` (ADR 0021).
   // Unauthenticated, so it resolves before any login. Callers treat any failure as
   // false (login wall stays on) — never accidentally drop auth on a real cluster.
@@ -3253,7 +3232,6 @@ export const api = {
       throw err;
     }
   },
-  whoami: (signal?: AbortSignal) => whoami({ signal }),
 
   // listAgents reads one page window through the list contract (§4): it returns
   // { items, nextCursor } — the DataTable keys "more pages" off nextCursor, never
@@ -3284,30 +3262,6 @@ export const api = {
   namespaces: (signal?: AbortSignal) =>
     getJSON<NamespaceListResponse>("/api/namespaces", signal),
 
-  // setNamespaceDisplayName sets or clears the human-readable display label on a
-  // namespace via PUT /api/namespaces/{name}/display-name (ADR 0068 §7). An empty
-  // displayName removes the annotation. A 403 means the caller lacks "update
-  // namespaces" — the API server enforces it. This is the only write path that
-  // touches namespace metadata; "workspace" is a UI-only label over this.
-  setNamespaceDisplayName: async (
-    name: string,
-    displayName: string,
-    signal?: AbortSignal,
-  ): Promise<NamespaceSummary> => {
-    const res = await apiFetch(
-      `/api/namespaces/${encodeURIComponent(name)}/display-name`,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ displayName }),
-        signal,
-      },
-    );
-    if (!res.ok) {
-      throw await apiError(res, `set display-name failed (${res.status})`);
-    }
-    return (await res.json()) as NamespaceSummary;
-  },
   // topology fetches the cluster graph. In raw mode (no params / params.group="")
   // it returns the flat {nodes, edges} graph (M12 dashboard backward-compatible).
   // In grouped mode (params.group="registry"|"namespace") the response includes
@@ -3322,16 +3276,6 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
     return getJSON<TopologyResponse>(`/api/topology${suffix}`, signal);
   },
-  // cost reads the TENANT-SCOPED cost summary (ADR 0077) from GET /api/cost?tenant=.
-  // As of m86.1 this endpoint is tenant-scoped: TotalCostUSD/TotalTokens come from
-  // the durable per-tenant rollup (the same source forecast reads), and byModel is
-  // intentionally EMPTY (the durable rollup carries no per-model detail). ?tenant=
-  // is REQUIRED — a missing tenant is a 400 — so callers must supply one.
-  cost: (tenant: string, signal?: AbortSignal) =>
-    getJSON<CostResponse>(
-      `/api/cost?tenant=${encodeURIComponent(tenant)}`,
-      signal,
-    ),
   // namespace "" is "All workspaces": every namespace the caller works in.
   runs: (namespace: string, signal?: AbortSignal) =>
     getJSON<RunListResponse>(`/api/runs${namespaceQuery(namespace)}`, signal),
@@ -3657,17 +3601,6 @@ export const api = {
     postJSON<ConnectProviderRequest, ConnectProviderResponse>(
       "/api/providers",
       req,
-      signal,
-    ),
-
-  // providerModels re-fetches a connected provider's live model list (proxied
-  // server-side via the stored Secret). Not on the connect happy path (the POST
-  // response already carries them) — kept for a re-connect / refresh.
-  providerModels: (name: string, signal?: AbortSignal) =>
-    // The real BFF DTO is { provider, models: string[] } — NOT ProviderModel[]
-    // objects (the m18.4 fixture pins the connect/list shapes; this matches them).
-    getJSON<{ provider: string; models: string[] }>(
-      `/api/providers/${encodeURIComponent(name)}/models`,
       signal,
     ),
 
@@ -4809,25 +4742,6 @@ export const api = {
   },
 
   // --- MCPToolBinding CRUD (m17.5 / m17.10) -----------------------------------
-  // listMcpToolBindings reads one page window of MCPToolBindings through the
-  // list contract. Pass namespace to scope to one namespace.
-  // A 403 surfaces as a typed ApiError (isForbidden).
-  listMcpToolBindings: (
-    params?: MCPToolBindingListParams,
-    signal?: AbortSignal,
-  ): Promise<MCPToolBindingListResponse> => {
-    const qs = new URLSearchParams();
-    if (params?.limit && params.limit > 0)
-      qs.set("limit", String(params.limit));
-    if (params?.cursor) qs.set("cursor", params.cursor);
-    if (params?.namespace) qs.set("namespace", params.namespace);
-    const suffix = qs.toString() ? `?${qs.toString()}` : "";
-    return getJSON<MCPToolBindingListResponse>(
-      `/api/mcptoolbindings${suffix}`,
-      signal,
-    );
-  },
-
   // createMcpToolBinding creates a new MCPToolBinding — attaching a catalog
   // tool to an agent. The controller reconciles it and sets the Ready condition.
   // A 403 (viewer-can't-create) or 409 (already exists) surfaces via ApiError.
@@ -4880,12 +4794,6 @@ export const api = {
       signal,
     );
   },
-
-  agentScalingPolicyDetail: (ns: string, name: string, signal?: AbortSignal) =>
-    getJSON<AgentScalingPolicyDetail>(
-      `/api/agentscalingpolicies/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
-      signal,
-    ),
 
   // createAgentScalingPolicy attaches a scaling policy to an agent. A 403
   // (viewer-can't-create), 409 (already exists), or 422 (XValidation: max<min or
@@ -4956,12 +4864,6 @@ export const api = {
     return getJSON<EvalSuiteListResponse>(`/api/evalsuites${suffix}`, signal);
   },
 
-  evalSuiteDetail: (ns: string, name: string, signal?: AbortSignal) =>
-    getJSON<EvalSuiteDetail>(
-      `/api/evalsuites/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
-      signal,
-    ),
-
   // createEvalSuite creates a new EvalSuite. A 403 (viewer), 409 (exists), or
   // 422 (validation) surfaces as ApiError.
   createEvalSuite: async (
@@ -4976,27 +4878,6 @@ export const api = {
     });
     if (!res.ok) {
       throw await apiError(res, `create eval suite failed (${res.status})`);
-    }
-    return (await res.json()) as EvalSuiteDetail;
-  },
-
-  updateEvalSuite: async (
-    ns: string,
-    name: string,
-    req: EvalSuiteUpdateRequest,
-    signal?: AbortSignal,
-  ): Promise<EvalSuiteDetail> => {
-    const res = await apiFetch(
-      `/api/evalsuites/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req),
-        signal,
-      },
-    );
-    if (!res.ok) {
-      throw await apiError(res, `update eval suite failed (${res.status})`);
     }
     return (await res.json()) as EvalSuiteDetail;
   },
@@ -5045,12 +4926,6 @@ export const api = {
     );
   },
 
-  promptVersionDetail: (ns: string, name: string, signal?: AbortSignal) =>
-    getJSON<PromptVersionDetail>(
-      `/api/promptversions/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
-      signal,
-    ),
-
   createPromptVersion: async (
     req: PromptVersionCreateRequest,
     signal?: AbortSignal,
@@ -5063,27 +4938,6 @@ export const api = {
     });
     if (!res.ok) {
       throw await apiError(res, `create prompt version failed (${res.status})`);
-    }
-    return (await res.json()) as PromptVersionDetail;
-  },
-
-  updatePromptVersion: async (
-    ns: string,
-    name: string,
-    req: PromptVersionUpdateRequest,
-    signal?: AbortSignal,
-  ): Promise<PromptVersionDetail> => {
-    const res = await apiFetch(
-      `/api/promptversions/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req),
-        signal,
-      },
-    );
-    if (!res.ok) {
-      throw await apiError(res, `update prompt version failed (${res.status})`);
     }
     return (await res.json()) as PromptVersionDetail;
   },
@@ -5264,26 +5118,6 @@ export const api = {
       throw await apiError(res, `cost forecast failed (${res.status})`);
     }
     return (await res.json()) as CostForecastResponse;
-  },
-
-  // costChargebackJSON reads the per-day rollup for a calendar month as JSON
-  // (M70, ADR 0063 D3) from GET /api/cost/chargeback?tenant=&period=YYYY-MM.
-  // Returns null on 501 (control-plane store absent).
-  costChargebackJSON: async (
-    tenant: string,
-    period: string,
-    signal?: AbortSignal,
-  ): Promise<ChargebackResponse | null> => {
-    const qs = new URLSearchParams({ tenant, period });
-    const res = await apiFetch(`/api/cost/chargeback?${qs.toString()}`, {
-      headers: { Accept: "application/json" },
-      signal,
-    });
-    if (res.status === 501) return null;
-    if (!res.ok) {
-      throw await apiError(res, `cost chargeback failed (${res.status})`);
-    }
-    return (await res.json()) as ChargebackResponse;
   },
 
   // costChargebackCSVUrl returns the URL for a chargeback CSV download (no fetch;

@@ -21,6 +21,15 @@ POST /api/datasets/{name}/export | documented | Dataset export from traces; the 
 POST /api/datasets/{name}/pin | documented | Dataset pinning; the console has no pin control
 POST /api/workflows/runs | documented | The inline-spec (planning-mode) workflow run
 GET /api/workflows/spec-schema | documented | The WorkflowSpec JSON Schema
+GET /api/health | documented | Liveness; the console's client for it was never called (m184.43)
+PUT /api/namespaces/{name}/display-name | documented | Setting a namespace's display name; the console has no control for it (m184.43)
+GET /api/providers/{name}/models | documented | A provider's live model list; the console reads models from the provider list (m184.43)
+GET /api/mcptoolbindings | documented | MCP tool binding CRUD; the console lists an agent's bindings from its detail (m184.43)
+GET /api/agentscalingpolicies/{ns}/{name} | documented | Scaling policy CRUD; the console reads policies from the list (m184.43)
+GET /api/evalsuites/{ns}/{name} | documented | Eval suite CRUD; the console reads suites from the list (m184.43)
+PUT /api/evalsuites/{ns}/{name} | documented | Eval suite CRUD; the console has no suite edit (m184.43)
+GET /api/promptversions/{ns}/{name} | documented | Prompt version CRUD; the console reads versions from the list (m184.43)
+PUT /api/promptversions/{ns}/{name} | documented | Prompt version CRUD; the console has no version edit (m184.43)
 
 # Kept for the reason given.
 GET /api/skills | kept | The only way a skill reaches the store (ADR 0137): without these routes spec.skillRefs and the SDK skills client cannot be used. Their console surface is not built

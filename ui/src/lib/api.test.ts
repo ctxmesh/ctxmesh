@@ -64,13 +64,13 @@ describe("api client", () => {
     expect(res.agents[0].ready).toBe(true);
   });
 
-  it("health hits /api/health with the JSON Accept header", async () => {
-    const fetchMock = mockFetch({ status: "ok", version: "dev" });
+  it("reads JSON with the JSON Accept header", async () => {
+    const fetchMock = mockFetch({ namespaces: [{ name: "team-a" }] });
     vi.stubGlobal("fetch", fetchMock);
 
-    const res = await api.health();
-    expect(res.status).toBe("ok");
-    expect(fetchMock.mock.calls[0][0]).toBe("/api/health");
+    const res = await api.namespaces();
+    expect(res.namespaces[0].name).toBe("team-a");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/namespaces");
     expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get("Accept")).toBe(
       "application/json",
     );
