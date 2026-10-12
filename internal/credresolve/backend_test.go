@@ -136,12 +136,12 @@ func TestResolveLegacyBoundaryFallback(t *testing.T) {
 	b, _ := backendWith(t, &fakeExchanger{}, true, legacy)
 
 	// A registry-boundary-scoped resolve finds no scoped grant → falls back to the legacy one.
-	got, err := b.Resolve(ctx, testNS, "r:reg-a", "weather", UserHash(nil, testUser))
+	got, err := b.Resolve(ctx, testNS, RegistryBoundary(testNS, "reg-a"), "weather", UserHash(nil, testUser))
 	require.NoError(t, err)
 	assert.Equal(t, "LEGACY-AT", got.Value)
 
 	// A user with NO grant at all still gets consent-required under a boundary (no false fallback).
-	_, err = b.Resolve(ctx, testNS, "r:reg-a", "weather", UserHash(nil, "nobody@example.com"))
+	_, err = b.Resolve(ctx, testNS, RegistryBoundary(testNS, "reg-a"), "weather", UserHash(nil, "nobody@example.com"))
 	require.ErrorIs(t, err, ErrConsentRequired)
 }
 
@@ -397,4 +397,40 @@ func TestRevokeForgetsAndBestEffortRevokes(t *testing.T) {
 
 	// A revoke of a missing grant is a no-op.
 	assert.NoError(t, b.Revoke(ctx, testNS, "", "weather", userHash))
+}
+
+// Two registries in two namespaces can carry the same registryId (it is chosen by their authors).
+// A person's grant for one is never resolved for an agent of the other, in the locked credential
+// namespace where every namespace's grants sit side by side.
+func TestResolveSameRegistryIDInTwoNamespaces(t *testing.T) {
+	ctx := context.Background()
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	b := NewK8sBackend(K8sBackendConfig{
+		Client:              cl,
+		CredentialNamespace: "ctxmesh-credentials",
+		Now:                 func() time.Time { return fixedNow },
+		AuthTypeIsOAuth:     func(context.Context, string, string) (bool, error) { return true, nil },
+	})
+	user := UserHash(nil, testUser)
+	alpha := RegistryBoundary("team-alpha", "squad")
+	beta := RegistryBoundary("team-beta", "squad")
+	grant := func(token string) Grant {
+		return Grant{Tokens: Tokens{AccessToken: token, ExpiresAt: fixedNow.Add(time.Hour)}}
+	}
+	require.NoError(t, b.StoreGrant(ctx, "team-alpha", alpha, "github", user, grant("ALPHA-AT")))
+	require.NoError(t, b.StoreGrant(ctx, "team-beta", beta, "github", user, grant("BETA-AT")))
+
+	got, err := b.Resolve(ctx, "team-alpha", alpha, "github", user)
+	require.NoError(t, err)
+	assert.Equal(t, "ALPHA-AT", got.Value)
+	got, err = b.Resolve(ctx, "team-beta", beta, "github", user)
+	require.NoError(t, err)
+	assert.Equal(t, "BETA-AT", got.Value)
+
+	// A capability scoped to team-beta's registry, presented where team-alpha's grant lives,
+	// resolves nothing: the boundary itself names the namespace.
+	_, err = b.Resolve(ctx, "team-alpha", beta, "github", user)
+	require.ErrorIs(t, err, ErrConsentRequired)
+	_, err = b.Resolve(ctx, "team-beta", alpha, "github", user)
+	require.ErrorIs(t, err, ErrConsentRequired)
 }

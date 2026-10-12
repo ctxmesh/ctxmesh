@@ -1571,7 +1571,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			corev1.EnvVar{Name: envAsyncPublishURL, Value: platform.asyncPublishURL()},
 		)
 		// Shared memory scope (ADR 0035, m33.3): a sessionMemory scope=shared keys the team
-		// scratchpad under this registry (mem:shared:{registry}:{conversationId}), so agents in the
+		// scratchpad under this registry (mem:shared:{namespace}/{registryId}:{conversationId}), so agents in the
 		// conversation collaborate on ONE context. Injected ONLY here — inside the membership block —
 		// because the shared key needs a registry boundary; a scope=shared config on a NON-member
 		// agent gets no MEMORY_SCOPE and the launcher keeps its private layout (a visible misconfig,
@@ -2463,7 +2463,7 @@ func asIdentitySAConflictError(err error) (*identitySAConflictError, bool) {
 //
 // registryID, when non-empty, is stamped as the registryIDLabel LABEL on the SA — the
 // SERVER-TRUSTED source the state-layer proxy reads to derive the SHARED-scope memory
-// boundary (`mem:shared:{registry}:`), which used to be the runcap `bnd` claim (ADR 0052
+// boundary (`mem:shared:{namespace}/{registryId}:`), which used to be the runcap `bnd` claim (ADR 0052
 // §C6 shared-scope resolution). Empty ⇒ the label is removed (the agent left the
 // registry), so a stale boundary can never linger.
 //

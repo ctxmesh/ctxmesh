@@ -91,6 +91,29 @@ would ship used to lead to `/soon/<id>`, a page naming the milestone it would ar
 destination has since shipped and nothing linked there any more; an old `/soon/…` link now shows the
 console's not-found page.
 
+**Security: a registry in one namespace could share another namespace's team scratchpad and
+credential boundary by copying its `registryId`.** A registry's id is chosen by its author and was
+the whole key for what its members share: the shared scratchpad (`sessionMemory.scope: shared`)
+lived at `mem:shared:<registryId>:`, and the trust boundary a person's grants are scoped to was
+`r:<registryId>`. A developer who created a registry in their own namespace with another team's id
+had their agents read and write that team's shared scratchpad, and their agents' egress sidecars
+accepted run capabilities minted for that team's agents. Both are now qualified by the registry's
+namespace (`mem:shared:<namespace>/<registryId>:` and `r:<namespace>/<registryId>`), so registries
+in different namespaces are different registries whatever their ids. Stored grants were already
+keyed by the namespace consent ran in, so no grant was resolved across namespaces.
+
+A `registryId` must now also be unique within its namespace, because pods, network policies and the
+boundary are keyed by it: a registry declaring an id that an older registry in the namespace already
+holds is `Ready=False` with reason `DuplicateRegistryId`, naming the holder, and has no members until
+the holder is deleted. `MultiRegistryConflict`, which the API documented and nothing set, is gone
+from the documented reasons.
+
+**Behaviour change:** personal grants scoped to a registry were stored under the old boundary and
+are not found under the new one, so each person reconnects once per registry (the run asks for
+consent as it would for a new grant). Shared scratchpad contents written before the upgrade are not
+carried over. Registry members bound to tools roll one new revision, because their egress sidecar's
+boundary changes. See docs/upgrading.md.
+
 **Changed: an `/api` route the server cannot serve answers 501, not 404.** Each route is now
 registered once. When something it needs is missing (the caller-scoped cluster client, as under
 `ctxmesh dev --ui`; the trace store; the agent invoker; the config expander), it answers `501`

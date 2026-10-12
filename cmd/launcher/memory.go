@@ -240,8 +240,9 @@ type memoryConfig struct {
 	Agent     string
 	// Scope selects the key layout (ADR 0035, m33.3): "" / "session" = PRIVATE per-agent
 	// (mem:{namespace}/{agent}:{convId}); "shared" = a team scratchpad keyed
-	// mem:shared:{registry}:{convId} — readable/writable by every agent in the same registry
-	// conversation. Injected as MEMORY_SCOPE by the controller.
+	// mem:shared:{namespace}/{registry}:{convId} — readable/writable by every agent in the same
+	// registry conversation. The namespace is part of the key because a registry id is chosen by
+	// its author. Injected as MEMORY_SCOPE by the controller.
 	Scope string
 	// Registry is AGENT_REGISTRY_ID — the trust boundary (ADR 0033) the shared scope keys under.
 	// Required for the shared scope; empty ⇒ shared falls back to private (a visible misconfig).
@@ -320,7 +321,7 @@ func newMemoryServer(
 	// the shared injection on membership, so this only bites a hand-rolled misconfig).
 	prefix := fmt.Sprintf("mem:%s/%s:", cfg.Namespace, cfg.Agent)
 	if cfg.Scope == memoryScopeShared && cfg.Registry != "" {
-		prefix = fmt.Sprintf("mem:shared:%s:", cfg.Registry)
+		prefix = fmt.Sprintf("mem:shared:%s/%s:", cfg.Namespace, cfg.Registry)
 	}
 	m := &memoryServer{
 		store:     store,

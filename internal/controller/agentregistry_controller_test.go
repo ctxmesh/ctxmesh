@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -38,7 +39,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
 
 // newRegistryReconciler builds an AgentRegistryReconciler on the envtest client.
@@ -816,6 +819,76 @@ func TestRegistry_StatusRegistryRef(t *testing.T) {
 	reconcileNN(t, newReconciler(), agent.Name, namespace)
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(agent), agent))
 	assert.Empty(t, agent.Status.RegistryRef, "an agent that left every registry records none")
+}
+
+// TestRegistry_SameIDInTwoNamespacesIsTwoBoundaries: a registryId is chosen by the registry's
+// author, so a registry in another namespace can copy it. Each member's egress sidecar serves its
+// own namespace's boundary, so a capability minted for one registry's run is refused by the other's.
+func TestRegistry_SameIDInTwoNamespacesIsTwoBoundaries(t *testing.T) {
+	const registryID = "copied-id"
+	boundaries := map[string]string{}
+	for _, ns := range []string{"boundary-ns-a", "boundary-ns-b"} {
+		if err := k8sClient.Create(testCtx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}); err != nil &&
+			!apierrors.IsAlreadyExists(err) {
+			require.NoError(t, err)
+		}
+		mkRegistryMesh(t, "squad", ns, registryID, "squad")
+		agent := mkLabeledAgent(t, "squad-worker", ns, map[string]string{"registry": "squad"})
+		mkRegistry(t, "tools", ns, agentsv1beta1.ToolEntry{Name: "word-count", URL: "http://wc.svc/mcp"})
+		binding := mkBinding(t, "squad-worker-wc", ns, agentsv1beta1.MCPToolBindingSpec{
+			AgentRef: agent.Name, RegistryRef: "tools", ToolName: "word-count",
+			Mode: toolmanifest.ModeRemote, Server: agentsv1beta1.ToolServer{URL: "http://wc.svc/mcp"},
+		})
+		reconcileNN(t, newReconciler(), agent.Name, ns)
+		reconcileBinding(t, newBindingReconciler(), binding.Name, ns)
+
+		sidecar, ok := containerByName(getKsvc(t, agent.Name, ns).Spec.Template.Spec.Containers, egressSidecarContainerName)
+		require.True(t, ok, "a tool-bound member runs the egress sidecar")
+		b, ok := envValue(sidecar, "EGRESS_BOUNDARY")
+		require.True(t, ok)
+		assert.Equal(t, credresolve.RegistryBoundary(ns, registryID), b.Value,
+			"the sidecar serves the boundary the BFF mints and the token service resolves with")
+		boundaries[ns] = b.Value
+	}
+	assert.NotEqual(t, boundaries["boundary-ns-a"], boundaries["boundary-ns-b"],
+		"two registries with one id in two namespaces are two boundaries")
+}
+
+// TestRegistry_DuplicateIDInOneNamespaceIsRefused: the id is what pods, NetworkPolicies, the shared
+// scratchpad and credential boundaries are keyed by, so a second registry declaring an id its
+// namespace already holds is refused and gives no agent membership. Deleting the holder hands the
+// id to it.
+func TestRegistry_DuplicateIDInOneNamespaceIsRefused(t *testing.T) {
+	const namespace = "default"
+	holder := mkRegistryMesh(t, "dup-id-a", namespace, "dup-id", "dup-id-a")
+	mkRegistryMesh(t, "dup-id-b", namespace, "dup-id", "dup-id-b")
+	agent := mkLabeledAgent(t, "dup-id-worker", namespace, map[string]string{"registry": "dup-id-b"})
+
+	reconcileRegistry(t, newRegistryReconciler(), "dup-id-b", namespace)
+	var refused agentsv1beta1.AgentRegistry
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "dup-id-b", Namespace: namespace}, &refused))
+	ready := apimeta.FindStatusCondition(refused.Status.Conditions, conditionReady)
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, reasonDuplicateRegistryID, ready.Reason)
+	assert.Contains(t, ready.Message, "dup-id-a", "the condition names the registry that holds the id")
+	assert.Empty(t, refused.Status.Members)
+
+	reconcileNN(t, newReconciler(), agent.Name, namespace)
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(agent), agent))
+	assert.Empty(t, agent.Status.RegistryRef, "a refused registry gives its selected agents no membership")
+	assert.NotContains(t, envByName(getKsvc(t, agent.Name, namespace).Spec.Template.Spec.Containers[0].Env),
+		"AGENT_REGISTRY_ID")
+
+	require.NoError(t, k8sClient.Delete(testCtx, holder))
+	reconcileRegistry(t, newRegistryReconciler(), "dup-id-b", namespace)
+	reconcileNN(t, newReconciler(), agent.Name, namespace)
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "dup-id-b", Namespace: namespace}, &refused))
+	ready = apimeta.FindStatusCondition(refused.Status.Conditions, conditionReady)
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionTrue, ready.Status, "with the holder gone the id is this registry's")
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(agent), agent))
+	assert.Equal(t, "dup-id-b", agent.Status.RegistryRef)
 }
 
 // TestRegistry_EmptySelectorNoMembers verifies an empty memberSelector selects

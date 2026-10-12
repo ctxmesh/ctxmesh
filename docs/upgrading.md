@@ -79,6 +79,47 @@ Upgrade one minor version at a time. Skipping versions is untested, and a schema
 migration that assumes the immediately previous shape has no way to tell you it was
 skipped.
 
+## Registry-scoped grants and shared scratchpads are keyed by namespace
+
+**What changed.** The trust boundary a person's grants are scoped to for an agent in an
+AgentRegistry was `r:<registryId>`, and a registry's shared scratchpad lived at
+`mem:shared:<registryId>:`. A registry's id is chosen by its author, so a registry in another
+namespace could copy it. Both now include the registry's namespace. A `registryId` must also be
+unique within its namespace: a second registry declaring one is `Ready=False`
+(`DuplicateRegistryId`) and has no members.
+
+**Before upgrading,** list registries that share an id within a namespace; after the upgrade only
+the oldest keeps its members:
+
+```sh
+kubectl get agentregistries -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.spec.registryId}{"\n"}{end}' | sort | uniq -d
+```
+
+**During the upgrade** every registry member bound to a tool rolls one new revision. A run that
+was in flight, or waiting for approval, against such an agent fails its tool calls with
+`boundary_mismatch` once the new revision serves it; start it again.
+
+**After upgrading,** each person reconnects their accounts once per registry: a grant made for a
+registry is stored under the old boundary and is not found under the new one, so the first run asks
+for consent again. Grants for agents in no registry are unchanged. Shared scratchpad entries
+written before the upgrade are not carried over; they expire with their 24-hour TTL.
+
+The superseded grants stay stored until removed. They are not used, but they hold refresh tokens.
+On the default Kubernetes backend, delete them from the credential namespace (or from each agent
+namespace, when `bff.mcp.credentialNamespace` is unset):
+
+```sh
+kubectl -n <credential-namespace> get secrets -l app.kubernetes.io/managed-by=ctxmesh-mcp-grant -o json \
+  | jq -r '.items[] | select((.metadata.annotations["agents.ctxmesh.ai/mcp-boundary"] // "") | test("^r:[^/]+$")) | .metadata.name' \
+  | xargs -r kubectl -n <credential-namespace> delete secret
+```
+
+On the Postgres backend:
+
+```sql
+DELETE FROM credential_grants WHERE boundary LIKE 'r:%' AND position('/' in boundary) = 0;
+```
+
 ## The bundled NATS is off by default, and third-party images moved under `thirdPartyImages`
 
 - **NATS.** The chart no longer deploys the bundled NATS unless `devDataPlane.nats.enabled=true`.

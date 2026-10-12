@@ -189,7 +189,7 @@ func egressSidecarContainer(
 // revision (the EGRESS_BOUNDARY env must actually land).
 func agentEgressBoundary(deploy *agentsv1beta1.AgentDeployment, m registryMembership) string {
 	if m.IsMember && m.RegistryID != "" {
-		return credresolve.RegistryBoundary(m.RegistryID)
+		return credresolve.RegistryBoundary(deploy.Namespace, m.RegistryID)
 	}
 	return credresolve.AgentBoundary(deploy.Namespace, deploy.Name)
 }

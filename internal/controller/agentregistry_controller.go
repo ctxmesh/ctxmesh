@@ -146,9 +146,9 @@ const (
 	registryDefaultHopBudget = int32(32)
 
 	// Ready-condition reasons for AgentRegistry reconciliation.
-	reasonRegistryReady   = "Ready"
-	reasonMultiRegistry   = "MultiRegistryConflict"
-	reasonInvalidSelector = "InvalidSelector"
+	reasonRegistryReady       = "Ready"
+	reasonInvalidSelector     = "InvalidSelector"
+	reasonDuplicateRegistryID = "DuplicateRegistryId"
 
 	// dlqNameSuffix names the per-registry dead-letter-queue sink
 	// (<registry>-dlq). It is a Knative Service the registry's Broker points its
@@ -247,6 +247,20 @@ func (r *AgentRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching AgentRegistry: %w", err)
+	}
+
+	// ── Step 0: the registry must hold its id in this namespace ───────────────
+	if registry.DeletionTimestamp.IsZero() {
+		var inNamespace agentsv1beta1.AgentRegistryList
+		if err := r.List(ctx, &inNamespace, client.InNamespace(registry.Namespace)); err != nil {
+			return ctrl.Result{}, fmt.Errorf("listing AgentRegistries: %w", err)
+		}
+		if holder := registryIDHolders(inNamespace.Items)[registry.Spec.RegistryId]; holder != registry.Name {
+			msg := fmt.Sprintf("registryId %q is held by registry %q in this namespace, which declared it first; "+
+				"this registry has no members until that one is deleted",
+				registry.Spec.RegistryId, holder)
+			return ctrl.Result{}, r.setStatus(ctx, &registry, nil, metav1.ConditionFalse, reasonDuplicateRegistryID, msg)
+		}
 	}
 
 	// ── Step 1: resolve membership ────────────────────────────────────────────
@@ -675,6 +689,36 @@ func (r *AgentRegistryReconciler) setStatus(
 	return nil
 }
 
+// registryIDHolders maps each registryId declared in one namespace to the registry that holds it:
+// the oldest live registry declaring it, ties broken by name. A later registry declaring a held id
+// is refused, so "<namespace>/<registryId>" names exactly one registry. Pods, NetworkPolicies, the
+// shared scratchpad and credential boundaries are all keyed by the id, so two registries sharing
+// one would silently be one registry.
+func registryIDHolders(registries []agentsv1beta1.AgentRegistry) map[string]string {
+	holders := map[string]*agentsv1beta1.AgentRegistry{}
+	for i := range registries {
+		reg := &registries[i]
+		if !reg.DeletionTimestamp.IsZero() || reg.Spec.RegistryId == "" {
+			continue
+		}
+		if cur, ok := holders[reg.Spec.RegistryId]; !ok || declaredFirst(reg, cur) {
+			holders[reg.Spec.RegistryId] = reg
+		}
+	}
+	out := make(map[string]string, len(holders))
+	for id, reg := range holders {
+		out[id] = reg.Name
+	}
+	return out
+}
+
+func declaredFirst(a, b *agentsv1beta1.AgentRegistry) bool {
+	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+		return a.CreationTimestamp.Before(&b.CreationTimestamp)
+	}
+	return a.Name < b.Name
+}
+
 // registryMembership is the resolved registry context for a single agent, used
 // by the AgentDeployment reconciler to inject the member env + membership label
 // and to roll the revision when membership changes. The zero value (IsMember
@@ -698,10 +742,10 @@ type registryMembership struct {
 // identically).
 //
 // v1 rule: an agent is in AT MOST ONE registry. If the agent's labels match more
-// than one registry the first by name is chosen (deterministic); the extra
-// membership is a warning surfaced on that registry's status by its own
-// reconciler, not here. Terminating registries are excluded so membership drops
-// immediately on registry delete (revision roll).
+// than one registry the first by name is chosen (deterministic) and recorded in
+// status.registryRef, which every other reader uses. Terminating registries, and a
+// registry refused because an older one holds its id, are excluded, so membership
+// drops immediately on registry delete (revision roll).
 //
 // Guard defaults follow the CRD: maxDepth=8, hopBudget=32 when spec.guards is
 // nil or a field is zero. The AgentDeployment reconciler injects them as the
@@ -717,10 +761,11 @@ func resolveAgentRegistry(
 	}
 
 	agentLabels := labels.Set(agent.Labels)
+	holders := registryIDHolders(all.Items)
 	var matches []agentsv1beta1.AgentRegistry
 	for i := range all.Items {
 		reg := &all.Items[i]
-		if !reg.DeletionTimestamp.IsZero() {
+		if !reg.DeletionTimestamp.IsZero() || holders[reg.Spec.RegistryId] != reg.Name {
 			continue
 		}
 		selector, err := metav1.LabelSelectorAsSelector(&reg.Spec.MemberSelector)
@@ -795,6 +840,29 @@ func (r *AgentRegistryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	)
 
+	// A registry's claim on its id depends on the other registries declaring it: deleting the
+	// holder hands the id to the next one, which must reconcile to take its members.
+	mapToSameIDRegistries := handler.EnqueueRequestsFromMapFunc(
+		func(ctx context.Context, obj client.Object) []reconcile.Request {
+			changed, ok := obj.(*agentsv1beta1.AgentRegistry)
+			if !ok {
+				return nil
+			}
+			var list agentsv1beta1.AgentRegistryList
+			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(changed.Namespace)); err != nil {
+				return nil
+			}
+			var reqs []reconcile.Request
+			for i := range list.Items {
+				other := &list.Items[i]
+				if other.Name != changed.Name && other.Spec.RegistryId == changed.Spec.RegistryId {
+					reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(other)})
+				}
+			}
+			return reqs
+		},
+	)
+
 	// Knative Eventing is OPTIONAL (ADR 0141): owning a kind the cluster does not serve stops the
 	// manager from starting, which made eventing a hard prerequisite for everyone -- including
 	// users who never send an event.
@@ -807,6 +875,7 @@ func (r *AgentRegistryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return b.
 		Owns(&servingv1.Service{}).
 		Watches(&agentsv1beta1.AgentDeployment{}, mapAgentToRegistries).
+		Watches(&agentsv1beta1.AgentRegistry{}, mapToSameIDRegistries).
 		Named("agentregistry").
 		Complete(r)
 }

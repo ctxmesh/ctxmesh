@@ -56,7 +56,7 @@ const (
 	// a boundary on first scoped use (dual-read migration). Non-secret — a lookup key.
 	LabelGrantBoundary = "mcp.ctxmesh.ai/boundary"
 
-	// AnnGrantBoundary mirrors the RAW boundary string (e.g. "r:my-registry") on the grant
+	// AnnGrantBoundary mirrors the RAW boundary string (e.g. "r:team-a/my-registry") on the grant
 	// for debuggability; the label holds the hash (the match key). Non-secret.
 	AnnGrantBoundary = "agents.ctxmesh.ai/mcp-boundary"
 
@@ -130,14 +130,33 @@ func appendLenPrefixed(dst []byte, s string) []byte {
 	return append(dst, s...)
 }
 
+// registryBoundaryPrefix marks a registry trust boundary ("r:<ns>/<registryId>").
+const registryBoundaryPrefix = "r:"
+
 // RegistryBoundary is the trust boundary for an agent that belongs to a registry — the
 // collaboration boundary (ADR 0033): every agent in the registry shares the invoking
-// user's personal grant. Empty registry → "" (an unscoped/legacy grant).
-func RegistryBoundary(registry string) string {
-	if registry == "" {
+// user's personal grant. It is qualified by the registry's namespace because spec.registryId
+// is chosen by the registry's author: without the namespace, a registry in one namespace that
+// copied another's id would share its boundary. Either part empty → "" (an unscoped grant).
+func RegistryBoundary(namespace, registryID string) string {
+	if namespace == "" || registryID == "" {
 		return ""
 	}
-	return "r:" + registry
+	return registryBoundaryPrefix + namespace + "/" + registryID
+}
+
+// ParseRegistryBoundary splits a registry boundary built by RegistryBoundary. ok is false for
+// any other boundary, including the pre-namespace "r:<registryId>" form, which names no namespace.
+func ParseRegistryBoundary(boundary string) (namespace, registryID string, ok bool) {
+	rest, isRegistry := strings.CutPrefix(boundary, registryBoundaryPrefix)
+	if !isRegistry {
+		return "", "", false
+	}
+	namespace, registryID, found := strings.Cut(rest, "/")
+	if !found || namespace == "" || registryID == "" || strings.Contains(registryID, "/") {
+		return "", "", false
+	}
+	return namespace, registryID, true
 }
 
 // AgentBoundary is the trust boundary for a STANDALONE agent (no registry) — the agent is
@@ -148,7 +167,7 @@ func AgentBoundary(ns, agent string) string {
 }
 
 // BoundaryHash derives a short, label/name-safe token from a raw boundary string
-// ("r:<registry>" / "a:<ns>/<agent>"). Empty boundary → "" (the legacy unscoped key, so
+// ("r:<ns>/<registryId>" / "a:<ns>/<agent>"). Empty boundary → "" (the legacy unscoped key, so
 // pre-ADR-0033 grant names/labels are byte-identical and resolve unchanged).
 func BoundaryHash(boundary string) string {
 	if boundary == "" {

@@ -53,7 +53,7 @@ func agentBoundary(ctx context.Context, c client.Client, ns, agentName string) s
 	if !reg.DeletionTimestamp.IsZero() || reg.Spec.RegistryId == "" {
 		return standalone
 	}
-	return credresolve.RegistryBoundary(reg.Spec.RegistryId)
+	return credresolve.RegistryBoundary(reg.Namespace, reg.Spec.RegistryId)
 }
 
 // endUserAgentBoundary returns the OBO trust boundary for an END-USER run (M137/EU1b, ADR 0106 §6).

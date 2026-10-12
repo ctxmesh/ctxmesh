@@ -22,6 +22,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
@@ -66,7 +67,7 @@ func TestAgentBoundary(t *testing.T) {
 	).Build()
 
 	// A member resolves to its recorded registry's boundary (its teammates share the grant).
-	assert.Equal(t, credresolve.RegistryBoundary("squad-a"), agentBoundary(ctx, c, "team", "worker"))
+	assert.Equal(t, credresolve.RegistryBoundary("team", "squad-a"), agentBoundary(ctx, c, "team", "worker"))
 	// Labels matching a registry's selector are not membership until the controller records it:
 	// the BFF does not evaluate selectors.
 	assert.Equal(t, credresolve.AgentBoundary("team", "unreconciled"), agentBoundary(ctx, c, "team", "unreconciled"))
@@ -84,4 +85,33 @@ func TestEndUserAgentBoundary(t *testing.T) {
 	assert.Equal(t, credresolve.AgentBoundary("team", "chatbot"), endUserAgentBoundary("team", "chatbot"))
 	assert.Equal(t, "a:team/chatbot", endUserAgentBoundary("team", "chatbot"))
 	assert.NotEmpty(t, endUserAgentBoundary("team", "chatbot"), "never the legacy unscoped boundary")
+}
+
+// TestAgentBoundaryQualifiesTheRegistryByNamespace: a registry's id is chosen by its author, so a
+// registry in another namespace can carry the same name and id. Its members get a different
+// boundary, so a person's grant for one registry is never resolved for an agent of the other.
+func TestAgentBoundaryQualifiesTheRegistryByNamespace(t *testing.T) {
+	ctx := context.Background()
+	objs := make([]client.Object, 0, 4)
+	for _, ns := range []string{"team-alpha", "team-beta"} {
+		objs = append(objs,
+			&agentsv1beta1.AgentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: ns},
+				Status:     agentsv1beta1.AgentDeploymentStatus{RegistryRef: "squad"},
+			},
+			&agentsv1beta1.AgentRegistry{
+				ObjectMeta: metav1.ObjectMeta{Name: "squad", Namespace: ns},
+				Spec:       agentsv1beta1.AgentRegistrySpec{RegistryId: "squad"},
+			},
+		)
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+
+	alpha := agentBoundary(ctx, c, "team-alpha", "worker")
+	beta := agentBoundary(ctx, c, "team-beta", "worker")
+	assert.Equal(t, credresolve.RegistryBoundary("team-alpha", "squad"), alpha)
+	assert.Equal(t, credresolve.RegistryBoundary("team-beta", "squad"), beta)
+	assert.NotEqual(t, alpha, beta)
+	assert.NotEqual(t, credresolve.BoundaryHash(alpha), credresolve.BoundaryHash(beta),
+		"the grant key differs, so a grant stored for one is not found for the other")
 }

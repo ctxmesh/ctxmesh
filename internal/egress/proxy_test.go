@@ -208,7 +208,7 @@ func TestEgressBoundaryMatch(t *testing.T) {
 		Resolver:         &mockResolver{cred: credresolve.Credential{Kind: credresolve.KindBearer, Value: "TOK"}},
 		Namespace:        testNS,
 		ExpectedAgent:    "team-alpha/support", // present but SUPERSEDED by the boundary gate
-		ExpectedBoundary: "r:squad-a",
+		ExpectedBoundary: credresolve.RegistryBoundary("team-alpha", "squad-a"),
 		Routes:           routes,
 		Log:              logr.Discard(),
 	})
@@ -223,11 +223,17 @@ func TestEgressBoundaryMatch(t *testing.T) {
 	}
 
 	// A teammate agent (different act) with the SAME registry boundary is accepted (team-OBO).
-	rec := call("team-alpha/other-agent", "r:squad-a")
+	rec := call("team-alpha/other-agent", credresolve.RegistryBoundary("team-alpha", "squad-a"))
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	// A capability scoped to a DIFFERENT registry is rejected — isolation across registries.
-	rec = call("team-alpha/support", "r:squad-b")
+	rec = call("team-alpha/support", credresolve.RegistryBoundary("team-alpha", "squad-b"))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "boundary_mismatch")
+
+	// A registry in another namespace that copied this registry's id is another boundary: a
+	// capability minted for one of its agents is not redeemable here.
+	rec = call("team-beta/intruder", credresolve.RegistryBoundary("team-beta", "squad-a"))
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Contains(t, rec.Body.String(), "boundary_mismatch")
 }

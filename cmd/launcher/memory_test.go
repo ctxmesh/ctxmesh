@@ -677,11 +677,41 @@ func TestMemorySharedScopeKeysUnderRegistry(t *testing.T) {
 
 	doReq(t, http.MethodPost, srv.URL+"/memory/conv1/append", `{"role":"user","content":"hi"}`)
 
-	if !mr.Exists("mem:shared:team-x:conv1") {
-		t.Errorf("shared scope must key under mem:shared:{registry}:{conv}; keys=%v", mr.Keys())
+	if !mr.Exists("mem:shared:ns/team-x:conv1") {
+		t.Errorf("shared scope must key under mem:shared:{namespace}/{registry}:{conv}; keys=%v", mr.Keys())
 	}
 	if mr.Exists("mem:ns/agent-a:conv1") {
 		t.Errorf("shared scope must NOT write the private per-agent key")
+	}
+}
+
+// A registry id is chosen by its author, so another namespace can copy it; its agents must not
+// reach this namespace's scratchpad.
+func TestMemorySharedScopeIsolatesNamespacesWithTheSameRegistryID(t *testing.T) {
+	t.Parallel()
+	mr := miniredis.RunT(t)
+	_, tp := newTestTracer(t)
+	serve := func(ns string) string {
+		ms := newMemoryServer(
+			newRedisStore(mr.Addr()),
+			memoryConfig{BackendAddr: mr.Addr(), Namespace: ns, Agent: "agent", Scope: "shared", Registry: "team-x"},
+			tp.Tracer(tracerName), nil, nil,
+		)
+		srv := httptest.NewServer(ms.handler())
+		t.Cleanup(srv.Close)
+		return srv.URL
+	}
+	victim, other := serve("team-a"), serve("team-b")
+
+	doReq(t, http.MethodPost, victim+"/memory/conv1/append", `{"role":"user","content":"secret"}`)
+
+	_, got := doReq(t, http.MethodGet, other+"/memory/conv1", "")
+	if strings.Contains(string(got), "secret") {
+		t.Errorf("an agent in another namespace with the same registry id read the scratchpad: %s", got)
+	}
+	_, mine := doReq(t, http.MethodGet, victim+"/memory/conv1", "")
+	if !strings.Contains(string(mine), "secret") {
+		t.Fatalf("the namespace's own agent must read its scratchpad (the test reads the right route): %s", mine)
 	}
 }
 

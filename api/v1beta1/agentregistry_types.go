@@ -52,16 +52,20 @@ type AgentRegistrySpec struct {
 	// registryId is the stable identifier carried in every A2A message envelope
 	// (PRD §12.5). It is set at creation and immutable thereafter. Must be a
 	// valid DNS label: lowercase alphanumeric and hyphens, starting with a
-	// letter or digit.
+	// letter or digit. It is unique within the namespace: a registry declaring
+	// an id that an older registry in its namespace already holds is not Ready
+	// (DuplicateRegistryId) and has no members. Registries in different
+	// namespaces may share an id; they remain separate registries.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9\-]*[a-z0-9])?$`
 	RegistryId string `json:"registryId"`
 
 	// memberSelector selects AgentDeployments in the same namespace that belong
-	// to this registry. An agent joins by carrying the matching label. In v1 an
-	// agent may belong to at most one registry; the controller marks a second
-	// matching membership as a status warning.
+	// to this registry. An agent joins by carrying the matching label. An agent
+	// belongs to at most one registry: when several select it, it joins the
+	// first by name, which the controller records in the agent's
+	// status.registryRef.
 	MemberSelector metav1.LabelSelector `json:"memberSelector"`
 
 	// guards defines registry-level conversation guard defaults (PRD §12.7).
@@ -100,7 +104,7 @@ type AgentRegistryStatus struct {
 	// Ready=True means memberSelector has been resolved, all member agents have
 	// been annotated with AGENT_REGISTRY_ID, and guard defaults have been
 	// injected. Known condition types: Ready. Failure reasons include
-	// InvalidSelector and MultiRegistryConflict.
+	// InvalidSelector and DuplicateRegistryId.
 	// +listType=map
 	// +listMapKey=type
 	// +optional

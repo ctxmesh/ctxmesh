@@ -120,7 +120,7 @@ type ScalingSpec struct {
 type SessionMemorySpec struct {
 	// scope selects the memory key layout. "session" (default) = PRIVATE per-agent
 	// (mem:{namespace}/{agent}:{conversationId}); "shared" (m33.3) = a team scratchpad keyed
-	// mem:shared:{registry}:{conversationId}, which requires the agent to be a registry member.
+	// mem:shared:{namespace}/{registryId}:{conversationId}, which requires the agent to be a registry member.
 	// +kubebuilder:validation:Enum=session;shared
 	// +kubebuilder:default=session
 	// +optional
