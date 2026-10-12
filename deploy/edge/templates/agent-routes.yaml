@@ -25,9 +25,11 @@ spec:
         # injected capability (ADR 0033/0039) and must NEVER see the caller's bearer — a K8s console token
         # OR an end-user OIDC ID token, which a compromised agent pod could otherwise replay for the
         # token's full lifetime (worse in blast direction for a long-lived OIDC token).
-        # The AMP envelope and attestation (ADR 0153) are what one agent's launcher sends another's: from
-        # outside they could only be a claim to be an agent, so they never get in. A caller from outside
-        # is admitted by the run capability ext-auth mints for the agent it names.
+        # The AMP envelope and attestations (ADR 0153), on a call or an async delivery, are what one
+        # agent's launcher or the platform's dispatcher sends an agent: from outside they could only be a
+        # claim to be an agent, so they never get in. A caller from outside is admitted by the run
+        # capability ext-auth mints for the agent it names; one the caller wrote is removed before ext-auth
+        # runs (clienttrafficpolicy.yaml), not here, where ext-auth's own would go with it.
         - type: RequestHeaderModifier
           requestHeaderModifier:
             remove:
@@ -35,6 +37,7 @@ spec:
               - X-AMP-Envelope
               - X-A2A-Envelope
               - X-AMP-Attestation
+              - Ce-Ampattestation
         # The tenant's container answers here, at an agent hostname, so nothing it returns may be a
         # document with that origin: the console's consent page trusts an opener at an agent
         # hostname (ADR 0040 amendment). A sandboxed document has an opaque origin and runs no

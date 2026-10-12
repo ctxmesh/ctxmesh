@@ -31,7 +31,11 @@ claims its own registry. `AGENT_REGISTRY_ID` and `AGENT_ROLE` are now platform i
 a value in `spec.env` is not used, and `IdentityEnvIgnored` names it. On a member the same holds for
 `AMP_REQUIRE_ATTESTATION`, `MCP_CAPABILITY_PUBLIC_KEY`, `MCP_CAPABILITY_AUDIENCE` and
 `BFF_POD_TOKEN_PATH`, so an author cannot switch one agent to accept unattested calls or verify
-against a key of their own. The edge removes
+against a key of their own. The edge also removes `Ce-Ampattestation`, and the platform edge's
+Gateway now removes `X-Ctxmesh-Run-Capability` and `X-Ctxmesh-Run-Proof` from every request before
+ext-auth runs: ext-auth replaced a caller's capability header only when it minted one, so on any
+allow without a capability, or with ext-auth off, the caller's own reached the agent. This adds a
+`ClientTrafficPolicy` to the edge chart and needs Envoy Gateway v1.2 or later. The edge removes
 `X-AMP-Envelope`, `X-A2A-Envelope` and `X-AMP-Attestation` from inbound requests. An agent whose
 launcher cannot get an attestation fails the hop with HTTP 503 `attestation_unavailable` instead of
 sending it unattested. Every agent's launcher, member or not, refuses with HTTP 401 a capability

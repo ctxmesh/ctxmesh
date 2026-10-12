@@ -1,0 +1,21 @@
+# No request through this edge carries a run capability, or its proof, that the caller wrote (ADR 0124,
+# ADR 0153). A capability is an in-cluster credential: the BFF mints it and the launcher relays it, and
+# nothing outside the cluster presents one. Removed early, before ext-auth runs, so the only capability an
+# agent receives through the edge is the one ext-auth minted for this caller; when ext-auth mints none, or
+# is off, the agent receives none. Removing it on the agents route instead would also remove ext-auth's:
+# a route's header filter is applied after ext-auth has added its headers. Needs Envoy Gateway v1.2+.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: platform-edge-headers
+  namespace: {{ .Values.gateway.namespace }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: platform-edge
+  headers:
+    earlyRequestHeaders:
+      remove:
+        - {{ .Values.extAuth.capabilityHeader }}
+        - X-Ctxmesh-Run-Proof

@@ -10,8 +10,12 @@
 # chatbox route (`agents-app`) must not be sandboxed, or the chatbox cannot run.
 #
 # The same route must drop, from the request, the caller's bearer and every header that claims to be
-# an agent (ADR 0153): the AMP envelope under both names and the attestation. A registry member admits
+# an agent (ADR 0153): the AMP envelope under both names and both attestations. A registry member admits
 # an attested AMP call, so anything outside that could send them could claim to be one of its peers.
+#
+# No caller may hand an agent a run capability of its own: the Gateway removes the capability header
+# and its proof before ext-auth runs, so the only one an agent gets is what ext-auth minted. The agents
+# route must not remove it itself, since a route's filter runs after ext-auth and would drop ext-auth's.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -87,19 +91,47 @@ for i, (got, removed) in enumerate(response_mods(routes["agents"])):
         fail(f"agents rule {i} does not remove Set-Cookie; a sandboxed response can still plant a cookie, "
              "such as an OAuth binding cookie, at or beside the agent host")
 
-must_strip = {"authorization", "x-amp-envelope", "x-a2a-envelope", "x-amp-attestation"}
+must_strip = {"authorization", "x-amp-envelope", "x-a2a-envelope", "x-amp-attestation", "ce-ampattestation"}
 for i, removed in enumerate(request_removed(routes["agents"])):
     missing = sorted(must_strip - removed)
     if missing:
         fail(f"agents rule {i} forwards {', '.join(missing)} from the caller to the agent; a caller outside "
              "the mesh could then present a bearer the agent must not see, or claim to be one of its AMP peers")
 
+capability = "x-ctxmesh-run-capability"
+policies = [d for d in docs if d.get("kind") == "SecurityPolicy"]
+for p in policies:
+    sent = {h.lower() for h in (((p["spec"].get("extAuth") or {}).get("http") or {}).get("headersToBackend") or [])}
+    if sent != {capability}:
+        fail(f"SecurityPolicy {p['metadata']['name']} copies {sorted(sent)} from ext-auth to the agent, "
+             f"want only {capability}")
+for i, removed in enumerate(request_removed(routes["agents"])):
+    if capability in removed:
+        fail(f"agents rule {i} removes {capability}: a route's filter runs after ext-auth, so it would drop "
+             "the capability ext-auth minted, and every caller through the edge would run without one")
+
+early = None
+for d in docs:
+    if d.get("kind") != "ClientTrafficPolicy":
+        continue
+    targets = [(t.get("kind"), t.get("name")) for t in d["spec"].get("targetRefs") or []]
+    if ("Gateway", "platform-edge") in targets:
+        early = {n.lower() for n in ((d["spec"].get("headers") or {}).get("earlyRequestHeaders") or {}).get("remove") or []}
+if early is None:
+    fail("no ClientTrafficPolicy on the platform-edge Gateway; a caller's own run capability reaches the agent "
+         "whenever ext-auth mints none or is off")
+missing = sorted({capability, "x-ctxmesh-run-proof"} - early)
+if missing:
+    fail(f"the platform-edge Gateway does not remove {', '.join(missing)} before ext-auth; a caller could hand "
+         "an agent a run capability ext-auth did not mint")
+
 for i, (got, _) in enumerate(response_mods(routes["agents-app"])):
     if "content-security-policy" in got:
         fail(f"agents-app rule {i} sets a Content-Security-Policy; the chatbox SPA needs its scripts and the BFF sets its own CSP")
 
 print(f"  ok ({label}): agents sets CSP sandbox + nosniff, drops Set-Cookie, and strips the bearer and the AMP "
-      "headers from requests; agents-app is not sandboxed")
+      "headers from requests; the Gateway drops a caller's run capability before ext-auth; agents-app is not "
+      "sandboxed")
 PY
 done
 echo "RESULT: PASS (edge-truth)"

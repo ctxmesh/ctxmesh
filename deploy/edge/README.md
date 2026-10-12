@@ -49,6 +49,13 @@ console's `POST /api/invoke` — the agent URL is a first-class authenticated en
 **relays** the capability (never forges it), so the ADR 0033 model holds end to end; one place mints (the
 BFF), and the signing key never leaves it.
 
+A caller cannot hand an agent a capability of its own. A `ClientTrafficPolicy` on the Gateway removes
+`X-Ctxmesh-Run-Capability` and `X-Ctxmesh-Run-Proof` from every request before ext-auth runs, so the
+only capability an agent receives through the edge is the one ext-auth minted for this caller, and
+none when ext-auth mints none or is off. (Removing it on the agents route would remove ext-auth's too:
+a route's header filter applies after ext-auth.) This needs Envoy Gateway v1.2 or later, and it is the
+Gateway's one `ClientTrafficPolicy`: add other client settings to it rather than beside it.
+
 Because the agents route is in `kourier-system` and the BFF in `ctxmesh`, the chart also
 renders the cross-namespace `ReferenceGrant` (SecurityPolicy → BFF Service). Set `extAuth.enabled: false`
 to leave agent URLs unauthenticated (no OBO — the pre-ADR-0039 behaviour); their responses stay
