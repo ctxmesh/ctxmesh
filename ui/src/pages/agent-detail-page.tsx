@@ -2437,6 +2437,9 @@ function LogsTab({ ns, name, ready }: { ns: string; name: string; ready: boolean
 
   React.useEffect(() => {
     let retry: ReturnType<typeof setTimeout> | undefined;
+    // Aborting does not stop frames already read from being parsed, so after cleanup this tail's
+    // callbacks must do nothing: a late "waiting" would start a retry that nothing clears.
+    let cancelled = false;
     // The SSE tail over fetch-stream: the Bearer rides the request (EventSource
     // can't set headers). We follow the stream and render every frame honestly.
     const cancel = openLogStream(
@@ -2444,6 +2447,7 @@ function LogsTab({ ns, name, ready }: { ns: string; name: string; ready: boolean
       name,
       {
         onEvent: (type: LogEventType, data: string) => {
+          if (cancelled) return;
           if (type === "log") {
             waitRef.current = null;
             setPhase("streaming");
@@ -2471,10 +2475,12 @@ function LogsTab({ ns, name, ready }: { ns: string; name: string; ready: boolean
         // A PRE-STREAM 403 (RBAC denied pods list) — an HTTP status before any
         // frame. Rendered as a forbidden state, NOT an in-stream error.
         onForbidden: (message: string) => {
+          if (cancelled) return;
           setPhase("forbidden");
           setErrorMsg(message);
         },
         onError: (message: string) => {
+          if (cancelled) return;
           setPhase("error");
           setErrorMsg(message);
         },
@@ -2484,6 +2490,7 @@ function LogsTab({ ns, name, ready }: { ns: string; name: string; ready: boolean
 
     // Cancel the stream and any pending ask on unmount / tab-switch — no leak.
     return () => {
+      cancelled = true;
       cancel();
       if (retry !== undefined) clearTimeout(retry);
     };

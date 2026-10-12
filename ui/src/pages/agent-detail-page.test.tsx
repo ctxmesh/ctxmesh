@@ -415,6 +415,75 @@ describe("AgentDetailPage — the log tail waits for the agent to start (m184.37
     );
   });
 
+  // A tail can be replaced while a frame of the old one is still in flight: the agent turned
+  // ready and the tab re-asked. That late "waiting" frame must not schedule an ask of its own,
+  // or every replaced tail would start a second retry chain beside the live one.
+  it("a frame from a replaced tail schedules nothing", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let up = false;
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const calls = installFetch({
+      detail: { ...DEFAULT_DETAIL, ready: false, phase: "Pending" },
+      logSequence: [WAITING, WAITING, ["event: log\ndata: agent listening on :8080\n\n"]],
+    });
+    const base = globalThis.fetch;
+    let logAsk = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (up && url === "/api/agents/prod/billing" && (init?.method ?? "GET") === "GET") {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => DEFAULT_DETAIL,
+            text: async () => JSON.stringify(DEFAULT_DETAIL),
+          } as Response);
+        }
+        const res = base(input, init);
+        if (!url.includes("/logs") || ++logAsk !== 2) return res;
+        // The second ask is still open when the agent turns ready; its frame lands later.
+        let sent = false;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          body: {
+            getReader: () => ({
+              read: async () => {
+                if (sent) return { value: undefined, done: true };
+                await held;
+                sent = true;
+                return { value: new TextEncoder().encode(WAITING[0]), done: false };
+              },
+              releaseLock() {},
+            }),
+          },
+        } as unknown as Response);
+      }),
+    );
+    renderAt();
+    fireEvent.click(await screen.findByRole("tab", { name: "Runs" }));
+    expect(await screen.findByTestId("logs-waiting")).toBeInTheDocument();
+    await advance(logWaitDelay(0));
+    await waitFor(() => expect(logAsks(calls)).toBe(2));
+
+    up = true;
+    await advance(5_000); // one settle poll reads the agent as ready, and the tab asks again
+    await waitFor(() =>
+      expect(screen.getAllByTestId("log-line").map((n) => n.textContent)).toEqual([
+        "agent listening on :8080",
+      ]),
+    );
+    expect(logAsks(calls)).toBe(3);
+
+    release();
+    await advance(30_000);
+    expect(logAsks(calls)).toBe(3);
+    expect(screen.getAllByTestId("log-line")).toHaveLength(1);
+    expect(screen.queryByTestId("logs-waiting")).toBeNull();
+  });
+
   it("stops asking after the bound, says so without an alert, and asks again on request", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const calls = installFetch({ logSequence: [WAITING] });
