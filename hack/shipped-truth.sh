@@ -39,7 +39,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # The number of rows the table holds. Raise it with the rows; lowering it is a visible edit to a claim.
-FLOOR=163
+FLOOR=165
 
 SITE="${CTXMESH_SITE:-../ctxmesh.github.io}"
 SITE_OK=0
@@ -371,6 +371,11 @@ row m184.37 has config/rbac/ctxmesh_viewer_role.yaml '  - agentversions' "the vi
 row m184.37 test internal/controller/agentversion_import_memory_test.go TestImportAgentVersions_StreamsWithinAMemoryBound "the upgrade import streams instead of holding every object"
 row m184.37 test internal/controller/agent_version_store_test.go TestVersion_PruneKeepsTheServingVersionBehindBlockedCandidates "pruning never removes the version that serves"
 row m184.37 test internal/controller/agent_version_store_test.go TestConditionMessagesKeepStoreDetailsOut "no condition message carries the store's connection details"
+
+# The identity variables are the platform's: an author cannot tag traces, scores or spend as another
+# agent, version or tenant by setting them in spec.env.
+row m184 test internal/controller/identity_env_integration_test.go TestAnAgentCannotNameAnotherAgentsIdentity "spec.env cannot set an agent's namespace, name, version or tenant"
+row m184 test internal/controller/identity_env_integration_test.go TestAnAgentDeployedWithItsOwnNamespaceRollsOnceToTheRealOne "an agent that set its own identity rolls to the platform's values"
 
 # ── verdict ───────────────────────────────────────────────────────────────────
 if [ "$total" -eq 0 ]; then

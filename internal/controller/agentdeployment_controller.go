@@ -168,8 +168,8 @@ const (
 	budgetProxyURL = "http://localhost:2996"
 
 	// envAgentName is the AGENT_NAME env var — the agent's identity, injected
-	// unconditionally in the base env (the tracing identity) and reused by the
-	// memory, registry, and budget paths (each guards against double-inject).
+	// once in the base env (the tracing identity) and read by the memory,
+	// registry, and budget paths. An identity variable (identity_env.go).
 	envAgentName = "AGENT_NAME"
 
 	// envAgentVersion is the AGENT_VERSION env var: the AgentVersion the pod serves. The launcher tags
@@ -1026,7 +1026,8 @@ type podTemplate struct {
 	// digest is the combined structural digest ("" when no binding/membership
 	// resolves), used as the "-h<digest>" revision/name suffix.
 	digest string
-	// supersededDigests is digest as each of supersededPodContracts computed it, in that order.
+	// supersededDigests is digest as each of supersededPodContracts computed it, then, for a spec that
+	// sets an identity variable, as it was before they were dropped.
 	supersededDigests []string
 	// resolvedSkills is what spec.skillRefs resolved to — "<name>@sha256:…", always digests.
 	// Carried out so the reconciler can record it in status and in the version snapshot:
@@ -1066,7 +1067,12 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 
 	// Platform env vars come first so they are always present; user env is appended
 	// last and may override platform defaults if the operator deliberately sets the
-	// same name (consistent with the treatment of AGENT_PORT).
+	// same name (consistent with the treatment of AGENT_PORT). The identity variables
+	// are the exception: they are always the platform's (identity_env.go).
+	userEnv, ignoredIdentity := withoutIdentityEnv(deploy.Spec.Env)
+	if err := r.syncIdentityEnvCondition(ctx, deploy, ignoredIdentity); err != nil {
+		return podTemplate{}, err
+	}
 	env := make([]corev1.EnvVar, 0, 2+len(deploy.Spec.Env))
 	env = append(env, corev1.EnvVar{Name: "AGENT_PORT", Value: strconv.Itoa(int(port))})
 
@@ -1182,36 +1188,22 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		env = append(env, corev1.EnvVar{Name: "AGENT_RUNTIME", Value: string(rtBytes)})
 	}
 
-	env = append(env, deploy.Spec.Env...)
+	env = append(env, userEnv...)
 
-	// AGENT_NAME + POD_NAMESPACE identify the agent to the launcher's tracing:
-	// together they form the UNAMBIGUOUS `<namespace>/<name>` identity the launcher
-	// stamps as the Langfuse trace-level tag `agent:<ns>/<name>` (proxy.go), so the
-	// console can list the runs of exactly ONE agent without mixing two same-named
-	// agents in different namespaces. Injected UNCONDITIONALLY for every agent (a
-	// plain agent with no budget/memory/registry still needs a filterable trace
-	// identity), STATIC (values known at reconcile time — NEVER valueFrom, the m5.7
-	// Knative ksvc landmine / tier1 no-valueFrom guard), user-override-wins, and
-	// BEFORE the budget/memory/registry blocks so they observe it present (their own
-	// double-injection guards then no-op). These same vars also key per-agent spend
-	// (budget proxy), the Valkey memory prefix, and the AMP envelope identity — one
-	// injection now serves all of them.
-	if !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
-		env = append(env, corev1.EnvVar{Name: envAgentName, Value: deploy.Name})
+	// The identity variables, for every agent and before the blocks below that read them: the
+	// `<namespace>/<name>` the launcher tags traces with (two same-named agents in different
+	// namespaces stay apart), which also keys per-agent spend, the memory prefix and the AMP sender;
+	// and the version this pod serves, derived from its own spec so each canary arm says which it is.
+	// STATIC values, never valueFrom (Knative rejects a fieldRef in a ksvc template).
+	hash, err := specHash(deploy.Spec)
+	if err != nil {
+		return podTemplate{}, fmt.Errorf("computing spec hash for %s: %w", envAgentVersion, err)
 	}
-	if !envVarPresent(env, envPodNamespace) && !envVarPresent(deploy.Spec.Env, envPodNamespace) {
-		env = append(env, corev1.EnvVar{Name: envPodNamespace, Value: deploy.Namespace})
-	}
-	// Derived from the spec this pod is built from, so every revision, each canary arm included, carries
-	// the version it actually serves. Static, user-override-wins like AGENT_NAME; an override takes the
-	// agent out of per-version scoring, since no spec can name its own hash.
-	if !envVarPresent(env, envAgentVersion) && !envVarPresent(deploy.Spec.Env, envAgentVersion) {
-		hash, err := specHash(deploy.Spec)
-		if err != nil {
-			return podTemplate{}, fmt.Errorf("computing spec hash for %s: %w", envAgentVersion, err)
-		}
-		env = append(env, corev1.EnvVar{Name: envAgentVersion, Value: agentVersionName(deploy.Name, hash)})
-	}
+	env = append(env,
+		corev1.EnvVar{Name: envAgentName, Value: deploy.Name},
+		corev1.EnvVar{Name: envPodNamespace, Value: deploy.Namespace},
+		corev1.EnvVar{Name: envAgentVersion, Value: agentVersionName(deploy.Name, hash)},
+	)
 
 	var resources corev1.ResourceRequirements
 	if deploy.Spec.Resources != nil {
@@ -1364,8 +1356,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 
 	// Memory (M5): resolve the agent's session memory from spec.sessionMemory (ADR 0045;
 	// the standalone MemoryBinding CRD was retired in M127/ADR 0101). When present, inject
-	// MEMORY_BACKEND_ADDR, MEMORY_PORT, MEMORY_KEY_NAMESPACE (pod namespace), and AGENT_NAME
-	// (for Valkey key composition). The single-writer rule applies: only this reconciler
+	// MEMORY_BACKEND_ADDR, MEMORY_PORT and MEMORY_KEY_NAMESPACE (pod namespace); keys are composed
+	// with the base env's AGENT_NAME. The single-writer rule applies: only this reconciler
 	// writes the pod template.
 	memAddr, memScope, hasMemory := resolveMemory(deploy)
 	if hasMemory {
@@ -1392,15 +1384,6 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			// harmless + still correct for a proxy-less install.)
 			corev1.EnvVar{Name: "MEMORY_KEY_NAMESPACE", Value: deploy.Namespace},
 		)
-		// AGENT_NAME: inject only if not already present. The launcher uses
-		// AGENT_NAME for Valkey key composition and as the agent.invoke span
-		// attribute. Check the ACCUMULATED env (the M8 budget block earlier may
-		// have already injected it for a budgeted agent) AND spec.env (user
-		// override must win) so a memory+budget agent gets AGENT_NAME exactly once
-		// — a duplicate container env var is invalid.
-		if !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
-			env = append(env, corev1.EnvVar{Name: envAgentName, Value: deploy.Name})
-		}
 		// STATELAYER_PROXY_URL (M51, ADR 0050 §8 phase 1): when the controller is
 		// configured with it, route this agent's session/shared memory through the
 		// state-layer proxy (the launcher reverse-proxies; it still holds MEMORY_BACKEND_ADDR
@@ -1455,9 +1438,6 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 				!envVarPresent(env, envMCPCapAudience) && !envVarPresent(deploy.Spec.Env, envMCPCapAudience) {
 				env = append(env, corev1.EnvVar{Name: envMCPCapAudience, Value: r.OBOEgress.CapabilityAudience})
 			}
-		}
-		if !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
-			env = append(env, corev1.EnvVar{Name: envAgentName, Value: deploy.Name})
 		}
 	}
 
@@ -1531,7 +1511,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// injectPodToken records whether to mount the projected proxy token (set below).
 	injectPodToken := false
 	if hasTenant {
-		env = append(env, corev1.EnvVar{Name: "TENANT_ID", Value: tenantCtx.id})
+		env = append(env, corev1.EnvVar{Name: envTenantID, Value: tenantCtx.id})
 		if tenantCtx.budgetUSD != "" {
 			env = append(env, corev1.EnvVar{Name: "TENANT_BUDGET_USD", Value: tenantCtx.budgetUSD})
 		}
@@ -1598,26 +1578,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		if hasMemory && memScope == memoryScopeShared {
 			env = append(env, corev1.EnvVar{Name: "MEMORY_SCOPE", Value: memoryScopeShared})
 		}
-		// POD_NAMESPACE: the namespace AMP targets resolve in — the launcher's
-		// clusterHost() builds http://{target}.{POD_NAMESPACE}.svc.cluster.local.
-		// STATIC (deploy.Namespace, known here), never a downward-API fieldRef:
-		// Knative's webhook rejects fieldRef in a ksvc pod template (the m5.7
-		// landmine). Now injected
-		// UNCONDITIONALLY in the base env for the trace identity, so guard against a
-		// duplicate here (a duplicate container env var name is invalid); the base
-		// injection already covers a registry member without session memory.
-		if !envVarPresent(env, envPodNamespace) && !envVarPresent(deploy.Spec.Env, envPodNamespace) {
-			env = append(env, corev1.EnvVar{Name: envPodNamespace, Value: deploy.Namespace})
-		}
-		// AGENT_NAME: the launcher's senderAgentId / envelope path identity. The
-		// memory path (earlier in this function) may have already appended it, and
-		// the user may have overridden it in spec.env — inject exactly ONCE. Check
-		// the ACCUMULATED env slice (covers the memory path) AND spec.env (user
-		// override wins) so a member with BOTH memory and registry gets AGENT_NAME
-		// once, and a member without memory still gets it (the AMP path needs it).
-		if !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
-			env = append(env, corev1.EnvVar{Name: envAgentName, Value: deploy.Name})
-		}
+		// POD_NAMESPACE (the namespace AMP targets resolve in, clusterHost()) and AGENT_NAME (the
+		// envelope's senderAgentId) are in the base env.
 		// AGENT_ROLE: from spec.role, user-override-wins (like AGENT_NAME). The
 		// launcher stamps it into the envelope role field.
 		if !envVarPresent(deploy.Spec.Env, "AGENT_ROLE") {
@@ -2098,6 +2060,15 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	}) {
 		initContainers = append(initContainers, egressRedirectInitContainer(r.EgressRedirect))
 		foldAfterContract("|egress-redirect:" + r.EgressRedirect.Image)
+	}
+
+	// Dropping a spec's identity variables changes its pod without changing anything a digest reads, so
+	// the drop must move the revision name or it never reaches a running pod. The pod built before it
+	// is the same pod renamed, as across a contract change: its approval carries, and it is not kept as
+	// a canary arm beside the corrected one.
+	if len(ignoredIdentity) > 0 {
+		supersededDigests = append(supersededDigests, combinedDigest)
+		combinedDigest = foldDigest(combinedDigest, "|identity-env:"+strings.Join(ignoredIdentity, ","))
 	}
 
 	return podTemplate{

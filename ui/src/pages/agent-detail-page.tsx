@@ -2181,6 +2181,13 @@ function conditionSentence(c: AgentCondition): string {
       ? "A regression was detected against the baseline"
       : "No regression has been detected";
   }
+  // IdentityEnvIgnored inverts too: True means spec.env named variables the
+  // platform always sets, and the controller used its own values instead.
+  if (c.type === "IdentityEnvIgnored") {
+    return c.status === "True"
+      ? "Its environment names variables only the platform sets"
+      : "Its environment leaves its identity to the platform";
+  }
   const pair = CONDITION_SENTENCE[c.type];
   if (pair) return c.status === "True" ? pair[0] : pair[1];
   return c.status === "True"
@@ -2190,6 +2197,8 @@ function conditionSentence(c: AgentCondition): string {
 
 function conditionTone(c: AgentCondition): TimelineTone {
   if (c.type === "RegressionDetected") return c.status === "True" ? "failed" : "step";
+  // The platform overrode the author: a governance step, not a failure (it serves on).
+  if (c.type === "IdentityEnvIgnored") return c.status === "True" ? "governance" : "step";
   if (c.status === "True") return "done";
   // "Unknown" is the controller saying it has not decided. That is not a
   // failure and it is not a hold — it is a plain moment in the story.

@@ -91,28 +91,6 @@ func TestEachCanaryArmCarriesItsOwnVersion(t *testing.T) {
 		"the candidate %q serves %q", candidateRev, candidateVersion)
 }
 
-// No spec can carry its own hash, so an operator's AGENT_VERSION opts the agent out of per-version
-// scoring. It still wins, like every platform env var, and is never duplicated.
-func TestAnOperatorsAgentVersionWins(t *testing.T) {
-	t.Parallel()
-
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team-a"}}
-	r := &AgentDeploymentReconciler{
-		Client: fake.NewClientBuilder().WithScheme(podTemplateScheme(t)).WithObjects(ns).Build(),
-		Scheme: podTemplateScheme(t),
-	}
-	deploy := &agentsv1beta1.AgentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "pinned", Namespace: "team-a"},
-		Spec: agentsv1beta1.AgentDeploymentSpec{
-			Image: "ghcr.io/ctxmesh/example-agent:latest",
-			Env:   []corev1.EnvVar{{Name: envAgentVersion, Value: "1.2.3"}},
-		},
-	}
-	pod, err := r.buildPodTemplate(context.Background(), deploy)
-	require.NoError(t, err)
-	assert.Equal(t, "1.2.3", agentVersionEnv(t, pod))
-}
-
 // Adding AGENT_VERSION changes every agent's pod template, and a template change under an unchanged
 // revision name is dropped by the controller and refused by Knative. The contract bump must therefore
 // move every revision name, including an agent whose other digest inputs are all empty.

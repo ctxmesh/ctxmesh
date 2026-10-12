@@ -151,6 +151,18 @@ everyone. The `developer` and `operator` roles now grant `get` and `list` on `po
 `viewer` role now grants `get`, `list` and `watch` on `skills`, and the `developer` and `operator`
 roles grant the same verbs they hold on `promptversions`, in the namespaces they are bound in.
 
+**Fixed: an agent's author could put its traces and spend under another agent's name.**
+`POD_NAMESPACE`, `AGENT_NAME`, `AGENT_VERSION` and `TENANT_ID` in `spec.env` replaced the platform's
+values, and the launcher tags every trace `agent:<POD_NAMESPACE>/<AGENT_NAME>` and
+`version:<AGENT_VERSION>`. An author could therefore plant traces and cost rows under another
+namespace's agent (a trace that no run maps is authorized by that tag), score one version as another,
+which steers regression detection, rollback and canary decisions, and charge calls to another
+tenant's quota and spend ledger. These four are now always the platform's. A value for one in
+`spec.env` is not used, and the agent's `IdentityEnvIgnored` condition names it until it is removed.
+An agent that set one rolls one new revision with the platform's values; an approval carries to it,
+and the old revision is not kept as a canary arm. Setting `TENANT_ID` in `spec.env` of an agent whose
+namespace a Tenant owns no longer produces two `TENANT_ID` entries, which the Knative Service refused.
+
 **Fixed: a person who could list tenants but read cost in one namespace never saw its cost.** The
 shipped `viewer` role bound cluster-wide grants listing tenants, so with `operator` bound in
 `team-a` the breakdown demanded a tenant, the Cost page picked the first one, and the tenant's
@@ -444,7 +456,7 @@ at once, and an agent serving the version a rollback restored keeps serving it. 
 carries only when the platform alone renamed the revision; a change to the spec, the prompt, a
 binding or a skill still waits for its own. A revision created before the upgrade, such as the old
 arm of a canary in progress, still records no version until it is replaced. An `AGENT_VERSION` set
-in `spec.env` still wins, and leaves that agent out of per-version scoring.
+in `spec.env` is not used (see the entry on identity variables).
 
 **Fixed: an aborted canary reopened when its candidate's revision was renamed.** An abort held only
 while the candidate kept its revision name, which also changes on a platform upgrade such as this
