@@ -117,6 +117,30 @@ does not copy anything a second time.
 `agentversions`, which the built-in `viewer`, `developer` and `operator` roles grant. A custom role
 needs the same two verbs.
 
+## Registry members admit only attested callers (BREAKING for direct calls to a member)
+
+**What changed.** An agent in an AgentRegistry used to accept any `/invoke` that carried no AMP
+envelope, and trusted whatever envelope it was sent, so any pod in the cluster could call it past its
+registry's isolation and `allowedCallers`. A member now admits an AMP call only with the platform's
+attestation of its caller, its own async consumer, and a run capability minted for it (the console,
+`/api/invoke`, `/api/runs`, workflows and the authenticating edge mint one). Anything else is HTTP 403
+`caller_not_allowed`. Agents in no registry are unchanged.
+
+**Before upgrading,** find anything that calls a member's `/invoke` directly, such as scripts that
+`curl` an agent's cluster-local URL or an edge installed with `extAuth.enabled=false`, and move it to
+`POST /api/invoke` or `/api/runs`. Remove `AGENT_REGISTRY_ID` and `AGENT_ROLE` from `spec.env`; they
+are now set by the platform from the registry and `spec.role`.
+
+**During the upgrade** every member rolls one new revision; an approved revision stays approved.
+Launchers on old revisions do not send attestations until they roll, so AMP calls from them are
+refused for that window. To roll out in two steps, upgrade with
+`--set controllerManager.amp.requireAttestation=false`, watch the `amp.admission` span attribute on
+`agent.invoke` until no member reports `unattested`, then upgrade again without it. A bad attestation
+is refused under either setting.
+
+**After upgrading,** a member's `IdentityEnvIgnored` condition names any identity variable its
+`spec.env` still sets.
+
 ## M162 — the agent container is hardened by default (BREAKING for root images)
 
 **What changed.** The agent's own container now gets a `securityContext`: `runAsNonRoot`, no

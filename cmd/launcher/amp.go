@@ -30,15 +30,18 @@ package main
 //      so the callee continues the same trace, and forwards. A blocked, unknown or
 //      cross-registry target fast-fails typed rather than hanging.
 //
-//   2. INBOUND access control — middleware on the /invoke proxy. A request carrying an
-//      X-A2A-Envelope is checked for cross-registry isolation first, then the callee's
-//      allowedCallers and role rules, before the user container sees it. A request with no
-//      envelope is an ordinary /invoke and passes through.
+//   2. INBOUND access control — middleware on the /invoke proxy of a registry member. It admits
+//      an attested AMP call, its own async consumer's loopback call, or a run capability minted
+//      for this agent (amp_attest.go, ADR 0153); an AMP call is then checked for cross-registry
+//      isolation, then the callee's allowedCallers and role rules, before the user container
+//      sees it.
 //
 // The envelope's depth/path grow per hop: no incoming envelope means a FIRST hop (depth 1,
 // path [self]); an incoming one means this agent was itself reached via AMP and is
-// forwarding, so depth and path extend while traceId/registryId/conversationId are
-// inherited and immutable downstream. checkGuards runs against the OUTGOING envelope.
+// forwarding, so depth and path extend while traceId/conversationId are inherited. The
+// registry, sender and role are always this agent's own: the incoming envelope is echoed by
+// the agent's code, and what it claims about identity is never carried forward.
+// checkGuards runs against the OUTGOING envelope.
 import (
 	"bytes"
 	"context"
@@ -48,6 +51,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -220,6 +224,11 @@ type ampConfig struct {
 	// Default: defaultMaxDepth (8) when the env is absent or zero.
 	MaxDepth int
 
+	// AcceptUnattested is AMP_REQUIRE_ATTESTATION=false, the rollout's accept posture (ADR 0153): this
+	// member also admits an /invoke that carries neither an attestation nor a run capability minted for
+	// it. The zero value requires one, so a config built any other way fails closed.
+	AcceptUnattested bool
+
 	// HopBudget is the per-conversation hop-budget limit (A2A_HOP_BUDGET).
 	// Injected by the m6.4 controller from the registry guards.hopBudget CRD
 	// field. Default: defaultHopBudget (32) when the env is absent or zero.
@@ -285,15 +294,16 @@ func loadAMPConfig(lookup func(string) string, agentName string) (ampConfig, err
 	}
 
 	return ampConfig{
-		RegistryID:      regID,
-		Port:            port,
-		SelfName:        agentName,
-		Role:            lookup("AGENT_ROLE"),
-		Namespace:       lookup("POD_NAMESPACE"),
-		AllowedCallers:  parseCallerList(lookup("AGENT_ALLOWED_CALLERS")),
-		MaxDepth:        maxDepth,
-		HopBudget:       hopBudget,
-		AsyncPublishURL: strings.TrimSpace(lookup("ASYNC_PUBLISH_URL")),
+		RegistryID:       regID,
+		Port:             port,
+		SelfName:         agentName,
+		Role:             lookup("AGENT_ROLE"),
+		Namespace:        lookup("POD_NAMESPACE"),
+		AllowedCallers:   parseCallerList(lookup("AGENT_ALLOWED_CALLERS")),
+		MaxDepth:         maxDepth,
+		HopBudget:        hopBudget,
+		AsyncPublishURL:  strings.TrimSpace(lookup("ASYNC_PUBLISH_URL")),
+		AcceptUnattested: !requireAttestation(lookup(envAMPRequireAttestation)),
 	}, nil
 }
 
@@ -373,6 +383,14 @@ type ampServer struct {
 	// resolveHost maps a target agent name to its base URL. Injectable so unit
 	// tests can point it at an httptest server instead of cluster DNS.
 	resolveHost func(target string) string
+	// attest supplies this agent's attestation for each receiver (ADR 0153). Every forwarded hop
+	// carries one; a hop for which none can be had is refused, never sent unattested.
+	attest attestor
+}
+
+// attestor is the attestation source: the BFF exchange in production, a stub in unit tests.
+type attestor interface {
+	get(ctx context.Context, receiver string) (string, error)
 }
 
 func newAMPServer(
@@ -407,6 +425,7 @@ func newAMPServer(
 	// gets the bound capability and a proof.
 	s.client = withRuncapProof(s.client, processRuncapBinder())
 	s.resolveHost = s.clusterHost
+	s.attest = newAttestationSource(os.Getenv("BFF_INTERNAL_URL"), readBFFPodToken)
 	return s
 }
 
@@ -551,7 +570,11 @@ func (s *ampServer) publishAsync(
 //     budgetRemaining=hopBudget (initialised here; decremented by every chained hop).
 //   - An incoming envelope ⇒ CHAINED hop: depth=incoming+1,
 //     path=incoming++[self], budgetRemaining=incoming.budgetRemaining-1, and
-//     traceId/registryId/conversationId INHERITED (immutable downstream, §12.5).
+//     traceId/conversationId INHERITED (§12.5).
+//
+// registryId, senderAgentId and role are this agent's own on every hop: the callee checks
+// them against this agent's attestation, so a chained hop out of another registry is refused
+// there rather than passed off as that registry's.
 //
 // messageId is ALWAYS fresh (unique per hop — the M7 idempotency key).
 func (s *ampServer) buildEnvelope(
@@ -592,8 +615,7 @@ func (s *ampServer) buildEnvelope(
 		return env, nil
 	}
 
-	// CHAINED hop — inherit the immutable fields, extend depth/path/budget.
-	env.RegistryID = incoming.RegistryID
+	// CHAINED hop — inherit the conversation, extend depth/path/budget.
 	env.TraceID = incoming.TraceID
 	env.ConversationID = incoming.ConversationID
 	env.Depth = incoming.Depth + 1
@@ -615,6 +637,13 @@ func (s *ampServer) buildEnvelope(
 func (s *ampServer) forward(
 	ctx context.Context, w http.ResponseWriter, span trace.Span, env envelope, capToken string,
 ) {
+	att, err := s.attest.get(ctx, env.ReceiverAgentID)
+	if err != nil {
+		span.RecordError(err)
+		s.fail(w, span, http.StatusServiceUnavailable, errAttestationUnavailable,
+			"this agent could not obtain its platform attestation, so the call was not sent: "+err.Error())
+		return
+	}
 	base := s.resolveHost(env.ReceiverAgentID)
 
 	// The wire body is the FULL envelope (payload nested inside) so the callee's
@@ -644,6 +673,7 @@ func (s *ampServer) forward(
 	// legacy emission is a separate, later decision — see ADR 0138.
 	outReq.Header.Set(ampEnvelopeHeader, string(envJSON))
 	outReq.Header.Set(legacyEnvelopeHeader, string(envJSON))
+	outReq.Header.Set(runcap.AttestationHeaderName, att)
 	// Relay the invoking user's run capability (ADR 0033, m30.3) so the callee acts on-behalf-of
 	// the same user; the callee's egress verifies it against the platform key + its own boundary.
 	if capToken != "" {
@@ -712,26 +742,32 @@ func (s *ampServer) fail(w http.ResponseWriter, span trace.Span, status int, cod
 // ── inbound access control (callee side) ────────────────────────────────────
 
 // ampGuard holds the callee-side access-control policy. It is the inbound
-// counterpart to ampServer, injected into the /invoke proxy middleware.
+// counterpart to ampServer, injected into the /invoke proxy middleware of a
+// registry member.
 type ampGuard struct {
 	cfg    ampConfig
 	tracer trace.Tracer
+	// verifier checks attestations and run capabilities with the platform public key. nil ⇒ the
+	// pod has none, and neither is admitted.
+	verifier *runcap.Verifier
+	// loopback is this process's secret marking its own async consumer's calls. "" ⇒ none are.
+	loopback string
 }
 
-func newAMPGuard(cfg ampConfig, tracer trace.Tracer) *ampGuard {
-	return &ampGuard{cfg: cfg, tracer: tracer}
+func newAMPGuard(cfg ampConfig, tracer trace.Tracer, verifier *runcap.Verifier, loopback string) *ampGuard {
+	return &ampGuard{cfg: cfg, tracer: tracer, verifier: verifier, loopback: loopback}
 }
 
 // enforceInbound is the callee-side access-control check the /invoke proxy runs
 // BEFORE forwarding to the user container. It returns true when the request may
-// proceed. If the request carries an AMP envelope, it enforces (in order)
-// cross-registry isolation, then the allowlist + role rules; a rejected caller
-// is denied here (typed 403, traced) and the function returns false, having
-// already written the response.
+// proceed; on a denial it has already written the typed 403 (traced).
 //
-// A request WITHOUT an envelope is an ordinary external /invoke — access
-// control does not apply (registry isolation is a mesh-internal concern) — so it
-// passes through untouched.
+// A registry member admits an /invoke only as its own async consumer's loopback
+// call, an attested AMP call, or a request carrying a run capability minted for
+// it (amp_attest.go, ADR 0153). An AMP envelope admitted either way is then
+// checked for cross-registry isolation and the allowlist + role rules. Under the
+// accept posture a request with none of the three is admitted as before: an
+// envelope is checked as it claims, and a plain /invoke passes.
 //
 // Cross-registry isolation is enforced HERE, at the app layer, NOT by
 // NetworkPolicy: agents are Knative Services, so an AMP call routes
@@ -739,51 +775,76 @@ func newAMPGuard(cfg ampConfig, tracer trace.Tracer) *ampGuard {
 // kourier-system — which the generated per-registry NetworkPolicy ALLOWS as
 // platform ingress. The per-registry podSelector therefore cannot isolate
 // Knative-routed AMP traffic; kourier defeats it. NetworkPolicy remains as
-// defense-in-depth for any DIRECT pod-to-pod traffic, but the ACTUAL
-// cross-registry deny is this app-layer check on the envelope's registryId
-// (agent-mesh.md §"Design" layer 1; the live-cluster m6.8 e2e proved a
-// cross-registry call is not blocked at the network layer).
+// defense-in-depth for any DIRECT pod-to-pod traffic.
 //
 // It is wired as a wrapper INSIDE the agent.invoke span (ctx already carries the
 // server span) so a denial is a child event of the invoke, not an orphan.
 func (g *ampGuard) enforceInbound(ctx context.Context, w http.ResponseWriter, r *http.Request) bool {
 	raw, conflict, source := envelopeHeaderWithSource(r.Header)
+	span := trace.SpanFromContext(ctx)
 	if source != "" {
 		// Recorded BEFORE any denial, so a refused call still reports which name it
 		// used — otherwise the legacy-usage evidence would be biased toward callers
 		// that happened to pass.
-		trace.SpanFromContext(ctx).SetAttributes(
-			attribute.String("amp.envelope.source", source),
-		)
+		span.SetAttributes(attribute.String("amp.envelope.source", source))
 	}
 	if conflict {
 		// Two envelopes that disagree. Fail closed: see envelopeHeader.
 		g.deny(ctx, w, "", "conflicting envelope headers")
 		return false
 	}
-	if raw == "" {
-		return true // not a mediated call — nothing to enforce.
-	}
+	admitted := func(how string) { span.SetAttributes(attribute.String("amp.admission", how)) }
 
+	attTok := strings.TrimSpace(r.Header.Get(runcap.AttestationHeaderName))
+	switch {
+	case g.isLoopback(r):
+		// The consumer delivers the envelope it decoded from the event; its claims are checked as
+		// they were before attestation, since an event carries none.
+		admitted(admissionLoopback)
+		return raw == "" || g.checkRawEnvelope(ctx, w, raw)
+	case attTok != "":
+		// Held to the attestation under either posture: a bad one is never downgraded to a pass.
+		if !g.admitAttested(ctx, w, raw, attTok) {
+			return false
+		}
+		admitted(admissionAttested)
+		return true
+	case raw == "" && g.capabilityNamesSelf(ctx, r):
+		admitted(admissionCapability)
+		return true
+	case !g.cfg.AcceptUnattested:
+		if raw != "" {
+			g.deny(ctx, w, "", "an AMP call must carry its caller's platform attestation")
+		} else {
+			g.deny(ctx, w, "", "this agent is in a registry: it is invoked with a run capability minted "+
+				"for it, by an attested AMP call, or by its own async consumer")
+		}
+		return false
+	}
+	span.AddEvent("amp.unattested_admitted")
+	admitted(admissionUnattested)
+	return raw == "" || g.checkRawEnvelope(ctx, w, raw)
+}
+
+// checkRawEnvelope parses an inbound envelope and applies checkEnvelope. A
+// malformed envelope is a protocol error and is refused, never treated as a
+// plain call.
+func (g *ampGuard) checkRawEnvelope(ctx context.Context, w http.ResponseWriter, raw string) bool {
 	env, err := parseIncomingEnvelope(raw)
 	if err != nil || env == nil {
-		// A malformed envelope on the inbound path is a protocol error: reject
-		// rather than silently treat it as a plain call (fail closed).
 		g.deny(ctx, w, "", "malformed AMP envelope")
 		return false
 	}
+	return g.checkEnvelope(ctx, w, env)
+}
 
-	// Layer 1 (registry isolation), app-layer: a hard deny BEFORE the
-	// allowedCallers/role checks. An envelope whose registryId does not match this
-	// agent's own registry is a cross-registry call — reject it. NetworkPolicy
-	// cannot enforce this under Knative (kourier fronts every AMP hop), so this is
-	// the authoritative check. A same-registry envelope falls through to the
-	// allowedCallers/role checks unchanged.
+// checkEnvelope applies registry isolation (layer 1, a hard deny before the
+// rest), then the allowedCallers and role rules (layers 2–3).
+func (g *ampGuard) checkEnvelope(ctx context.Context, w http.ResponseWriter, env *envelope) bool {
 	if env.RegistryID != g.cfg.RegistryID {
 		g.denyCrossRegistry(ctx, w, env.SenderAgentID, env.RegistryID)
 		return false
 	}
-
 	if allowed, reason := g.allowCaller(env); !allowed {
 		g.deny(ctx, w, env.SenderAgentID, reason)
 		return false

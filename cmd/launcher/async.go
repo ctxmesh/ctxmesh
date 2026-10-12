@@ -329,10 +329,14 @@ func (c *asyncConsumer) markSeen(ctx context.Context, span trace.Span, messageID
 // the sync path) so the callee launcher's inbound access control can read it, and
 // so a chained async→sync hop inherits the conversation context.
 //
+// The call carries this process's loopback secret, which is how a registry member's
+// guard admits it (amp_attest.go): it has no attestation, and arrives from 127.0.0.1
+// like every request Knative's queue-proxy delivers.
+//
 // It returns the agent's HTTP status. A transport error (agent down) is returned
 // as an error so consume NACKs (retry/DLQ); a 5xx is returned as a status so
 // consume can DLQ a poison message.
-func newProxyInvoker(proxyPort int, client *http.Client) func(context.Context, envelope) (int, error) {
+func newProxyInvoker(proxyPort int, loopback string, client *http.Client) func(context.Context, envelope) (int, error) {
 	base := fmt.Sprintf("http://127.0.0.1:%d", proxyPort)
 	return func(ctx context.Context, env envelope) (int, error) {
 		payload := env.Payload
@@ -344,6 +348,9 @@ func newProxyInvoker(proxyPort int, client *http.Client) func(context.Context, e
 			return 0, fmt.Errorf("build invoke request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if loopback != "" {
+			req.Header.Set(ampLoopbackHeader, loopback)
+		}
 		if env.ConversationID != "" {
 			req.Header.Set("X-Conversation-Id", env.ConversationID)
 		}

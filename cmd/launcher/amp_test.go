@@ -24,6 +24,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,10 +34,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
@@ -46,8 +49,35 @@ import (
 type peerCapture struct {
 	traceparent string
 	runCap      string
+	attestation string
 	envelope    envelope
 	body        []byte
+}
+
+// stubAttestor stands in for the BFF exchange: it attests any receiver, or fails with err, and
+// records who it was asked about.
+type stubAttestor struct {
+	mu        sync.Mutex
+	receivers []string
+	err       error
+}
+
+func (a *stubAttestor) get(_ context.Context, receiver string) (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.receivers = append(a.receivers, receiver)
+	if a.err != nil {
+		return "", a.err
+	}
+	return "attestation-for-" + receiver, nil
+}
+
+// newStubbedAMPServer is newAMPServer with the attestation exchange stubbed, so an outbound
+// test needs no BFF.
+func newStubbedAMPServer(cfg ampConfig, tracer trace.Tracer) *ampServer {
+	s := newAMPServer(cfg, tracer, propagation.TraceContext{}, nil)
+	s.attest = &stubAttestor{}
+	return s
 }
 
 // newTestAMPServer builds an ampServer wired to a fake peer. The peer echoes a
@@ -69,6 +99,7 @@ func newTestAMPServer(
 		peerCh <- peerCapture{
 			traceparent: r.Header.Get("Traceparent"),
 			runCap:      r.Header.Get(runcap.HeaderName),
+			attestation: r.Header.Get(runcap.AttestationHeaderName),
 			envelope:    env,
 			body:        body,
 		}
@@ -83,7 +114,7 @@ func newTestAMPServer(
 		t.Fatal(err)
 	}
 
-	s := newAMPServer(cfg, tp.Tracer(tracerName), propagation.TraceContext{}, nil)
+	s := newStubbedAMPServer(cfg, tp.Tracer(tracerName))
 	// Route every target to the fake peer's base URL (the forward path appends
 	// /invoke).
 	s.resolveHost = func(string) string { return peerURL.Scheme + "://" + peerURL.Host }
@@ -309,7 +340,7 @@ func TestAMPChainedHopEnvelope(t *testing.T) {
 		t.Errorf("chained conversationId = %q, want inherited conv-77", env.ConversationID)
 	}
 	if env.RegistryID != "research-team" {
-		t.Errorf("chained registryId = %q, want inherited research-team", env.RegistryID)
+		t.Errorf("chained registryId = %q, want this agent's own research-team", env.RegistryID)
 	}
 	// messageId is fresh per hop — must NOT be inherited.
 	if env.MessageID == "msg-upstream" || env.MessageID == "" {
@@ -491,9 +522,57 @@ func newTestProxyWithGuardRec(t *testing.T, cfg ampConfig) (http.Handler, chan b
 		t.Fatal(err)
 	}
 
-	guard := newAMPGuard(cfg, tracer)
+	_, verifier := ampTestKeys(t)
+	guard := newAMPGuard(cfg, tracer, verifier, testLoopback)
 	handler := buildHandler(tracer, propagation.TraceContext{}, upstreamURL, Config{AgentName: cfg.SelfName}, guard, nil)
 	return handler, reachedCh, rec
+}
+
+const testLoopback = "test-loopback-secret"
+
+var (
+	ampKeysOnce     sync.Once
+	ampTestSigner   *runcap.Signer
+	ampTestVerifier *runcap.Verifier
+	ampTestPrivate  ed25519.PrivateKey
+)
+
+// ampTestKeys is the platform keypair the inbound tests sign attestations and capabilities with.
+func ampTestKeys(t *testing.T) (*runcap.Signer, *runcap.Verifier) {
+	t.Helper()
+	ampKeysOnce.Do(func() {
+		pub, priv, err := runcap.GenerateKeyPair()
+		if err != nil {
+			panic(err)
+		}
+		ampTestPrivate = priv
+		ampTestSigner = runcap.NewSigner(priv, runcap.DefaultAudience, nil)
+		ampTestVerifier = runcap.NewVerifier(pub, runcap.DefaultAudience, nil)
+	})
+	return ampTestSigner, ampTestVerifier
+}
+
+// attestationOf mints what the platform gives agent (namespace team-a) for calling receiver.
+func attestationOf(t *testing.T, agent, registry, role, receiver string) string {
+	t.Helper()
+	signer, _ := ampTestKeys(t)
+	tok, err := signer.MintAttestation(runcap.AttestationRequest{
+		Namespace: "team-a", Agent: agent, RegistryID: registry, Role: role, Receiver: receiver, TTL: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
+}
+
+// attestedInvoke is an AMP call from sender to baseCfg's agent ("orchestrator" in team-a), carrying an
+// envelope naming registry and role and the platform's attestation of exactly that.
+func attestedInvoke(t *testing.T, registry, sender, role string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
+	req.Header.Set(legacyEnvelopeHeader, inboundEnvelopeIn(registry, sender, role))
+	req.Header.Set(runcap.AttestationHeaderName, attestationOf(t, sender, registry, role, "orchestrator"))
+	return req
 }
 
 // assertSpanEvent asserts the span recorder captured an event with the given
@@ -532,23 +611,26 @@ func inboundEnvelopeIn(registryID, sender, role string) string {
 	return string(b)
 }
 
-func TestAMPInboundNoEnvelopePassesThrough(t *testing.T) {
+// A registry member's /invoke with no envelope, no attestation and no run capability is not the
+// platform calling it: under the require posture it is refused before the agent's code sees it. Before
+// ADR 0153 it passed as "ordinary external traffic", which let any pod skip registry isolation and
+// allowedCallers by leaving the envelope off.
+func TestAMPInboundPlainInvokeIsRefusedForAMember(t *testing.T) {
 	t.Parallel()
-	cfg := baseCfg()
-	cfg.AllowedCallers = []string{"nobody"} // strict allowlist...
-	handler, reached := newTestProxyWithGuard(t, cfg)
+	handler, reached := newTestProxyWithGuard(t, baseCfg())
 
-	// ...but a plain external /invoke (no envelope) is NOT an AMP call and must
-	// pass through untouched.
 	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("plain /invoke status = %d, want 200 (access control must not apply)", rr.Code)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("plain /invoke status = %d, want 403", rr.Code)
 	}
-	if !<-reached {
-		t.Error("upstream not reached for a plain /invoke")
+	assertAMPError(t, rr.Body.Bytes(), errCallerNotAllowed)
+	select {
+	case <-reached:
+		t.Error("upstream reached for an unadmitted /invoke")
+	default:
 	}
 }
 
@@ -557,8 +639,7 @@ func TestAMPInboundAllowsEmptyAllowlist(t *testing.T) {
 	cfg := baseCfg() // empty AllowedCallers ⇒ allow any in-registry caller.
 	handler, reached := newTestProxyWithGuard(t, cfg)
 
-	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
-	req.Header.Set(legacyEnvelopeHeader, inboundEnvelope("orchestrator", "orchestrator"))
+	req := attestedInvoke(t, "research-team", "orchestrator", "orchestrator")
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -576,8 +657,7 @@ func TestAMPInboundAllowsListedCaller(t *testing.T) {
 	cfg.AllowedCallers = []string{"orchestrator", "research"}
 	handler, reached := newTestProxyWithGuard(t, cfg)
 
-	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
-	req.Header.Set(legacyEnvelopeHeader, inboundEnvelope("research", "worker"))
+	req := attestedInvoke(t, "research-team", "research", "worker")
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -595,8 +675,7 @@ func TestAMPInboundDeniesUnlistedCaller(t *testing.T) {
 	cfg.AllowedCallers = []string{"orchestrator"}
 	handler, reached := newTestProxyWithGuard(t, cfg)
 
-	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
-	req.Header.Set(legacyEnvelopeHeader, inboundEnvelope("intruder", "worker"))
+	req := attestedInvoke(t, "research-team", "intruder", "worker")
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -618,8 +697,7 @@ func TestAMPInboundDeniesEmptyRole(t *testing.T) {
 	cfg := baseCfg()
 	handler, reached := newTestProxyWithGuard(t, cfg)
 
-	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
-	req.Header.Set(legacyEnvelopeHeader, inboundEnvelope("orchestrator", "")) // empty role.
+	req := attestedInvoke(t, "research-team", "orchestrator", "") // empty role.
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -640,6 +718,8 @@ func TestAMPInboundDeniesMalformedEnvelope(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
 	req.Header.Set(legacyEnvelopeHeader, `{not valid json`)
+	req.Header.Set(runcap.AttestationHeaderName,
+		attestationOf(t, "orchestrator", "research-team", "orchestrator", "orchestrator"))
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -666,9 +746,8 @@ func TestAMPInboundDeniesCrossRegistry(t *testing.T) {
 	cfg := baseCfg() // this agent is in "research-team".
 	handler, reached, rec := newTestProxyWithGuardRec(t, cfg)
 
-	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
-	// Foreign registry: a valid orchestrator caller, but from "other-team".
-	req.Header.Set(legacyEnvelopeHeader, inboundEnvelopeIn("other-team", "orchestrator", "orchestrator"))
+	// Foreign registry: an attested orchestrator caller, but a member of "other-team".
+	req := attestedInvoke(t, "other-team", "orchestrator", "orchestrator")
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -696,9 +775,8 @@ func TestAMPCrossRegistryCheckedBeforeAllowlist(t *testing.T) {
 	cfg.AllowedCallers = []string{"orchestrator"} // caller IS on the allowlist...
 	handler, reached, rec := newTestProxyWithGuardRec(t, cfg)
 
-	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
-	// ...but names a foreign registry → cross-registry deny wins.
-	req.Header.Set(legacyEnvelopeHeader, inboundEnvelopeIn("other-team", "orchestrator", "orchestrator"))
+	// ...but is attested in a foreign registry → cross-registry deny wins.
+	req := attestedInvoke(t, "other-team", "orchestrator", "orchestrator")
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -723,8 +801,7 @@ func TestAMPInboundAllowsSameRegistry(t *testing.T) {
 	cfg := baseCfg() // registry "research-team", empty allowlist.
 	handler, reached := newTestProxyWithGuard(t, cfg)
 
-	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
-	req.Header.Set(legacyEnvelopeHeader, inboundEnvelopeIn("research-team", "orchestrator", "orchestrator"))
+	req := attestedInvoke(t, "research-team", "orchestrator", "orchestrator")
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -742,7 +819,7 @@ func TestAMPUnknownTarget(t *testing.T) {
 	t.Parallel()
 	// Point resolveHost at a name guaranteed to NXDOMAIN.
 	_, tp := newTestTracer(t)
-	s := newAMPServer(baseCfg(), tp.Tracer(tracerName), propagation.TraceContext{}, nil)
+	s := newStubbedAMPServer(baseCfg(), tp.Tracer(tracerName))
 	s.resolveHost = func(target string) string {
 		return "http://" + target + ".this-domain-does-not-exist.invalid"
 	}
@@ -759,7 +836,7 @@ func TestAMPBlockedTargetFastFails(t *testing.T) {
 	// A closed port on localhost: the dial is refused immediately (the
 	// NetworkPolicy "connection refused" shape) → typed blocked, no hang.
 	_, tp := newTestTracer(t)
-	s := newAMPServer(baseCfg(), tp.Tracer(tracerName), propagation.TraceContext{}, nil)
+	s := newStubbedAMPServer(baseCfg(), tp.Tracer(tracerName))
 	s.resolveHost = func(string) string { return "http://127.0.0.1:1" } // port 1: refused.
 
 	rr := callAMP(t, s, context.Background(), "blocked-peer", `{}`, nil)
@@ -1286,26 +1363,34 @@ func TestGuardEnforcesUnderEitherHeaderName(t *testing.T) {
 	for _, header := range []string{ampEnvelopeHeader, legacyEnvelopeHeader} {
 		t.Run(header, func(t *testing.T) {
 			_, tp := newTestTracer(t)
-			guard := newAMPGuard(ampConfig{RegistryID: "mine", SelfName: "callee"}, tp.Tracer(tracerName))
-			raw, err := json.Marshal(envelope{
-				RegistryID:      "theirs",
-				SenderAgentID:   "caller",
-				ReceiverAgentID: "callee",
-			})
-			if err != nil {
-				t.Fatal(err)
+			_, verifier := ampTestKeys(t)
+			guard := newAMPGuard(ampConfig{RegistryID: "mine", SelfName: "callee", Namespace: "team-a"},
+				tp.Tracer(tracerName), verifier, testLoopback)
+			call := func(registry string) *httptest.ResponseRecorder {
+				raw, err := json.Marshal(envelope{
+					RegistryID: registry, SenderAgentID: "caller", ReceiverAgentID: "callee", Role: "worker",
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				req := httptest.NewRequest(http.MethodPost, "/invoke", nil)
+				req.Header.Set(header, string(raw))
+				req.Header.Set(runcap.AttestationHeaderName, attestationOf(t, "caller", registry, "worker", "callee"))
+				rec := httptest.NewRecorder()
+				if guard.enforceInbound(context.Background(), rec, req) {
+					rec.WriteHeader(http.StatusOK)
+				}
+				return rec
 			}
 
-			req := httptest.NewRequest(http.MethodPost, "/invoke", nil)
-			req.Header.Set(header, string(raw))
-			rec := httptest.NewRecorder()
-
-			if guard.enforceInbound(context.Background(), rec, req) {
-				t.Fatalf("%s: a cross-registry call was ALLOWED — the guard did not recognise the envelope", header)
+			if rec := call("mine"); rec.Code != http.StatusOK {
+				t.Fatalf("%s: a same-registry attested call got %d — the guard did not read the envelope", header, rec.Code)
 			}
+			rec := call("theirs")
 			if rec.Code != http.StatusForbidden {
-				t.Fatalf("%s: got %d, want 403", header, rec.Code)
+				t.Fatalf("%s: a cross-registry call got %d, want 403", header, rec.Code)
 			}
+			assertAMPError(t, rec.Body.Bytes(), errCrossRegistry)
 		})
 	}
 }
@@ -1319,7 +1404,7 @@ func TestBothOutboundPathsAreServed(t *testing.T) {
 		t.Run(prefix, func(t *testing.T) {
 			cfg := ampConfig{RegistryID: "r1", SelfName: "caller", Port: 0}
 			_, tp := newTestTracer(t)
-			srv := newAMPServer(cfg, tp.Tracer(tracerName), propagation.TraceContext{}, nil)
+			srv := newStubbedAMPServer(cfg, tp.Tracer(tracerName))
 
 			req := httptest.NewRequest(http.MethodPost, prefix+"analyst", strings.NewReader(`{}`))
 			rec := httptest.NewRecorder()
@@ -1350,7 +1435,7 @@ func TestOutboundStampsBothEnvelopeNames(t *testing.T) {
 	t.Cleanup(peer.Close)
 
 	_, tp := newTestTracer(t)
-	srv := newAMPServer(baseCfg(), tp.Tracer(tracerName), propagation.TraceContext{}, nil)
+	srv := newStubbedAMPServer(baseCfg(), tp.Tracer(tracerName))
 	srv.resolveHost = func(string) string { return peer.URL }
 
 	req := httptest.NewRequest(http.MethodPost, "/amp/analyst", strings.NewReader(`{"q":"hi"}`))
@@ -1374,7 +1459,9 @@ func TestOutboundStampsBothEnvelopeNames(t *testing.T) {
 // header names disagree — it must not pick one.
 func TestGuardDeniesConflictingEnvelopes(t *testing.T) {
 	_, tp := newTestTracer(t)
-	guard := newAMPGuard(ampConfig{RegistryID: "mine", SelfName: "callee"}, tp.Tracer(tracerName))
+	_, verifier := ampTestKeys(t)
+	guard := newAMPGuard(ampConfig{RegistryID: "mine", SelfName: "callee", Namespace: "team-a"},
+		tp.Tracer(tracerName), verifier, testLoopback)
 
 	// The AMP copy claims the callee's own registry (would be ALLOWED alone); the
 	// legacy copy claims another (would be DENIED alone). Neither may win.
@@ -1390,6 +1477,7 @@ func TestGuardDeniesConflictingEnvelopes(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/invoke", nil)
 	req.Header.Set(ampEnvelopeHeader, string(sameRegistry))
 	req.Header.Set(legacyEnvelopeHeader, string(otherRegistry))
+	req.Header.Set(runcap.AttestationHeaderName, attestationOf(t, "caller", "mine", "", "callee"))
 	rec := httptest.NewRecorder()
 
 	if guard.enforceInbound(context.Background(), rec, req) {

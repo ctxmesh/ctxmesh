@@ -73,7 +73,11 @@ func main() {
 	// non-mesh agent's /invoke path is unchanged.
 	var guard inboundGuard
 	if cfg.AMPEnabled() {
-		guard = newAMPGuard(cfg.AMP, tracer)
+		verifier, vErr := capabilityVerifierFromEnv(os.Getenv)
+		if vErr != nil {
+			fmt.Fprintf(os.Stderr, "launcher: AMP: %v; attested calls and run capabilities are refused\n", vErr)
+		}
+		guard = newAMPGuard(cfg.AMP, tracer, verifier, processLoopbackSecret())
 	}
 
 	// Async AMP consumer (eventing path): wired when the agent is a registry
@@ -117,7 +121,8 @@ func main() {
 			seen:    seen,
 			tracer:  tracer,
 			offload: off,
-			invoke:  newProxyInvoker(cfg.ProxyPort, &http.Client{Timeout: ampRequestTimeout, CheckRedirect: refuseRedirect}),
+			invoke: newProxyInvoker(cfg.ProxyPort, processLoopbackSecret(),
+				&http.Client{Timeout: ampRequestTimeout, CheckRedirect: refuseRedirect}),
 		}
 	}
 	handler := buildHandler(tracer, prop, upstreamURL, cfg, guard, consumer)

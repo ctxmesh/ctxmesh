@@ -33,6 +33,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 const tracerName = "ctxmesh/launcher"
@@ -283,6 +285,11 @@ func buildHandler(
 		// instrumentation can nest beneath this span.
 		outReq := r.Clone(ctx)
 		prop.Inject(ctx, propagation.HeaderCarrier(outReq.Header))
+		// Never handed to the agent's code, on any agent: an AMP caller's attestation is good for
+		// this agent, and code holding it could use it here as that caller; the loopback marker is
+		// this launcher's own secret (ADR 0153).
+		outReq.Header.Del(runcap.AttestationHeaderName)
+		outReq.Header.Del(ampLoopbackHeader)
 
 		// Bind the run capability before the agent's code sees it (ADR 0124). The exchange is single-use,
 		// so whoever binds first owns the capability — and that must never be the agent's code.

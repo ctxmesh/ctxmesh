@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+**Security: any pod in the cluster could invoke an agent in an AgentRegistry, past its registry's
+isolation and its `allowedCallers`.** The launcher checked registry isolation and the callee's
+`allowedCallers` and role rules only when a request carried an AMP envelope, the envelope was
+whatever the caller wrote, and a request without one passed as ordinary traffic. Knative's
+cluster-local route goes through Kourier, which every registry's network policy admits, so a pod in
+another registry or another namespace reached any member by leaving the envelope off, or by writing
+one. A chained hop also took its registry from the envelope the agent's own code echoed back,
+`AGENT_REGISTRY_ID` and `AGENT_ROLE` could be set in `spec.env`, and the edge forwarded envelope
+headers from outside. Confirmed on a live cluster.
+
+A registry member now admits `/invoke` only from:
+
+- an AMP call from another member's launcher, carrying the platform's attestation of the caller:
+  the launcher trades its pod's token at the BFF for a five-minute attestation naming its agent,
+  registry and role and the agent it is calling, and the callee requires the envelope to match it;
+- its own async consumer;
+- a request carrying a run capability minted for that agent, which is how the console, runs,
+  workflows, sub-runs and the authenticating edge call it.
+
+Anything else gets HTTP 403 `caller_not_allowed`. Agents in no registry are unchanged. A chained hop
+claims its own registry. `AGENT_REGISTRY_ID` and `AGENT_ROLE` are now platform identity variables:
+a value in `spec.env` is not used, and `IdentityEnvIgnored` names it. The edge removes
+`X-AMP-Envelope`, `X-A2A-Envelope` and `X-AMP-Attestation` from inbound requests. An agent whose
+launcher cannot get an attestation fails the hop with HTTP 503 `attestation_unavailable` instead of
+sending it unattested.
+
+**Behaviour change:** a request to a member's `/invoke` that does not come through the platform,
+such as a `curl` to its cluster-local URL or through an edge with ext-auth off, is now refused. Go
+through the console or `POST /api/invoke` and `/api/runs`. Every registry member rolls one new
+revision on upgrade, with its BFF token, the capability key and the posture added; an approved
+revision stays approved. `controllerManager.amp.requireAttestation: false` keeps admitting
+unattested calls during a staged upgrade, while still refusing a bad attestation; the
+`amp.admission` span attribute says how each call was admitted, so the flag can be turned back on
+once `unattested` stops appearing. Async deliveries (Knative Eventing and the JetStream dispatcher)
+still carry a self-asserted envelope.
+
 **Security: the Langfuse key was readable in every agent's pod spec.** The trace collector carried
 it as a literal environment value, so anyone who could `kubectl get pods` in an agent namespace
 could read it. And an agent whose namespace had no `langfuse-otlp` Secret was given the *platform*
