@@ -192,6 +192,11 @@ func TestBinding_ValidRemote_InjectionAndConfigMap(t *testing.T) {
 	toolsPath, ok := envValue(user, "TOOLS_JSON_PATH")
 	require.True(t, ok, "TOOLS_JSON_PATH tells the launcher and the SDKs where the manifest is")
 	assert.Equal(t, "/etc/agent/tools/tools.json", toolsPath.Value)
+	// A namespace enforcing the restricted Pod Security Standard admits this pod: every container in it
+	// is the platform's, and a pod is judged by its worst container.
+	for _, c := range containers {
+		assert.Empty(t, restrictedViolations(c), "%s fails the restricted profile", c.Name)
+	}
 
 	// CM volume must be present and reference <agent>-tools.
 	vol, ok := volumeByName(ksvc.Spec.Template.Spec.Volumes, toolsVolumeName)

@@ -23,6 +23,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/utils/ptr"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
@@ -163,11 +164,27 @@ func egressSidecarContainer(
 	}
 	env = append(env, corev1.EnvVar{Name: envGoMemLimit, Value: egressSidecarGoMemLimit})
 	return corev1.Container{
-		Name:         egressSidecarContainerName,
-		Image:        cfg.SidecarImage,
-		Env:          env,
-		VolumeMounts: mounts,
-		Resources:    egressSidecarResources(),
+		Name:            egressSidecarContainerName,
+		Image:           cfg.SidecarImage,
+		Env:             env,
+		VolumeMounts:    mounts,
+		Resources:       egressSidecarResources(),
+		SecurityContext: egressSidecarSecurityContext(),
+	}
+}
+
+// egressSidecarSecurityContext meets the restricted Pod Security Standard, which judges a pod by its
+// worst container: without it a namespace enforcing restricted refuses every tool-bound agent. The
+// image runs as a fixed non-root uid (Dockerfile.egress-sidecar) and the binary writes no file, so the
+// root filesystem is read-only too. It does not follow spec.unconfined: that exception is for the
+// author's image, and this one is the platform's.
+func egressSidecarSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		RunAsNonRoot:             ptr.To(true),
+		AllowPrivilegeEscalation: ptr.To(false),
+		ReadOnlyRootFilesystem:   ptr.To(true),
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{capabilityAll}},
+		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
 }
 

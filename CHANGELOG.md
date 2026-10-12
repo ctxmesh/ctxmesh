@@ -83,6 +83,12 @@ Kubernetes client. The sidecar refuses to start without `TOKEN_SERVICE_URL`, and
 refuses to deploy a tool-bound agent on an install without one, naming the setting, rather than
 deploy a pod whose sidecar crash-loops. The controller no longer reads `MCP_CREDENTIAL_NAMESPACE`.
 
+**Fixed: a namespace enforcing the restricted Pod Security Standard refused every tool-bound agent.**
+The egress sidecar had no securityContext, and a pod is judged by its worst container. It now runs
+non-root with no privilege escalation, every capability dropped, the RuntimeDefault seccomp profile
+and a read-only root filesystem. A sidecar-mode tool container is still the binding author's image
+and carries none, so an agent with one is still refused there.
+
 **Changed: every sidecar the platform injects has CPU and memory limits.** The egress sidecar is
 limited to 500m and 256Mi, with `GOMEMLIMIT` below that, sized from a load measurement of the
 sidecar; the trace collector gains a 250m CPU limit beside its 256Mi. Every agent takes one new

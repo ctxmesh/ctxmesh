@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -319,4 +320,50 @@ func TestEgressSidecarContainer_LimitsAndGoMemLimit(t *testing.T) {
 	soft, err := resource.ParseQuantity(strings.TrimSuffix(e.Value, "B"))
 	require.NoError(t, err, "GOMEMLIMIT %q is a byte quantity", e.Value)
 	assert.True(t, soft.Cmp(*limit) < 0, "GOMEMLIMIT %s must be below the memory limit %s", e.Value, limit)
+}
+
+// restrictedViolations lists what keeps a container from the restricted Pod Security Standard's
+// container-level rules (privilege escalation, capabilities, non-root, seccomp). A pod is judged by its
+// worst container, so one injected container failing these refuses the whole agent.
+func restrictedViolations(c corev1.Container) []string {
+	sc := c.SecurityContext
+	if sc == nil {
+		return []string{"no securityContext"}
+	}
+	var v []string
+	if sc.Privileged != nil && *sc.Privileged {
+		v = append(v, "privileged")
+	}
+	if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
+		v = append(v, "allowPrivilegeEscalation is not false")
+	}
+	if sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
+		v = append(v, "runAsNonRoot is not true")
+	}
+	if sc.RunAsUser != nil && *sc.RunAsUser == 0 {
+		v = append(v, "runAsUser is 0")
+	}
+	if sc.Capabilities == nil || !slices.Contains(sc.Capabilities.Drop, capabilityAll) {
+		v = append(v, "capabilities do not drop ALL")
+	} else {
+		for _, add := range sc.Capabilities.Add {
+			if add != "NET_BIND_SERVICE" {
+				v = append(v, "adds capability "+string(add))
+			}
+		}
+	}
+	if sc.SeccompProfile == nil ||
+		(sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault && sc.SeccompProfile.Type != corev1.SeccompProfileTypeLocalhost) {
+		v = append(v, "seccompProfile is not RuntimeDefault or Localhost")
+	}
+	return v
+}
+
+func TestEgressSidecarContainer_RestrictedPodSecurity(t *testing.T) {
+	c := egressSidecarContainer(OBOEgressConfig{SidecarImage: "img", TokenServiceURL: "http://ts"},
+		"ns", "ns/a", "", "[]", false, nil, nil, nil, nil, nil)
+	assert.Empty(t, restrictedViolations(c))
+	require.NotNil(t, c.SecurityContext.ReadOnlyRootFilesystem)
+	assert.True(t, *c.SecurityContext.ReadOnlyRootFilesystem, "the sidecar writes no file")
+	assert.Nil(t, c.SecurityContext.RunAsUser, "the uid is the image's (Dockerfile.egress-sidecar)")
 }

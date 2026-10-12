@@ -2200,8 +2200,9 @@ func langfuseSecretRequests(ctx context.Context, c client.Reader, obj client.Obj
 //   - v3: every agent gets BFF_INTERNAL_URL, so its launcher can bind the run capability (ADR 0124).
 //   - v4: every revision carries a run timeout and a target-burst-capacity (ADR 0147).
 //   - v5: every agent carries AGENT_VERSION, the version its online scores are keyed by.
-//   - v6: every injected sidecar has CPU and memory limits, and tool discovery moved from a sidecar
-//     into the launcher (the agent container mounts the tools ConfigMap).
+//   - v6: every injected sidecar has CPU and memory limits, the egress sidecar a restricted-profile
+//     securityContext, and tool discovery moved from a sidecar into the launcher (the agent container
+//     mounts the tools ConfigMap).
 const podContractVersion = "v6"
 
 // supersededPodContracts are the contracts whose revision names may still be serving, approved or recorded
