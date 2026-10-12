@@ -153,4 +153,26 @@ func TestCostAndTenantsForAPersonaBoundToOneNamespace(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, get(operator, "/api/cost/breakdown?by=agent&tenant=cost-tenant").Code,
 			"naming a tenant needs the cluster-wide cost grant, as before")
 	})
+
+	// The shipped viewer role bound cluster-wide grants get and list on tenants; with the operator
+	// role bound only in their namespace, this person sees every Tenant and may read cost in one
+	// namespace. A tenant's breakdown refuses them, so they must not be asked to name one.
+	t.Run("a cluster-wide viewer who operates one namespace reads that namespace's cost", func(t *testing.T) {
+		viewerRole := installPersona(t, admin, "ctxmesh_viewer_role.yaml")
+		viewerOperator := personaUser(t, admin, mine, "cost-viewer-operator", operatorRole)
+		require.NoError(t, admin.Create(ctx, &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "cost-viewer-operator-view"},
+			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: viewerRole},
+			Subjects:   []rbacv1.Subject{{Kind: "User", Name: "cost-viewer-operator", APIGroup: rbacv1.GroupName}},
+		}))
+
+		require.Equal(t, http.StatusOK, get(viewerOperator, "/api/tenants").Code, "they can list Tenants")
+		assert.True(t, canListTenants(t, viewerOperator))
+		got, resp := namespacesOf(t, get(viewerOperator, "/api/cost/breakdown?by=agent"))
+		assert.Equal(t, []string{mine}, got)
+		assert.Equal(t, []string{mine}, resp.Namespaces)
+		assert.InDelta(t, 1.0, resp.Total.TotalCostUSD, 1e-9)
+		assert.Equal(t, http.StatusForbidden, get(viewerOperator, "/api/cost/breakdown?by=agent&tenant=cost-tenant").Code,
+			"the tenant path is still the cluster-wide cost reader's")
+	})
 }

@@ -86,13 +86,15 @@ import {
 //   • The forecast returns null on 501 too — calm, and the card is absent.
 //
 // ── TENANT SCOPE (ADR 0077) ─────────────────────────────────────────────────
-// A tenant admin scopes the page by tenant, so the page lists tenants FIRST and
-// picks one: with tenants present it defaults to the first (never a dead end),
-// and with genuinely zero tenants the BFF serves the cluster-wide breakdown
-// (M99 B1). A caller who cannot list tenants (a 403) is not a tenant admin: the
-// page asks for no tenant and the BFF answers for the caller's workspaces. Only
-// a tenant list that FAILED leaves nothing to scope by, and the page says
-// exactly that instead of rendering an empty table that would read as "no spend".
+// The BFF decides who is scoped by tenant, so the page first asks for no
+// tenant. Anyone who may not read cost cluster-wide gets their workspaces, even
+// if they can list tenants: naming a tenant would be refused them. With
+// genuinely zero tenants a cluster-wide reader gets the whole cluster (M99 B1).
+// Only a cluster-wide reader with tenants to scope by is answered
+// `tenant_required`, and the page then picks the first tenant (never a dead
+// end). If it cannot list tenants, or the list FAILED, there is nothing to pick
+// and the page says exactly that instead of an empty table that would read as
+// "no spend".
 //
 // data-testid contract:
 //   cost-page             — root container
@@ -441,16 +443,16 @@ type LoadState =
       /** The caller's workspaces the breakdown covers; absent for a tenant or the cluster. */
       namespaces?: string[];
     }
-  // ADR 0077 — the breakdown must be scoped by a tenant and we have no list to
-  // scope by (the list failed, or is still loading). NOT "no spend".
+  // ADR 0077 — the BFF requires a tenant and none is picked yet (the list is
+  // loading, failed, or refused). NOT "no spend".
   | { kind: "no-tenant" }
   | { kind: "unavailable" } // 501 — no trace backend on this install
   | { kind: "degraded"; message: string } // 200 + notice — trace store transiently down
   | { kind: "error"; message: string; forbidden: boolean };
 
 // TenantsState is the PICKER's own load state, kept distinct from the
-// breakdown's. `forbidden` is a first-class outcome: a caller who cannot list
-// tenants is not a tenant admin, gets no picker, and reads their workspaces.
+// breakdown's. `forbidden` is a first-class outcome: there is no list to pick
+// from, which matters only to a caller the BFF asks to name a tenant.
 type TenantsState =
   | { kind: "loading" }
   | { kind: "ready"; tenants: TenantSummary[] }
@@ -527,14 +529,20 @@ export function CostPage() {
     return () => controller.abort();
   }, [tenantsAttempt]);
 
-  // Default-to-first: landing with no ?tenant= while tenants exist picks the
-  // first, so the page is immediately useful instead of dead-ending.
+  // tenantRequired: the BFF answered `tenant_required` to a breakdown with no
+  // tenant, so this caller reads cost cluster-wide and spend is grouped by
+  // tenant. Until it says so the page never picks a tenant: a caller without
+  // cluster-wide cost access would be refused every tenant it listed.
+  const [tenantRequired, setTenantRequired] = useState(false);
+
+  // Default-to-first: a caller asked to name a tenant lands on the first, so the
+  // page is immediately useful instead of dead-ending.
   useEffect(() => {
-    if (tenant) return;
+    if (tenant || !tenantRequired) return;
     if (tenantsState.kind === "ready" && tenantsState.tenants.length > 0) {
       setTenant(tenantsState.tenants[0].name);
     }
-  }, [tenant, tenantsState, setTenant]);
+  }, [tenant, tenantRequired, tenantsState, setTenant]);
 
   // Cursor pagination: stack of cursors, one per page. [""] = page 0.
   const [pageStack, setPageStack] = useState<string[]>([""]);
@@ -549,31 +557,21 @@ export function CostPage() {
     setPageStack([""]);
   }, [tenant]);
 
-  // untenanted is the ONLY thing the breakdown fetch needs from the tenant
-  // list: there is no tenant to pick, because the cluster has none (M99 B1) or
-  // the caller cannot list them; either way the breakdown is fetched without
-  // one and the BFF decides its scope. Depending on the whole tenantsState
-  // instead re-created `load` when the list merely finished loading, which
-  // fired a SECOND identical breakdown fetch and flashed already-rendered rows
-  // away (m52.G8). As a boolean it only changes when the answer actually changes.
-  const zeroTenants =
-    tenantsState.kind === "ready" && tenantsState.tenants.length === 0;
-  const untenanted = zeroTenants || tenantsState.kind === "forbidden";
-
+  // `load` depends on nothing from the tenant list: the breakdown is fetched
+  // without a tenant and the BFF decides its scope. Depending on the list
+  // re-created `load` when the list merely finished loading, which fired a
+  // SECOND identical breakdown fetch and flashed already-rendered rows away
+  // (m52.G8).
   const load = useCallback(() => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
-    // ADR 0077: the breakdown REQUIRES ?tenant= when the caller sees tenants.
-    // With none to pick (see untenanted) it is fetched without one. While the
-    // list is still loading, failed, or non-empty (default-to-first will select
-    // one), hold the calm no-tenant state.
-    if (!tenant) {
-      if (!untenanted) {
-        setLoadState({ kind: "no-tenant" });
-        return;
-      }
+    // Already told to name a tenant: hold the calm no-tenant state until
+    // default-to-first picks one, rather than asking again.
+    if (!tenant && tenantRequired) {
+      setLoadState({ kind: "no-tenant" });
+      return;
     }
 
     setLoadState({ kind: "loading" });
@@ -608,6 +606,11 @@ export function CostPage() {
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted) return;
+        if (!tenant && err instanceof ApiError && err.code === "tenant_required") {
+          setTenantRequired(true);
+          setLoadState({ kind: "no-tenant" });
+          return;
+        }
         // 502 and other non-501 errors surface as a real, retryable error.
         setLoadState({
           kind: "error",
@@ -615,7 +618,7 @@ export function CostPage() {
           forbidden: err instanceof ApiError && err.isForbidden,
         });
       });
-  }, [cursor, tenant, untenanted]);
+  }, [cursor, tenant, tenantRequired]);
 
   useEffect(() => {
     load();
@@ -831,33 +834,41 @@ export function CostPage() {
 
   // The header is shared across every state so the picker is always reachable,
   // not just on the happy path.
+  // The picker is for a caller scoped by tenant: one the BFF asked to name a
+  // tenant, or one already looking at a tenant. Offering it to anyone else
+  // would offer tenants whose breakdown refuses them.
+  const showPicker = tenants.length > 0 && (tenant !== "" || tenantRequired);
   const header = (
     <PageHeader
       title="Cost"
       meta={
         tenant ||
-        (tenantsState.kind === "forbidden"
+        (workspaces !== undefined
           ? "your workspaces"
-          : zeroTenants
+          : loadState.kind === "ready"
             ? "all agents"
             : undefined)
       }
       lede="What the models actually cost, per agent, over a recent window of traced calls. Every figure here is measured — where one is not, it says so."
       actionsSlot={
-        tenants.length > 0 ? (
+        showPicker ? (
           <TenantPicker tenant={tenant} tenants={tenants} onChange={setTenant} />
         ) : undefined
       }
     />
   );
 
-  // Nothing to scope by (ADR 0077). Reached when the tenant list failed, because
-  // the breakdown is 400 without a tenant for anyone who may see tenants. It is
-  // NOT "no spend", and the copy must never let it read that way.
+  // Nothing to scope by (ADR 0077). Reached when the BFF requires a tenant and
+  // the list to pick one from failed, was refused, or came back empty. It is NOT
+  // "no spend", and the copy must never let it read that way.
   if (loadState.kind === "no-tenant") {
-    // The list is still in flight: this is LOADING, not an answer. Claiming
-    // "no tenants" here would be a claim made a beat before the data arrives.
-    if (tenantsState.kind === "loading") {
+    // The list is still in flight, or holds a tenant default-to-first is about
+    // to pick: this is LOADING, not an answer. Claiming "no tenants" here would
+    // be a claim made a beat before the data arrives.
+    if (
+      tenantsState.kind === "loading" ||
+      (tenantsState.kind === "ready" && tenantsState.tenants.length > 0)
+    ) {
       return (
         <div className="min-w-0 space-y-6" data-testid="cost-page">
           {header}
@@ -877,7 +888,15 @@ export function CostPage() {
       <div className="min-w-0 space-y-6" data-testid="cost-page">
         {header}
         <div data-testid="cost-no-tenant">
-          {tenantsState.kind === "error" ? (
+          {tenantsState.kind === "forbidden" ? (
+            <QuietNote title="Cost is grouped by tenant, and you can’t list tenants.">
+              You may read cost across the cluster, so spend is shown one tenant
+              at a time, but your access does not include listing tenants. Open
+              this page with a tenant’s name (<span className="font-mono">?tenant=</span>),
+              or ask whoever administers tenants for access to list them. This
+              is not a report of zero spend.
+            </QuietNote>
+          ) : tenantsState.kind === "error" ? (
             <QuietNote title="Cost is grouped by tenant, and the tenant list didn’t load.">
               Spend is scoped to one tenant at a time, so the breakdown cannot be
               fetched until that list answers. This is not a report of zero

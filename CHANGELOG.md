@@ -151,6 +151,14 @@ everyone. The `developer` and `operator` roles now grant `get` and `list` on `po
 `viewer` role now grants `get`, `list` and `watch` on `skills`, and the `developer` and `operator`
 roles grant the same verbs they hold on `promptversions`, in the namespaces they are bound in.
 
+**Fixed: a person who could list tenants but read cost in one namespace never saw its cost.** The
+shipped `viewer` role bound cluster-wide grants listing tenants, so with `operator` bound in
+`team-a` the breakdown demanded a tenant, the Cost page picked the first one, and the tenant's
+breakdown refused them, because naming a tenant needs cluster-wide cost access. A tenant is now
+required only of a caller who may read cost cluster-wide; anyone else is answered for their
+workspaces, whatever tenants they can list. That refusal now carries the code `tenant_required`,
+and the Cost page asks for no tenant first and picks one only when told to.
+
 **Fixed: a tenant's or a workspace's cost breakdown could show a false zero.** The breakdown cut
 its page from every agent in the cluster and only then kept the ones the caller may see, so an
 agent that ranked below the first page came back as an empty page, a $0 total and a next cursor,

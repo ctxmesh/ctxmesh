@@ -742,7 +742,8 @@ export interface CostBreakdownResponse {
   // (m23.6). Distinguish from a true-empty breakdown.
   notice?: string;
   // namespaces is set when a breakdown asked for with no tenant covers only the
-  // caller's workspaces (a caller who cannot list tenants); total then sums the rows.
+  // caller's workspaces (a caller who may not read cost cluster-wide); total then
+  // sums their rows.
   namespaces?: string[];
 }
 
@@ -4687,7 +4688,8 @@ export const api = {
   // RECENT WINDOW of traces (≤200), NOT all-time spend, filtered to the agents in
   // the tenant's namespaces. An empty tenant asks for none: the BFF then answers
   // for the caller's workspaces, or the cluster when it has no tenants, and is a
-  // 400 for a caller who can see tenants. Returns null on 501 (Langfuse not
+  // 400 with code `tenant_required` for a cluster-wide cost reader who must name
+  // one. Returns null on 501 (Langfuse not
   // configured) as the calm sentinel — callers render "unavailable", NOT an error.
   // Throws ApiError on 502 (Langfuse configured but upstream fetch FAILED) — a real,
   // likely-transient error the UI should surface. This mirrors the 501-calm /

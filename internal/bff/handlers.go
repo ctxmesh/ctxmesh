@@ -582,9 +582,9 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 // `agent:<ns>/<name>` identity tag and returns per-agent cost/token/run counts.
 //
 // Scope (ADR 0077). With ?tenant= the breakdown keeps the tenant's namespaces, behind one
-// cluster-wide SSAR on `costrollups`. Without one, see costScopeWithoutTenant: a caller who sees
-// a tenant must name it, and anyone else gets the namespaces where they may read cost. A denial
-// is 403, never a leaked or empty response.
+// cluster-wide SSAR on `costrollups`. Without one, see costScopeWithoutTenant: a cluster-wide cost
+// reader who sees a tenant must name it, and anyone else gets the namespaces where they may read
+// cost. A denial is 403, never a leaked or empty response.
 //
 // Supported query params:
 //
@@ -697,39 +697,37 @@ const msgCostTenantRequired = "missing required query param: tenant"
 // costScopeWithoutTenant decides what a breakdown given no tenant covers, and reports whether the
 // request may proceed (a refusal has been written).
 //
-// A caller who can list Tenants and sees one must name it: that is tenant scoping, unchanged. A
-// caller who cannot list Tenants is not a tenant admin, and one who sees none has no boundary to
-// pick; either way the breakdown covers the namespaces where the caller may read cost, by the
-// All-workspaces rule. It is cluster-wide (nil) only for a caller who may read cost cluster-wide
-// and can see the cluster has no tenants. One who may read cost cluster-wide but cannot list
-// Tenants must still name one, because the boundaries they cannot see may exist.
+// A tenant only scopes a caller who may read cost cluster-wide: naming one needs that grant, so
+// requiring one of anyone else would refuse them everything. Anyone else gets the namespaces where
+// they may read cost, by the All-workspaces rule, whatever Tenants they can list. A cluster-wide
+// cost reader must name a tenant when they see one, or when they cannot list Tenants (the
+// boundaries they cannot see may exist); the refusal carries errCodeTenantRequired so the console
+// can pick one. On a cluster they can see has no Tenants the breakdown is cluster-wide (nil).
 func (s *Server) costScopeWithoutTenant(w http.ResponseWriter, r *http.Request, caller client.Client) ([]string, bool) {
+	all, namespaces, err := s.listableNamespaces(r.Context(), caller, resourceCostRollups)
+	if err != nil {
+		s.writeAuthzError(w, err, "read the cost breakdown")
+		return nil, false
+	}
+	if !all {
+		return namespaces, true
+	}
 	var tenants agentsv1beta1.TenantList
-	err := caller.List(r.Context(), &tenants)
-	seesTenants := err == nil
+	err = caller.List(r.Context(), &tenants)
 	switch {
-	case err != nil && !apierrors.IsForbidden(err):
+	case err == nil && len(tenants.Items) == 0:
+		return nil, true
+	case err == nil, apierrors.IsForbidden(err):
+		writeErrorCode(w, http.StatusBadRequest, errCodeTenantRequired, msgCostTenantRequired)
+	default:
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
 			return nil, false
 		}
 		s.log.Error(err, "list Tenants for the cost breakdown failed")
 		writeError(w, http.StatusInternalServerError, "failed to list tenants")
-		return nil, false
-	case seesTenants && len(tenants.Items) > 0:
-		writeError(w, http.StatusBadRequest, msgCostTenantRequired)
-		return nil, false
 	}
-	all, namespaces, err := s.listableNamespaces(r.Context(), caller, resourceCostRollups)
-	if err != nil {
-		s.writeAuthzError(w, err, "read the cost breakdown")
-		return nil, false
-	}
-	if all && !seesTenants {
-		writeError(w, http.StatusBadRequest, msgCostTenantRequired)
-		return nil, false
-	}
-	return namespaces, true
+	return nil, false
 }
 
 // handleTraceLink serves GET /api/traces/{id} — resolves a traceId to its one
@@ -957,6 +955,10 @@ const (
 	// (m52.G30). Same status, opposite meaning — one is "never", the other is "not yet", and a
 	// client cannot tell them apart without this.
 	errCodeTracePending = "trace_pending"
+
+	// errCodeTenantRequired marks the 400 a cluster-wide cost reader gets for a breakdown that names
+	// no tenant while tenants exist (or may exist unseen): name one. Anyone else is never sent it.
+	errCodeTenantRequired = "tenant_required"
 )
 
 // msgInvalidJSONBody is the client-safe message for an unparseable request body,

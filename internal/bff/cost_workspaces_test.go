@@ -139,6 +139,36 @@ func TestCostBreakdownWithoutTenantCoversTheCallersWorkspaces(t *testing.T) {
 	assert.Equal(t, int64(10), resp.Total.TotalTokens)
 }
 
+// Seeing Tenants does not make a caller a tenant admin: naming a tenant needs cluster-wide cost
+// access, so a caller who can list Tenants but read cost only in their workspaces is never asked
+// for one, and reads those workspaces.
+func TestCostBreakdownForATenantListerWithoutClusterWideCost(t *testing.T) {
+	s := workspaceCostServer(t, nil, costReaderIn{namespaces: map[string]bool{"mine": true}})
+
+	rec := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp CostBreakdownResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Agents, 1)
+	assert.Equal(t, "mine", resp.Agents[0].AgentNs)
+	assert.Equal(t, []string{"mine"}, resp.Namespaces)
+
+	assert.Equal(t, http.StatusForbidden, serveWithToken(t, s, "/api/cost/breakdown?by=agent&tenant=acme").Code,
+		"naming a tenant still needs the cluster-wide grant")
+}
+
+// The refusal a cluster-wide cost reader gets for naming no tenant says why in a code, so the
+// console can pick one instead of reporting an error.
+func TestCostBreakdownTenantRequiredCarriesItsCode(t *testing.T) {
+	for _, tenantsErr := range []error{nil, forbiddenTenants} {
+		rec := serveWithToken(t, workspaceCostServer(t, tenantsErr, costReaderIn{clusterWide: true}), "/api/cost/breakdown?by=agent")
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		var body errorBody
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, errCodeTenantRequired, body.Code)
+	}
+}
+
 func TestCostBreakdownWithoutTenantRefusals(t *testing.T) {
 	for _, c := range []struct {
 		name       string

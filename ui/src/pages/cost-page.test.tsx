@@ -24,9 +24,9 @@ import type {
 //   • 502 surfaces as a visible error (NOT a calm state)
 //   • 501 degrades calmly to cost-unavailable (NOT an error toast)
 //   • the tenant picker (m86 ADR 0077): lists tenants, defaults to the first
-//     when ?tenant= is absent, and selecting one drives ?tenant= + the fetch
-//   • the calm no-tenant state holds ONLY when zero tenants exist (never a
-//     guaranteed-400 tenant-less breakdown call)
+//     when the BFF answers tenant_required, and selecting one drives ?tenant=
+//     + the fetch; a caller the BFF serves without a tenant is never given one
+//   • the calm no-tenant state says why nothing is shown, never "no spend"
 
 function item(over: Partial<AgentCostItem> = {}): AgentCostItem {
   return {
@@ -113,6 +113,21 @@ function installFetch(
     }),
   );
   return captured;
+}
+
+// TENANT_REQUIRED is the BFF's answer to a breakdown that names no tenant from a
+// caller who reads cost cluster-wide while tenants exist (handlers.go
+// costScopeWithoutTenant).
+const TENANT_REQUIRED = {
+  ok: false,
+  status: 400,
+  body: { error: "missing required query param: tenant", code: "tenant_required" },
+};
+
+// tenantAdmin answers like the BFF for a cluster-wide cost reader: no tenant is
+// tenant_required, a named tenant gets `body`.
+function tenantAdmin(body: unknown) {
+  return (qs: URLSearchParams) => (qs.get("tenant") ? { ok: true, body } : TENANT_REQUIRED);
 }
 
 // renderPage renders the CostPage at /cost. As of ADR 0077 the breakdown is
@@ -608,8 +623,9 @@ describe("CostPage — query params sent to API (m16.10)", () => {
   });
 
   it("says WHY the page is blank when the tenant list failed — never 'no spend'", async () => {
-    // A list that failed is not a permission answer: the caller may be a tenant admin, so
-    // the breakdown is not fetched without a tenant and the page says nothing was asked.
+    // The BFF asks this caller to name a tenant and the list to pick one from failed, so
+    // nothing can be asked and the page says so. (The breakdown with no tenant is asked
+    // first now: the BFF, not the tenant list, decides who is scoped by tenant.)
     const captured: string[] = [];
     vi.stubGlobal(
       "fetch",
@@ -617,11 +633,12 @@ describe("CostPage — query params sent to API (m16.10)", () => {
         const url = typeof input === "string" ? input : input.toString();
         captured.push(url);
         const failed = url.includes("/api/tenants");
+        const r = failed ? { status: 500, body: { error: "etcd" } } : TENANT_REQUIRED;
         return Promise.resolve({
-          ok: !failed,
-          status: failed ? 500 : 200,
-          json: async () => (failed ? { error: "etcd" } : { agents: [], total: summary(), nextCursor: "" }),
-          text: async () => JSON.stringify({ error: "etcd" }),
+          ok: false,
+          status: r.status,
+          json: async () => r.body,
+          text: async () => JSON.stringify(r.body),
         } as Response);
       }),
     );
@@ -634,7 +651,65 @@ describe("CostPage — query params sent to API (m16.10)", () => {
     // No table, and above all no empty one that could be read as zero spend.
     expect(screen.queryByTestId("cost-breakdown-table")).toBeNull();
     expect(screen.queryByText("No cost data yet")).toBeNull();
-    expect(captured.some((u) => u.includes("/api/cost/breakdown"))).toBe(false);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(captured.some((u) => u.includes("tenant="))).toBe(false);
+  });
+
+  // The persona the shipped roles produce when viewer is bound cluster-wide and operator in
+  // one namespace: they list every tenant but read cost only in team-a. A tenant's
+  // breakdown would refuse them, so the BFF answers for their workspaces and the page must
+  // neither pick a tenant nor offer one.
+  it("a caller who lists tenants but reads cost only in their workspaces is never given a tenant", async () => {
+    const captured = installFetch((qs) =>
+      qs.get("tenant")
+        ? { ok: false, status: 403, body: { error: "forbidden" } }
+        : {
+            ok: true,
+            body: {
+              agents: [item({ agentNs: "team-a", agentName: "billing-agent" })],
+              total: summary({ observations: 0 }),
+              nextCursor: "",
+              namespaces: ["team-a"],
+            },
+          },
+    );
+
+    renderPage(""); // no ?tenant=
+
+    const note = await screen.findByTestId("cost-workspaces-note");
+    expect(note).toHaveTextContent("team-a");
+    expect(screen.getByTestId("cost-row-team-a-billing-agent")).toBeInTheDocument();
+    // Let the tenant list land; the page still must not reach for a tenant.
+    await waitFor(() => expect(captured.some((u) => u.includes("/api/tenants"))).toBe(true));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(captured.some((u) => u.includes("tenant="))).toBe(false);
+    expect(screen.queryByTestId("cost-tenant-picker")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("tells a cluster-wide cost reader who cannot list tenants why there is nothing to show", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const r = url.includes("/api/tenants")
+          ? { status: 403, body: { error: "forbidden" } }
+          : TENANT_REQUIRED;
+        return Promise.resolve({
+          ok: false,
+          status: r.status,
+          json: async () => r.body,
+          text: async () => JSON.stringify(r.body),
+        } as Response);
+      }),
+    );
+
+    renderPage("");
+
+    const note = await screen.findByTestId("cost-no-tenant");
+    expect(note).toHaveTextContent(/can’t list tenants/i);
+    expect(screen.queryByText("No cost data yet")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
 
@@ -642,10 +717,7 @@ describe("CostPage — query params sent to API (m16.10)", () => {
 
 describe("CostPage — tenant picker (m86, ADR 0077)", () => {
   it("lists the tenants in the picker", async () => {
-    installFetch(() => ({
-      ok: true,
-      body: { agents: [item()], total: summary(), nextCursor: "" },
-    }));
+    installFetch(tenantAdmin({ agents: [item()], total: summary(), nextCursor: "" }));
 
     renderPage(""); // no ?tenant= → default-to-first
 
@@ -657,11 +729,8 @@ describe("CostPage — tenant picker (m86, ADR 0077)", () => {
     });
   });
 
-  it("defaults to the FIRST tenant when ?tenant= is absent and tenants exist", async () => {
-    const captured = installFetch(() => ({
-      ok: true,
-      body: { agents: [item()], total: summary(), nextCursor: "" },
-    }));
+  it("defaults to the FIRST tenant when the BFF asks for one and tenants exist", async () => {
+    const captured = installFetch(tenantAdmin({ agents: [item()], total: summary(), nextCursor: "" }));
 
     renderPage(""); // no ?tenant=
 
