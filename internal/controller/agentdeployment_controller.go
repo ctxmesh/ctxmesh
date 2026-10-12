@@ -2200,14 +2200,16 @@ func langfuseSecretRequests(ctx context.Context, c client.Reader, obj client.Obj
 //   - v3: every agent gets BFF_INTERNAL_URL, so its launcher can bind the run capability (ADR 0124).
 //   - v4: every revision carries a run timeout and a target-burst-capacity (ADR 0147).
 //   - v5: every agent carries AGENT_VERSION, the version its online scores are keyed by.
-const podContractVersion = "v5"
+//   - v6: every injected sidecar has CPU and memory limits, and tool discovery moved from a sidecar
+//     into the launcher (the agent container mounts the tools ConfigMap).
+const podContractVersion = "v6"
 
 // supersededPodContracts are the contracts whose revision names may still be serving, approved or recorded
 // when this controller starts: the one podContractVersion replaced, and "" for releases up to
 // v0.1.0-beta.8, which folded no contract. A revision whose name differs from the candidate's only by one
 // of these is the same pod, so its approval carries to the candidate (candidateRevision.names). Update the
 // list with every bump; a contract left off it re-gates every gated agent on upgrade.
-var supersededPodContracts = []string{"", "v4"}
+var supersededPodContracts = []string{"", "v5"}
 
 // traceExportFold folds the pod contract into the revision digest. Whether export is on
 // is part of it so that creating, completing or deleting a namespace's langfuse-otlp Secret reaches

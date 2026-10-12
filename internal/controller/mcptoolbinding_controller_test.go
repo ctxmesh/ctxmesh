@@ -20,6 +20,7 @@ package controller
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -315,6 +316,15 @@ func TestBinding_ValidSidecar_ToolContainerInjected(t *testing.T) {
 	// user + collector + tool + egress-sidecar = 4 (M82: front-all is always-on, so even an in-pod
 	// sidecar-mode tool is fronted through the injected egress sidecar; discovery is the launcher's).
 	require.Len(t, containers, 4, "user + collector + sidecar tool + egress sidecar")
+	// Every container the platform builds into the pod is bounded. The agent's own container takes
+	// spec.resources and a tool container is the binding author's image, so neither is sized here.
+	for _, c := range containers {
+		if c.Name == "user-container" || strings.HasPrefix(c.Name, "tool-") {
+			continue
+		}
+		assert.False(t, c.Resources.Limits.Cpu().IsZero(), "%s has no CPU limit", c.Name)
+		assert.False(t, c.Resources.Limits.Memory().IsZero(), "%s has no memory limit", c.Name)
+	}
 	_, hasEgress := containerByName(containers, egressSidecarContainerName)
 	require.True(t, hasEgress, "M82: the always-on egress sidecar is injected for a tool-having agent")
 

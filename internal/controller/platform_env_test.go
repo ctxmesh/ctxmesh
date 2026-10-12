@@ -90,7 +90,7 @@ func TestWithSpecEnv(t *testing.T) {
 // containers, so these need no class.
 var envVarLiteralsOutsideAgentContainer = []string{
 	envEgressAgent, envEgressListenAddr, envEgressRoutes, envEgressBoundary,
-	envEgressResponseHeaderTimeout, envEgressStreamIdleTimeout, envToolPolicyFile, envEgressRoutesFile,
+	envEgressResponseHeaderTimeout, envEgressStreamIdleTimeout, envToolPolicyFile, envEgressRoutesFile, envGoMemLimit,
 	"PORT",
 }
 

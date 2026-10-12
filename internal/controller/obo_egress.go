@@ -161,16 +161,36 @@ func egressSidecarContainer(
 	if routesMount != nil {
 		mounts = append(mounts, *routesMount) // J7: the hot-reloadable routes ConfigMap.
 	}
+	env = append(env, corev1.EnvVar{Name: envGoMemLimit, Value: egressSidecarGoMemLimit})
 	return corev1.Container{
 		Name:         egressSidecarContainerName,
 		Image:        cfg.SidecarImage,
 		Env:          env,
 		VolumeMounts: mounts,
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("25m"),
-				corev1.ResourceMemory: resource.MustParse("64Mi"),
-			},
+		Resources:    egressSidecarResources(),
+	}
+}
+
+// The sidecar's limits, from a local load measurement of the sidecar binary (m184.40): about 16Mi idle;
+// 25Mi at 64 concurrent 1 MiB calls streamed through an allow-all route; 138Mi and a quarter core at 64
+// concurrent 1 MiB calls on a route whose policy makes it read each body (450Mi at 4 MiB bodies, which
+// the limit deliberately does not cover: a pod making 64 such calls at once is OOM-killed and restarts
+// its sidecar rather than starving the node). GOMEMLIMIT sits below the memory limit so the collector
+// runs before the kernel kills the process.
+const (
+	envGoMemLimit           = "GOMEMLIMIT"
+	egressSidecarGoMemLimit = "230MiB"
+)
+
+func egressSidecarResources() corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("25m"),
+			corev1.ResourceMemory: resource.MustParse("64Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("500m"),
+			corev1.ResourceMemory: resource.MustParse("256Mi"),
 		},
 	}
 }

@@ -104,7 +104,7 @@ func assertServesRenamed(t *testing.T, name, namespace, rev string) {
 func TestPodContract_ApprovedGatedAgentStaysPromoted(t *testing.T) {
 	const namespace = "default"
 	for _, tc := range []struct{ name, agent, contract string }{
-		{"approved under contract v4", "contract-gated-v4", "v4"},
+		{"approved under contract v5", "contract-gated-v5", "v5"},
 		{"approved under the last release, which folded no contract", "contract-gated-pre", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -155,7 +155,7 @@ func TestPodContract_PromotedCanaryAgentMovesWithoutSplit(t *testing.T) {
 		r := gateReconciler(0.9)
 		_, r2, _, _ := promoteOver(t, r, agent, namespace, es.Name, canary(false), nil)
 		require.Equal(t, r2, getDeploy(t, agent, namespace).Annotations[promoteAnnotation])
-		renameToOlderContract(t, agent, namespace, r2, plainRevisionUnder(t, getDeploy(t, agent, namespace), "v4"))
+		renameToOlderContract(t, agent, namespace, r2, plainRevisionUnder(t, getDeploy(t, agent, namespace), "v5"))
 
 		reconcileNN(t, r, agent, namespace)
 		assertServesRenamed(t, agent, namespace, r2)
@@ -167,7 +167,7 @@ func TestPodContract_PromotedCanaryAgentMovesWithoutSplit(t *testing.T) {
 		r := gateReconciler(0.9)
 		_, r2, _, _ := promoteOver(t, r, agent, namespace, es.Name, canary(true), nil)
 		require.Empty(t, getDeploy(t, agent, namespace).Annotations[promoteAnnotation], "no person approved it")
-		renameToOlderContract(t, agent, namespace, r2, plainRevisionUnder(t, getDeploy(t, agent, namespace), "v4"))
+		renameToOlderContract(t, agent, namespace, r2, plainRevisionUnder(t, getDeploy(t, agent, namespace), "v5"))
 
 		reconcileNN(t, r, agent, namespace)
 		assertServesRenamed(t, agent, namespace, r2)
@@ -189,7 +189,7 @@ func TestPodContract_PromotedCanaryAgentMovesWithoutSplit(t *testing.T) {
 		r1 := getDeploy(t, agent, namespace).Status.Gate.ScoredRevision
 		promoteTo(t, r, agent, namespace, r1)
 		require.Empty(t, trafficMap(getKsvc(t, agent, namespace)), "a first deploy routes by no name")
-		renameToOlderContract(t, agent, namespace, r1, plainRevisionUnder(t, getDeploy(t, agent, namespace), "v4"))
+		renameToOlderContract(t, agent, namespace, r1, plainRevisionUnder(t, getDeploy(t, agent, namespace), "v5"))
 
 		reconcileNN(t, r, agent, namespace)
 		assertServesRenamed(t, agent, namespace, r1)
@@ -214,7 +214,7 @@ func TestPodContract_RollbackTargetStaysServed(t *testing.T) {
 			r1, _, v1, _ := rollbackAfterPromotion(t, r, tc.agent, namespace, es.Name, tc.rollout, false, nil)
 			reconcileNN(t, r, tc.agent, namespace)
 			require.Equal(t, r1, assertRollbackServes(t, tc.agent, namespace, v1))
-			renameToOlderContract(t, tc.agent, namespace, r1, plainRevisionUnder(t, getDeploy(t, tc.agent, namespace), "v4"))
+			renameToOlderContract(t, tc.agent, namespace, r1, plainRevisionUnder(t, getDeploy(t, tc.agent, namespace), "v5"))
 
 			reconcileNN(t, r, tc.agent, namespace)
 			assert.Equal(t, r1, assertRollbackServes(t, tc.agent, namespace, v1))
@@ -248,7 +248,7 @@ func TestPodContract_PromptChangeIsStillGated(t *testing.T) {
 	cand, err := r.candidateRevisionName(testCtx, d, hash)
 	require.NoError(t, err)
 	require.Equal(t, cur, cand.name)
-	renameToOlderContract(t, name, namespace, cur, cand.superseded[slices.Index(supersededPodContracts, "v4")])
+	renameToOlderContract(t, name, namespace, cur, cand.superseded[slices.Index(supersededPodContracts, "v5")])
 	reconcileNN(t, r, name, namespace)
 	assertServesRenamed(t, name, namespace, cur)
 	version := getDeploy(t, name, namespace).Status.LatestVersion

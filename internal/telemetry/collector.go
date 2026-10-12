@@ -278,9 +278,12 @@ func Container(configMapName, image string) corev1.Container {
 				corev1.ResourceCPU:    resource.MustParse("50m"),
 				corev1.ResourceMemory: resource.MustParse("64Mi"),
 			},
-			// Memory limit caps a runaway/leaking collector so it can't OOM the
-			// node; 256Mi is ample for M3 dev span volume.
+			// The limits cap a runaway or leaking collector so it cannot starve the node. One agent's
+			// spans are a small, bursty stream through a batch processor: 256Mi is ample for it, and
+			// 250m (five times the request) bounds a spin without throttling a burst. Neither was
+			// load-measured; the collector's future is weighed on cost in m184.49.
 			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("250m"),
 				corev1.ResourceMemory: resource.MustParse("256Mi"),
 			},
 		},

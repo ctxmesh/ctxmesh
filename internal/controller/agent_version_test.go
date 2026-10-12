@@ -145,14 +145,14 @@ func TestACandidateIsNamedUnderEachSupersededContract(t *testing.T) {
 	}
 	require.Equal(t, named(traceExportFold(pre, false)), cand.name,
 		"the test's digest inputs must be the controller's, or the names below are not what older controllers wrote")
-	v4, release := named(podContractFold(pre, "v4", false)), named(pre)
-	assert.ElementsMatch(t, []string{v4, release}, cand.superseded)
+	previous, release := named(podContractFold(pre, "v5", false)), named(pre)
+	assert.ElementsMatch(t, []string{previous, release}, cand.superseded)
 
-	for _, rev := range []string{cand.name, v4, release} {
+	for _, rev := range []string{cand.name, previous, release} {
 		assert.True(t, cand.names(rev), "%q is the candidate's pod", rev)
 	}
 	assert.False(t, cand.renamedFrom(cand.name))
-	assert.True(t, cand.renamedFrom(v4))
+	assert.True(t, cand.renamedFrom(previous))
 	assert.False(t, cand.names(""))
 
 	other, err := specHash(deploy(8090).Spec)

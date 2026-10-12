@@ -17,11 +17,13 @@ limitations under the License.
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
@@ -300,4 +302,21 @@ func envByNameC(env []corev1.EnvVar) map[string]string {
 		out[e.Name] = e.Value
 	}
 	return out
+}
+
+// GOMEMLIMIT must sit below the memory limit, or the kernel kills the sidecar before Go's collector
+// ever runs against the limit.
+func TestEgressSidecarContainer_LimitsAndGoMemLimit(t *testing.T) {
+	c := egressSidecarContainer(OBOEgressConfig{SidecarImage: "img", TokenServiceURL: "http://ts"},
+		"ns", "ns/a", "", "[]", false, nil, nil, nil, nil, nil)
+	limit := c.Resources.Limits.Memory()
+	require.False(t, limit.IsZero(), "the egress sidecar has a memory limit")
+	require.False(t, c.Resources.Limits.Cpu().IsZero(), "the egress sidecar has a CPU limit")
+	assert.True(t, c.Resources.Requests.Memory().Cmp(*limit) < 0, "request below limit")
+
+	e, ok := envValue(c, "GOMEMLIMIT")
+	require.True(t, ok, "GOMEMLIMIT is set")
+	soft, err := resource.ParseQuantity(strings.TrimSuffix(e.Value, "B"))
+	require.NoError(t, err, "GOMEMLIMIT %q is a byte quantity", e.Value)
+	assert.True(t, soft.Cmp(*limit) < 0, "GOMEMLIMIT %s must be below the memory limit %s", e.Value, limit)
 }
