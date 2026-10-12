@@ -305,6 +305,8 @@ tokenService:
   # Admits only the BFF from the install namespace, and pods from every other namespace, to the
   # service's port (ADR 0154). Defence in depth: every request is authenticated by a token
   # review either way, and the policy does nothing on a CNI that does not enforce NetworkPolicy.
+  # While it is on, an agent in the install namespace cannot reach the token service: its tool
+  # calls, memory and knowledge searches time out. Run agents in their own namespaces.
   networkPolicy:
     enabled: true
   # Where per-user MCP grants (OAuth tokens) are stored (ADR 0152). One backend per install,

@@ -111,7 +111,10 @@ it now takes effect: it was shadowed by an empty literal, so grants made until n
 and people reconnect once.
 
 **With an enforcing CNI,** the token service's new NetworkPolicy admits only the BFF from the install
-namespace. Anything else in that namespace that called it stops reaching it.
+namespace. Anything else in that namespace that called it stops reaching it. **Agents cannot run in the
+install namespace while the policy is on:** their tool calls, memory and knowledge searches time out
+(after 20 to 30 seconds) instead of being refused. Move such agents to a namespace of their own, or set
+`tokenService.networkPolicy.enabled=false`.
 
 ## Registry-scoped grants and shared scratchpads are keyed by namespace
 

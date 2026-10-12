@@ -2,7 +2,9 @@
 # passes, and this policy does nothing on a cluster whose CNI does not enforce NetworkPolicy (kindnet,
 # for one). Where it is enforced, the platform namespace's other workloads cannot reach the service at
 # all, and agents reach it from their own namespaces. It cannot tell an agent's sidecar from its code,
-# since both share the pod. The chart can turn it off (tokenService.networkPolicy.enabled).
+# since both share the pod. An agent placed in the install namespace is therefore blocked, and its tool
+# calls, memory and knowledge searches time out rather than being refused: no label on a pod there
+# proves it is an agent. The chart can turn it off (tokenService.networkPolicy.enabled).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

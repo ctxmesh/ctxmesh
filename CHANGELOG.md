@@ -29,7 +29,8 @@ ServiceAccount token, reviewed by TokenReview (ADR 0154):
 The token service reads the capability public key from `bff-capability` and needs `create` on
 `tokenreviews` (a new ClusterRole). A NetworkPolicy now admits only the BFF from the install namespace
 and pods from other namespaces to its port (`tokenService.networkPolicy.enabled`, default on; it does
-nothing on a CNI that does not enforce NetworkPolicy). A knowledge-base reference to another namespace
+nothing on a CNI that does not enforce NetworkPolicy). Under it an agent in the install namespace cannot
+reach the token service, and its tool calls time out. A knowledge-base reference to another namespace
 no longer resolves. **Agents built on an older base image lose long-term memory and knowledge until
 rebuilt**: their launcher sends no token. See [docs/upgrading.md](docs/upgrading.md).
 
