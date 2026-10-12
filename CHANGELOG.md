@@ -114,6 +114,17 @@ consent as it would for a new grant). Shared scratchpad contents written before 
 carried over. Registry members bound to tools roll one new revision, because their egress sidecar's
 boundary changes. See docs/upgrading.md.
 
+**Fixed: a clone of a release installed images that were never published.** The chart in the
+tree said `v0.1.0-beta.1` at every release, because the release stamped only the package it
+published. A clone of any tag therefore installed the first beta's control plane against that
+tag's CRDs and templates, and three images the controller injects into agent pods,
+`agent-otel-collector`, `agent-discovery` and `egress-sidecar`, that were first published with
+beta.7; the collector goes into every agent pod, so no agent started. `Chart.yaml` now carries the
+product version, written by `hack/bump-version.sh` with the other pinned versions and checked in CI.
+The release refuses a tag it disagrees with and, before it publishes the Release page, pulls every
+first-party image a clone of the tag renders; the nightly does the same on `main`. A milestone
+branch names its upcoming release, so installing one from a clone needs images built from it.
+
 **Changed: an `/api` route the server cannot serve answers 501, not 404.** Each route is now
 registered once. When something it needs is missing (the caller-scoped cluster client, as under
 `ctxmesh dev --ui`; the trace store; the agent invoker; the config expander), it answers `501`

@@ -75,8 +75,12 @@ curl -s http://localhost:9090/api/runs/$RUN -H "Authorization: Bearer $TOKEN"   
 
 The run opens in the console at `http://localhost:9090/runs/<id>`.
 
-Contributors installing from a clone use the chart directory instead of the OCI reference:
-`helm install ctxmesh ./deploy/helm/ctxmesh --namespace ctxmesh --create-namespace`.
+To install from a clone, check out a release tag (`main` is the last release too) and use the chart
+directory instead of the OCI reference:
+`helm install ctxmesh ./deploy/helm/ctxmesh --namespace ctxmesh --create-namespace`. The chart
+installs the images published for the version in its `Chart.yaml`. A milestone branch is ahead of
+every published image and names its upcoming version, so installing one needs images built from
+it.
 
 **What you get, and what you have to add.** The install brings up a working control plane: the
 console, the CRDs, the model gateway, the databases and the credential plane. It ships **no models** —

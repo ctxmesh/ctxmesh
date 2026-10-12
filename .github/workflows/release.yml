@@ -66,6 +66,14 @@ jobs:
             echo "::error::README.md installs $(grep -oE -- '--version [^ ]+' install.txt || echo 'no --version'), not ${tag#v}."
             exit 1
           fi
+          # A clone of this tag installs the tree's Chart.yaml, whose appVersion tags every first-party
+          # image (hack/bump-version.sh writes it). The packaged chart is stamped from the tag below.
+          chart_app="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' deploy/helm/ctxmesh/Chart.yaml)"
+          chart_ver="$(sed -n 's/^version: *//p' deploy/helm/ctxmesh/Chart.yaml)"
+          if [ "$chart_app" != "$tag" ] || [ "$chart_ver" != "${tag#v}" ]; then
+            echo "::error::deploy/helm/ctxmesh/Chart.yaml is version ${chart_ver}, appVersion ${chart_app}: a clone of ${tag} would install other images. Run hack/bump-version.sh ${tag#v} before tagging."
+            exit 1
+          fi
           {
             echo
             echo "---"
@@ -203,10 +211,9 @@ jobs:
           persist-credentials: false
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
-      # The chart's version and appVersion are stamped from the TAG, not read from
-      # Chart.yaml. A committed version drifts from the tag the moment anyone forgets to
-      # bump it, and a chart whose appVersion disagrees with the images it installs is
-      # the same "pins nothing" defect in a subtler costume.
+      # The chart's version and appVersion are stamped from the TAG. The notes job has already
+      # refused a tag Chart.yaml disagrees with, so this changes nothing a clone of the tag would
+      # not also get; it keeps the published chart right if that check is ever bypassed.
       - name: Stamp the chart at ${{ github.ref_name }}
         run: |
           set -euo pipefail
@@ -239,12 +246,39 @@ jobs:
     secrets:
       BRAIN_CHECKOUT_TOKEN: ${{ secrets.BRAIN_CHECKOUT_TOKEN }}
 
+  # ── A clone of the tag pulls every image it names ──────────────────────────
+  # The tag's Chart.yaml tags our images with the release version. Once they are pushed, every
+  # render a clone can make (the default, the README's production command, optional components on)
+  # must name only images that pull anonymously. A clone once named three that no release had
+  # published.
+  clone-images:
+    name: release-clone-images
+    needs: images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.9"
+      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: v3.16.3
+      - name: Install PyYAML (the image lister parses the render)
+        run: python3 -m pip install --quiet pyyaml
+      - name: Pull every first-party image a clone of the tag renders, anonymously
+        run: ./hack/chart-images-pullable.sh --first-party
+
   # ── The Release page ────────────────────────────────────────────────────────
   # Runs LAST: a Release page pointing at artifacts that do not install reads as success, which is
   # worse than no page.
   github-release:
     name: release-notes
-    needs: [notes, stranger]
+    needs: [notes, stranger, clone-images]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

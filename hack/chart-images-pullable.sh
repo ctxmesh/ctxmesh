@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# chart-images-pullable — every third-party image the chart renders must pull anonymously.
+# chart-images-pullable — every image the chart renders must pull anonymously.
 #
 # MinIO closed anonymous pulls on Docker Hub and then on quay.io, and both times the first sign was
 # a stranger's `helm install` failing on a cold cluster: the image was digest-pinned and gone. A
@@ -7,11 +7,12 @@
 # with no registry credentials, so an upstream that closes its doors fails CI instead of an install.
 #
 # Images come from hack/chart_images.py: the default render, the README's production command and
-# every optional component on. First-party images are left out: in a working tree they carry
-# Chart.yaml's appVersion, which the release replaces with the tag, and the release's own stranger
-# gate pulls the ones it publishes.
+# every optional component on. By default it pulls the third-party images. --first-party pulls
+# ours instead: they carry Chart.yaml's appVersion, which on a milestone branch is a release not
+# yet published, so that mode runs where the version exists (the release, after its images are
+# pushed, and nightly on main). A clone install once named three images no release had published.
 #
-# Usage: hack/chart-images-pullable.sh [-- extra helm args for every render]
+# Usage: hack/chart-images-pullable.sh [--first-party] [-- extra helm args for every render]
 #   CHART               chart directory (default deploy/helm/ctxmesh)
 #   CHART_IMAGES_PULLER a command run as `<cmd> <ref>` instead of `docker pull`: exit 0 pullable,
 #                       2 rate-limited, anything else not pullable
@@ -19,7 +20,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CHART="${CHART:-deploy/helm/ctxmesh}"
-refs="$(python3 hack/chart_images.py list --third-party --chart "$CHART" "$@")" \
+which="--third-party"
+label="third-party"
+if [ "${1:-}" = "--first-party" ]; then
+  which="--first-party"
+  label="first-party"
+  shift
+fi
+[ "${1:-}" = "--" ] && shift
+refs="$(python3 hack/chart_images.py list "$which" --chart "$CHART" -- "$@")" \
   || { echo "FAIL: could not list the chart's images (above)" >&2; exit 1; }
 
 anon="$(mktemp -d)"
@@ -79,13 +88,17 @@ while read -r ref; do
   fi
 done <<< "$refs"
 
-[ "$checked" -gt 0 ] || { echo "FAIL: no third-party images were listed; this checked nothing" >&2; exit 1; }
+[ "$checked" -gt 0 ] || { echo "FAIL: no $label images were listed; this checked nothing" >&2; exit 1; }
 if [ "$failed" -gt 0 ]; then
-  echo "FAIL: $failed of $checked third-party images do not pull. Mirror the image, move it to a registry that serves it, or replace it (ADR 0145)." >&2
+  if [ "$label" = first-party ]; then
+    echo "FAIL: $failed of $checked first-party images do not pull at the chart's appVersion. A clone install of this tree gets ImagePullBackOff: publish them, or fix Chart.yaml (hack/bump-version.sh)." >&2
+  else
+    echo "FAIL: $failed of $checked third-party images do not pull. Mirror the image, move it to a registry that serves it, or replace it (ADR 0145)." >&2
+  fi
   exit 1
 fi
 if [ "$limited" -gt 0 ]; then
-  echo "FAIL: $limited of $checked third-party images could not be checked: the registry rate-limited every attempt. Re-run; this is not a verdict on the images." >&2
+  echo "FAIL: $limited of $checked $label images could not be checked: the registry rate-limited every attempt. Re-run; this is not a verdict on the images." >&2
   exit 1
 fi
-echo "PASS: all $checked third-party images the chart renders pull anonymously"
+echo "PASS: all $checked $label images the chart renders pull anonymously"

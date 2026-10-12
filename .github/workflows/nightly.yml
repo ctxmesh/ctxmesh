@@ -71,6 +71,9 @@ jobs:
         run: python3 -m pip install --quiet pyyaml
       - name: Pull every third-party image the chart renders, anonymously
         run: ./hack/chart-images-pullable.sh
+      # main is the last release, so a clone of it must pull the images its Chart.yaml names.
+      - name: Pull every first-party image a clone of main renders, anonymously
+        run: ./hack/chart-images-pullable.sh --first-party
 
   # Upgrade from the newest published release to this tree, on a cluster carrying real data: the
   # upgrade every user makes next (m184.17). Red until a published release installs (beta.8's

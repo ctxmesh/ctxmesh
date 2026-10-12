@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The images the Helm chart renders, and the checks over them.
 
-  list [--third-party]   every image reference the chart renders, one per line
+  list [--third-party | --first-party]
+                         every image reference the chart renders, one per line
   seamed                 fail on any image no chart value can move, or a third-party image without a
                          digest, or a mirror list out of step with thirdPartyImages
   mirror-plan            "<source> <destination>" for each image the mirror list marks for mirroring
@@ -27,9 +28,9 @@ DEFAULT_CHART = REPO / "deploy/helm/ctxmesh"
 MIRROR_LIST = REPO / "hack/third-party-images.txt"
 MIRROR_REGISTRY = "ghcr.io/ctxmesh/mirror"
 
-# First-party images are versioned by the release tag (release.yml stamps appVersion), so in a
-# working tree they name whatever Chart.yaml says, which need not be published. Their pullability is
-# the release's to prove; this module checks the images we do not publish.
+# First-party images carry Chart.yaml's appVersion, the product version bump-version.sh writes. On a
+# milestone branch that is the upcoming release, published only when it is tagged, so they are
+# listed apart and pulled where the version exists (the release, and nightly on main).
 FIRST_PARTY_PREFIX = "ghcr.io/ctxmesh/"
 
 # The README's production command, plus the two bff.mcp values the production guards also require
@@ -126,10 +127,12 @@ def third_party_entries(chart: pathlib.Path) -> dict[str, dict]:
     return {k: v for k, v in tpi.items() if isinstance(v, dict)}
 
 
-def cmd_list(chart: pathlib.Path, extra: list[str], third_party: bool) -> int:
+def cmd_list(chart: pathlib.Path, extra: list[str], third_party: bool, first_party: bool) -> int:
     refs = set().union(*rendered(chart, extra).values())
     if third_party:
         refs = {r for r in refs if not is_first_party(r)}
+    if first_party:
+        refs = {r for r in refs if is_first_party(r)}
     if not refs:
         print("FAIL: the chart rendered no images; this is not checking anything", file=sys.stderr)
         return 1
@@ -204,11 +207,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", choices=["list", "seamed", "mirror-plan"])
     ap.add_argument("--chart", default=str(DEFAULT_CHART))
-    ap.add_argument("--third-party", action="store_true", help="list: leave out first-party images")
+    only = ap.add_mutually_exclusive_group()
+    only.add_argument("--third-party", action="store_true", help="list: leave out first-party images")
+    only.add_argument("--first-party", action="store_true", help="list: only ghcr.io/ctxmesh images")
     ns = ap.parse_args(argv)
     chart = pathlib.Path(ns.chart).resolve()
     if ns.command == "list":
-        return cmd_list(chart, extra, ns.third_party)
+        return cmd_list(chart, extra, ns.third_party, ns.first_party)
     if ns.command == "seamed":
         return cmd_seamed(chart, extra)
     return cmd_mirror_plan(chart)
