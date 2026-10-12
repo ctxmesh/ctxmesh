@@ -88,6 +88,7 @@ type ScalingSpec struct {
 	// concurrency is the most runs one replica handles at once (Knative containerConcurrency). A run
 	// beyond it waits for a free slot or a new replica instead of joining an overloaded pod. 0 means
 	// no limit: the pod takes every run it is sent and the autoscaler scales only on its soft target.
+	// A value above 1 requires resources.cpu and resources.memory, sized for that many runs at once.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1000
@@ -212,6 +213,7 @@ type LongTermMemorySpec struct {
 
 // AgentDeploymentSpec defines the desired state of an AgentDeployment.
 // +kubebuilder:validation:XValidation:rule="!(has(self.endUserAccess) && self.endUserAccess && (self.executionModel == 'job' || self.executionModel == 'eventing'))",message="endUserAccess is only valid on a serving execution model — end-user chat is interactive request-driven (M137/ADR 0107)"
+// +kubebuilder:validation:XValidation:rule="!has(self.scaling) || !has(self.scaling.concurrency) || self.scaling.concurrency <= 1 || (has(self.resources) && has(self.resources.cpu) && has(self.resources.memory) && quantity(string(self.resources.cpu)).isGreaterThan(quantity('0')) && quantity(string(self.resources.memory)).isGreaterThan(quantity('0')))",message="resources.cpu and resources.memory are required when scaling.concurrency is greater than 1: one replica then holds several runs at once, and the scheduler places it only by what it declares"
 type AgentDeploymentSpec struct {
 	// image is the fully-qualified container image for the agent,
 	// e.g. "ghcr.io/ctxmesh/echo-agent:latest". Required.
