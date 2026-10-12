@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 
-import { McpApprovalsPage } from "@/pages/mcp-approvals-page";
+import { ApprovalsPage } from "@/pages/approvals-page";
 import { CapabilitiesProvider } from "@/lib/capabilities";
 import { NamespaceProvider } from "@/lib/namespace";
 import { ToastProvider } from "@/components/kit";
 
-// McpApprovalsPage tests (m17.9):
+// The MCP approval queue (m17.9), rendered where it lives: the Approvals page's MCP tab.
 //   1. Renders pending approval rows from GET /api/mcp/approvals.
 //   2. Approve button calls POST /api/mcp/approvals/{ns}/{name}.
 //   3. Reject (via ConfirmDialog) calls POST /api/mcp/approvals/{ns}/{name}/reject.
@@ -105,12 +105,18 @@ function installFetch(opts: FetchSetup = {}) {
 
 function renderPage(caps?: Record<string, Record<string, boolean>>, setup: FetchSetup = {}) {
   installFetch({ ...setup, caps: caps ?? setup.caps });
+  return renderQueue();
+}
+
+function renderQueue() {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={["/approvals?tab=mcp"]}>
       <ToastProvider>
         <NamespaceProvider>
           <CapabilitiesProvider>
-            <McpApprovalsPage />
+            <Routes>
+              <Route path="/approvals" element={<ApprovalsPage />} />
+            </Routes>
           </CapabilitiesProvider>
         </NamespaceProvider>
       </ToastProvider>
@@ -124,7 +130,7 @@ afterEach(() => {
   sessionStorage.clear();
 });
 
-describe("McpApprovalsPage", () => {
+describe("the MCP approval queue", () => {
   it("renders pending approval rows", async () => {
     renderPage(OPERATOR_CAPS);
 
@@ -148,17 +154,7 @@ describe("McpApprovalsPage", () => {
 
   it("approve button calls approveMcp", async () => {
     const calls = installFetch({ caps: OPERATOR_CAPS });
-    render(
-      <MemoryRouter>
-        <ToastProvider>
-          <NamespaceProvider>
-            <CapabilitiesProvider>
-              <McpApprovalsPage />
-            </CapabilitiesProvider>
-          </NamespaceProvider>
-        </ToastProvider>
-      </MemoryRouter>,
-    );
+    renderQueue();
 
     const btn = await screen.findByTestId("mcp-approve-default-acme-mcp");
     fireEvent.click(btn);
@@ -173,17 +169,7 @@ describe("McpApprovalsPage", () => {
 
   it("reject goes through ConfirmDialog before calling rejectMcp", async () => {
     const calls = installFetch({ caps: OPERATOR_CAPS });
-    render(
-      <MemoryRouter>
-        <ToastProvider>
-          <NamespaceProvider>
-            <CapabilitiesProvider>
-              <McpApprovalsPage />
-            </CapabilitiesProvider>
-          </NamespaceProvider>
-        </ToastProvider>
-      </MemoryRouter>,
-    );
+    renderQueue();
 
     // Click reject to open the confirmation dialog
     const rejectBtn = await screen.findByTestId("mcp-reject-default-acme-mcp");
@@ -210,17 +196,7 @@ describe("McpApprovalsPage", () => {
 
   it("cancel on ConfirmDialog does NOT call rejectMcp", async () => {
     const calls = installFetch({ caps: OPERATOR_CAPS });
-    render(
-      <MemoryRouter>
-        <ToastProvider>
-          <NamespaceProvider>
-            <CapabilitiesProvider>
-              <McpApprovalsPage />
-            </CapabilitiesProvider>
-          </NamespaceProvider>
-        </ToastProvider>
-      </MemoryRouter>,
-    );
+    renderQueue();
 
     const rejectBtn = await screen.findByTestId("mcp-reject-default-acme-mcp");
     fireEvent.click(rejectBtn);
@@ -280,7 +256,7 @@ describe("McpApprovalsPage", () => {
 
 // ── M151: colour doctrine + the queue archetype ───────────────────────────────
 
-describe("McpApprovalsPage — colour doctrine (§2.2 / §2.4)", () => {
+describe("the MCP approval queue — colour doctrine (§2.2 / §2.4)", () => {
   it("a person-must-decide row wears HOLD, never warn", async () => {
     renderPage(OPERATOR_CAPS);
 
@@ -302,7 +278,7 @@ describe("McpApprovalsPage — colour doctrine (§2.2 / §2.4)", () => {
   });
 });
 
-describe("McpApprovalsPage — the closing line (§5.18)", () => {
+describe("the MCP approval queue — the closing line (§5.18)", () => {
   it("states what approving would actually grant, counted from the rows", async () => {
     renderPage(OPERATOR_CAPS);
 

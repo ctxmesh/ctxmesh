@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { CheckCircle2, RefreshCw } from "lucide-react";
 
@@ -16,19 +16,27 @@ import {
   type Column,
   type DataTableError,
   type EmptyStateProps,
+  type TabHeaderProps,
 } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { useCapabilities } from "@/lib/capabilities";
 import { mapLimit, NAMESPACE_SCAN_CONCURRENCY } from "@/lib/map-limit";
 import { useNamespace } from "@/lib/namespace";
+import { RES_REGISTRIES } from "@/lib/nav";
 import { api, ApiError, type ApprovalQueueItem } from "@/lib/api";
 import { formatRelativeTime, formatDateTime } from "@/lib/format";
+import { useLoad } from "@/lib/use-load";
+import { useTabParam } from "@/lib/use-tab-param";
+import { McpApprovalsQueue } from "@/pages/mcp-approvals-queue";
 
-// ApprovalsPage — the unified approval inbox (M113), on the M151 editorial
-// system: archetype A1, the §4.4 QUEUE budget (Kind · Ask · Requester · Age ·
-// Decide), and the one surface whose entire subject is "a person must decide".
+// ApprovalsPage — every queue where a person must decide, one tab each: runs paused
+// for a person (the default) and MCP servers awaiting an operator (`?tab=mcp`, which
+// /tools/approvals redirects to). The run queue below is the unified approval inbox
+// (M113), on the M151 editorial system: archetype A1, the §4.4 QUEUE budget (Kind · Ask ·
+// Requester · Age · Decide).
 //
 // ── WHY THE KIND TAG IS NOT A STATUS TAG (the §2.4 sweep item) ──────────────
 // This column used to render `<Badge variant="default">Plan gate</Badge>`, and
@@ -187,219 +195,137 @@ type Scan =
   | { kind: "unavailable" }
   | { kind: "error"; message: string };
 
-type LoadState =
-  | { kind: "loading" }
-  | {
-      kind: "ready";
-      items: ApprovalQueueItem[];
-      /** Workspaces that refused to answer — never silently folded into "none". */
-      unreadable: number;
-      /** Workspaces that did answer. */
-      readable: number;
-    }
-  // 501 — this install has no approval queue at all (§7.1 backend-cannot-answer).
-  | { kind: "unavailable" }
-  | { kind: "error"; message: string; forbidden: boolean };
+/** The queue as read: its rows, and how many workspaces answered or refused. */
+interface Queue {
+  items: ApprovalQueueItem[];
+  /** Workspaces that refused to answer — never silently folded into "none". */
+  unreadable: number;
+  /** Workspaces that did answer. */
+  readable: number;
+}
+
+/**
+ * Reads the queue. The backend needs a namespace, so under "All workspaces" every workspace
+ * the caller can see is asked, and one that REFUSES is counted rather than swallowed: a 403
+ * turned into `[]` renders as "nothing is waiting on you", the one lie this page cannot tell.
+ * When none answers, why is the point: an install without the queue (501), a caller without
+ * the grant (403) and a backend that broke are three different sentences.
+ */
+async function readQueue(namespace: string, signal: AbortSignal): Promise<Queue> {
+  if (namespace) {
+    return { items: await api.listApprovals(namespace, signal), unreadable: 0, readable: 1 };
+  }
+  const { namespaces } = await api.namespaces(signal);
+  const scans: Scan[] = await mapLimit(namespaces, NAMESPACE_SCAN_CONCURRENCY, (n) =>
+    api
+      .listApprovals(n.name, signal)
+      .then((items): Scan => ({ kind: "ok", items }))
+      .catch((err: unknown): Scan => {
+        if (err instanceof ApiError) {
+          if (err.status === 501) return { kind: "unavailable" };
+          if (err.isForbidden) return { kind: "forbidden" };
+          return { kind: "error", message: err.message };
+        }
+        return { kind: "error", message: err instanceof Error ? err.message : "request failed" };
+      }),
+  );
+  const ok = scans.filter((s): s is Extract<Scan, { kind: "ok" }> => s.kind === "ok");
+  // No workspace is visible, so no approval can be: a permission boundary, not an empty inbox.
+  if (scans.length === 0) throw new ApiError("", 403);
+  if (ok.length === 0) {
+    if (scans.every((s) => s.kind === "unavailable")) throw new ApiError("", 501);
+    if (scans.some((s) => s.kind === "forbidden")) throw new ApiError("", 403);
+    const first = scans.find((s) => s.kind === "error");
+    throw new Error(first?.kind === "error" ? first.message : "request failed");
+  }
+  return {
+    // A run id is globally unique, so the same run reported by two workspace queues is one
+    // decision, not two (and two rows would share a key).
+    items: dedupe(ok.flatMap((s) => s.items)),
+    unreadable: scans.length - ok.length,
+    readable: ok.length,
+  };
+}
 
 type Decision = "approve" | "deny";
 
+/**
+ * The run approval queue: runs paused on a plan gate or a mid-run step. The Approvals
+ * page's default tab; `header` is that page's one header.
+ */
+const TABS = ["runs", "mcp"] as const;
+type ApprovalsTab = (typeof TABS)[number];
+
+const TAB_LABEL: Record<ApprovalsTab, string> = { runs: "Runs", mcp: "MCP servers" };
+
 export function ApprovalsPage() {
+  const [tab, setTab] = useTabParam(TABS);
+  // Deciding an MCP submission is an operator's grant, so its tab shows to a caller who
+  // may update registries, as its nav entry did. A link to the tab opens it regardless;
+  // the queue itself still answers for what the caller may read and decide.
+  const { can } = useCapabilities();
+  const shown = TABS.filter((t) => t !== "mcp" || tab === "mcp" || can(RES_REGISTRIES, "update"));
+  const header = (props: TabHeaderProps) => (
+    <PageHeader
+      title="Approvals"
+      tabs={
+        shown.length > 1
+          ? shown.map((t) => ({ id: t, label: TAB_LABEL[t], current: t === tab }))
+          : undefined
+      }
+      onTabChange={(id) => setTab(id as ApprovalsTab)}
+      {...props}
+    />
+  );
+  return tab === "mcp" ? <McpApprovalsQueue header={header} /> : <RunApprovalsQueue header={header} />;
+}
+
+function RunApprovalsQueue({ header }: { header: (props: TabHeaderProps) => ReactNode }) {
   const { namespace } = useNamespace();
-  // Always start loading — load() fetches whether a namespace is selected (that ns)
-  // or not (aggregates across all visible namespaces, M144.6). No dead-end state.
-  const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
-  // refreshing drives the manual Refresh button's spinner. The manual refresh is SILENT (it does not blank
-  // the table with a skeleton — matching the background poll); the spinner is the only feedback (V16 close-
-  // gate UX finding: a non-silent manual refresh flashed a skeleton over already-visible rows).
-  const [refreshing, setRefreshing] = useState(false);
+  const fetchQueue = useCallback(
+    (signal: AbortSignal) => readQueue(namespace, signal),
+    [namespace],
+  );
+  // A refresh is silent: it keeps the rows on screen rather than flashing a skeleton over
+  // them, and a failed one keeps them (V16).
+  const { state, reload, refreshing } = useLoad(fetchQueue);
   /** Run ids this session has already decided — dropped from the view at once. */
   const [decided, setDecided] = useState<string[]>([]);
   const [busyRun, setBusyRun] = useState<string | null>(null);
   const [denying, setDenying] = useState<Row | null>(null);
-  // Approving is the CONSEQUENTIAL click, and it was the unguarded one: Deny
-  // merely cancels a run, while Approve authorises the very call a person was
-  // asked about — a refund, a write, a spend — and it fired on a single click
-  // eight pixels from an identically-shaped Deny. The guard was on the wrong
-  // button (M151 UX review, finding 2).
+  // Approving is the CONSEQUENTIAL click — it authorises the very call a person was asked
+  // about — so it is the guarded one (M151 UX review, finding 2).
   const [approving, setApproving] = useState<Row | null>(null);
   const [denyReason, setDenyReason] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
 
-  // load fetches the queue. `silent` (used by the poll) refreshes the rows IN PLACE — it does not flip to
-  // the loading skeleton, and a failed silent refresh keeps the current rows rather than blowing the table
-  // away with an error (a background poll must never disrupt what the reviewer is looking at). A manual load
-  // (the Refresh button / initial mount) is non-silent: it shows loading + surfaces errors normally.
-  const load = useCallback(
-    (silent = false) => {
-      abortRef.current?.abort();
-      // The per-namespace backend REQUIRES a namespace (it 400s without one). When
-      // none is selected, DON'T dead-end on "select a namespace" (M144.6) — aggregate
-      // the queue across every namespace the caller can see, so the inbox shows all
-      // pending decisions at once (each row still carries its namespace).
-      if (!namespace) {
-        const allController = new AbortController();
-        abortRef.current = allController;
-        if (!silent) setLoadState({ kind: "loading" });
-        api
-          .namespaces(allController.signal)
-          .then(async (resp) => {
-            // Each workspace answers for itself, and a workspace that REFUSES is
-            // counted rather than swallowed: a 403 turned into `[]` renders as
-            // "nothing is waiting on you", which is the one lie this page cannot
-            // afford to tell.
-            const scans: Scan[] = await mapLimit(
-              resp.namespaces,
-              NAMESPACE_SCAN_CONCURRENCY,
-              (n) =>
-                api
-                  .listApprovals(n.name, allController.signal)
-                  .then((list): Scan => ({ kind: "ok", items: list }))
-                  .catch((err: unknown): Scan => {
-                    if (err instanceof ApiError) {
-                      if (err.status === 501) return { kind: "unavailable" };
-                      if (err.isForbidden) return { kind: "forbidden" };
-                      return { kind: "error", message: err.message };
-                    }
-                    return {
-                      kind: "error",
-                      message: err instanceof Error ? err.message : "request failed",
-                    };
-                  }),
-            );
-            if (allController.signal.aborted) return;
-            const ok = scans.filter(
-              (s): s is Extract<Scan, { kind: "ok" }> => s.kind === "ok",
-            );
-
-            // Nothing answered. WHY nothing answered is the whole point: an
-            // install without the queue, a caller without the grant, and a
-            // backend that broke are three different sentences.
-            if (scans.length > 0 && ok.length === 0) {
-              if (scans.every((s) => s.kind === "unavailable")) {
-                setLoadState({ kind: "unavailable" });
-                return;
-              }
-              if (scans.some((s) => s.kind === "forbidden")) {
-                setLoadState({ kind: "error", message: "", forbidden: true });
-                return;
-              }
-              const first = scans.find((s) => s.kind === "error");
-              setLoadState({
-                kind: "error",
-                message: first?.kind === "error" ? first.message : "request failed",
-                forbidden: false,
-              });
-              return;
-            }
-            // No workspace is visible at all, so no approval can be. That is a
-            // permission boundary, not an empty inbox.
-            if (scans.length === 0) {
-              setLoadState({ kind: "error", message: "", forbidden: true });
-              return;
-            }
-            setLoadState({
-              kind: "ready",
-              // A run id is globally unique, so the same run reported by two
-              // workspace queues is one decision, not two. Concatenating the
-              // scans without this also hands the table duplicate row keys.
-              items: dedupe(ok.flatMap((s) => s.items)),
-              unreadable: scans.length - ok.length,
-              readable: ok.length,
-            });
-          })
-          .catch((err: unknown) => {
-            if (allController.signal.aborted || silent) return;
-            if (err instanceof ApiError && err.status === 501) {
-              setLoadState({ kind: "unavailable" });
-              return;
-            }
-            setLoadState({
-              kind: "error",
-              message: err instanceof Error ? err.message : "request failed",
-              forbidden: err instanceof ApiError && err.isForbidden,
-            });
-          })
-          .finally(() => {
-            if (silent) setRefreshing(false);
-          });
-        return;
-      }
-      const controller = new AbortController();
-      abortRef.current = controller;
-      if (!silent) setLoadState({ kind: "loading" });
-
-      api
-        .listApprovals(namespace, controller.signal)
-        .then((list) => {
-          if (controller.signal.aborted) return;
-          setLoadState({ kind: "ready", items: list, unreadable: 0, readable: 1 });
-        })
-        .catch((err: unknown) => {
-          if (controller.signal.aborted) return;
-          // A background poll must not disrupt the view — keep the current rows on a silent failure.
-          if (silent) return;
-          if (err instanceof ApiError && err.status === 501) {
-            setLoadState({ kind: "unavailable" });
-            return;
-          }
-          setLoadState({
-            kind: "error",
-            message: err instanceof Error ? err.message : "request failed",
-            forbidden: err instanceof ApiError && err.isForbidden,
-          });
-        })
-        .finally(() => {
-          if (silent) setRefreshing(false);
-        });
-    },
-    [namespace],
-  );
-
-  // Manual refresh: refresh IN PLACE (silent — no skeleton flash) with a button spinner for feedback.
-  const manualRefresh = useCallback(() => {
-    setRefreshing(true);
-    load(true);
-  }, [load]);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
-
-  // A ~30s background poll so a row a colleague already resolved isn't clicked blind (V16). Silent (no
-  // skeleton flash), and only while a namespace is selected — the interval resets when the namespace changes
-  // (load's identity changes) and is torn down on unmount.
+  // A ~30s background poll so a row a colleague already resolved isn't clicked blind (V16),
+  // only while a namespace is selected.
   useEffect(() => {
     if (!namespace) return;
-    const id = window.setInterval(() => load(true), 30_000);
+    const id = window.setInterval(() => reload({ silent: true }), 30_000);
     return () => window.clearInterval(id);
-  }, [load, namespace]);
+  }, [reload, namespace]);
 
-  const unreadable = loadState.kind === "ready" ? loadState.unreadable : 0;
-  const readable = loadState.kind === "ready" ? loadState.readable : 0;
+  const unavailable = state.kind === "error" && state.status === 501;
+  const unreadable = state.kind === "ready" ? state.data.unreadable : 0;
+  const readable = state.kind === "ready" ? state.data.readable : 0;
 
-  // Derived from `loadState` itself, not from a `kind === "ready" ? … : []`
-  // temporary: that temporary is a fresh array on every render, so the memo
-  // would recompute every time and never memoise anything.
   const rows = useMemo(() => {
-    if (loadState.kind !== "ready") return [];
-    return loadState.items
+    if (state.kind !== "ready") return [];
+    return state.data.items
       .filter((i) => !decided.includes(i.runId))
       .map(toRow)
       .sort(byAge);
-  }, [loadState, decided]);
+  }, [state, decided]);
 
   const error: DataTableError | null =
-    loadState.kind === "error"
+    state.kind === "error" && !unavailable
       ? {
-          message: loadState.message,
-          forbidden: loadState.forbidden,
+          message: state.message,
+          forbidden: state.forbidden,
           resource: "approvals",
-          // `load` takes a boolean; handing it straight to onRetry would pass
-          // the click EVENT as `silent` and retry down the silent path, which
-          // never clears the error state it was pressed to clear.
-          onRetry: loadState.forbidden ? undefined : () => load(),
+          onRetry: state.forbidden ? undefined : () => reload(),
         }
       : null;
 
@@ -417,7 +343,7 @@ export function ApprovalsPage() {
       setDecided((d) => [...d, id]);
       setDenying(null);
       setDenyReason("");
-      load(true);
+      reload({ silent: true });
     } catch (err) {
       const detail = err instanceof Error ? err.message : "the request failed";
       // Never swallowed and never dressed as success: the run is STILL waiting,
@@ -566,41 +492,39 @@ export function ApprovalsPage() {
       : "No run in any workspace you can see is stopped for a person. When one stops on a plan gate or a mid-run step, it appears here with what it is asking and a way to decide.",
   };
 
-  const waiting = loadState.kind === "ready" ? rows.length : undefined;
+  const waiting = state.kind === "ready" ? rows.length : undefined;
   const closing = closingLine(rows);
   const scope = namespace || "all workspaces";
 
   return (
     <div className="min-w-0 space-y-6" data-testid="approvals-page">
-      <PageHeader
-        title="Approvals"
+      {header({
         // The ONE hold chip on the page, on the one thing here that genuinely is
         // a state: how many decisions are blocked on a person (§2.2's example).
-        status={
+        status:
           waiting !== undefined && waiting > 0 ? (
             <Badge variant="hold" data-testid="approvals-waiting-count">
               {waiting} awaiting a person
             </Badge>
-          ) : undefined
-        }
-        meta={scope}
-        lede="Every run here is stopped because a person must decide. Oldest first — whatever has been blocked longest sits at the top. A step approval can be decided in its row; a plan gate opens its run, because the plan is the thing being approved."
+          ) : undefined,
+        meta: scope,
+        lede: "Every run here is stopped because a person must decide. Oldest first — whatever has been blocked longest sits at the top. A step approval can be decided in its row; a plan gate opens its run, because the plan is the thing being approved.",
         // actionsSlot rather than a structured action: PageHeaderAction carries
         // no testId, and the refresh control is asserted by id.
-        actionsSlot={
+        actionsSlot: (
           <Button
             variant="outline"
             size="sm"
             className="text-sm"
-            onClick={manualRefresh}
-            disabled={loadState.kind === "loading" || refreshing}
+            onClick={() => reload({ silent: true })}
+            disabled={state.kind === "loading" || refreshing}
             data-testid="approvals-refresh"
           >
             <RefreshCw className={`h-4 w-4${refreshing ? " animate-spin" : ""}`} />
             {refreshing ? "Refreshing…" : "Refresh"}
           </Button>
-        }
-      />
+        ),
+      })}
 
       {actionError && (
         <p
@@ -623,7 +547,7 @@ export function ApprovalsPage() {
         </QuietNote>
       )}
 
-      {loadState.kind === "unavailable" ? (
+      {unavailable ? (
         // The backend-cannot-answer state (§7.1): calm, solid, no hue, no CTA —
         // and visibly NOT the dashed "nothing is waiting on you" fence.
         <EmptyState
@@ -636,7 +560,7 @@ export function ApprovalsPage() {
           columns={columns}
           rows={rows}
           rowKey={(r) => r.item.runId}
-          loading={loadState.kind === "loading"}
+          loading={state.kind === "loading"}
           error={error}
           ariaLabel="Approvals"
           tableClassName="min-w-[42rem]"

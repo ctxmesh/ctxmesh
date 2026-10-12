@@ -11,7 +11,6 @@ import {
   EmptyState,
   KeyValueList,
   NextStepLink,
-  PageHeader,
   QuantityValue,
   UnknownValue,
   UNKNOWN,
@@ -22,16 +21,19 @@ import {
   type EmptyStateProps,
   type KeyValueItem,
   type Quantity,
+  type TabHeaderProps,
 } from "@/components/kit";
 import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_REGISTRIES } from "@/lib/nav";
 import { api, ApiError, type McpApproval } from "@/lib/api";
 import { formatDateTime, formatRelativeTime } from "@/lib/format";
+import { useLoad } from "@/lib/use-load";
 
-// McpApprovalsPage — the operator's queue of MCP servers awaiting review, on the
-// M151 editorial system: archetype A1, the §4.4 QUEUE budget (Kind · Ask ·
-// Requester · Age · Decide). On a hardened install, user-submitted MCP servers
+// McpApprovalsQueue — the operator's queue of MCP servers awaiting review: the
+// Approvals page's `?tab=mcp`, where /tools/approvals redirects. On the M151
+// editorial system: archetype A1, the §4.4 QUEUE budget (Kind · Ask · Requester ·
+// Age · Decide). On a hardened install, user-submitted MCP servers
 // land here; approving one binds it — and every tool it declares — into the
 // catalog, so this is a grant, not a formality.
 //
@@ -86,13 +88,6 @@ const SUBMITTER_UNKNOWN =
 
 const REJECT_CONTRACT =
   "Rejecting removes the submission from the queue permanently. Nothing is added to the catalog and no tool is granted; whoever submitted it would have to submit it again.";
-
-type PageState =
-  | { kind: "loading" }
-  | { kind: "ready"; approvals: McpApproval[] }
-  // 501 — the approval queue is not built into this install (§7.1).
-  | { kind: "unavailable" }
-  | { kind: "error"; message: string; forbidden: boolean };
 
 interface ActionState {
   kind: "idle" | "approving" | "rejecting" | "confirm-reject";
@@ -167,12 +162,9 @@ export function closingLine(rows: McpApproval[]): string | null {
   return `${head} ${scope} would add ${tools} tool${tools === 1 ? "" : "s"} to the catalog.`;
 }
 
-export function McpApprovalsPage() {
-  const [page, setPage] = React.useState<PageState>({ kind: "loading" });
+export function McpApprovalsQueue({ header }: { header: (props: TabHeaderProps) => React.ReactNode }) {
   const [action, setAction] = React.useState<ActionState>(ACTION_IDLE);
-  const [refreshing, setRefreshing] = React.useState(false);
   const [reviewing, setReviewing] = React.useState<McpApproval | null>(null);
-  const abortRef = React.useRef<AbortController | null>(null);
 
   // Operator gate: only update permission holders see approve/reject actions, asked of the
   // submission's own namespace, which under "All workspaces" is not the shell's. A viewer sees the
@@ -187,62 +179,24 @@ export function McpApprovalsPage() {
   // The shell's selection; "" ("All workspaces") reads every namespace the caller works in.
   const { namespace } = useNamespace();
 
-  // `silent` refreshes the rows IN PLACE: no skeleton over already-visible rows,
-  // and a failed silent refresh keeps what the operator is looking at. A queue
-  // that flashes a spinner every 30 seconds is unusable during an incident, and
-  // one that blanks itself after every decision is worse.
-  const load = React.useCallback((silent = false) => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    if (!silent) setPage({ kind: "loading" });
-    api
-      .mcpApprovals(namespace, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        // The BFF returns the pending servers under `items` (list-contract key);
-        // fall back to `servers`, and default to [] so an unexpected shape can
-        // never crash on `.length` (the integration-shape bug this fixes).
-        setPage({ kind: "ready", approvals: res.items ?? res.servers ?? [] });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        if (silent) return;
-        if (err instanceof ApiError) {
-          if (err.status === 501) {
-            setPage({ kind: "unavailable" });
-            return;
-          }
-          setPage({ kind: "error", message: err.message, forbidden: err.isForbidden });
-          return;
-        }
-        setPage({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden: false,
-        });
-      })
-      .finally(() => {
-        if (silent) setRefreshing(false);
-      });
-  }, [namespace]);
-
-  React.useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+  // The BFF returns the pending servers under `items` (list-contract key); `servers` is the
+  // older key, and an unexpected shape reads as empty rather than crashing on `.length`.
+  const fetchQueue = React.useCallback(
+    (signal: AbortSignal) =>
+      api.mcpApprovals(namespace, signal).then((res) => res.items ?? res.servers ?? []),
+    [namespace],
+  );
+  // Refreshes are silent: no skeleton over rows already showing, and a failed one keeps
+  // what the operator is looking at. A queue that blanks itself every 30 seconds, or after
+  // every decision, is unusable during an incident.
+  const { state, reload, refreshing } = useLoad(fetchQueue);
 
   // A ~30s silent background poll, so a submission a colleague already actioned
   // is not decided blind. Torn down on unmount.
   React.useEffect(() => {
-    const id = window.setInterval(() => load(true), 30_000);
+    const id = window.setInterval(() => reload({ silent: true }), 30_000);
     return () => window.clearInterval(id);
-  }, [load]);
-
-  function manualRefresh() {
-    setRefreshing(true);
-    load(true);
-  }
+  }, [reload]);
 
   async function onApprove(ns: string, name: string) {
     setAction({ kind: "approving", ns, name });
@@ -251,7 +205,7 @@ export function McpApprovalsPage() {
       toast({ variant: "success", title: `Approved ${name}`, description: "The MCP server is now in the catalog." });
       setReviewing(null);
       setAction(ACTION_IDLE);
-      load(true);
+      reload({ silent: true });
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.isForbidden) {
@@ -273,7 +227,7 @@ export function McpApprovalsPage() {
       toast({ variant: "success", title: `Rejected ${name}`, description: "The pending MCP server has been removed." });
       setReviewing(null);
       setAction(ACTION_IDLE);
-      load(true);
+      reload({ silent: true });
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.isForbidden) {
@@ -289,21 +243,20 @@ export function McpApprovalsPage() {
   }
 
   const busy = action.kind === "approving" || action.kind === "rejecting";
+  // 501: the approval queue is not built into this install (§7.1).
+  const unavailable = state.kind === "error" && state.status === 501;
   const rows = React.useMemo(
-    () => (page.kind === "ready" ? [...page.approvals].sort(byAge) : []),
-    [page],
+    () => (state.kind === "ready" ? [...state.data].sort(byAge) : []),
+    [state],
   );
 
   const error: DataTableError | null =
-    page.kind === "error"
+    state.kind === "error" && !unavailable
       ? {
-          message: page.message,
-          forbidden: page.forbidden,
+          message: state.message,
+          forbidden: state.forbidden,
           resource: "the MCP approval queue",
-          // `load` takes a boolean, so handing it straight to onRetry would pass
-          // the click EVENT as `silent` and retry down the path that suppresses
-          // errors — the retry would look like it did nothing.
-          onRetry: page.forbidden ? undefined : () => load(),
+          onRetry: state.forbidden ? undefined : () => reload(),
         }
       : null;
 
@@ -434,37 +387,35 @@ export function McpApprovalsPage() {
       "No MCP server is queued for operator review. When someone submits one, it appears here with what it would grant and a way to approve or reject it.",
   };
 
-  const waiting = page.kind === "ready" ? rows.length : undefined;
+  const waiting = state.kind === "ready" ? rows.length : undefined;
   const closing = closingLine(rows);
 
   return (
     <div className="min-w-0 space-y-6" data-testid="mcp-approvals">
-      <PageHeader
-        title="MCP approvals"
+      {header({
         // The one hold chip on the page, on the one thing that is a state: how
         // many submissions are blocked on a person (§2.2).
-        status={
+        status:
           waiting !== undefined && waiting > 0 ? (
             <Badge variant="hold" data-testid="mcp-approvals-waiting-count">
               {waiting} awaiting a person
             </Badge>
-          ) : undefined
-        }
-        lede="MCP servers submitted by users, waiting on an operator. Oldest first. Approving one binds it — and every tool it declares — into the catalog, where any agent granted that registry can call it."
-        actionsSlot={
+          ) : undefined,
+        lede: "MCP servers submitted by users, waiting on an operator. Oldest first. Approving one binds it — and every tool it declares — into the catalog, where any agent granted that registry can call it.",
+        actionsSlot: (
           <Button
             variant="outline"
             size="sm"
             className="text-sm"
-            onClick={manualRefresh}
-            disabled={page.kind === "loading" || refreshing}
+            onClick={() => reload({ silent: true })}
+            disabled={state.kind === "loading" || refreshing}
             data-testid="mcp-approvals-refresh"
           >
             <RefreshCw className={`h-4 w-4${refreshing ? " animate-spin" : ""}`} />
             {refreshing ? "Refreshing…" : "Refresh"}
           </Button>
-        }
-      />
+        ),
+      })}
 
       {action.error && (
         <p
@@ -476,7 +427,7 @@ export function McpApprovalsPage() {
         </p>
       )}
 
-      {page.kind === "unavailable" ? (
+      {unavailable ? (
         // The backend-cannot-answer state (§7.1): calm, solid, no hue, no CTA.
         <EmptyState
           intent="unavailable"
@@ -488,7 +439,7 @@ export function McpApprovalsPage() {
           columns={columns}
           rows={rows}
           rowKey={(a) => `${a.namespace}/${a.name}`}
-          loading={page.kind === "loading"}
+          loading={state.kind === "loading"}
           error={error}
           ariaLabel="MCP approvals"
           tableClassName="min-w-[38rem]"

@@ -9,7 +9,7 @@ import { NamespaceProvider } from "@/lib/namespace";
 import { CreateTeamPage } from "@/pages/create-team-page";
 import { GuardrailPoliciesPage } from "@/pages/guardrail-policies-page";
 import { KBDetailPage, KnowledgeBasesPage } from "@/pages/knowledge-bases-page";
-import { McpApprovalsPage } from "@/pages/mcp-approvals-page";
+import { ApprovalsPage } from "@/pages/approvals-page";
 import { McpServersPage } from "@/pages/mcp-servers-page";
 import { AgentRegistriesPage } from "@/pages/agent-registries-page";
 import { AgentRegistryDetailPage } from "@/pages/agent-registry-detail-page";
@@ -96,7 +96,7 @@ afterEach(() => {
 const SHELL_LISTS: [string, string, () => React.ReactElement, string?][] = [
   ["Knowledge Bases", "/api/knowledgebases", () => <KnowledgeBasesPage />],
   ["MCP servers", "/api/mcpservers", () => <McpServersPage />],
-  ["MCP approvals", "/api/mcp/approvals", () => <McpApprovalsPage />],
+  ["MCP approvals", "/api/mcp/approvals", () => <ApprovalsPage />, "?tab=mcp"],
   ["Teams", "/api/teams", () => <TeamsPage />],
   ["Guardrails", "/api/guardrailpolicies", () => <GuardrailPoliciesPage />],
   ["Workflows", "/api/workflows", () => <WorkflowsPage />],
@@ -250,7 +250,8 @@ describe("row controls follow the row's namespace under All workspaces", () => {
     {
       page: "MCP approvals",
       list: "/api/mcp/approvals",
-      element: () => <McpApprovalsPage />,
+      element: () => <ApprovalsPage />,
+      search: "?tab=mcp",
       resource: "agentregistries",
       rows: (ns) => ({ namespace: ns, name: name(ns), toolCount: 1 }),
       controls: (ns) => [`mcp-approve-${ns}-${name(ns)}`, `mcp-reject-${ns}-${name(ns)}`],

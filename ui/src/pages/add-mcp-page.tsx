@@ -607,7 +607,7 @@ export function AddMcpPage() {
           queuedForOperator ? "See the approval queue" : "Use these in an agent"
         }
         onFinish={() =>
-          navigate(queuedForOperator ? "/tools/approvals" : "/agents/new")
+          navigate(queuedForOperator ? "/approvals?tab=mcp" : "/agents/new")
         }
         // Cancel belongs in the footer (§6.1 A4) while there is still something
         // to cancel. Once the server IS registered there is nothing to abandon.

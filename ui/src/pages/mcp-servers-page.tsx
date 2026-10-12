@@ -346,7 +346,7 @@ function ServerList({ header }: { header: (props: TabHeaderProps) => React.React
             // A refused or pending server is decided in the approvals queue; a
             // server yielding no tools is diagnosed from its own wiring, which
             // is what the drawer shows.
-            to={kind === "connection" ? undefined : "/tools/approvals"}
+            to={kind === "connection" ? undefined : "/approvals?tab=mcp"}
             onClick={kind === "connection" ? () => setInspect(s) : undefined}
           />
         );

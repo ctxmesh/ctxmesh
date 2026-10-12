@@ -13,7 +13,6 @@ import {
 import { AgentsPage } from "@/pages/agents-page";
 import { AddMcpPage } from "@/pages/add-mcp-page";
 import { McpServersPage } from "@/pages/mcp-servers-page";
-import { McpApprovalsPage } from "@/pages/mcp-approvals-page";
 import { McpConnectPage } from "@/pages/mcp-connect-page";
 import { TemplateGalleryPage } from "@/pages/template-gallery-page";
 import { ConfigBuilderPage } from "@/pages/config-builder-page";
@@ -202,8 +201,8 @@ export function App() {
             {/* m25 S10: MCP Servers list — the primary MCP surface (Add is in-page) */}
             <Route path="tools/mcp-servers" element={<McpServersPage />} />
             <Route path="tools/add-mcp" element={<AddMcpPage />} />
-            {/* m17.9: MCP approval queue — operator-only, lists pending MCPs */}
-            <Route path="tools/approvals" element={<McpApprovalsPage />} />
+            {/* The MCP approval queue is the Approvals page's MCP tab. */}
+            <Route path="tools/approvals" element={<MovedTo path="/approvals" set={{ tab: "mcp" }} />} />
             {/* The tool catalog is the MCP servers page's Tools tab. */}
             <Route path="tools/catalog" element={<MovedTo path="/tools/mcp-servers" set={{ tab: "tools" }} />} />
             {/* m76.1: /tools/mcp-catalog retired — redirect to Gallery (the single

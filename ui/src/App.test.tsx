@@ -80,8 +80,10 @@ describe("App routes — a deep link outlives the first-run nav", () => {
 
 describe("App routes — a page that moved still answers its old link", () => {
   it.each([
-    ["/tools/catalog", "/tools/mcp-servers?tab=tools", "tool-catalog"],
+    ["/tools/approvals", "/approvals?tab=mcp", "mcp-approvals"],
     // What the old link carried rides along.
+    ["/tools/approvals?q=acme#row", "/approvals?q=acme&tab=mcp#row", "mcp-approvals"],
+    ["/tools/catalog", "/tools/mcp-servers?tab=tools", "tool-catalog"],
     ["/tools/catalog?q=lookup#card", "/tools/mcp-servers?q=lookup&tab=tools#card", "tool-catalog"],
   ])("%s lands on %s", async (from, to, testid) => {
     renderAt(from);

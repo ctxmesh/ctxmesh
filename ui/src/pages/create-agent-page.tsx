@@ -2408,7 +2408,7 @@ function reqNextStep(r: Requirement): { label: string; to: string } | null {
     return { label: "Register the server", to: "/tools/add-mcp" };
   }
   if (r.state === "needs-approval") {
-    return { label: "Open the approvals", to: "/tools/approvals" };
+    return { label: "Open the approvals", to: "/approvals?tab=mcp" };
   }
   return null;
 }

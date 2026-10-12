@@ -105,6 +105,14 @@ expose, and it was a separate nav entry beside them. It is now the Tools tab of 
 tool to an agent works as before. `/tools/catalog` redirects there, keeping its query, so bookmarks
 and the MCP sign-in's return still land on the catalog. The Tool catalog nav entry is removed.
 
+**Changed: MCP approvals is a tab of Approvals.** The console had two approval queues in the nav:
+runs waiting on a person, and MCP servers waiting on an operator. Approvals now holds both, with
+runs as the first tab and MCP servers as the second (`/approvals?tab=mcp`), which shows to a caller
+who may update agent registries, as its nav entry did. Each queue keeps its count, refresh, poll,
+drawer and decisions. `/tools/approvals` redirects to the tab, and the links that pointed at it
+(an MCP server awaiting approval, a requirement on the create-agent review, a server queued after
+it is added) go there. The MCP approvals nav entry is removed.
+
 **Security: a registry in one namespace could share another namespace's team scratchpad and
 credential boundary by copying its `registryId`.** A registry's id is chosen by its author and was
 the whole key for what its members share: the shared scratchpad (`sessionMemory.scope: shared`)

@@ -77,7 +77,6 @@ describe("every pre-M151 destination still lands somewhere", () => {
     "prompts",
     "evals",
     "mcp-servers",
-    "mcp-approvals",
     "runs",
     "my-shares",
     "approvals",
@@ -111,7 +110,10 @@ describe("every pre-M151 destination still lands somewhere", () => {
 // m184.43 folded pages into the page that holds their subject. Each is gone from the nav, and
 // its old route redirects to the tab or mode that holds it (App.test.tsx).
 describe("pages folded into another page (m184.43)", () => {
-  it.each([["tool-catalog", "mcp-servers"]])("%s is reached through %s", (gone, holder) => {
+  it.each([
+    ["mcp-approvals", "approvals"],
+    ["tool-catalog", "mcp-servers"],
+  ])("%s is reached through %s", (gone, holder) => {
     expect(NAV_ITEMS.find((i) => i.id === gone)).toBeUndefined();
     expect(NAV_ITEMS.find((i) => i.id === holder)).toBeDefined();
   });
@@ -163,8 +165,8 @@ describe("nav consolidation (m23.7 / m25 S8, carried forward)", () => {
   it("groups the MCP/tool surfaces in Library, with the approval queue in Govern", () => {
     // The tool catalog is MCP servers' Tools tab.
     expect(sectionOf("MCP servers")).toBe("Library");
-    // The approval QUEUE is a human gate, so it sits with the other queues.
-    expect(sectionOf("MCP approvals")).toBe("Govern");
+    // The MCP approval QUEUE is a human gate: a tab of Approvals, with the other queue.
+    expect(sectionOf("Approvals")).toBe("Govern");
     expect(NAV_ITEMS.map((i) => i.label)).not.toContain("Add MCP server");
   });
 });

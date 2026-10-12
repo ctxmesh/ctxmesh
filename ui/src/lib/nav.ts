@@ -18,7 +18,6 @@ import {
   ScrollText,
   Share2,
   Shield,
-  ShieldCheck,
   SlidersHorizontal,
   Tags,
   TestTube2,
@@ -261,22 +260,15 @@ export const NAV_SECTIONS: NavSection[] = [
     items: [
       {
         // Approvals (V5/V15) — the namespace-scoped queue of runs paused on
-        // plan_approval OR a mid-run approval step. Gated on `list workflows`,
-        // and so is its count, the console's "someone is waiting on you" signal.
+        // plan_approval OR a mid-run approval step, with MCP servers awaiting an
+        // operator as its second tab. Gated on `list workflows`, and so is its
+        // count (runs only), the console's "someone is waiting on you" signal.
         id: "approvals",
         label: "Approvals",
         icon: CheckSquare,
         route: "/approvals",
         requiresCapability: { resource: RES_WORKFLOWS, verb: "list" },
         count: { source: "approvals", tone: "waiting" },
-      },
-      {
-        // MCP approval queue (m17.9). Operator-only: gated on update agentregistries.
-        id: "mcp-approvals",
-        label: "MCP approvals",
-        icon: ShieldCheck,
-        route: "/tools/approvals",
-        requiresCapability: { resource: RES_REGISTRIES, verb: "update" },
       },
       {
         // Stops (ADR 0126, spec §5.23/§6.2) — the scoped kill switch's landing
