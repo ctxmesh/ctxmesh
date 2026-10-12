@@ -16,32 +16,22 @@ limitations under the License.
 
 package main
 
-// The synchronous agent-to-agent (AMP) mesh surface (M6, spec agent-mesh.md).
+// The synchronous agent-to-agent (AMP) mesh surface (spec agent-mesh.md, ADR 0138). The SDK
+// exposes it as client.mesh.
 //
-// AMP is mediation, not interop: the launcher governs calls between agents the platform
-// already owns (ADR 0138). The SDK exposes it as `client.mesh` — mesh is the boundary,
-// AMP is the call surface within it.
+//  1. OUTBOUND: a localhost listener on :2997 serving POST /a2a/{targetAgent}, started only when
+//     AGENT_REGISTRY_ID is set. The launcher stamps the envelope, resolves the target, injects
+//     traceparent so the callee continues the trace, and forwards; a blocked, unknown or
+//     cross-registry target fails fast with a typed error rather than hanging.
 //
-// Two surfaces live here:
+//  2. INBOUND: middleware on a registry member's /invoke. It admits an attested AMP call, its own
+//     async consumer's loopback call, or a run capability minted for this agent (amp_attest.go,
+//     ADR 0153), then checks registry isolation, allowedCallers and roles before the user
+//     container sees the request.
 //
-//   1. OUTBOUND — a localhost listener on :2997 serving POST /a2a/{targetAgent}, started
-//      only when AGENT_REGISTRY_ID is present. The agent POSTs an opaque payload; the
-//      launcher stamps the envelope, resolves the target over DNS, injects W3C traceparent
-//      so the callee continues the same trace, and forwards. A blocked, unknown or
-//      cross-registry target fast-fails typed rather than hanging.
-//
-//   2. INBOUND access control — middleware on the /invoke proxy of a registry member. It admits
-//      an attested AMP call, its own async consumer's loopback call, or a run capability minted
-//      for this agent (amp_attest.go, ADR 0153); an AMP call is then checked for cross-registry
-//      isolation, then the callee's allowedCallers and role rules, before the user container
-//      sees it.
-//
-// The envelope's depth/path grow per hop: no incoming envelope means a FIRST hop (depth 1,
-// path [self]); an incoming one means this agent was itself reached via AMP and is
-// forwarding, so depth and path extend while traceId/conversationId are inherited. The
-// registry, sender and role are always this agent's own: the incoming envelope is echoed by
-// the agent's code, and what it claims about identity is never carried forward.
-// checkGuards runs against the OUTGOING envelope.
+// An incoming envelope means this agent is forwarding: depth and path extend, and traceId and
+// conversationId are inherited. Registry, sender and role are always this agent's own, because
+// the incoming envelope is echoed by the agent's code. checkGuards runs on the outgoing envelope.
 import (
 	"bytes"
 	"context"
