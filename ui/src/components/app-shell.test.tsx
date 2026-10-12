@@ -29,7 +29,14 @@ interface FetchOptions {
   namespaces?: { name: string; displayName?: string }[];
   stops?: unknown;
   approvals?: unknown;
+  /**
+   * What GET /api/agents answers: an array is the page's items, a number an HTTP
+   * error status. Defaults to one agent, so the whole nav shows.
+   */
+  agents?: unknown[] | number;
 }
+
+const ONE_AGENT = [{ name: "checkout-bot", namespace: "team-a" }];
 
 let killBodies: unknown[] = [];
 
@@ -68,6 +75,21 @@ function installFetch(caps: FetchOptions) {
           json: async () => ({ scope: "ns/team-a", applied: true }),
         } as Response);
       }
+      if (url === "/api/agents" || url.startsWith("/api/agents?")) {
+        const agents = caps.agents ?? ONE_AGENT;
+        if (typeof agents === "number") {
+          return Promise.resolve({
+            ok: false,
+            status: agents,
+            json: async () => ({ error: "refused" }),
+          } as Response);
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ items: agents, nextCursor: "" }),
+        } as Response);
+      }
       if (url.startsWith("/api/approvals")) {
         return Promise.resolve({
           ok: true,
@@ -94,6 +116,7 @@ function renderShell(initialEntry = "/") {
           <Route path="/" element={<AppShell />}>
             <Route index element={<div>index surface</div>} />
             <Route path="agents" element={<div>agents surface</div>} />
+            <Route path="tenants" element={<div>tenants surface</div>} />
           </Route>
         </Routes>
       </ToastProvider>
@@ -260,6 +283,86 @@ describe("AppShell — every capability gate hides its destination", () => {
       }
     },
   );
+});
+
+// A workspace with no agent yet gets the first-run nav: the three destinations the Home
+// checklist walks through, and nothing that would only show an empty page.
+describe("AppShell — the nav before the first agent", () => {
+  const sections = () => screen.findByRole("navigation", { name: "Sections" });
+  const hrefs = (nav: HTMLElement) =>
+    Array.from(nav.querySelectorAll("a")).map((a) => a.getAttribute("href"));
+
+  it("shows only Home, Agents and Providers, flat, with a line saying more is coming", async () => {
+    installFetch({ ...ALLOW_ALL, namespaces: [{ name: "team-a" }], agents: [] });
+    renderShell();
+    const nav = await sections();
+    await waitFor(() => expect(hrefs(nav)).toEqual(["/", "/agents", "/providers"]));
+    expect(within(nav).getByTestId("nav-first-run-note")).toHaveTextContent(
+      "The rest of the console appears once you have an agent.",
+    );
+    // No section eyebrows over a three-item list.
+    for (const heading of ["Agents", "Library", "Govern", "Activity", "Admin"]) {
+      expect(within(nav).queryByText(heading, { selector: "p" })).toBeNull();
+    }
+  });
+
+  it("asks about the workspace in view, drafts included", async () => {
+    installFetch({ ...ALLOW_ALL, namespaces: [{ name: "team-a" }], agents: [] });
+    renderShell();
+    await waitFor(() =>
+      expect(
+        vi.mocked(fetch).mock.calls.map(([u]) => String(u)),
+      ).toContain("/api/agents?limit=1&namespace=team-a&includeDrafts=true"),
+    );
+  });
+
+  it("collapses the drawer the same way", async () => {
+    installFetch({ ...ALLOW_ALL, namespaces: [{ name: "team-a" }], agents: [] });
+    renderShell();
+    const nav = await sections();
+    await waitFor(() => expect(hrefs(nav)).toHaveLength(3));
+    fireEvent.click(screen.getByRole("button", { name: "Open the navigation" }));
+    const drawer = await screen.findByTestId("nav-drawer");
+    expect(
+      Array.from(drawer.querySelectorAll("nav a")).map((a) => a.getAttribute("href")),
+    ).toEqual(["/", "/agents", "/providers"]);
+  });
+
+  it("widens to the whole nav on the next page once an agent exists", async () => {
+    const options: FetchOptions = { ...ALLOW_ALL, namespaces: [{ name: "team-a" }], agents: [] };
+    installFetch(options);
+    renderShell();
+    const nav = await sections();
+    await waitFor(() => expect(hrefs(nav)).toHaveLength(3));
+
+    options.agents = ONE_AGENT;
+    fireEvent.click(within(nav).getByRole("link", { name: /Agents/ }));
+    expect(await within(nav).findByRole("link", { name: /Runs/ })).toBeInTheDocument();
+    expect(within(nav).getByRole("link", { name: /Tenants/ })).toBeInTheDocument();
+    expect(within(nav).queryByTestId("nav-first-run-note")).toBeNull();
+  });
+
+  it.each([403, 500, 501])("keeps the whole nav when the agent list answers %i", async (status) => {
+    installFetch({ ...ALLOW_ALL, namespaces: [{ name: "team-a" }], agents: status });
+    renderShell();
+    const nav = await sections();
+    await waitFor(() =>
+      expect(vi.mocked(fetch).mock.calls.some(([u]) => String(u).startsWith("/api/agents?"))).toBe(true),
+    );
+    // Let the refusal land before asserting nothing collapsed.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(within(nav).getByRole("link", { name: /Runs/ })).toBeInTheDocument();
+    expect(within(nav).queryByTestId("nav-first-run-note")).toBeNull();
+  });
+
+  it("still serves a deep link to a page the short nav leaves out", async () => {
+    installFetch({ ...ALLOW_ALL, namespaces: [{ name: "team-a" }], agents: [] });
+    renderShell("/tenants");
+    const nav = await sections();
+    await waitFor(() => expect(hrefs(nav)).toHaveLength(3));
+    expect(screen.getByText("tenants surface")).toBeInTheDocument();
+    expect(within(nav).queryByRole("link", { name: /Tenants/ })).toBeNull();
+  });
 });
 
 // The fit contract. This is the whole reason the frame was rebuilt, so it is

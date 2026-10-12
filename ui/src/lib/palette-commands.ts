@@ -8,7 +8,9 @@ import { NAV_SECTIONS, type NavItem } from "@/lib/nav";
 // (m13.6b). It builds the grouped CommandItem[] the kit's CommandPalette renders,
 // from live app state (RBAC allow-map, namespace list, session actions). Kept
 // side-effect-free and component-free so it is unit-testable in isolation and so
-// the palette and the sidebar nav share ONE visibility rule (they can't drift).
+// the palette and the sidebar nav share ONE RBAC visibility rule (they can't drift).
+// The palette does not follow the sidebar's first-run shortening: before the first
+// agent it is how a person who knows what they want still reaches every page.
 
 export interface BuildCommandsArgs {
   /** The RBAC gate - same `can(resource, verb)` the Sidebar uses (ADR 0011). */

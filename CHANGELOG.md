@@ -64,6 +64,14 @@ not delivering a hop whose sender has left the registry. A producer publishing s
 registry's Knative Broker must attach its own attestation, fetched from
 `POST /api/internal/amp/attestation` with the sending agent's pod token.
 
+**Changed: before its first agent, a workspace's sidebar shows Home, Agents and Providers.** With no
+agent the other pages have nothing to show: no runs, no cost, nothing waiting for approval, nothing
+to stop. The sidebar now lists only the destinations Home's first-run checklist walks through, says
+the rest appears once there is an agent, and widens on the first page after one is created. It asks
+what Home asks, the agent list for the selected workspace with drafts included, and keeps the whole
+nav when that list is refused or fails. Every page still opens from a link, its URL, or the command
+palette, which keeps listing them all.
+
 **Fixed: the Approvals and Alerts nav entries showed to people who could not open them.** Their
 gates asked about `list workflows` and `list alertpolicies`, which `/api/capabilities` never probed,
 and the console reads a permission nobody asked about as allowed. Both are now probed, for `list`

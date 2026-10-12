@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { App } from "@/App";
@@ -57,4 +57,16 @@ describe("App routes — retired surfaces fall through to not-found", () => {
       expect(screen.queryByText(/not yet built|arrives in/i)).toBeNull();
     },
   );
+});
+
+describe("App routes — a deep link outlives the first-run nav", () => {
+  // Every list here answers empty, so the shell shows the short first-run nav; a page it leaves
+  // out must still open from a link.
+  it("opens Tenants from its URL while the nav leaves it out", async () => {
+    renderAt("/tenants");
+    expect(await screen.findByRole("heading", { name: "Tenants", level: 1 })).toBeInTheDocument();
+    const nav = screen.getByRole("navigation", { name: "Sections" });
+    await waitFor(() => expect(within(nav).getByTestId("nav-first-run-note")).toBeInTheDocument());
+    expect(within(nav).queryByRole("link", { name: /Tenants/ })).toBeNull();
+  });
 });

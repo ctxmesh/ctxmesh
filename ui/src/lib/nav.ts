@@ -494,6 +494,15 @@ export const FIRST_RUN_CHECKLIST: FirstRunStep[] = [
   },
 ];
 
+// FIRST_RUN_NAV_IDS — the only destinations the sidebar shows while the workspace
+// in view provably has no agent. Until one exists the rest of the console has
+// nothing to show: no runs or cost, nothing waiting for approval, nothing to stop,
+// evaluate, route or bind. Home holds the checklist; Providers is where its first
+// step connects a model; Agents is where its second step creates the agent. Its
+// third step, the Playground, needs an agent, and by then the whole nav is back.
+// Every other page still answers a link, a typed URL and the command palette.
+export const FIRST_RUN_NAV_IDS: readonly string[] = ["home", "agents", "providers"];
+
 // ── The breadcrumb trail (M151 §4.2) ────────────────────────────────────────
 
 export interface ShellCrumb {

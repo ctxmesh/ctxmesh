@@ -6,6 +6,7 @@ import {
   navRoute,
   navSectionOf,
   FIRST_RUN_CHECKLIST,
+  FIRST_RUN_NAV_IDS,
 } from "@/lib/nav";
 
 // The M151 IA: six sections — Home / Agents / Library / Govern / Activity /
@@ -238,3 +239,30 @@ describe("first-run checklist derives from nav (m54.4)", () => {
   });
 });
 
+
+// The nav a workspace with no agent sees is the checklist's own path, so it is derived against
+// the checklist rather than chosen independently of it.
+describe("the first-run nav", () => {
+  it("names real destinations nobody is gated out of", () => {
+    for (const id of FIRST_RUN_NAV_IDS) {
+      const item = NAV_ITEMS.find((i) => i.id === id);
+      expect(item, id).toBeDefined();
+      expect(item?.requiresCapability, id).toBeUndefined();
+    }
+  });
+
+  it("reaches every checklist step that needs no agent, and Home", () => {
+    expect(FIRST_RUN_NAV_IDS).toContain("home");
+    for (const step of FIRST_RUN_CHECKLIST.filter((s) => s.doneKey !== "run")) {
+      const owner = FIRST_RUN_NAV_IDS.find(
+        (id) => step.to === navRoute(id) || step.to.startsWith(`${navRoute(id)}/`),
+      );
+      expect(owner, step.label).toBeDefined();
+    }
+  });
+
+  it("leaves out the run step's surface, which needs an agent to run", () => {
+    const run = FIRST_RUN_CHECKLIST.find((s) => s.doneKey === "run")!;
+    expect(FIRST_RUN_NAV_IDS.map(navRoute)).not.toContain(run.to);
+  });
+});

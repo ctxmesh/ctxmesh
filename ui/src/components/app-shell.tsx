@@ -24,6 +24,7 @@ import { useSession } from "@/lib/use-session";
 import { useDevMode } from "@/lib/dev-mode";
 import {
   buildCrumbs,
+  FIRST_RUN_NAV_IDS,
   NAV_SECTIONS,
   navCountGate,
   type NavCountTone,
@@ -497,6 +498,45 @@ function useNavCounts(): { counts: NavCounts; refresh: () => void } {
   return { counts, refresh };
 }
 
+/**
+ * Whether the workspace in view provably holds no agent — the same scope and the
+ * same list (drafts included) Home's first-run checklist reads.
+ *
+ * True only on a definite empty answer. Loading, a refusal, a 501 or a failure
+ * leave it false and the nav whole: hiding destinations on a question nobody
+ * answered would strand the person. While the answer is "none" each navigation
+ * asks again, so the nav widens on the first page after the agent is created.
+ */
+function useNoAgentsYet(): boolean {
+  const { namespace } = useNamespace();
+  const { pathname } = useLocation();
+  const [answer, setAnswer] = React.useState<{ scope: string; empty: boolean } | null>(null);
+  const empty = answer?.scope === namespace ? answer.empty : undefined;
+  const settled = empty === false;
+
+  React.useEffect(() => {
+    if (settled) return;
+    const controller = new AbortController();
+    api
+      .listAgents(
+        { limit: 1, includeDrafts: true, namespace: namespace || undefined },
+        controller.signal,
+      )
+      .then((res) => {
+        if (controller.signal.aborted) return;
+        setAnswer(
+          Array.isArray(res.items) ? { scope: namespace, empty: res.items.length === 0 } : null,
+        );
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setAnswer(null);
+      });
+    return () => controller.abort();
+  }, [namespace, pathname, settled]);
+
+  return empty === true;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The nav itself
 // ─────────────────────────────────────────────────────────────────────────────
@@ -650,19 +690,23 @@ function NavItemLink({
 // NavSections renders the grouped IA. Write-only items (config-builder,
 // Playground, the operator-only queues) are HIDDEN when the caller lacks the
 // gating right (RBAC-aware chrome, §3) — a viewer sees a read-only nav by
-// construction.
+// construction. In a workspace with no agent yet it renders only the first-run
+// destinations, as one flat list with a line saying the rest is coming.
 function NavSections({
   expanded,
   counts,
+  firstRun,
 }: {
   expanded: boolean;
   counts: NavCounts;
+  firstRun: boolean;
 }) {
   const { can } = useCapabilities();
 
   const visible = (it: NavItem): boolean =>
-    !it.requiresCapability ||
-    can(it.requiresCapability.resource, it.requiresCapability.verb);
+    (!firstRun || FIRST_RUN_NAV_IDS.includes(it.id)) &&
+    (!it.requiresCapability ||
+      can(it.requiresCapability.resource, it.requiresCapability.verb));
 
   return (
     <>
@@ -670,9 +714,10 @@ function NavSections({
         const items = section.items.filter(visible);
         if (items.length === 0) return null;
         // A one-item section whose item is its own name (Home) needs no eyebrow —
-        // it would print the word twice, once in each register.
+        // it would print the word twice, once in each register. Three first-run
+        // destinations need no grouping at all.
         const eyebrow =
-          items.length === 1 && items[0].label === section.heading
+          firstRun || (items.length === 1 && items[0].label === section.heading)
             ? null
             : section.heading;
         return (
@@ -689,7 +734,7 @@ function NavSections({
             )}
             {/* In the rail the eyebrow has no room, so the grouping is carried by
                 a hairline instead of a word — the sections still read as sections. */}
-            {!expanded && sectionIndex > 0 && (
+            {!expanded && !firstRun && sectionIndex > 0 && (
               <div
                 aria-hidden="true"
                 className="mx-2 mb-2 mt-1 border-t border-border-soft xl:hidden"
@@ -706,6 +751,17 @@ function NavSections({
           </div>
         );
       })}
+      {firstRun && (
+        <p
+          data-testid="nav-first-run-note"
+          className={cn(
+            "px-3 pt-1 text-xs text-faint",
+            !expanded && "hidden xl:block",
+          )}
+        >
+          The rest of the console appears once you have an agent.
+        </p>
+      )}
     </>
   );
 }
@@ -731,10 +787,12 @@ function Sidebar({
   expanded,
   onToggleRail,
   counts,
+  firstRun,
 }: {
   expanded: boolean;
   onToggleRail: () => void;
   counts: NavCounts;
+  firstRun: boolean;
 }) {
   return (
     <aside className="sticky top-0 hidden h-screen min-w-0 flex-col border-r bg-card lg:flex">
@@ -754,7 +812,7 @@ function Sidebar({
         aria-label="Sections"
         className="min-h-0 flex-1 overflow-y-auto px-2 py-3"
       >
-        <NavSections expanded={expanded} counts={counts} />
+        <NavSections expanded={expanded} counts={counts} firstRun={firstRun} />
       </nav>
       {/* The pin toggle exists only in the rail range: at ≥1280 the sidebar is
           always full, so a control offering to expand it would be a lie. */}
@@ -794,12 +852,14 @@ function Sidebar({
 function NavDrawer({
   onClose,
   counts,
+  firstRun,
   onLogout,
   session,
   devMode,
 }: {
   onClose: () => void;
   counts: NavCounts;
+  firstRun: boolean;
   onLogout: () => void;
   session: ReturnType<typeof useSession>;
   devMode: boolean;
@@ -837,7 +897,7 @@ function NavDrawer({
           aria-label="Sections (menu)"
           className="min-h-0 flex-1 overflow-y-auto px-2 py-3"
         >
-          <NavSections expanded counts={counts} />
+          <NavSections expanded counts={counts} firstRun={firstRun} />
         </nav>
         <div className="shrink-0 space-y-3 border-t p-3">
           <WorkspaceSwitcher id="drawer-ns-picker" className="md:hidden" />
@@ -926,6 +986,7 @@ function ShellChrome() {
   const [drawerOpen, setDrawerOpen] = React.useState(false);
   const [railExpanded, setRailExpanded] = React.useState(false);
   const { counts, refresh } = useNavCounts();
+  const firstRun = useNoAgentsYet();
 
   // A nav click inside the drawer navigates AND must dismiss it; leaving it open
   // over the page it just routed to is the classic mobile-nav bug.
@@ -962,6 +1023,7 @@ function ShellChrome() {
           expanded={railExpanded}
           onToggleRail={() => setRailExpanded((v) => !v)}
           counts={counts}
+          firstRun={firstRun}
         />
 
         <div className="flex min-h-screen min-w-0 flex-col">
@@ -1018,6 +1080,7 @@ function ShellChrome() {
         <NavDrawer
           onClose={() => setDrawerOpen(false)}
           counts={counts}
+          firstRun={firstRun}
           onLogout={onLogout}
           session={session}
           devMode={devMode}
