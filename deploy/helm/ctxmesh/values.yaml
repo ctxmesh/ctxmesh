@@ -136,6 +136,15 @@ controllerManager:
     responseHeaderTimeout: ""
     streamIdleTimeout: ""
 
+  # amp: calls between agents in an AgentRegistry (ADR 0153). requireAttestation=true (the default) makes
+  # a registry member admit /invoke only from an attested AMP caller, its own async consumer, or a run
+  # capability minted for it, so registry isolation and allowedCallers hold against any code in the
+  # cluster. false is the accept posture for a two-step rollout: members also admit unattested calls,
+  # while a caller that presents an attestation is still held to it. Flipping it rolls every member once;
+  # an approved revision stays approved.
+  amp:
+    requireAttestation: true
+
 # How long the controller waits for a referenced KnowledgeBase to become visible before deploying the
 # agent WITHOUT it (M146.7 / m52.M143-knobs; the gate itself is M143.5). Blank ⇒ 30s, which covers the
 # ordinary case of an AgentDeployment and its KnowledgeBase being applied together. A NEGATIVE value

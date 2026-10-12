@@ -295,6 +295,13 @@ type AgentDeploymentReconciler struct {
 	// (envtest) — the registration sync is a no-op.
 	AgentCapabilityStore agentcapability.Store
 
+	// AMPAcceptUnattested is the rollout posture for in-mesh calls (ADR 0153), from the controller's
+	// AMP_REQUIRE_ATTESTATION: only an explicit "false" sets it. False (the default) ⇒ a registry member
+	// admits /invoke only from an attested AMP caller, its own async consumer, or a run capability naming
+	// it. True ⇒ it also admits what it admitted before, while a caller that does present an attestation
+	// is still held to it.
+	AMPAcceptUnattested bool
+
 	// SpawnBudgetStore mirrors a supervisor's DECLARED spawn budget (M142.6, m52.C19b) so the BFF's
 	// authoritative spawn gate can enforce the team's real numbers instead of the ones a pod relays.
 	// Nil ⇒ no control-plane DB (envtest) — the sync is a no-op.
@@ -1559,7 +1566,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	if membership.IsMember {
 		env = append(
 			env,
-			corev1.EnvVar{Name: "AGENT_REGISTRY_ID", Value: membership.RegistryID},
+			corev1.EnvVar{Name: envAgentRegistryID, Value: membership.RegistryID},
 			corev1.EnvVar{Name: "A2A_MAX_DEPTH", Value: strconv.Itoa(int(membership.MaxDepth))},
 			corev1.EnvVar{Name: "A2A_HOP_BUDGET", Value: strconv.Itoa(int(membership.HopBudget))},
 			// M141.4 (ADR 0121): where a fire-and-forget hop goes to become durable. The agent pod holds
@@ -1580,11 +1587,9 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		}
 		// POD_NAMESPACE (the namespace AMP targets resolve in, clusterHost()) and AGENT_NAME (the
 		// envelope's senderAgentId) are in the base env.
-		// AGENT_ROLE: from spec.role, user-override-wins (like AGENT_NAME). The
-		// launcher stamps it into the envelope role field.
-		if !envVarPresent(deploy.Spec.Env, "AGENT_ROLE") {
-			env = append(env, corev1.EnvVar{Name: "AGENT_ROLE", Value: deploy.Spec.Role})
-		}
+		// AGENT_ROLE: from spec.role, always (an identity variable, identity_env.go). The launcher stamps
+		// it into the envelope, and a callee admits the call only when it equals the attested role.
+		env = append(env, corev1.EnvVar{Name: envAgentRole, Value: deploy.Spec.Role})
 		// AGENT_ALLOWED_CALLERS: comma-join of spec.allowedCallers (user-override-
 		// wins). Empty when the list is unset → the launcher applies its default
 		// (registry-membership) policy.
@@ -1594,6 +1599,13 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 				Value: strings.Join(deploy.Spec.AllowedCallers, ","),
 			})
 		}
+
+		// AMP attestation (ADR 0153): as a caller, the launcher trades this pod's BFF-audience token for the
+		// platform's attestation of who it is and stamps it on every AMP hop; as a callee, it verifies a
+		// caller's with the capability public key and run capabilities with the key and audience, and
+		// admits a call that carries neither only under the accept posture. Without the key a member
+		// refuses every attested call, so the key is injected whenever the platform has one.
+		env = append(env, ampAttestationEnv(env, deploy.Spec.Env, r.OBOEgress, !r.AMPAcceptUnattested)...)
 
 		// Delegate (M64, ADR 0057): if this registry member is the SUPERVISOR of an AgentTeam, inject the
 		// launcher's delegate wiring so its SDK gets the delegate_to tool + can spawn its roster as sub-runs.
@@ -1694,7 +1706,10 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// the prompt CM). No image change — a pod-VOLUME + config change only.
 		userMounts = append(userMounts, *guardrailMount)
 	}
-	if guardrailMount != nil {
+	// The BFF-audience pod token: a guarded agent's audit edge (m184.7) and a registry member's AMP
+	// attestation (ADR 0153) both present it. One volume however many need it.
+	mountBFFPodToken := guardrailMount != nil || membership.IsMember
+	if mountBFFPodToken {
 		userMounts = append(userMounts, corev1.VolumeMount{
 			Name: bffPodTokenVolume, MountPath: bffPodTokenMountPath, ReadOnly: true,
 		})
@@ -1778,7 +1793,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// WITHOUT rolling the revision — the mount is structurally constant for any tool-having agent.
 		volumes = append(volumes, *routesVol)
 	}
-	if guardrailVol != nil {
+	if mountBFFPodToken {
 		volumes = append(volumes, bffPodTokenVolumeSpec())
 	}
 	if injectPodToken {
@@ -2069,6 +2084,17 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	if len(ignoredIdentity) > 0 {
 		supersededDigests = append(supersededDigests, combinedDigest)
 		combinedDigest = foldDigest(combinedDigest, "|identity-env:"+strings.Join(ignoredIdentity, ","))
+	}
+
+	// A registry member's attestation wiring (the BFF token, the capability key, the posture) is read by
+	// no digest, so it moves the revision name here. The pod named without it, and the pod named under
+	// the other posture, are the same pod renamed: an approval carries across the upgrade and across the
+	// accept-to-require flip the posture exists for.
+	if membership.IsMember {
+		require := !r.AMPAcceptUnattested
+		supersededDigests = append(supersededDigests, combinedDigest,
+			foldDigest(combinedDigest, ampAttestationFold(r.OBOEgress, !require)))
+		combinedDigest = foldDigest(combinedDigest, ampAttestationFold(r.OBOEgress, require))
 	}
 
 	return podTemplate{
@@ -3063,7 +3089,9 @@ func (r *AgentDeploymentReconciler) syncCapabilityRegistration(
 		Ready:       ready,
 	}
 	if membership.IsMember {
-		row.RegistryID = membership.RegistryID
+		// The role is what the BFF attests for this agent's AMP calls (ADR 0153), so it is recorded
+		// beside the membership it qualifies.
+		row.RegistryID, row.Role = membership.RegistryID, deploy.Spec.Role
 	}
 	if err := r.AgentCapabilityStore.Set(ctx, row); err != nil {
 		logf.FromContext(ctx).Error(err, "capability registration failed; will re-converge next reconcile",

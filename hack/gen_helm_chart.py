@@ -457,6 +457,17 @@ DEV_DATA_PLANE_ENV_HELM = (
     "          value: {{ .Values.devDataPlane.enabled | quote }}"
 )
 
+# AMP_REQUIRE_ATTESTATION (ADR 0153) — DEFAULT-ON. config/manager hardcodes "true" (== the kustomize default,
+# so the DEFAULT render matches → no drift); the chart templates it from controllerManager.amp.requireAttestation
+# so an operator can roll out in two steps. ternary, not `default`, so an explicit false stays false.
+AMP_REQUIRE_ATTESTATION_ENV_KUSTOMIZE = (
+    '        - name: AMP_REQUIRE_ATTESTATION\n' '          value: "true"'
+)
+AMP_REQUIRE_ATTESTATION_ENV_HELM = (
+    "        - name: AMP_REQUIRE_ATTESTATION\n"
+    '          value: {{ ternary "true" "false" .Values.controllerManager.amp.requireAttestation | quote }}'
+)
+
 # ENABLE_TENANT_LABEL_WEBHOOK (M134, ADR 0102) — DEFAULT-ON tenant-label fail-closed webhook. config/manager
 # hardcodes "true" (== the kustomize default, so the DEFAULT render matches → no drift); the chart templates
 # it from security.tenantLabelWebhook.enabled so an operator can opt OUT (with the values.yaml ack). ternary
@@ -733,6 +744,7 @@ def substitute(doc: str) -> str:
     # OPS-2 — the dev-data-plane gate -> Helm value. Default "true" renders == kustomize (no drift);
     # profile=production sets devDataPlane.enabled=false so the controller injects no dev creds.
     doc = doc.replace(DEV_DATA_PLANE_ENV_KUSTOMIZE, DEV_DATA_PLANE_ENV_HELM)
+    doc = doc.replace(AMP_REQUIRE_ATTESTATION_ENV_KUSTOMIZE, AMP_REQUIRE_ATTESTATION_ENV_HELM)
     doc = doc.replace(ENABLE_TENANT_LABEL_WEBHOOK_ENV_KUSTOMIZE, ENABLE_TENANT_LABEL_WEBHOOK_ENV_HELM)
     # The Namespace object's own name + RoleBinding/ClusterRoleBinding subject
     # namespaces use `name:`/`namespace:` -> also parameterize the Namespace name.

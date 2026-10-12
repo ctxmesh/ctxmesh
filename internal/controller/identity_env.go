@@ -29,15 +29,21 @@ import (
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
-// The identity variables say which agent, version and tenant a pod is. The launcher stamps every trace
-// agent:<POD_NAMESPACE>/<AGENT_NAME> and version:<AGENT_VERSION>; a trace no run maps is authorized by
-// that agent tag (ADR 0078); per-agent spend is keyed by the agent's namespace and name; per-version
-// scores drive regression detection, rollback and canary scoring; and TENANT_ID decides whose quota
-// and spend ledger a call is charged to. A value an author could set would let one agent write traces,
-// scores and spend under another's name, so they are always the platform's: a value for one in
-// spec.env is dropped and reported in the IdentityEnvIgnored condition.
+// The identity variables say which agent, version, tenant, registry and role a pod is. The launcher stamps
+// every trace agent:<POD_NAMESPACE>/<AGENT_NAME> and version:<AGENT_VERSION>; a trace no run maps is
+// authorized by that agent tag (ADR 0078); per-agent spend is keyed by the agent's namespace and name;
+// per-version scores drive regression detection, rollback and canary scoring; TENANT_ID decides whose
+// quota and spend ledger a call is charged to; and AGENT_REGISTRY_ID and AGENT_ROLE are the registry and
+// role an AMP call claims, which the callee checks against the platform's attestation (ADR 0153). A value
+// an author could set would let one agent act under another's name, so they are always the platform's: a
+// value for one in spec.env is dropped and reported in the IdentityEnvIgnored condition.
+//
+// AGENT_ALLOWED_CALLERS is not among them: it is the callee's own inbound policy, which whoever can edit
+// spec.env can equally set through spec.allowedCallers, and it says nothing about the agent to anyone else.
 const (
-	envTenantID = "TENANT_ID"
+	envTenantID        = "TENANT_ID"
+	envAgentRegistryID = "AGENT_REGISTRY_ID"
+	envAgentRole       = "AGENT_ROLE"
 
 	// conditionIdentityEnvIgnored is True while spec.env sets an identity variable, naming them; it is
 	// absent otherwise.
@@ -46,7 +52,9 @@ const (
 )
 
 // identityEnvNames are the identity variables, in the order a condition names them.
-var identityEnvNames = []string{envPodNamespace, envAgentName, envAgentVersion, envTenantID}
+var identityEnvNames = []string{
+	envPodNamespace, envAgentName, envAgentVersion, envTenantID, envAgentRegistryID, envAgentRole,
+}
 
 // withoutIdentityEnv returns env without the identity variables, and the ones it held, each once, in
 // identityEnvNames order.

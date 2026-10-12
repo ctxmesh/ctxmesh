@@ -45,6 +45,7 @@ func mkDescribedAgent(
 			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: "serving",
 			Port:           8080,
+			Role:           "reviewer",
 			Capabilities:   desc,
 		},
 	}
@@ -81,6 +82,7 @@ func TestReconcile_RegistersCapabilityDescriptor(t *testing.T) {
 	assert.Equal(t, []string{"summarization", "pdf"}, got[0].Tags)
 	assert.Equal(t, "cap-registry", got[0].RegistryID,
 		"registration is scoped by AgentRegistry membership (the AMP trust boundary), not by namespace alone")
+	assert.Equal(t, "reviewer", got[0].Role, "the member's spec.role is recorded for the BFF to attest (ADR 0153)")
 }
 
 // An agent with NO descriptor is never registered — it stays reachable by name but is not semantically

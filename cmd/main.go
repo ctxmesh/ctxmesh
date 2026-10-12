@@ -596,6 +596,10 @@ func main() {
 		// it false). False ⇒ neither dev credential family is injected, so a production render
 		// never ships the bundled dev.local creds.
 		DevDataPlane: strings.TrimSpace(os.Getenv("DEV_DATA_PLANE")) == envValueTrue,
+		// In-mesh call posture (ADR 0153): a registry member requires an attested caller unless the
+		// operator explicitly opts out (chart: controllerManager.amp.requireAttestation=false) to roll
+		// out in two steps. Unset or anything but "false" requires.
+		AMPAcceptUnattested: strings.TrimSpace(os.Getenv("AMP_REQUIRE_ATTESTATION")) == "false",
 		// State-layer proxy URL (M51, ADR 0050 §8 phase 1): opt-in. Set ⇒ memory-bound
 		// agents route session/shared memory through the proxy; empty ⇒ direct Valkey.
 		StatelayerProxyURL: statelayerProxyURL,

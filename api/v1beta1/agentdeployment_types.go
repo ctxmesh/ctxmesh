@@ -248,10 +248,10 @@ type AgentDeploymentSpec struct {
 	// the agent container alongside the controller-managed variables such as
 	// $AGENT_PORT. Uses the standard Kubernetes EnvVar schema.
 	//
-	// POD_NAMESPACE, AGENT_NAME, AGENT_VERSION and TENANT_ID are always set by
-	// the platform: they identify the agent in its traces, cost and
-	// authorization. A value given here for one of them is not used, and the
-	// IdentityEnvIgnored condition names it.
+	// POD_NAMESPACE, AGENT_NAME, AGENT_VERSION, TENANT_ID, AGENT_REGISTRY_ID and
+	// AGENT_ROLE are always set by the platform: they identify the agent in its
+	// traces, cost, authorization and calls to other agents. A value given here
+	// for one of them is not used, and the IdentityEnvIgnored condition names it.
 	// +optional
 	// +kubebuilder:validation:MaxItems=64
 	Env []corev1.EnvVar `json:"env,omitempty"`

@@ -173,6 +173,12 @@ spec:
           # injected. Its value must track the bundled dev Valkey/MinIO gate (same values key).
           - name: DEV_DATA_PLANE
             value: "true"
+          # AMP_REQUIRE_ATTESTATION (ADR 0153) — DEFAULT-ON. A registry member admits /invoke only from an
+          # attested AMP caller, its own async consumer, or a run capability naming it. "false" is the
+          # rollout's accept posture: members also admit what they admitted before. The chart templates it
+          # from controllerManager.amp.requireAttestation.
+          - name: AMP_REQUIRE_ATTESTATION
+            value: "true"
           # ENABLE_TENANT_LABEL_WEBHOOK (M134, ADR 0102) — DEFAULT-ON. The fail-closed tenant-label
           # ValidatingWebhook forbids a non-controller principal from repointing a namespace's tenant
           # label (a cross-tenant boundary move). Proven no-wedge fresh (cert bootstrap + restart +

@@ -19,6 +19,7 @@ limitations under the License.
 package controller
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -37,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // newRegistryReconciler builds an AgentRegistryReconciler on the envtest client.
@@ -296,11 +298,35 @@ func TestRegistry_MemberEnvInjected(t *testing.T) {
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(agent), agent))
 
-	reconcileNN(t, newReconciler(), agentName, namespace)
+	r := newReconciler()
+	r.OBOEgress.CapabilityPublicKeyB64 = "dGVzdC1jYXBhYmlsaXR5LXB1YmxpYy1rZXktMzJieXQ="
+	reconcileNN(t, r, agentName, namespace)
 
 	ksvc := getKsvc(t, agentName, namespace)
 	userContainer := ksvc.Spec.Template.Spec.Containers[0]
 	envMap := envByName(userContainer.Env)
+
+	// ADR 0153: what attested AMP needs, as the API server stored it. The token is projected for the
+	// BFF's audience, and the posture defaults to require.
+	assert.Equal(t, bffPodTokenMountPath+"/token", envMap[envBFFPodTokenPath])
+	assert.Equal(t, r.OBOEgress.CapabilityPublicKeyB64, envMap[envMCPCapPublicKey])
+	assert.Equal(t, strconv.FormatBool(true), envMap[envAMPRequireAttestation])
+	var tokenVols int
+	for _, v := range ksvc.Spec.Template.Spec.Volumes {
+		if v.Name == bffPodTokenVolume {
+			tokenVols++
+			require.NotNil(t, v.Projected)
+			assert.Equal(t, runcap.BFFPodAudience, v.Projected.Sources[0].ServiceAccountToken.Audience)
+		}
+	}
+	assert.Equal(t, 1, tokenVols, "a member projects its BFF-audience token once")
+	var tokenMounts int
+	for _, m := range userContainer.VolumeMounts {
+		if m.Name == bffPodTokenVolume && m.MountPath == bffPodTokenMountPath && m.ReadOnly {
+			tokenMounts++
+		}
+	}
+	assert.Equal(t, 1, tokenMounts)
 
 	assert.Equal(t, registryID, envMap["AGENT_REGISTRY_ID"], "AGENT_REGISTRY_ID must be injected")
 	assert.Equal(t, "orchestrator", envMap["AGENT_ROLE"], "AGENT_ROLE from spec.role")
@@ -832,9 +858,11 @@ func TestRegistry_CustomGuardsInjected(t *testing.T) {
 	assert.Equal(t, "5", envMap["A2A_HOP_BUDGET"], "custom hopBudget must be injected")
 }
 
-// TestRegistry_UserRoleEnvWins verifies a user-set AGENT_ROLE in spec.env is not
-// overwritten by spec.role (user-override-wins, like AGENT_NAME).
-func TestRegistry_UserRoleEnvWins(t *testing.T) {
+// TestRegistry_RoleInSpecEnvIsThePlatforms: AGENT_ROLE is identity (ADR 0153). A callee admits an AMP
+// call only when the envelope's role equals the one the platform attests from spec.role, so a value in
+// spec.env is not used and the attempt is reported. (It used to win; an agent claiming a role its spec
+// does not hold would now fail every hop, and could otherwise claim a role it was not given.)
+func TestRegistry_RoleInSpecEnvIsThePlatforms(t *testing.T) {
 	const (
 		namespace  = "default"
 		regName    = "roleoverride-mesh"
@@ -855,7 +883,10 @@ func TestRegistry_UserRoleEnvWins(t *testing.T) {
 			ExecutionModel: "serving",
 			Port:           8080,
 			Role:           "worker",
-			Env:            []corev1.EnvVar{{Name: "AGENT_ROLE", Value: "reviewer"}},
+			Env: []corev1.EnvVar{
+				{Name: "AGENT_ROLE", Value: "reviewer"},
+				{Name: "AGENT_REGISTRY_ID", Value: "someone-elses-registry"},
+			},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, agent))
@@ -865,15 +896,17 @@ func TestRegistry_UserRoleEnvWins(t *testing.T) {
 	reconcileNN(t, newReconciler(), agentName, namespace)
 	ksvc := getKsvc(t, agentName, namespace)
 
-	// Exactly one AGENT_ROLE entry, holding the user's value.
-	var roleEntries []corev1.EnvVar
-	for _, e := range ksvc.Spec.Template.Spec.Containers[0].Env {
-		if e.Name == "AGENT_ROLE" {
-			roleEntries = append(roleEntries, e)
-		}
-	}
-	require.Len(t, roleEntries, 1, "controller must not inject a duplicate AGENT_ROLE")
-	assert.Equal(t, "reviewer", roleEntries[0].Value, "user-set AGENT_ROLE must win")
+	env := ksvc.Spec.Template.Spec.Containers[0].Env
+	require.Equal(t, 1, countEnv(env, "AGENT_ROLE"), "controller must not inject a duplicate AGENT_ROLE")
+	require.Equal(t, 1, countEnv(env, "AGENT_REGISTRY_ID"))
+	assert.Equal(t, "worker", envByName(env)["AGENT_ROLE"], "spec.role, never spec.env")
+	assert.Equal(t, registryID, envByName(env)["AGENT_REGISTRY_ID"], "the resolved registry, never spec.env")
+
+	var stored agentsv1beta1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(agent), &stored))
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, conditionIdentityEnvIgnored)
+	require.NotNil(t, cond)
+	assert.Contains(t, cond.Message, "AGENT_REGISTRY_ID, AGENT_ROLE")
 }
 
 // TestRegistry_NetworkPolicyIdempotent verifies re-reconciling a registry does
