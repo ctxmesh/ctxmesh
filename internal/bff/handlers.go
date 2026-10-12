@@ -914,12 +914,45 @@ func (s *Server) handleEvalGatedMetric(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// notImplemented is the handler mounted for adapter seams (Langfuse/Prometheus/
-// invoke/expand) whose adapter is nil on the foundation. It returns 501 so the
-// route exists and is discoverable but honestly reports "not wired yet".
-func notImplemented(feature string) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		writeError(w, http.StatusNotImplemented, feature+" is not implemented yet")
+// dependency is something a route cannot serve without: the caller-scoped cluster client, the
+// trace store, an adapter. wired is whether this server has it.
+type dependency struct {
+	name  string
+	wired bool
+}
+
+// requires is the one place an absent dependency becomes a response. Every route registers
+// exactly once, through it when it has dependencies, so the route table is the same in every
+// configuration: a server missing a dependency answers 501 naming it rather than 404, which the
+// console reads as "not available here".
+func requires(h http.HandlerFunc, deps ...dependency) http.Handler {
+	for _, d := range deps {
+		if !d.wired {
+			name := d.name
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeError(w, http.StatusNotImplemented, name+" is not configured on this server")
+			})
+		}
+	}
+	return h
+}
+
+// routeDeps are the dependencies routes are gated on, named as their 501 names them.
+type routeDeps struct {
+	cluster dependency // the caller-scoped client factory (ADR 0011)
+	scheme  dependency // decoding and applying manifests
+	traces  dependency // the trace store
+	invoke  dependency // dispatching to an agent
+	expand  dependency // the simplified-config expand core
+}
+
+func (s *Server) routeDeps() routeDeps {
+	return routeDeps{
+		cluster: dependency{"caller-scoped cluster access", s.callerClients != nil},
+		scheme:  dependency{"the platform API scheme", s.scheme != nil},
+		traces:  dependency{"the trace store", s.adapters.Langfuse != nil},
+		invoke:  dependency{"the agent invoker", s.adapters.Invoke != nil},
+		expand:  dependency{"the config expander", s.adapters.Expand != nil},
 	}
 }
 

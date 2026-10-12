@@ -64,6 +64,18 @@ not delivering a hop whose sender has left the registry. A producer publishing s
 registry's Knative Broker must attach its own attestation, fetched from
 `POST /api/internal/amp/attestation` with the sending agent's pod token.
 
+**Changed: an `/api` route the server cannot serve answers 501, not 404.** Each route is now
+registered once. When something it needs is missing (the caller-scoped cluster client, as under
+`ctxmesh dev --ui`; the trace store; the agent invoker; the config expander), it answers `501`
+naming what is missing, for example `caller-scoped cluster access is not configured on this
+server`. Some routes had no such answer and fell through to a 404, among them
+`/api/agents/census`, `/api/kills`, `/api/audit`, `/api/runs/{id}/tree` and
+`/api/runs/{id}/fixture`, so the console could not tell a missing feature from a missing object.
+
+**Removed: `GET /api/metrics/…`.** It answered 501 on an install without Prometheus and 404 on one
+with it; nothing ever served it. Cost is `GET /api/cost`, and `GET /api/metrics/eval-gated` is
+unchanged. `GET /api/traces/{id}/…` paths other than `/detail` now answer 404 rather than 501.
+
 **Fixed: per-user memory, per-user knowledge bases and per-user quota refused every run under the
 default install.** The launcher checked run capabilities against `MCP_CAPABILITY_AUDIENCE`, which
 the chart leaves unset, so it expected an empty audience while the BFF mints for

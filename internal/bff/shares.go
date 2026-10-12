@@ -141,22 +141,16 @@ type ShareSummary struct {
 }
 
 // registerShareRoutes mounts the caller-scoped mint/revoke/list surface for share links (M75, m75.1,
-// ADR 0069 §1) on the authed mux. Like registerRunRoutes it requires the caller-scoped cluster path (the
-// mint authorizes the caller against the run's agent through their own client, ADR 0011). Absent the
-// cluster path or the store → honest 501. (The UNAUTHENTICATED public read is m75.2, mounted elsewhere.)
+// ADR 0069 §1) on the authed mux. Like registerRunRoutes it needs the caller-scoped cluster path (the
+// mint authorizes the caller against the run's agent through their own client, ADR 0011); a missing
+// store is a 501 from the handler. (The UNAUTHENTICATED public read is mounted elsewhere.)
 func (s *Server) registerShareRoutes(authed *http.ServeMux) {
-	if s.callerClients != nil {
-		authed.HandleFunc("POST /api/runs/{id}/shares", s.handleCreateShare)
-		authed.HandleFunc("GET /api/runs/{id}/shares", s.handleListShares)
-		authed.HandleFunc("DELETE /api/runs/{id}/shares/{shareId}", s.handleRevokeShare)
-		// V13 (M112): the caller-scoped "my active shares" view — the caller's shares across ALL runs.
-		authed.HandleFunc("GET /api/my/shares", s.handleMyShares)
-		return
-	}
-	authed.Handle("POST /api/runs/{id}/shares", notImplemented("run shares"))
-	authed.Handle("GET /api/runs/{id}/shares", notImplemented("run shares"))
-	authed.Handle("DELETE /api/runs/{id}/shares/{shareId}", notImplemented("run shares"))
-	authed.Handle("GET /api/my/shares", notImplemented("run shares"))
+	d := s.routeDeps()
+	authed.Handle("POST /api/runs/{id}/shares", requires(s.handleCreateShare, d.cluster))
+	authed.Handle("GET /api/runs/{id}/shares", requires(s.handleListShares, d.cluster))
+	authed.Handle("DELETE /api/runs/{id}/shares/{shareId}", requires(s.handleRevokeShare, d.cluster))
+	// V13 (M112): the caller-scoped "my active shares" view — the caller's shares across ALL runs.
+	authed.Handle("GET /api/my/shares", requires(s.handleMyShares, d.cluster))
 }
 
 // authorizeRunAccess is the caller-scoped authorization gate for a single run (ADR 0011). Every user-facing

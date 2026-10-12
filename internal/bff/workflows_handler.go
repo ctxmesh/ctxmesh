@@ -122,16 +122,12 @@ func (s *Server) registerWorkflowRunRoutes(authed *http.ServeMux) {
 	// static-artifact convention: consistent auth surface, no special-casing.
 	authed.HandleFunc("GET /api/workflows/spec-schema", s.handleWorkflowSpecSchema)
 
-	if s.adapters.Invoke != nil && s.callerClients != nil {
-		authed.HandleFunc("POST /api/workflows/{name}/runs", s.handleCreateWorkflowRun)
-		// The INLINE-spec run (planning mode, m67.7, ADR 0060 §6): the body carries a runtime-generated
-		// WorkflowSpec — NO {name}, NO Workflow CR. Registered on the SAME guard (it also spawns node
-		// sub-runs + reads the registry through the caller-scoped client).
-		authed.HandleFunc("POST /api/workflows/runs", s.handleCreateInlineWorkflowRun)
-		return
-	}
-	authed.Handle("POST /api/workflows/{name}/runs", notImplemented("workflow runs"))
-	authed.Handle("POST /api/workflows/runs", notImplemented("workflow runs"))
+	d := s.routeDeps()
+	authed.Handle("POST /api/workflows/{name}/runs", requires(s.handleCreateWorkflowRun, d.invoke, d.cluster))
+	// The INLINE-spec run (planning mode, m67.7, ADR 0060 §6): the body carries a runtime-generated
+	// WorkflowSpec — NO {name}, NO Workflow CR. Same dependencies: it also spawns node sub-runs and
+	// reads the registry through the caller-scoped client.
+	authed.Handle("POST /api/workflows/runs", requires(s.handleCreateInlineWorkflowRun, d.invoke, d.cluster))
 }
 
 // workflowSpecSchemaJSON is the pure JSON-Schema for a WorkflowSpec, DERIVED from the generated Workflow

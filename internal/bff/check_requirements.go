@@ -265,13 +265,7 @@ func (s *Server) requirementsToolCheck(ctx context.Context, caller client.Client
 }
 
 // registerCheckRequirementsRoute registers POST /api/agents/check-requirements (m72.3,
-// ADR 0066 D3). Extracted into a helper (like registerRefineRoute) so its caller-scoped
-// guard branch lives here, not in Server.Handler() (keeps that function under the
-// gocyclo threshold).
+// ADR 0066 D3), which reads the caller's cluster.
 func (s *Server) registerCheckRequirementsRoute(mux *http.ServeMux) {
-	if s.callerClients != nil {
-		mux.HandleFunc("POST /api/agents/check-requirements", s.handleCheckRequirements)
-	} else {
-		mux.Handle("POST /api/agents/check-requirements", notImplemented("check-requirements"))
-	}
+	mux.Handle("POST /api/agents/check-requirements", requires(s.handleCheckRequirements, s.routeDeps().cluster))
 }

@@ -73,24 +73,17 @@ type CreateRunResponse struct {
 }
 
 // registerRunRoutes mounts the run-oriented execution contract (ADR 0034, M31) on the authed mux:
-// create a durable run + read its status. It requires the caller-scoped cluster path (the run
-// resolves + invokes the agent as the caller, like /invoke); the streaming SSE endpoint is m31.3.
+// create a durable run, read it, stream its events, resume or cancel it. It needs the caller-scoped
+// cluster path (the run resolves + invokes the agent as the caller, like /invoke).
 func (s *Server) registerRunRoutes(authed *http.ServeMux) {
-	if s.adapters.Invoke != nil && s.callerClients != nil {
-		authed.HandleFunc("POST /api/runs", s.handleCreateRun)
-		authed.HandleFunc("GET /api/runs/{id}", s.handleGetRun)
-		authed.HandleFunc("GET /api/runs/{id}/tree", s.handleRunTree)
-		authed.HandleFunc("GET /api/runs/{id}/events", s.handleRunEvents)
-		authed.HandleFunc("GET /api/runs/{id}/fixture", s.handleGetRunFixture)
-		authed.HandleFunc("POST /api/runs/{id}/resume", s.handleResumeRun)
-		authed.HandleFunc("POST /api/runs/{id}/cancel", s.handleCancelRun)
-		return
-	}
-	authed.Handle("POST /api/runs", notImplemented("runs"))
-	authed.Handle("GET /api/runs/{id}", notImplemented("runs"))
-	authed.Handle("GET /api/runs/{id}/events", notImplemented("runs"))
-	authed.Handle("POST /api/runs/{id}/resume", notImplemented("runs"))
-	authed.Handle("POST /api/runs/{id}/cancel", notImplemented("runs"))
+	d := s.routeDeps()
+	authed.Handle("POST /api/runs", requires(s.handleCreateRun, d.invoke, d.cluster))
+	authed.Handle("GET /api/runs/{id}", requires(s.handleGetRun, d.invoke, d.cluster))
+	authed.Handle("GET /api/runs/{id}/tree", requires(s.handleRunTree, d.invoke, d.cluster))
+	authed.Handle("GET /api/runs/{id}/events", requires(s.handleRunEvents, d.invoke, d.cluster))
+	authed.Handle("GET /api/runs/{id}/fixture", requires(s.handleGetRunFixture, d.invoke, d.cluster))
+	authed.Handle("POST /api/runs/{id}/resume", requires(s.handleResumeRun, d.invoke, d.cluster))
+	authed.Handle("POST /api/runs/{id}/cancel", requires(s.handleCancelRun, d.invoke, d.cluster))
 }
 
 // handleResumeRun serves POST /api/runs/{id}/resume — re-enter `running` from `requires_action`
