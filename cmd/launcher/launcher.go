@@ -391,8 +391,9 @@ var platformSecretEnv = map[string]bool{
 	"LANGFUSE_SCORES_PUBLIC_KEY": true, // Langfuse scores keypair (launcher-only: feedback submission)
 	"LANGFUSE_SCORES_SECRET_KEY": true, // Langfuse scores secret
 	// paths to the pod's projected SA tokens — pod identity is the launcher's, not the child's:
-	"STATELAYER_TOKEN_PATH": true,
-	"BFF_POD_TOKEN_PATH":    true,
+	"STATELAYER_TOKEN_PATH":    true,
+	"BFF_POD_TOKEN_PATH":       true,
+	"TOKEN_SERVICE_TOKEN_PATH": true,
 }
 
 // buildChildEnv returns the environment slice for the spawned agent (child) process. Every var is inherited

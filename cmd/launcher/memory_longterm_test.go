@@ -55,7 +55,8 @@ func fakeTokenService(t *testing.T, remembered chan<- map[string]any) *httptest.
 
 func ltProxyTo(url, scope string) *longTermProxy {
 	return &longTermProxy{
-		tokenServiceURL: url, namespace: "prod", agent: "asst", scope: scope, embeddingModel: "embed-v1",
+		tokenServiceURL: url, tokenPath: testPodTokenPath,
+		namespace: "prod", agent: "asst", scope: scope, embeddingModel: "embed-v1",
 		client: &http.Client{Timeout: 5 * time.Second}, tracer: noop.NewTracerProvider().Tracer(""),
 		logf: func(string, ...any) {},
 	}
@@ -140,12 +141,11 @@ func TestLongTerm_PerUserWithoutVerifierIs400(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "per-user needs a verified user identity")
 }
 
-// TestLongTerm_DoesNotForwardRuncapUpstream pins the ADR 0072 invariant (m79.3): the LTM proxy
-// VERIFIES the inbound run capability but NEVER forwards (or otherwise leaks) the raw token to the
-// token-service — postToTokenService builds a fresh upstream request carrying only Content-Type. It
-// is one of the two guardrails that make DEFERRING the "distinct LTM audience" idea (C9) safe: with
-// the token dropped at the verifier, there is no lower-value path that could replay it downstream.
-// If this ever regresses (the LTM proxy starts forwarding the runcap), C9's reopen trigger fires.
+// TestLongTerm_DoesNotForwardRuncapUpstream pinned the ADR 0072 invariant (m79.3) that the LTM proxy
+// never forwards the run capability to the token-service. ADR 0154 replaced it: the token service now
+// verifies the capability itself and derives the per-user subject from it, so a per-user call forwards
+// it in its own header, and nowhere else. The bar this keeps: the token appears in no other header and
+// not in the body, and an agent-wide call carries none (TestTokenService_MemoryCallsCarryThePodToken...).
 func TestLongTerm_DoesNotForwardRuncapUpstream(t *testing.T) {
 	const audience = "ctxmesh-test-aud"
 	pub, priv, err := runcap.GenerateKeyPair()
@@ -178,10 +178,12 @@ func TestLongTerm_DoesNotForwardRuncapUpstream(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code, "the runcap must verify (per-user search succeeds)")
 
-	// The raw token must appear in NONE of the upstream headers or body, and the runcap header
-	// specifically must be absent upstream — the verifier consumes it, the proxy does not relay it.
-	assert.Empty(t, gotHeaders.Get(runcap.HeaderName), "the runcap header must not be forwarded to the token-service")
+	// The token travels only in its own header, which the token service verifies (ADR 0154).
+	assert.Equal(t, token, gotHeaders.Get(runcap.HeaderName), "per-user memory forwards the capability to be verified")
 	for k, vals := range gotHeaders {
+		if k == runcap.HeaderName {
+			continue
+		}
 		for _, v := range vals {
 			assert.NotContainsf(t, v, token, "runcap token leaked into upstream header %s", k)
 		}
