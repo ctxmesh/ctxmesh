@@ -2,6 +2,7 @@ package bff
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
@@ -97,7 +99,8 @@ func TestHandoff_TransfersToNewRun(t *testing.T) {
 	assert.Empty(t, b.RootRunID, "B roots its own tree")
 	assert.Equal(t, 0, b.SpawnDepth)
 	assert.Equal(t, "A-1", b.HandoffSourceRunID, "the A→B backlink (B has no ParentRunID by design)")
-	assert.Equal(t, "http://billing-agent.team-ns.svc", b.Endpoint)
+	assert.Equal(t, "http://billing-agent.team-ns.svc.cluster.local", b.Endpoint,
+		"B's address is the platform's, not the one the request named")
 
 	// A — TERMINATED with the recorded handoff outcome; its agent field is UNCHANGED (immutable).
 	a, err := store.Get("A-1")
@@ -221,9 +224,32 @@ func TestHandoff_SingleShotSourceIs409(t *testing.T) {
 func TestHandoff_MissingFieldsIs400(t *testing.T) {
 	s, signer, _, _ := newHandoffServer(t, mkSourceRun("A-1"))
 	body := validHandoffBody()
-	body.TargetEndpoint = "" // missing
+	body.TargetAgent = "" // missing
 	rec := postHandoff(t, s, mintCap(t, signer, "A-1"), body)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// B is run where the platform records it serves, whatever address the request names: an eventing agent
+// at its <agent>-eventing Service. The run-worker POSTs B's input there with B's capability, so an
+// address an agent could choose would send that capability anywhere (ADR 0122).
+func TestHandoff_TargetRunsAtTheAddressTheRegistryRecords(t *testing.T) {
+	s, signer, store, _ := newHandoffServer(t, mkSourceRun("A-1"))
+	caps := agentcapability.NewMemStore()
+	require.NoError(t, caps.Set(context.Background(), agentcapability.AgentCapability{
+		Namespace: "team-ns", Agent: "billing-agent", RegistryID: "reg-a",
+		Endpoint: "http://billing-agent-eventing.team-ns.svc.cluster.local",
+	}))
+	s.agentCapabilities = caps
+	body := validHandoffBody()
+	body.TargetEndpoint = "http://attacker.example.com/collect"
+
+	rec := postHandoff(t, s, mintCap(t, signer, "A-1"), body)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	var resp HandoffRunResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	b, err := store.Get(resp.RunID)
+	require.NoError(t, err)
+	assert.Equal(t, "http://billing-agent-eventing.team-ns.svc.cluster.local", b.Endpoint)
 }
 
 // TestHandoff_Idempotent — a re-issued identical handoff returns the SAME B, created once; A stays

@@ -112,8 +112,15 @@ func processLoopbackSecret() string {
 
 // ── caller side ─────────────────────────────────────────────────────────────
 
+// peerAttestation is the BFF's answer for one receiver: this agent's attestation for calling it, and the
+// address the platform records for the receiver ("" when it records none, which leaves the Knative route).
+type peerAttestation struct {
+	token    string
+	endpoint string
+}
+
 type cachedAttestation struct {
-	token     string
+	peerAttestation
 	refreshAt time.Time
 }
 
@@ -145,21 +152,21 @@ func newAttestationSource(bffURL string, readToken func() string) *attestationSo
 }
 
 // get returns an attestation for calling receiver, from the cache while it is fresh.
-func (a *attestationSource) get(ctx context.Context, receiver string) (string, error) {
+func (a *attestationSource) get(ctx context.Context, receiver string) (peerAttestation, error) {
 	if a == nil {
-		return "", errors.New("no BFF to attest this agent (BFF_INTERNAL_URL is unset)")
+		return peerAttestation{}, errors.New("no BFF to attest this agent (BFF_INTERNAL_URL is unset)")
 	}
 	receiver = strings.ToLower(receiver)
 	a.mu.Lock()
 	c, ok := a.cache[receiver]
 	a.mu.Unlock()
 	if ok && a.now().Before(c.refreshAt) {
-		return c.token, nil
+		return c.peerAttestation, nil
 	}
 
-	tok, lifetime, err := a.fetch(ctx, receiver)
+	got, lifetime, err := a.fetch(ctx, receiver)
 	if err != nil {
-		return "", err
+		return peerAttestation{}, err
 	}
 	margin := min(ampAttestationRefreshMargin, lifetime/2)
 	now := a.now()
@@ -172,48 +179,51 @@ func (a *attestationSource) get(ctx context.Context, receiver string) (string, e
 	if len(a.cache) >= maxCachedAttestations {
 		clear(a.cache)
 	}
-	a.cache[receiver] = cachedAttestation{token: tok, refreshAt: now.Add(lifetime - margin)}
+	a.cache[receiver] = cachedAttestation{peerAttestation: got, refreshAt: now.Add(lifetime - margin)}
 	a.mu.Unlock()
-	return tok, nil
+	return got, nil
 }
 
-func (a *attestationSource) fetch(ctx context.Context, receiver string) (string, time.Duration, error) {
+func (a *attestationSource) fetch(ctx context.Context, receiver string) (peerAttestation, time.Duration, error) {
 	podToken := a.readToken()
 	if podToken == "" {
-		return "", 0, errors.New("this pod has no BFF token (BFF_POD_TOKEN_PATH)")
+		return peerAttestation{}, 0, errors.New("this pod has no BFF token (BFF_POD_TOKEN_PATH)")
 	}
 	body, err := json.Marshal(map[string]string{"receiver": receiver})
 	if err != nil {
-		return "", 0, err
+		return peerAttestation{}, 0, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, ampAttestationFetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url, bytes.NewReader(body))
 	if err != nil {
-		return "", 0, err
+		return peerAttestation{}, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+podToken)
 	resp, err := a.hc.Do(req)
 	if err != nil {
-		return "", 0, fmt.Errorf("asking the BFF: %w", err)
+		return peerAttestation{}, 0, fmt.Errorf("asking the BFF: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return "", 0, fmt.Errorf("the BFF refused (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(detail)))
+		return peerAttestation{}, 0, fmt.Errorf("the BFF refused (HTTP %d): %s",
+			resp.StatusCode, strings.TrimSpace(string(detail)))
 	}
 	var out struct {
 		Attestation string `json:"attestation"`
 		ExpiresIn   int64  `json:"expiresIn"`
+		Endpoint    string `json:"endpoint"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<10)).Decode(&out); err != nil {
-		return "", 0, fmt.Errorf("decoding the BFF's answer: %w", err)
+		return peerAttestation{}, 0, fmt.Errorf("decoding the BFF's answer: %w", err)
 	}
 	if out.Attestation == "" || out.ExpiresIn <= 0 {
-		return "", 0, errors.New("the BFF answered without an attestation")
+		return peerAttestation{}, 0, errors.New("the BFF answered without an attestation")
 	}
-	return out.Attestation, time.Duration(out.ExpiresIn) * time.Second, nil
+	return peerAttestation{token: out.Attestation, endpoint: out.Endpoint},
+		time.Duration(out.ExpiresIn) * time.Second, nil
 }
 
 // ── callee side ─────────────────────────────────────────────────────────────

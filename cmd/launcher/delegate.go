@@ -404,7 +404,9 @@ func (s *delegateServer) selfRunID(capToken string) string {
 	return verified.RunID
 }
 
-// targetURL resolves a roster member's cluster-local ksvc URL (the AMP convention).
+// targetURL is a roster member's Knative route, sent with spawns, suspends and handoffs for a BFF that
+// predates deriving the address itself. The BFF now runs each target at the address the platform records
+// for it (an eventing agent serves at <agent>-eventing), so this value is not read.
 func (s *delegateServer) targetURL(subAgent string) string {
 	return fmt.Sprintf("http://%s.%s.svc.cluster.local", subAgent, s.cfg.Namespace)
 }

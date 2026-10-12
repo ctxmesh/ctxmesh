@@ -171,3 +171,28 @@ func TestSpawnFence_AbsentEndpointIsFine(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "http://web-researcher.team-ns.svc.cluster.local", sub.Endpoint)
 }
+
+// A sub-agent is called where it actually serves: an eventing agent has no Knative route, only its
+// <agent>-eventing Service, which its capability-registry row records. An agent whose row records no
+// address keeps its route.
+func TestSpawn_SubRunGoesToTheAddressTheRegistryRecords(t *testing.T) {
+	for name, tc := range map[string]struct{ recorded, want string }{
+		"eventing":   {"http://web-researcher-eventing.team-ns.svc.cluster.local", "http://web-researcher-eventing.team-ns.svc.cluster.local"},
+		"no address": {"", "http://web-researcher.team-ns.svc.cluster.local"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, signer, store := newSpawnServer(t, mkParentRun("run-addr-"+name))
+			sub := member("web-researcher", "reg-a")
+			sub.Endpoint = tc.recorded
+			withRegistry(t, s, member("supervisor", "reg-a"), sub)
+
+			rec := postSpawn(t, s, mintCap(t, signer, "run-addr-"+name), validSpawnBody())
+			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+			var resp SpawnRunResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			got, err := store.Get(resp.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got.Endpoint)
+		})
+	}
+}

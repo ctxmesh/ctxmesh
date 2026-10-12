@@ -48,14 +48,13 @@ import (
 
 // HandoffRunRequest is the launcher→BFF handoff body. The invoking user + boundary are NOT in the body —
 // they are INHERITED from the parent run A (loaded via the verified capability's RunID), so a handoff
-// can never escalate beyond A's OBO scope. TargetEndpoint is the launcher's resolved ksvc URL for the
-// roster member B (the launcher owns roster→endpoint resolution, the delegate precedent).
+// can never escalate beyond A's OBO scope. Nor is B's address: the platform derives it, as for spawn.
 type HandoffRunRequest struct {
 	// TargetAgent is the roster-member AgentDeployment name to transfer the conversation to (B).
 	TargetAgent string `json:"targetAgent"`
-	// TargetEndpoint is B's resolved ksvc URL (the launcher resolves it from the roster). The worker
-	// POSTs B's input there. Bounded by A's inherited Boundary + the registry NetworkPolicy.
-	TargetEndpoint string `json:"targetEndpoint"`
+	// TargetEndpoint is not read. Launchers still send the address they would have used; the worker
+	// POSTs B's input to the address the platform records for B, never to one an agent named (ADR 0122).
+	TargetEndpoint string `json:"targetEndpoint,omitempty"`
 	// Message is the handoff prompt A passes to B — B's first user turn. Optional; when empty B replays
 	// only the conversation history. The full prior conversation is threaded to B via the SAME
 	// conversationId (a memory-wired B replays the thread — ADR 0060 §5 "v1 passes B the full history").
@@ -152,9 +151,14 @@ func (s *Server) handleHandoffRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.TargetAgent = strings.TrimSpace(req.TargetAgent)
-	req.TargetEndpoint = strings.TrimSpace(req.TargetEndpoint)
-	if req.TargetAgent == "" || req.TargetEndpoint == "" {
-		writeError(w, http.StatusBadRequest, "targetAgent and targetEndpoint are required")
+	if req.TargetAgent == "" {
+		writeError(w, http.StatusBadRequest, "targetAgent is required")
+		return
+	}
+	targetEndpoint, err := s.agentAddress(r.Context(), parent.Namespace, req.TargetAgent)
+	if err != nil {
+		s.log.Error(err, "handoff: resolving the target's address failed")
+		writeError(w, http.StatusServiceUnavailable, "the target agent's address could not be resolved; retry")
 		return
 	}
 
@@ -169,7 +173,7 @@ func (s *Server) handleHandoffRun(w http.ResponseWriter, r *http.Request) {
 	// handoff message; the prior conversation is threaded to B via the shared conversationId (a
 	// memory-wired B replays the thread — ADR 0060 §5).
 	b := run.New(bID, parent.Namespace, req.TargetAgent, handoffInput(req.Message), parent.ConversationID, now)
-	b.Endpoint = req.TargetEndpoint
+	b.Endpoint = targetEndpoint
 	b.CallerUsername = parent.CallerUsername // the SAME invoking user (OBO for the conversation owner)
 	b.Boundary = parent.Boundary             // the SAME trust boundary (no escalation; B mints against B)
 	b.TraceID = parent.TraceID               // one trace across the transfer so the console links A→B

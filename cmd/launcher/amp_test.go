@@ -62,14 +62,14 @@ type stubAttestor struct {
 	err       error
 }
 
-func (a *stubAttestor) get(_ context.Context, receiver string) (string, error) {
+func (a *stubAttestor) get(_ context.Context, receiver string) (peerAttestation, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.receivers = append(a.receivers, receiver)
 	if a.err != nil {
-		return "", a.err
+		return peerAttestation{}, a.err
 	}
-	return "attestation-for-" + receiver, nil
+	return peerAttestation{token: "attestation-for-" + receiver}, nil
 }
 
 // newStubbedAMPServer is newAMPServer with the attestation exchange stubbed, so an outbound

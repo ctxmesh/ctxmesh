@@ -179,6 +179,19 @@ invoking the agent is processed by a later JetStream retry; Knative Eventing's r
 so there it goes to the dead-letter queue. The state-layer proxy's `/dedup` endpoint takes an `op`
 (`claim`, `complete`, `release`); a launcher that sends none gets the previous behaviour.
 
+**Fixed: synchronous AMP calls, spawns, handoffs and suspended delegations to an eventing agent
+failed.** Each was addressed to the agent's Knative route, `<agent>.<namespace>.svc`, and an
+eventing agent serves only at `<agent>-eventing`. A launcher now gets the receiver's address with
+its attestation, when the receiver is in its registry and the platform records one, and the BFF
+runs a spawned, handed-off or delegated run at the address the capability registry records for the
+target. Agents with no recorded address keep their Knative route.
+
+**Security: a handoff or a suspended delegation could send a run to an address the agent chose.**
+The BFF stored the `targetEndpoint` of a handoff, and the `endpoint` of each delegation in a
+suspend marker the agent's own code writes, and the run-worker then sent the new run's input and
+run capability there. Both are now ignored, as a spawn's already was: the platform derives the
+address. A handoff no longer needs `targetEndpoint`.
+
 **Security: the Langfuse key was readable in every agent's pod spec.** The trace collector carried
 it as a literal environment value, so anyone who could `kubectl get pods` in an agent namespace
 could read it. And an agent whose namespace had no `langfuse-otlp` Secret was given the *platform*

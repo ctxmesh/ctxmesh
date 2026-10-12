@@ -390,7 +390,7 @@ type ampServer struct {
 
 // attestor is the attestation source: the BFF exchange in production, a stub in unit tests.
 type attestor interface {
-	get(ctx context.Context, receiver string) (string, error)
+	get(ctx context.Context, receiver string) (peerAttestation, error)
 }
 
 func newAMPServer(
@@ -429,9 +429,8 @@ func newAMPServer(
 	return s
 }
 
-// clusterHost is the production DNS discovery (agent-mesh.md §12.3, "DNS
-// named"): a target resolves to its Knative route in the caller's namespace.
-// No capability discovery (phase 2).
+// clusterHost is a target's Knative route in the caller's namespace (agent-mesh.md
+// §12.3, "DNS named"), used when the BFF records no address for the receiver.
 func (s *ampServer) clusterHost(target string) string {
 	return fmt.Sprintf("http://%s.%s.svc.cluster.local", target, s.cfg.Namespace)
 }
@@ -644,7 +643,12 @@ func (s *ampServer) forward(
 			"this agent could not obtain its platform attestation, so the call was not sent: "+err.Error())
 		return
 	}
-	base := s.resolveHost(env.ReceiverAgentID)
+	// The receiver's address comes with its attestation when the platform records one: an eventing
+	// agent serves at <agent>-eventing, which the name alone does not tell this launcher.
+	base := att.endpoint
+	if base == "" {
+		base = s.resolveHost(env.ReceiverAgentID)
+	}
 
 	// The wire body is the FULL envelope (payload nested inside) so the callee's
 	// launcher can read access-control fields; the envelope also travels as a
@@ -673,7 +677,7 @@ func (s *ampServer) forward(
 	// legacy emission is a separate, later decision — see ADR 0138.
 	outReq.Header.Set(ampEnvelopeHeader, string(envJSON))
 	outReq.Header.Set(legacyEnvelopeHeader, string(envJSON))
-	outReq.Header.Set(runcap.AttestationHeaderName, att)
+	outReq.Header.Set(runcap.AttestationHeaderName, att.token)
 	// Relay the invoking user's run capability (ADR 0033, m30.3) so the callee acts on-behalf-of
 	// the same user; the callee's egress verifies it against the platform key + its own boundary.
 	if capToken != "" {

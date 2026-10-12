@@ -225,8 +225,24 @@ func (s *Server) attestAsyncSender(
 	return attestation, true, nil
 }
 
-// agentEndpoint is the in-cluster address of a serving agent's Knative route, the shape the launcher's
-// delegate path resolves. Injectable (agentURL) for tests.
+// agentAddress is where the platform calls an agent: the address its capability-registry row records for
+// its execution model (an eventing agent serves at <agent>-eventing, not at a Knative route), else its
+// Knative route. An agent with no row, or one written before addresses were recorded, has a route.
+func (s *Server) agentAddress(ctx context.Context, namespace, agent string) (string, error) {
+	if s.agentCapabilities != nil {
+		row, ok, err := s.agentCapabilities.Get(ctx, namespace, agent)
+		if err != nil {
+			return "", fmt.Errorf("resolving the address of %s/%s: %w", namespace, agent, err)
+		}
+		if ok && row.Endpoint != "" {
+			return row.Endpoint, nil
+		}
+	}
+	return s.agentEndpoint(agent, namespace), nil
+}
+
+// agentEndpoint is the in-cluster address of a serving agent's Knative route. Injectable (agentURL) for
+// tests.
 func (s *Server) agentEndpoint(agent, namespace string) string {
 	if s.agentURL != nil {
 		return s.agentURL(agent, namespace)

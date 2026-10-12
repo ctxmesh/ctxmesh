@@ -20,6 +20,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -111,4 +112,58 @@ func TestAttestedHopThroughTheBFFEdge(t *testing.T) {
 		t.Fatalf("a pod the BFF does not attest: %d, want 503", rr.Code)
 	}
 	assertAMPError(t, rr.Body.Bytes(), errAttestationUnavailable)
+}
+
+// A hop goes where the platform records its receiver serving, which for an eventing agent is not the
+// Knative route the name implies; a receiver with no recorded address keeps the route.
+func TestHopGoesToTheAddressThePlatformRecords(t *testing.T) {
+	t.Parallel()
+	pub, priv, err := runcap.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := newMemberProxy(t, baseCfg(), runcap.NewVerifier(pub, runcap.DefaultAudience, nil))
+	served := httptest.NewServer(member.handler)
+	t.Cleanup(served.Close)
+	var routeHits atomic.Int32
+	route := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		routeHits.Add(1)
+		member.handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(route.Close)
+
+	for name, recorded := range map[string]string{"recorded": served.URL, "none recorded": ""} {
+		t.Run(name, func(t *testing.T) {
+			caps := agentcapability.NewMemStore()
+			for agent, endpoint := range map[string]string{"research": "", "orchestrator": recorded} {
+				if err := caps.Set(context.Background(), agentcapability.AgentCapability{
+					Namespace: "team-a", Agent: agent, RegistryID: "research-team", Role: "worker", Endpoint: endpoint,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			edge := httptest.NewServer(bff.NewServer(bff.Options{
+				MCPCapabilityPrivateSeedB64: runcap.EncodePrivateSeed(priv),
+				AgentCapabilities:           caps,
+				PodAuth:                     podTokens{"research-pod": {Namespace: "team-a", ServiceAccount: "agent-research"}},
+				Log:                         logr.Discard(),
+			}).Handler())
+			t.Cleanup(edge.Close)
+
+			cfg := baseCfg()
+			cfg.SelfName, cfg.Role = "research", "worker"
+			_, tp := newTestTracer(t)
+			s := newAMPServer(cfg, tp.Tracer(tracerName), propagation.TraceContext{}, nil)
+			s.attest = newAttestationSource(edge.URL, func() string { return "research-pod" })
+			s.resolveHost = func(string) string { return route.URL }
+
+			before := routeHits.Load()
+			if rr := callAMP(t, s, context.Background(), "orchestrator", `{"q":1}`, nil); rr.Code != http.StatusOK {
+				t.Fatalf("hop: %d; body=%s", rr.Code, rr.Body.String())
+			}
+			if usedRoute := routeHits.Load() > before; usedRoute != (recorded == "") {
+				t.Errorf("the hop used the Knative route: %v; want %v", usedRoute, recorded == "")
+			}
+		})
+	}
 }

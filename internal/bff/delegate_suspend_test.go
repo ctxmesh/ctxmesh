@@ -17,6 +17,7 @@ limitations under the License.
 package bff
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
@@ -81,7 +83,7 @@ func TestSuspendOnDelegate_BuildsChildrenAndSuspends(t *testing.T) {
 			{SubAgent: "writer", Endpoint: "http://writer.team-a/invoke", Input: []byte(`{"q":"y"}`), Step: "3", CallID: "call_b"},
 		},
 	}
-	require.NoError(t, s.suspendOnDelegate(parent, dw, "trace-1", time.Unix(1, 0).UTC()))
+	require.NoError(t, s.suspendOnDelegate(context.Background(), parent, dw, "trace-1", time.Unix(1, 0).UTC()))
 
 	// The parent is parked on both children, checkpoint stamped + re-verifiable.
 	got, err := s.runStore.Get("sup-1")
@@ -97,7 +99,8 @@ func TestSuspendOnDelegate_BuildsChildrenAndSuspends(t *testing.T) {
 	child, err := s.runStore.Get(run.SpawnRunID("sup-1", "3", "call_a"))
 	require.NoError(t, err)
 	assert.Equal(t, "researcher", child.Agent)
-	assert.Equal(t, "http://researcher.team-a/invoke", child.Endpoint)
+	assert.Equal(t, "http://researcher.team-a.svc.cluster.local", child.Endpoint,
+		"the platform's address for the child, not the one the marker named")
 	assert.Equal(t, "team-a", child.Namespace)
 	assert.Equal(t, "alice@example.com", child.CallerUsername) // OBO inherited from the verified parent
 	assert.Equal(t, "tenant-x", child.Boundary)
@@ -119,7 +122,7 @@ func TestSuspendOnDelegate_SuspendsAtDepth(t *testing.T) {
 	dw := &delegateWaiting{Checkpoint: `{"step":1}`, Delegates: []delegateIntent{
 		{SubAgent: "r", Endpoint: "http://r/invoke", Step: "1", CallID: "c1"},
 	}}
-	err := s.suspendOnDelegate(parent, dw, "trace-1", time.Unix(1, 0).UTC())
+	err := s.suspendOnDelegate(context.Background(), parent, dw, "trace-1", time.Unix(1, 0).UTC())
 	require.NoError(t, err, "a depth>0 supervisor now suspends (nested suspend lifted)")
 
 	got, err := s.runStore.Get("sub-sup")
@@ -144,9 +147,9 @@ func TestSuspendOnDelegate_MissingField(t *testing.T) {
 	parent := mkRunningParent(t, s, "sup-2", 0)
 
 	dw := &delegateWaiting{Checkpoint: "cp", Delegates: []delegateIntent{
-		{SubAgent: "r", Endpoint: "", Step: "1", CallID: "c1"}, // no endpoint — the BFF never resolves a roster itself
+		{SubAgent: "r", Step: "", CallID: "c1"}, // no step: no idempotency key
 	}}
-	err := s.suspendOnDelegate(parent, dw, "trace-1", time.Unix(1, 0).UTC())
+	err := s.suspendOnDelegate(context.Background(), parent, dw, "trace-1", time.Unix(1, 0).UTC())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "required field")
 }
@@ -161,7 +164,7 @@ func TestSuspendOnDelegate_FanOutCeiling(t *testing.T) {
 	for i := range over {
 		over[i] = delegateIntent{SubAgent: "r", Endpoint: "http://r/invoke", Step: "1", CallID: fmt.Sprintf("c%d", i)}
 	}
-	err := s.suspendOnDelegate(parent, &delegateWaiting{Checkpoint: "cp", Delegates: over}, "trace-1", time.Unix(1, 0).UTC())
+	err := s.suspendOnDelegate(context.Background(), parent, &delegateWaiting{Checkpoint: "cp", Delegates: over}, "trace-1", time.Unix(1, 0).UTC())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ceiling")
 }
@@ -175,7 +178,7 @@ func TestSuspendOnDelegate_DepthCeiling(t *testing.T) {
 	dw := &delegateWaiting{Checkpoint: "cp", Delegates: []delegateIntent{
 		{SubAgent: "r", Endpoint: "http://r/invoke", Step: "1", CallID: "c1"},
 	}}
-	err := s.suspendOnDelegate(parent, dw, "trace-1", time.Unix(1, 0).UTC())
+	err := s.suspendOnDelegate(context.Background(), parent, dw, "trace-1", time.Unix(1, 0).UTC())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "depth")
 	_, gErr := s.runStore.Get(run.SpawnRunID("deep-sup", "1", "c1"))
@@ -197,9 +200,37 @@ func TestSuspendOnDelegate_BudgetExhausted(t *testing.T) {
 	dw := &delegateWaiting{Checkpoint: "cp", Delegates: []delegateIntent{
 		{SubAgent: "r", Endpoint: "http://r/invoke", Step: "1", CallID: "c1"},
 	}}
-	err := s.suspendOnDelegate(parent, dw, "trace-1", time.Unix(1, 0).UTC())
+	err := s.suspendOnDelegate(context.Background(), parent, dw, "trace-1", time.Unix(1, 0).UTC())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "budget")
 	_, gErr := s.runStore.Get(run.SpawnRunID("sup-budget", "1", "c1"))
 	assert.Error(t, gErr, "fail-closed: no child is created when the tree budget is exhausted")
+}
+
+// A suspended supervisor's children run where the platform records they serve, never at an address the
+// marker names: the marker is written by the agent's own code, and the run-worker POSTs each child's
+// input, with the child's capability, to the child's address.
+func TestSuspendOnDelegate_ChildrenRunAtTheAddressTheRegistryRecords(t *testing.T) {
+	caps := agentcapability.NewMemStore()
+	require.NoError(t, caps.Set(context.Background(), agentcapability.AgentCapability{
+		Namespace: "team-a", Agent: "researcher", RegistryID: "reg-a",
+		Endpoint: "http://researcher-eventing.team-a.svc.cluster.local",
+	}))
+	s := &Server{runStore: run.NewMemStore(), agentCapabilities: caps, log: logr.Discard()}
+	parent := mkRunningParent(t, s, "sup-addr", 0)
+
+	dw := &delegateWaiting{Checkpoint: "cp", Delegates: []delegateIntent{
+		{SubAgent: "researcher", Endpoint: "http://attacker.example.com/collect", Step: "1", CallID: "c1"},
+		{SubAgent: "writer", Step: "1", CallID: "c2"},
+	}}
+	require.NoError(t, s.suspendOnDelegate(context.Background(), parent, dw, "trace-1", time.Unix(1, 0).UTC()))
+
+	for callID, want := range map[string]string{
+		"c1": "http://researcher-eventing.team-a.svc.cluster.local",
+		"c2": "http://writer.team-a.svc.cluster.local",
+	} {
+		child, err := s.runStore.Get(run.SpawnRunID("sup-addr", "1", callID))
+		require.NoError(t, err)
+		assert.Equal(t, want, child.Endpoint)
+	}
 }

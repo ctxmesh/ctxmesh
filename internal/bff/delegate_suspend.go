@@ -17,6 +17,7 @@ limitations under the License.
 package bff
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,13 +36,14 @@ type delegateWaiting struct {
 	Delegates  []delegateIntent `json:"delegates"`
 }
 
-// delegateIntent is one child delegation the supervisor wants dispatched. SubAgent + Endpoint are the
-// launcher-RESOLVED target (the BFF never resolves a roster endpoint itself — ADR 0011), Input is the
-// sub-agent's task body, and (Step, CallID) are the idempotency key: run.SpawnRunID(parent, step, callID)
-// derives the SAME child run id on a reclaimed/re-issued delegation, so a supervisor can never double-spawn.
+// delegateIntent is one child delegation the supervisor wants dispatched. SubAgent is the target, Input is
+// the sub-agent's task body, and (Step, CallID) are the idempotency key: run.SpawnRunID(parent, step,
+// callID) derives the SAME child run id on a reclaimed/re-issued delegation, so a supervisor can never
+// double-spawn. Endpoint is not read: the marker is written by the agent's own code, so the child's
+// address is the one the platform records for it (ADR 0122), never one the marker names.
 type delegateIntent struct {
 	SubAgent string          `json:"sub_agent"`
-	Endpoint string          `json:"endpoint"`
+	Endpoint string          `json:"endpoint,omitempty"`
 	Input    json.RawMessage `json:"input"`
 	Step     string          `json:"step"`
 	CallID   string          `json:"call_id"`
@@ -75,7 +77,9 @@ func parseDelegateWaiting(resp []byte) *delegateWaiting {
 //
 // Fail-closed: a malformed marker (a bad field, an over-ceiling fan-out) returns an error and the caller
 // fails the run — never a silent block and never a swallowed success.
-func (s *Server) suspendOnDelegate(parent *run.Run, dw *delegateWaiting, traceID string, now time.Time) error {
+func (s *Server) suspendOnDelegate(
+	ctx context.Context, parent *run.Run, dw *delegateWaiting, traceID string, now time.Time,
+) error {
 	// Suspension is DEPTH-AGNOSTIC (ADR 0108, M138): a supervisor suspends at ANY delegation depth. The
 	// depth-0-only gate (ADR 0091's fork-5 fail-closed reject) is lifted — the SuspendOnDelegate machinery
 	// is generic over depth (CompleteAndWake commits the child terminal + the parent wake atomically in one
@@ -135,12 +139,16 @@ func (s *Server) suspendOnDelegate(parent *run.Run, dw *delegateWaiting, traceID
 	children := make([]*run.Run, 0, len(dw.Delegates))
 	for i := range dw.Delegates {
 		d := dw.Delegates[i]
-		if d.SubAgent == "" || d.Endpoint == "" || d.Step == "" || d.CallID == "" {
-			return fmt.Errorf("delegate intent %d missing a required field (sub_agent/endpoint/step/call_id)", i)
+		if d.SubAgent == "" || d.Step == "" || d.CallID == "" {
+			return fmt.Errorf("delegate intent %d missing a required field (sub_agent/step/call_id)", i)
+		}
+		endpoint, aErr := s.agentAddress(ctx, parent.Namespace, d.SubAgent)
+		if aErr != nil {
+			return fmt.Errorf("delegate intent %d: %w", i, aErr)
 		}
 		subID := run.SpawnRunID(parent.ID, d.Step, d.CallID)
 		sub := run.New(subID, parent.Namespace, d.SubAgent, d.Input, parent.ConversationID, now)
-		sub.Endpoint = d.Endpoint
+		sub.Endpoint = endpoint
 		sub.CallerUsername = parent.CallerUsername // OBO inherited from the VERIFIED parent, never the blob
 		sub.Boundary = parent.Boundary
 		sub.TraceID = parent.TraceID

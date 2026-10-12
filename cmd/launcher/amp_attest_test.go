@@ -648,7 +648,7 @@ func TestAttestationSourceCachesPerReceiverUntilRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	att, err := verifier.VerifyAttestation(first)
+	att, err := verifier.VerifyAttestation(first.token)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -677,8 +677,8 @@ func TestAttestationSourceFailsClosed(t *testing.T) {
 		"refused":      newAttestationSource(bff.URL, func() string { return "stolen" }),
 		"unreachable":  newAttestationSource("http://127.0.0.1:1", func() string { return "pod-token" }),
 	} {
-		if tok, err := src.get(context.Background(), "orchestrator"); err == nil || tok != "" {
-			t.Errorf("%s: got %q, %v; want an error and no attestation", name, tok, err)
+		if got, err := src.get(context.Background(), "orchestrator"); err == nil || got.token != "" {
+			t.Errorf("%s: got %q, %v; want an error and no attestation", name, got.token, err)
 		}
 	}
 }

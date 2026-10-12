@@ -100,6 +100,10 @@ type ampAttestationRequest struct {
 type ampAttestationResponse struct {
 	Attestation string `json:"attestation"`
 	ExpiresIn   int64  `json:"expiresIn"`
+	// Endpoint is where the receiver serves, when it is in the caller's registry and the platform records
+	// an address for it. A launcher cannot tell from the name alone that an eventing agent serves at its
+	// <agent>-eventing Service; without this it calls the Knative route.
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 // registerAMPAttestationRoute wires the edge onto the unauthenticated api mux: it authenticates the pod
@@ -175,9 +179,17 @@ func (s *Server) handleAMPAttestation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "the attestation could not be minted")
 		return
 	}
+	resp := ampAttestationResponse{Attestation: att, ExpiresIn: int64(ampAttestationTTL / time.Second)}
+	peer, ok, err := s.agentCapabilities.Get(r.Context(), id.Namespace, req.Receiver)
+	if err != nil {
+		s.log.Error(err, "amp attestation: reading the receiver's registration failed",
+			"receiver", id.Namespace+"/"+req.Receiver)
+		writeError(w, http.StatusServiceUnavailable, "the capability registry is unavailable; retry")
+		return
+	}
+	if ok && peer.RegistryID == self.RegistryID {
+		resp.Endpoint = peer.Endpoint
+	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, ampAttestationResponse{
-		Attestation: att,
-		ExpiresIn:   int64(ampAttestationTTL / time.Second),
-	})
+	writeJSON(w, http.StatusOK, resp)
 }

@@ -173,6 +173,38 @@ func TestAMPAttestation_EventingAndJobAgentsAreAttestedAsSenders(t *testing.T) {
 	}
 }
 
+// The answer carries the receiver's address when it is a peer in the caller's registry with one recorded,
+// since a launcher cannot tell from the name that an eventing agent serves at <agent>-eventing. A receiver
+// with no row, none recorded, or in another registry gets none, and the caller uses the Knative route.
+func TestAMPAttestation_CarriesThePeersAddress(t *testing.T) {
+	s, _ := newAttestationServer(t)
+	for _, row := range []agentcapability.AgentCapability{
+		{
+			Namespace: "team-a", Agent: "consumer", RegistryID: "research",
+			Endpoint: "http://consumer-eventing.team-a.svc.cluster.local",
+		},
+		{
+			Namespace: "team-a", Agent: "outsider", RegistryID: "other",
+			Endpoint: "http://outsider-eventing.team-a.svc.cluster.local",
+		},
+		{Namespace: "team-a", Agent: "reporter", RegistryID: "research"},
+	} {
+		require.NoError(t, s.agentCapabilities.Set(context.Background(), row))
+	}
+	for receiver, want := range map[string]string{
+		"consumer": "http://consumer-eventing.team-a.svc.cluster.local",
+		"outsider": "",
+		"reporter": "",
+		"nobody":   "",
+	} {
+		rec := postAttestation(t, s, "Bearer planner-token", `{"receiver":"`+receiver+`"}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp ampAttestationResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, want, resp.Endpoint, receiver)
+	}
+}
+
 func TestAMPAttestation_Refusals(t *testing.T) {
 	s, _ := newAttestationServer(t)
 	for _, tc := range []struct {

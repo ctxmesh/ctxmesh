@@ -485,7 +485,7 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 	// re-queues the supervisor, which the worker re-invokes carrying the checkpoint in the body (m108.3).
 	// A malformed marker is an honest `failed` — never a silent block and never a swallowed success.
 	if dw := parseDelegateWaiting(resp); dw != nil {
-		if sErr := s.suspendOnDelegate(started, dw, traceID, now); sErr != nil {
+		if sErr := s.suspendOnDelegate(ctx, started, dw, traceID, now); sErr != nil {
 			s.log.Error(sErr, "run: could not suspend supervisor on delegate", "run", runID)
 			if uErr := s.terminalTransitionFenced(ctx, runID, func(rn *run.Run) error {
 				rn.TraceID = traceID
