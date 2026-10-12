@@ -38,6 +38,8 @@ import (
 // an author could set would let one agent act under another's name, so they are always the platform's: a
 // value for one in spec.env is dropped and reported in the IdentityEnvIgnored condition.
 //
+// A registry member's attestation wiring is the platform's on the same terms (memberPlatformEnvNames).
+//
 // AGENT_ALLOWED_CALLERS is not among them: it is the callee's own inbound policy, which whoever can edit
 // spec.env can equally set through spec.allowedCallers, and it says nothing about the agent to anyone else.
 const (
@@ -56,13 +58,25 @@ var identityEnvNames = []string{
 	envPodNamespace, envAgentName, envAgentVersion, envTenantID, envAgentRegistryID, envAgentRole,
 }
 
-// withoutIdentityEnv returns env without the identity variables, and the ones it held, each once, in
-// identityEnvNames order.
-func withoutIdentityEnv(env []corev1.EnvVar) ([]corev1.EnvVar, []string) {
+// memberPlatformEnvNames decide how a registry member's launcher checks who calls it (ADR 0153): its BFF
+// token, the key and audience it verifies attestations and run capabilities with, and the posture. On a
+// member they are the platform's, or an author could switch one agent to accept unattested calls or to
+// verify against a key of their own, and the revision name would fold a posture the pod does not have.
+// An agent in no registry keeps what spec.env says: these do not decide who may call it.
+var memberPlatformEnvNames = []string{envBFFPodTokenPath, envMCPCapPublicKey, envMCPCapAudience, envAMPRequireAttestation}
+
+// withoutIdentityEnv returns env without the variables the platform owns (the identity variables, and a
+// registry member's attestation wiring), and the ones it held, each once, in the order a condition names
+// them.
+func withoutIdentityEnv(env []corev1.EnvVar, member bool) ([]corev1.EnvVar, []string) {
+	owned := identityEnvNames
+	if member {
+		owned = slices.Concat(identityEnvNames, memberPlatformEnvNames)
+	}
 	kept := make([]corev1.EnvVar, 0, len(env))
 	var ignored []string
 	for _, e := range env {
-		if !slices.Contains(identityEnvNames, e.Name) {
+		if !slices.Contains(owned, e.Name) {
 			kept = append(kept, e)
 			continue
 		}
@@ -71,7 +85,7 @@ func withoutIdentityEnv(env []corev1.EnvVar) ([]corev1.EnvVar, []string) {
 		}
 	}
 	slices.SortFunc(ignored, func(a, b string) int {
-		return slices.Index(identityEnvNames, a) - slices.Index(identityEnvNames, b)
+		return slices.Index(owned, a) - slices.Index(owned, b)
 	})
 	return kept, ignored
 }
@@ -92,8 +106,9 @@ func (r *AgentDeploymentReconciler) syncIdentityEnvCondition(
 			Status:             metav1.ConditionTrue,
 			Reason:             reasonIdentityEnvSet,
 			ObservedGeneration: deploy.Generation,
-			Message: fmt.Sprintf("spec.env sets %s, which identify the agent in traces, cost and authorization "+
-				"and are always set by the platform; the values in spec.env are not used. Remove them from spec.env.",
+			Message: fmt.Sprintf("spec.env sets %s, which identify the agent in traces, cost and authorization, "+
+				"or decide how a registry member checks its callers, and are always set by the platform; the values "+
+				"in spec.env are not used. Remove them from spec.env.",
 				strings.Join(ignored, ", ")),
 		})
 	}

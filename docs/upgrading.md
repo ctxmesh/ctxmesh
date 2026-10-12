@@ -130,7 +130,9 @@ capability opens one invoke: a bound one, or one already presented, is refused. 
 **Before upgrading,** find anything that calls a member's `/invoke` directly, such as scripts that
 `curl` an agent's cluster-local URL or an edge installed with `extAuth.enabled=false`, and move it to
 `POST /api/invoke` or `/api/runs`. Remove `AGENT_REGISTRY_ID` and `AGENT_ROLE` from `spec.env`; they
-are now set by the platform from the registry and `spec.role`.
+are now set by the platform from the registry and `spec.role`. On a member, so are
+`AMP_REQUIRE_ATTESTATION`, `MCP_CAPABILITY_PUBLIC_KEY`, `MCP_CAPABILITY_AUDIENCE` and
+`BFF_POD_TOKEN_PATH`: the posture is set for the whole install, never per agent.
 
 **During the upgrade** every member rolls one new revision; an approved revision stays approved.
 Launchers on old revisions do not send attestations until they roll, so AMP calls from them are

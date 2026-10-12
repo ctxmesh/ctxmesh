@@ -1072,11 +1072,18 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		port = 8080
 	}
 
+	// Registry membership (M6) decides which variables the platform owns, so it is resolved first.
+	membership, err := resolveAgentRegistry(ctx, r.Client, deploy)
+	if err != nil {
+		return podTemplate{}, fmt.Errorf("resolving registry membership: %w", err)
+	}
+
 	// Platform env vars come first so they are always present; user env is appended
 	// last and may override platform defaults if the operator deliberately sets the
-	// same name (consistent with the treatment of AGENT_PORT). The identity variables
-	// are the exception: they are always the platform's (identity_env.go).
-	userEnv, ignoredIdentity := withoutIdentityEnv(deploy.Spec.Env)
+	// same name (consistent with the treatment of AGENT_PORT). The identity variables,
+	// and a member's attestation wiring, are the exception: they are always the
+	// platform's (identity_env.go).
+	userEnv, ignoredIdentity := withoutIdentityEnv(deploy.Spec.Env, membership.IsMember)
 	if err := r.syncIdentityEnvCondition(ctx, deploy, ignoredIdentity); err != nil {
 		return podTemplate{}, err
 	}
@@ -1551,18 +1558,13 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		}
 	}
 
-	// Registry membership (M6): resolve the agent's AgentRegistry (if any). When a
-	// member, inject the STATIC mesh env the launcher's /amp server reads
-	// (AGENT_REGISTRY_ID gates the endpoint; AGENT_ROLE / AGENT_ALLOWED_CALLERS
+	// Registry membership (M6): when a member, inject the STATIC mesh env the launcher's /amp
+	// server reads (AGENT_REGISTRY_ID gates the endpoint; AGENT_ROLE / AGENT_ALLOWED_CALLERS
 	// feed the L7 access-control checks; A2A_MAX_DEPTH / A2A_HOP_BUDGET seed the
 	// conversation guards) and stamp the membership pod label the generated
 	// NetworkPolicy selects on. All values are known at reconcile time → plain
 	// static env. (The Knative webhook rejects a downward-API fieldRef in a ksvc — the m5.7
 	// landmine; it accepts secretKeyRef.)
-	membership, err := resolveAgentRegistry(ctx, r.Client, deploy)
-	if err != nil {
-		return podTemplate{}, fmt.Errorf("resolving registry membership: %w", err)
-	}
 	if membership.IsMember {
 		env = append(
 			env,
@@ -1605,7 +1607,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// caller's with the capability public key and run capabilities with the key and audience, and
 		// admits a call that carries neither only under the accept posture. Without the key a member
 		// refuses every attested call, so the key is injected whenever the platform has one.
-		env = append(env, ampAttestationEnv(env, deploy.Spec.Env, r.OBOEgress, !r.AMPAcceptUnattested)...)
+		env = append(env, ampAttestationEnv(env, r.OBOEgress, !r.AMPAcceptUnattested)...)
 
 		// Delegate (M64, ADR 0057): if this registry member is the SUPERVISOR of an AgentTeam, inject the
 		// launcher's delegate wiring so its SDK gets the delegate_to tool + can spawn its roster as sub-runs.

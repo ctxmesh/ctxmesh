@@ -161,14 +161,25 @@ func TestDroppingIdentityEnvRenamesTheRevision(t *testing.T) {
 func TestWithoutIdentityEnv(t *testing.T) {
 	t.Parallel()
 
-	kept, ignored := withoutIdentityEnv([]corev1.EnvVar{
-		{Name: "A", Value: "1"}, {Name: envAgentVersion}, {Name: "agent_name"}, {Name: envAgentName}, {Name: envAgentVersion},
-	})
-	assert.Equal(t, []corev1.EnvVar{{Name: "A", Value: "1"}, {Name: "agent_name"}}, kept,
+	env := []corev1.EnvVar{
+		{Name: "A", Value: "1"},
+		{Name: envAMPRequireAttestation},
+		{Name: envAgentVersion},
+		{Name: "agent_name"},
+		{Name: envAgentName},
+		{Name: envAgentVersion},
+	}
+	kept, ignored := withoutIdentityEnv(env, false)
+	assert.Equal(t, []corev1.EnvVar{{Name: "A", Value: "1"}, {Name: envAMPRequireAttestation}, {Name: "agent_name"}}, kept,
 		"environment names are case-sensitive: agent_name is not AGENT_NAME")
 	assert.Equal(t, []string{envAgentName, envAgentVersion}, ignored)
 
-	kept, ignored = withoutIdentityEnv(nil)
+	kept, ignored = withoutIdentityEnv(env, true)
+	assert.Equal(t, []corev1.EnvVar{{Name: "A", Value: "1"}, {Name: "agent_name"}}, kept,
+		"a member's attestation wiring is the platform's")
+	assert.Equal(t, []string{envAgentName, envAgentVersion, envAMPRequireAttestation}, ignored)
+
+	kept, ignored = withoutIdentityEnv(nil, true)
 	assert.Empty(t, kept)
 	assert.Empty(t, ignored)
 }

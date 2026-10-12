@@ -177,8 +177,11 @@ spec:
 
                   POD_NAMESPACE, AGENT_NAME, AGENT_VERSION, TENANT_ID, AGENT_REGISTRY_ID and
                   AGENT_ROLE are always set by the platform: they identify the agent in its
-                  traces, cost, authorization and calls to other agents. A value given here
-                  for one of them is not used, and the IdentityEnvIgnored condition names it.
+                  traces, cost, authorization and calls to other agents. For an agent in an
+                  AgentRegistry, so are AMP_REQUIRE_ATTESTATION, MCP_CAPABILITY_PUBLIC_KEY,
+                  MCP_CAPABILITY_AUDIENCE and BFF_POD_TOKEN_PATH, which decide how it checks
+                  its callers. A value given here for one of them is not used, and the
+                  IdentityEnvIgnored condition names it.
                 items:
                   description: EnvVar represents an environment variable present in
                     a Container.

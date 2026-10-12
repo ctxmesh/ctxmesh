@@ -28,7 +28,10 @@ A registry member now admits `/invoke` only from:
 
 Anything else gets HTTP 403 `caller_not_allowed`. Agents in no registry are unchanged. A chained hop
 claims its own registry. `AGENT_REGISTRY_ID` and `AGENT_ROLE` are now platform identity variables:
-a value in `spec.env` is not used, and `IdentityEnvIgnored` names it. The edge removes
+a value in `spec.env` is not used, and `IdentityEnvIgnored` names it. On a member the same holds for
+`AMP_REQUIRE_ATTESTATION`, `MCP_CAPABILITY_PUBLIC_KEY`, `MCP_CAPABILITY_AUDIENCE` and
+`BFF_POD_TOKEN_PATH`, so an author cannot switch one agent to accept unattested calls or verify
+against a key of their own. The edge removes
 `X-AMP-Envelope`, `X-A2A-Envelope` and `X-AMP-Attestation` from inbound requests. An agent whose
 launcher cannot get an attestation fails the hop with HTTP 503 `attestation_unavailable` instead of
 sending it unattested. Every agent's launcher, member or not, refuses with HTTP 401 a capability

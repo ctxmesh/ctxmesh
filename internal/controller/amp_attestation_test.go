@@ -239,7 +239,7 @@ func TestAMPAttestationEnvLeavesSetVariables(t *testing.T) {
 	t.Parallel()
 
 	obo := OBOEgressConfig{CapabilityPublicKeyB64: testCapabilityKey, CapabilityAudience: "aud"}
-	got := ampAttestationEnv(nil, nil, obo, true)
+	got := ampAttestationEnv(nil, obo, true)
 	assert.Equal(t, []corev1.EnvVar{
 		{Name: envBFFPodTokenPath, Value: bffPodTokenMountPath + "/token"},
 		{Name: envMCPCapPublicKey, Value: testCapabilityKey},
@@ -247,12 +247,64 @@ func TestAMPAttestationEnvLeavesSetVariables(t *testing.T) {
 		{Name: envAMPRequireAttestation, Value: postureRequire},
 	}, got)
 
-	set := []corev1.EnvVar{{Name: envMCPCapPublicKey, Value: "k"}, {Name: envBFFPodTokenPath, Value: "/p"}}
-	got = ampAttestationEnv(set, []corev1.EnvVar{{Name: envAMPRequireAttestation, Value: postureAccept}}, obo, true)
-	assert.Empty(t, got, "a variable already present is never duplicated")
+	set := []corev1.EnvVar{
+		{Name: envMCPCapPublicKey, Value: testCapabilityKey},
+		{Name: envBFFPodTokenPath, Value: "/p"},
+		{Name: envAMPRequireAttestation, Value: postureRequire},
+	}
+	assert.Equal(t, []corev1.EnvVar{{Name: envMCPCapAudience, Value: "aud"}}, ampAttestationEnv(set, obo, true),
+		"a variable the platform already set is never repeated, and the audience does not depend on who set the key")
 
 	assert.Equal(t, []corev1.EnvVar{
 		{Name: envBFFPodTokenPath, Value: bffPodTokenMountPath + "/token"},
 		{Name: envAMPRequireAttestation, Value: postureAccept},
-	}, ampAttestationEnv(nil, nil, OBOEgressConfig{}, false), "no key in the install, no key in the pod")
+	}, ampAttestationEnv(nil, OBOEgressConfig{}, false), "no key in the install, no key in the pod")
+}
+
+// A member's attestation wiring is the platform's: spec.env cannot switch it to accept unattested calls,
+// point it at another key, audience or token, and the attempt is reported. The pod carries the posture
+// its revision name folds. An agent in no registry keeps its spec.env values.
+func TestAMembersAttestationWiringInSpecEnvIsThePlatforms(t *testing.T) {
+	t.Parallel()
+
+	authored := []corev1.EnvVar{
+		{Name: envAMPRequireAttestation, Value: postureAccept},
+		{Name: envMCPCapPublicKey, Value: "YXV0aG9ycy1vd24ta2V5"},
+		{Name: envMCPCapAudience, Value: "authors-audience"},
+		{Name: envBFFPodTokenPath, Value: "/tmp/forged-token"},
+		{Name: "KEPT", Value: "1"},
+	}
+	member, objs := meshFixture("member", true, authored...)
+	r := meshReconciler(t, member, objs, false, testCapabilityKey)
+	r.OBOEgress.CapabilityAudience = "platform-audience"
+	pod, err := r.buildPodTemplate(context.Background(), member)
+	require.NoError(t, err)
+	assert.Equal(t, []string{postureRequire}, envValues(t, pod, envAMPRequireAttestation))
+	assert.Equal(t, []string{testCapabilityKey}, envValues(t, pod, envMCPCapPublicKey))
+	assert.Equal(t, []string{"platform-audience"}, envValues(t, pod, envMCPCapAudience))
+	assert.Equal(t, []string{bffPodTokenMountPath + "/token"}, envValues(t, pod, envBFFPodTokenPath))
+	assert.Equal(t, []string{"1"}, envValues(t, pod, "KEPT"))
+
+	var stored agentsv1beta1.AgentDeployment
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(member), &stored))
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, conditionIdentityEnvIgnored)
+	require.NotNil(t, cond)
+	assert.Contains(t, cond.Message,
+		"BFF_POD_TOKEN_PATH, MCP_CAPABILITY_PUBLIC_KEY, MCP_CAPABILITY_AUDIENCE, AMP_REQUIRE_ATTESTATION")
+
+	clean, cleanObjs := meshFixture("member", true, corev1.EnvVar{Name: "KEPT", Value: "1"})
+	cleanPod, err := meshReconciler(t, clean, cleanObjs, false, testCapabilityKey).buildPodTemplate(context.Background(), clean)
+	require.NoError(t, err)
+	assert.NotEqual(t, cleanPod.digest, pod.digest,
+		"dropping the authored values changes the pod, so it moves the revision name (identity-env fold)")
+
+	loner, objs := meshFixture("loner", false, authored...)
+	r = meshReconciler(t, loner, objs, false, testCapabilityKey)
+	pod, err = r.buildPodTemplate(context.Background(), loner)
+	require.NoError(t, err)
+	assert.Equal(t, []string{postureAccept}, envValues(t, pod, envAMPRequireAttestation),
+		"an agent in no registry is not checked by these, and keeps what spec.env says")
+	assert.Equal(t, []string{"YXV0aG9ycy1vd24ta2V5"}, envValues(t, pod, envMCPCapPublicKey))
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(loner), &stored))
+	assert.Nil(t, apimeta.FindStatusCondition(stored.Status.Conditions, conditionIdentityEnvIgnored))
 }
