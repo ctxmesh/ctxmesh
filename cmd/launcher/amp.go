@@ -752,10 +752,16 @@ type ampGuard struct {
 	verifier *runcap.Verifier
 	// loopback is this process's secret marking its own async consumer's calls. "" ⇒ none are.
 	loopback string
+	// spent is the run capabilities this member has admitted, so a copy is refused.
+	spent *spentCapabilities
+	now   func() time.Time
 }
 
 func newAMPGuard(cfg ampConfig, tracer trace.Tracer, verifier *runcap.Verifier, loopback string) *ampGuard {
-	return &ampGuard{cfg: cfg, tracer: tracer, verifier: verifier, loopback: loopback}
+	return &ampGuard{
+		cfg: cfg, tracer: tracer, verifier: verifier, loopback: loopback,
+		spent: newSpentCapabilities(), now: time.Now,
+	}
 }
 
 // enforceInbound is the callee-side access-control check the /invoke proxy runs
@@ -763,11 +769,12 @@ func newAMPGuard(cfg ampConfig, tracer trace.Tracer, verifier *runcap.Verifier, 
 // proceed; on a denial it has already written the typed 403 (traced).
 //
 // A registry member admits an /invoke only as its own async consumer's loopback
-// call, an attested AMP call, or a request carrying a run capability minted for
-// it (amp_attest.go, ADR 0153). An AMP envelope admitted either way is then
+// call, an attested AMP call, or a request carrying a fresh run capability minted
+// for it (amp_attest.go, ADR 0153). An AMP envelope admitted either way is then
 // checked for cross-registry isolation and the allowlist + role rules. Under the
 // accept posture a request with none of the three is admitted as before: an
-// envelope is checked as it claims, and a plain /invoke passes.
+// envelope is checked as it claims, and a plain /invoke passes. A copied run
+// capability naming this agent is refused under either posture.
 //
 // Cross-registry isolation is enforced HERE, at the app layer, NOT by
 // NetworkPolicy: agents are Knative Services, so an AMP call routes
@@ -809,10 +816,18 @@ func (g *ampGuard) enforceInbound(ctx context.Context, w http.ResponseWriter, r 
 		}
 		admitted(admissionAttested)
 		return true
-	case raw == "" && g.capabilityNamesSelf(ctx, r):
-		admitted(admissionCapability)
-		return true
-	case !g.cfg.AcceptUnattested:
+	}
+	if raw == "" {
+		switch g.admitCapability(ctx, w, r) {
+		case capabilityAdmits:
+			admitted(admissionCapability)
+			return true
+		case capabilityRefused:
+			return false
+		case capabilityNone:
+		}
+	}
+	if !g.cfg.AcceptUnattested {
 		if raw != "" {
 			g.deny(ctx, w, "", "an AMP call must carry its caller's platform attestation")
 		} else {

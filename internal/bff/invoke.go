@@ -71,6 +71,56 @@ func runCapabilityFromContext(ctx context.Context) string {
 	return token
 }
 
+// runCapabilityMintCtxKey carries how to mint another capability for the same run, caller and agent. An
+// agent's launcher admits a capability once (ADR 0124, ADR 0153), so every /invoke carries its own.
+type runCapabilityMintCtxKey struct{}
+
+// withRunCapability returns ctx carrying a capability minted for username's run of ns/agent, and the means
+// to mint the next one. An empty runID gets a fresh one, which the next mint keeps. ctx is returned
+// unchanged when nothing can be minted.
+func (s *Server) withRunCapability(ctx context.Context, username, ns, agent, boundary, runID string) context.Context {
+	if s.capabilitySigner == nil {
+		return ctx
+	}
+	if runID == "" {
+		id, err := randToken(16)
+		if err != nil {
+			s.log.Error(err, "run-capability: could not mint a run id; proceeding without a capability")
+			return ctx
+		}
+		runID = id
+	}
+	mint := func() (string, bool) { return s.mintRunCapability(username, ns, agent, boundary, runID) }
+	token, ok := mint()
+	if !ok {
+		return ctx
+	}
+	return context.WithValue(contextWithRunCapability(ctx, token), runCapabilityMintCtxKey{}, mint)
+}
+
+// withRunCapabilityOf returns dst carrying src's capability and its means to mint the next one.
+func withRunCapabilityOf(dst, src context.Context) context.Context {
+	dst = contextWithRunCapability(dst, runCapabilityFromContext(src))
+	if mint, ok := src.Value(runCapabilityMintCtxKey{}).(func() (string, bool)); ok {
+		dst = context.WithValue(dst, runCapabilityMintCtxKey{}, mint)
+	}
+	return dst
+}
+
+// withFreshRunCapability returns ctx for a further /invoke of the same run: its capability replaced by a
+// newly minted one, or dropped when none can be minted. The one already sent is spent at the agent.
+func withFreshRunCapability(ctx context.Context) context.Context {
+	if runCapabilityFromContext(ctx) == "" {
+		return ctx
+	}
+	if mint, ok := ctx.Value(runCapabilityMintCtxKey{}).(func() (string, bool)); ok {
+		if token, minted := mint(); minted {
+			return contextWithRunCapability(ctx, token)
+		}
+	}
+	return contextWithRunCapability(ctx, "")
+}
+
 // hdrConversationID is the header the agent reads to scope memory to a conversation
 // thread (`mem:{ns}/{agent}:{conversationId}`) — the same convention the launcher's
 // memory/gateway/AMP paths already use (cmd/launcher). The console's chat sends one

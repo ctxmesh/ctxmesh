@@ -49,6 +49,11 @@ import (
 // this launcher can no longer spend it.
 var errRuncapClaimed = errors.New("this run's capability was bound by another holder")
 
+// errRuncapReplayed means a capability came back to the launcher that holds it: bound to this launcher's
+// own key, or a bearer this launcher has already bound. Every front door mints a fresh capability per
+// invoke, so it is a copy, and accepting it would hand its sender this launcher's binding.
+var errRuncapReplayed = errors.New("this run capability was already received by this agent")
+
 const (
 	runcapBindPath    = "/api/internal/runcap/bind"
 	runcapBindTimeout = 5 * time.Second
@@ -113,8 +118,24 @@ func newRuncapBinder(bffURL string, logf func(string, ...any)) (*runcapBinder, e
 // the BFF's own posture decides whether a bearer capability is still accepted. The one refusal is
 // errRuncapClaimed.
 func (b *runcapBinder) Bind(ctx context.Context, tok string) (string, error) {
+	return b.bind(ctx, tok, false)
+}
+
+// bindInbound is Bind at the front door, where a capability this launcher already holds is a copy and is
+// refused with errRuncapReplayed.
+func (b *runcapBinder) bindInbound(ctx context.Context, tok string) (string, error) {
+	return b.bind(ctx, tok, true)
+}
+
+func (b *runcapBinder) bind(ctx context.Context, tok string, inbound bool) (string, error) {
 	u, err := runcap.InspectUnverified(tok)
-	if err != nil || u.KeyThumbprint != "" {
+	if err != nil {
+		return tok, nil
+	}
+	if u.KeyThumbprint != "" {
+		if inbound && u.KeyThumbprint == b.signer.Thumbprint() {
+			return "", errRuncapReplayed
+		}
 		return tok, nil
 	}
 	sum := sha256.Sum256([]byte(tok))
@@ -124,6 +145,9 @@ func (b *runcapBinder) Bind(ctx context.Context, tok string) (string, error) {
 	now := b.now()
 	if c, ok := b.bound[key]; ok && now.Before(c.exp) {
 		b.mu.Unlock()
+		if inbound {
+			return "", errRuncapReplayed
+		}
 		return c.token, nil
 	}
 	skip := now.Before(b.skipUntil)
@@ -264,8 +288,8 @@ func processRuncapBinder() *runcapBinder {
 }
 
 // bindInboundCapability replaces an inbound bearer capability with this process's bound one, before the
-// request reaches the agent's code. It returns false, having written the response, only when another
-// holder bound the capability first: it has leaked, and this agent can no longer spend it.
+// request reaches the agent's code. It returns false, having written the response, when the capability
+// has leaked: another holder bound it first, or it is a copy of one this launcher already holds.
 func bindInboundCapability(ctx context.Context, w http.ResponseWriter, req *http.Request, b *runcapBinder) bool {
 	tok := strings.TrimSpace(req.Header.Get(runcap.HeaderName))
 	if b == nil || tok == "" {
@@ -273,10 +297,14 @@ func bindInboundCapability(ctx context.Context, w http.ResponseWriter, req *http
 	}
 	bctx, cancel := context.WithTimeout(ctx, runcapFrontDoorTimeout)
 	defer cancel()
-	bound, err := b.Bind(bctx, tok)
+	bound, err := b.bindInbound(bctx, tok)
 	switch {
 	case errors.Is(err, errRuncapClaimed):
 		http.Error(w, "the run capability was bound by another holder before this agent received it", http.StatusUnauthorized)
+		return false
+	case errors.Is(err, errRuncapReplayed):
+		http.Error(w, "the run capability was already presented to this agent: every invoke carries its own",
+			http.StatusUnauthorized)
 		return false
 	case err != nil:
 		b.logf("runcap: %v; passing the run capability through as received", err)

@@ -22,8 +22,11 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -368,6 +371,155 @@ func TestAMemberWithoutTheKeyAdmitsOnlyItsConsumer(t *testing.T) {
 	})); rr.Code != http.StatusOK || !reached {
 		t.Errorf("own consumer without a key: %d, want 200", rr.Code)
 	}
+}
+
+// boundCapabilityFor mints what a launcher's bind exchange returns for agent: a capability bound to a key.
+func boundCapabilityFor(t *testing.T, agent string) string {
+	t.Helper()
+	signer, _ := ampTestKeys(t)
+	tok, err := signer.Mint(runcap.MintRequest{
+		User: "u-hash", Agent: agent, RunID: "run-1", TTL: time.Minute, KeyThumbprint: "the-holders-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
+}
+
+// capabilityWithoutID signs a capability for agent the way the BFF did before capabilities carried ids.
+func capabilityWithoutID(t *testing.T, agent string) string {
+	t.Helper()
+	ampTestKeys(t)
+	enc := func(v any) string {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return base64.RawURLEncoding.EncodeToString(b)
+	}
+	now := time.Now()
+	input := enc(map[string]string{"alg": "EdDSA", "typ": "JWT"}) + "." + enc(map[string]any{
+		"sub": "u-hash", "act": map[string]string{"sub": agent}, "aud": runcap.DefaultAudience, "run": "run-1",
+		"iat": now.Unix(), "exp": now.Add(time.Minute).Unix(),
+	})
+	return input + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(ampTestPrivate, []byte(input)))
+}
+
+// A run capability opens one /invoke of the agent it names. The BFF, its run worker and the edge mint a
+// fresh, unbound one per request; a bound one naming this agent was bound by this launcher and handed on
+// by its code, and a second presentation is a copy. Both are refused under either posture, because the
+// launcher would otherwise spend them as this agent for whoever sent them.
+func TestACopiedRunCapabilityIsRefused(t *testing.T) {
+	t.Parallel()
+	_, verifier := ampTestKeys(t)
+	for _, accept := range []bool{false, true} {
+		t.Run(fmt.Sprintf("accept=%v", accept), func(t *testing.T) {
+			t.Parallel()
+			cfg := baseCfg()
+			cfg.AcceptUnattested = accept
+			m := newMemberProxy(t, cfg, verifier)
+
+			fresh := capabilityFor(t, "team-a/orchestrator", 0)
+			rr, reached := m.serve(invokeWith(map[string]string{runcap.HeaderName: fresh}))
+			if rr.Code != http.StatusOK || !reached {
+				t.Fatalf("a fresh capability: %d, want 200; body=%s", rr.Code, rr.Body.String())
+			}
+			if got := m.admission(); got != admissionCapability {
+				t.Errorf("amp.admission = %q, want capability", got)
+			}
+			for name, tok := range map[string]string{
+				"the same capability again":        fresh,
+				"a bound capability naming it":     boundCapabilityFor(t, "team-a/orchestrator"),
+				"a capability with no id to spend": capabilityWithoutID(t, "team-a/orchestrator"),
+			} {
+				rr, reached := m.serve(invokeWith(map[string]string{runcap.HeaderName: tok}))
+				if rr.Code != http.StatusForbidden || reached {
+					t.Errorf("%s: %d reached=%v, want 403 before the agent's code", name, rr.Code, reached)
+					continue
+				}
+				assertAMPError(t, rr.Body.Bytes(), errCallerNotAllowed)
+			}
+			// Another request of the same run carries its own capability and is admitted.
+			if rr, _ := m.serve(invokeWith(map[string]string{
+				runcap.HeaderName: capabilityFor(t, "team-a/orchestrator", 0),
+			})); rr.Code != http.StatusOK {
+				t.Errorf("a second fresh capability: %d, want 200", rr.Code)
+			}
+		})
+	}
+}
+
+// An attested AMP hop carries its caller's capability, bound to the caller's key and naming the caller.
+// That is the relay the callee acts under, not an admission, so it neither admits nor blocks the hop.
+func TestAnAttestedHopKeepsItsRelayedCapability(t *testing.T) {
+	t.Parallel()
+	_, verifier := ampTestKeys(t)
+	m := newMemberProxy(t, baseCfg(), verifier)
+	relayed := boundCapabilityFor(t, "team-a/research")
+	for range 2 {
+		rr, reached := m.serve(invokeWith(map[string]string{
+			legacyEnvelopeHeader:         inboundEnvelopeIn("research-team", "research", "worker"),
+			runcap.AttestationHeaderName: attestationOf(t, "research", "research-team", "worker", "orchestrator"),
+			runcap.HeaderName:            relayed,
+		}))
+		if rr.Code != http.StatusOK || !reached {
+			t.Fatalf("an attested hop with its relayed capability: %d; body=%s", rr.Code, rr.Body.String())
+		}
+		if got := m.lastSeen().Get(runcap.HeaderName); got != relayed {
+			t.Errorf("the callee's code got capability %q, want the relayed one", got)
+		}
+	}
+}
+
+// The spent set remembers a capability until it would stop verifying, forgets it after, and refuses
+// rather than forgets when it is full of capabilities that still verify.
+func TestSpentCapabilitiesHoldUntilExpiryAndFailClosed(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	s := newSpentCapabilities()
+	if first, err := s.spend("a", now.Add(time.Minute), now); !first || err != nil {
+		t.Fatalf("first spend: %v %v", first, err)
+	}
+	if first, _ := s.spend("a", now.Add(time.Minute), now.Add(59*time.Second)); first {
+		t.Error("a capability that still verifies was spent twice")
+	}
+
+	for i := range maxSpentCapabilities - 1 {
+		if _, err := s.spend(strconv.Itoa(i), now.Add(time.Minute), now); err != nil {
+			t.Fatalf("spend %d: %v", i, err)
+		}
+	}
+	if _, err := s.spend("one-too-many", now.Add(time.Minute), now); !errors.Is(err, errSpentCapabilitiesFull) {
+		t.Fatalf("a full set of live capabilities: err = %v, want full", err)
+	}
+	later := now.Add(2 * time.Minute)
+	if first, err := s.spend("after-expiry", later.Add(time.Minute), later); !first || err != nil {
+		t.Errorf("once the remembered capabilities expired: %v %v, want room", first, err)
+	}
+	if len(s.until) != 1 {
+		t.Errorf("the expired capabilities were kept: %d remembered", len(s.until))
+	}
+}
+
+// A member that cannot remember another capability admits none, as an outage rather than a refusal.
+func TestAFullSpentSetRefusesAsUnavailable(t *testing.T) {
+	t.Parallel()
+	_, verifier := ampTestKeys(t)
+	_, tp := newTestTracer(t)
+	g := newAMPGuard(baseCfg(), tp.Tracer(tracerName), verifier, testLoopback)
+	for i := range maxSpentCapabilities {
+		g.spent.until[strconv.Itoa(i)] = time.Now().Add(time.Hour)
+	}
+	rr := httptest.NewRecorder()
+	if g.enforceInbound(context.Background(), rr, invokeWith(map[string]string{
+		runcap.HeaderName: capabilityFor(t, "team-a/orchestrator", 0),
+	})) {
+		t.Fatal("admitted a capability it could not record as spent")
+	}
+	if rr.Code != http.StatusServiceUnavailable || rr.Header().Get("Retry-After") == "" {
+		t.Errorf("status %d Retry-After %q, want 503 with a retry hint", rr.Code, rr.Header().Get("Retry-After"))
+	}
+	assertAMPError(t, rr.Body.Bytes(), errAdmissionUnavailable)
 }
 
 // An agent in no registry is unchanged: any /invoke reaches it. It still never hands an attestation or

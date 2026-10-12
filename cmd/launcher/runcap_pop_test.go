@@ -279,6 +279,38 @@ func TestBindInboundCapability_AClaimedCapabilityIsRefused(t *testing.T) {
 	}
 }
 
+// A capability that comes back to the launcher holding it is a copy: bound to this launcher's key (its
+// agent's code relayed or leaked it), or a bearer this launcher already bound. Either is refused at the
+// front door, and the binder's cache never turns a replayed bearer into this launcher's binding.
+func TestBindInboundCapability_ACopyOfAHeldCapabilityIsRefused(t *testing.T) {
+	bff, srv := newPopBFF(t)
+	binder := newTestBinder(t, srv.URL)
+	bearer := bff.mint(t, "run-held")
+	first := httptest.NewRequest(http.MethodPost, "/invoke", nil)
+	first.Header.Set(runcap.HeaderName, bearer)
+	if !bindInboundCapability(context.Background(), httptest.NewRecorder(), first, binder) {
+		t.Fatal("the first presentation was refused")
+	}
+	boundToUs := first.Header.Get(runcap.HeaderName)
+
+	for name, tok := range map[string]string{"the bound capability": boundToUs, "the same bearer": bearer} {
+		req := httptest.NewRequest(http.MethodPost, "/invoke", nil)
+		req.Header.Set(runcap.HeaderName, tok)
+		rec := httptest.NewRecorder()
+		if bindInboundCapability(context.Background(), rec, req, binder) {
+			t.Errorf("%s came back and was passed to the agent as %q", name, req.Header.Get(runcap.HeaderName))
+			continue
+		}
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s: HTTP %d, want 401", name, rec.Code)
+		}
+	}
+	// The launcher's own outbound calls still spend what it holds.
+	if code := spend(t, withRuncapProof(&http.Client{}, binder), srv.URL, boundToUs); code != http.StatusOK {
+		t.Errorf("the launcher spending its own bound capability: HTTP %d, want 200", code)
+	}
+}
+
 // An AMP callee receives the caller's capability already bound to the caller's key. It cannot spend it
 // at a BFF edge: every edge acts as the capability's run, so allowing it would let the callee act as
 // the caller (a confused deputy).

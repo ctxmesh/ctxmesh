@@ -200,9 +200,9 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	execCtx := contextWithApprovalVoucher(
-		contextWithRunCapability(
+		withRunCapabilityOf(
 			contextWithConversationID(context.Background(), conversationIDFromContext(r.Context())),
-			runCapabilityFromContext(r.Context()),
+			r.Context(),
 		),
 		voucher,
 	)

@@ -123,8 +123,9 @@ needs the same two verbs.
 envelope, and trusted whatever envelope it was sent, so any pod in the cluster could call it past its
 registry's isolation and `allowedCallers`. A member now admits an AMP call only with the platform's
 attestation of its caller, its own async consumer, and a run capability minted for it (the console,
-`/api/invoke`, `/api/runs`, workflows and the authenticating edge mint one). Anything else is HTTP 403
-`caller_not_allowed`. Agents in no registry are unchanged.
+`/api/invoke`, `/api/runs`, workflows and the authenticating edge mint one per request). A run
+capability opens one invoke: a bound one, or one already presented, is refused. Anything else is HTTP
+403 `caller_not_allowed`. Agents in no registry are unchanged.
 
 **Before upgrading,** find anything that calls a member's `/invoke` directly, such as scripts that
 `curl` an agent's cluster-local URL or an edge installed with `extAuth.enabled=false`, and move it to

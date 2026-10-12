@@ -25,7 +25,8 @@ package main
 //  2. an attested AMP call: the attestation verifies, names this agent as its receiver and this namespace,
 //     and the envelope's sender, registry and role are the attested ones;
 //  3. a request carrying a run capability minted for this agent: the console, the BFF's runs and
-//     workflows, and the edge.
+//     workflows, and the edge. Each of those mints a fresh, unbound capability per request, so only an
+//     unbound capability is admitted, and only the first time it is presented.
 //
 // Anything else is refused under the require posture. The accept posture (AMP_REQUIRE_ATTESTATION=false)
 // also admits what was admitted before, for a two-step rollout; a caller that presents an attestation is
@@ -69,6 +70,15 @@ const (
 
 	// errAttestationUnavailable: this agent could not get its attestation, so the hop was not sent.
 	errAttestationUnavailable = "attestation_unavailable"
+	// errAdmissionUnavailable: this member could not record a run capability as spent, so it admitted
+	// nothing. Retryable.
+	errAdmissionUnavailable = "admission_unavailable"
+
+	// maxSpentCapabilities bounds the run capabilities a member remembers as spent. Only a capability the
+	// BFF minted for this agent is recorded, and only until it would stop verifying (minutes), so reaching
+	// the bound takes more invokes within one capability lifetime than one pod serves.
+	maxSpentCapabilities = 1 << 16
+	minSpentSweep        = 1024
 
 	envAMPRequireAttestation = "AMP_REQUIRE_ATTESTATION"
 )
@@ -242,20 +252,96 @@ func (g *ampGuard) isLoopback(r *http.Request) bool {
 	return g.loopback != "" && got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(g.loopback)) == 1
 }
 
-// capabilityNamesSelf reports whether r carries a valid run capability minted for this agent. The BFF
-// names the invoked agent in every capability it mints; one relayed by a caller names the caller, so it
-// admits nothing here.
-func (g *ampGuard) capabilityNamesSelf(ctx context.Context, r *http.Request) bool {
+// capabilityVerdict is what the run capability on a plain /invoke decides.
+type capabilityVerdict int
+
+const (
+	// capabilityNone: no capability, or one that is not this agent's. The posture decides.
+	capabilityNone capabilityVerdict = iota
+	// capabilityAdmits: a fresh capability minted for this agent, now spent.
+	capabilityAdmits
+	// capabilityRefused: refused under either posture, and the response is written. The capability names
+	// this agent but is a copy, or could not be recorded as spent.
+	capabilityRefused
+)
+
+// admitCapability decides r's run capability. It admits one minted for this agent that is unbound and
+// presented for the first time. The launcher binds every capability it admits to its own key before the
+// agent's code sees it, so a bound one naming this agent is one that code relayed (an AMP hop carries it)
+// or leaked; and a second presentation of an unbound one is a copy. Admitting either would let whoever
+// holds it invoke this agent as the user, outside allowedCallers and the hop guards, with this launcher
+// spending it under its own key.
+func (g *ampGuard) admitCapability(ctx context.Context, w http.ResponseWriter, r *http.Request) capabilityVerdict {
 	tok := strings.TrimSpace(r.Header.Get(runcap.HeaderName))
 	if tok == "" || g.verifier == nil {
-		return false
+		return capabilityNone
 	}
 	c, err := g.verifier.Verify(tok)
 	if err != nil {
 		trace.SpanFromContext(ctx).SetAttributes(attribute.String("amp.capability_rejected", err.Error()))
-		return false
+		return capabilityNone
 	}
-	return c.Agent == g.cfg.Namespace+"/"+g.cfg.SelfName
+	if c.Agent != g.cfg.Namespace+"/"+g.cfg.SelfName {
+		return capabilityNone
+	}
+	switch {
+	case c.KeyThumbprint != "":
+		g.deny(ctx, w, "", "this run capability is bound to a holder: it was handed on, not minted for this call")
+		return capabilityRefused
+	case strings.TrimSpace(c.ID) == "":
+		g.deny(ctx, w, "", "this run capability has no id, so a copy of it cannot be told apart")
+		return capabilityRefused
+	}
+	first, err := g.spent.spend(c.ID, c.VerifiableUntil(), g.now())
+	switch {
+	case err != nil:
+		w.Header().Set("Retry-After", "5")
+		writeAMPError(w, http.StatusServiceUnavailable, errAdmissionUnavailable, err.Error())
+		trace.SpanFromContext(ctx).SetAttributes(attribute.String("amp.error", errAdmissionUnavailable))
+		return capabilityRefused
+	case !first:
+		g.deny(ctx, w, "", "this run capability was already presented: every invoke carries its own")
+		return capabilityRefused
+	}
+	return capabilityAdmits
+}
+
+// spentCapabilities is the run capabilities a member has admitted, by id, each until it would stop
+// verifying. Keyed by the signed id rather than the token text, so a re-encoding of the same token is
+// the same capability.
+type spentCapabilities struct {
+	mu      sync.Mutex
+	until   map[string]time.Time
+	sweepAt int
+}
+
+func newSpentCapabilities() *spentCapabilities {
+	return &spentCapabilities{until: map[string]time.Time{}, sweepAt: minSpentSweep}
+}
+
+var errSpentCapabilitiesFull = errors.New("this agent holds too many unexpired run capabilities to admit another")
+
+// spend records id until `until`, reporting false when it was already recorded. It fails closed when the
+// set is full of capabilities that still verify: forgetting one would let its copy in.
+func (s *spentCapabilities) spend(id string, until, now time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.until[id]; ok {
+		return false, nil
+	}
+	if len(s.until) >= s.sweepAt {
+		for k, u := range s.until {
+			if now.After(u) {
+				delete(s.until, k)
+			}
+		}
+		s.sweepAt = min(max(2*len(s.until), minSpentSweep), maxSpentCapabilities)
+	}
+	if len(s.until) >= maxSpentCapabilities {
+		return false, errSpentCapabilitiesFull
+	}
+	s.until[id] = until
+	return true, nil
 }
 
 // admitAttested checks an attested AMP call: the attestation, that it is for this agent in this

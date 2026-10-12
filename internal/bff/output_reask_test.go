@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -15,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ctxmesh/ctxmesh/internal/run"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // scriptedInvokeAdapter returns a different response per call, so a test can model an agent that
@@ -23,13 +25,15 @@ type scriptedInvokeAdapter struct {
 	mu        sync.Mutex
 	responses [][]byte
 	bodies    [][]byte
+	caps      []string
 	calls     int
 }
 
-func (f *scriptedInvokeAdapter) Invoke(_ context.Context, _ string, body []byte) ([]byte, string, error) {
+func (f *scriptedInvokeAdapter) Invoke(ctx context.Context, _ string, body []byte) ([]byte, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.bodies = append(f.bodies, body)
+	f.caps = append(f.caps, runCapabilityFromContext(ctx))
 	i := f.calls
 	f.calls++
 	if i >= len(f.responses) {
@@ -87,6 +91,68 @@ func TestReask_ANearMissIsRecoveredByOneReask(t *testing.T) {
 		"the repair must be visible on the run's stream, not an unexplained extra round-trip")
 	assert.Contains(t, body, "Re-asking",
 		"and must carry a HUMAN label — a step frame with no label renders as raw JSON in the console")
+}
+
+// The re-ask is a second /invoke of the same run, so it carries its own capability: the agent's launcher
+// admits a capability once (ADR 0153), and refuses a second presentation as a copy.
+func TestReask_CarriesItsOwnRunCapability(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	inv := &scriptedInvokeAdapter{responses: [][]byte{
+		[]byte(`{"output":"shipped, as prose","consent_required":[]}`),
+		[]byte(`{"output":"{\"answer\":\"shipped\"}","consent_required":[]}`),
+	}}
+	s := newInvokeServerNoWorkers(t, newFakeFactory(c), inv)
+	_, priv, err := runcap.GenerateKeyPair()
+	require.NoError(t, err)
+	signer := runcap.NewSigner(priv, "credential-plane", nil)
+	s.capabilitySigner = signer
+
+	rn := run.New("run-typed", "prod", "typed", []byte(`"ship it"`), "", time.Now())
+	rn.CallerUsername, rn.OutputSchema = aliceUser, m65_4OutputSchema
+	require.NoError(t, s.runStore.Create(rn))
+	ctx := s.withRunCapability(context.Background(), aliceUser, "prod", "typed", "", rn.ID)
+	s.executeRun(ctx, rn.ID, "http://typed.prod", []byte(`"ship it"`))
+
+	got, err := s.runStore.Get(rn.ID)
+	require.NoError(t, err)
+	require.Equal(t, run.StatusSucceeded, got.Status, got.Error)
+	require.Len(t, inv.caps, 2, "the run and its re-ask")
+	first, err := signer.Verifier().Verify(inv.caps[0])
+	require.NoError(t, err)
+	second, err := signer.Verifier().Verify(inv.caps[1])
+	require.NoError(t, err)
+	assert.NotEqual(t, first.ID, second.ID, "the re-ask must not resend the spent capability")
+	assert.Equal(t, first.User, second.User)
+	assert.Equal(t, first.RunID, second.RunID, "the same run")
+	assert.Equal(t, first.Agent, second.Agent)
+	assert.Empty(t, second.KeyThumbprint, "minted unbound, for the agent's launcher to bind")
+}
+
+// An invoke that minted its own run id keeps it for the next mint.
+func TestWithRunCapability_TheNextMintKeepsTheRun(t *testing.T) {
+	_, priv, err := runcap.GenerateKeyPair()
+	require.NoError(t, err)
+	signer := runcap.NewSigner(priv, "credential-plane", nil)
+	s := &Server{capabilitySigner: signer, log: logr.Discard()}
+
+	ctx := s.withRunCapability(context.Background(), aliceUser, "prod", "typed", "", "")
+	first, err := signer.Verifier().Verify(runCapabilityFromContext(ctx))
+	require.NoError(t, err)
+	next, err := signer.Verifier().Verify(runCapabilityFromContext(withFreshRunCapability(ctx)))
+	require.NoError(t, err)
+	assert.Equal(t, first.RunID, next.RunID)
+	assert.NotEqual(t, first.ID, next.ID)
+
+	moved := withRunCapabilityOf(context.Background(), ctx)
+	assert.Equal(t, runCapabilityFromContext(ctx), runCapabilityFromContext(moved))
+	again, err := signer.Verifier().Verify(runCapabilityFromContext(withFreshRunCapability(moved)))
+	require.NoError(t, err, "a capability moved onto another context keeps its means to mint the next")
+	assert.Equal(t, first.RunID, again.RunID)
+	assert.NotEqual(t, first.ID, again.ID)
+
+	bare := contextWithRunCapability(context.Background(), runCapabilityFromContext(ctx))
+	assert.Empty(t, runCapabilityFromContext(withFreshRunCapability(bare)),
+		"with no way to mint another, the spent capability is dropped rather than resent")
 }
 
 // The re-ask is a RECOVERY tier, not an escape from the control: an agent that is still wrong on the

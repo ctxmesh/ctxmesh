@@ -190,11 +190,7 @@ func (s *Server) attachRunCapabilityForRun(r *http.Request, caller client.Client
 	if boundary == "" {
 		boundary = agentBoundary(r.Context(), caller, ns, agent)
 	}
-	token, ok := s.mintRunCapability(username, ns, agent, boundary, runID)
-	if !ok {
-		return r
-	}
-	return r.WithContext(contextWithRunCapability(r.Context(), token))
+	return r.WithContext(s.withRunCapability(r.Context(), username, ns, agent, boundary, runID))
 }
 
 // mintRunCapability mints a fresh run capability from the invoking user's identity + the ADR 0033

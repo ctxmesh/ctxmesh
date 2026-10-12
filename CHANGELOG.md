@@ -19,14 +19,21 @@ A registry member now admits `/invoke` only from:
   registry and role and the agent it is calling, and the callee requires the envelope to match it;
 - its own async consumer;
 - a request carrying a run capability minted for that agent, which is how the console, runs,
-  workflows, sub-runs and the authenticating edge call it.
+  workflows, sub-runs and the authenticating edge call it. Each of those mints a fresh capability
+  per request, so the member admits one only while it is unbound and only the first time it sees
+  it. The launcher binds every capability it admits to its own key before the agent's code gets
+  it, so a bound one naming the agent is one its code handed on, for instance over an AMP hop,
+  and a second presentation is a copy. Either is refused, under both postures; without that, any
+  pod holding the copy could invoke the agent as the user for the capability's remaining life.
 
 Anything else gets HTTP 403 `caller_not_allowed`. Agents in no registry are unchanged. A chained hop
 claims its own registry. `AGENT_REGISTRY_ID` and `AGENT_ROLE` are now platform identity variables:
 a value in `spec.env` is not used, and `IdentityEnvIgnored` names it. The edge removes
 `X-AMP-Envelope`, `X-A2A-Envelope` and `X-AMP-Attestation` from inbound requests. An agent whose
 launcher cannot get an attestation fails the hop with HTTP 503 `attestation_unavailable` instead of
-sending it unattested.
+sending it unattested. Every agent's launcher, member or not, refuses with HTTP 401 a capability
+that comes back to it: one bound to its own key, or one it has already bound. A run's
+output-schema re-ask now carries a capability of its own instead of resending the first.
 
 **Behaviour change:** a request to a member's `/invoke` that does not come through the platform,
 such as a `curl` to its cluster-local URL or through an edge with ext-auth off, is now refused. Go

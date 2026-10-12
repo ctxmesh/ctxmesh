@@ -286,9 +286,7 @@ func (s *Server) executeClaimedRun(
 
 	execCtx := contextWithConversationID(context.Background(), rn.ConversationID)
 	if rn.CallerUsername != "" {
-		if token, ok := s.mintRunCapability(rn.CallerUsername, rn.Namespace, rn.Agent, rn.Boundary, rn.ID); ok {
-			execCtx = contextWithRunCapability(execCtx, token)
-		}
+		execCtx = s.withRunCapability(execCtx, rn.CallerUsername, rn.Namespace, rn.Agent, rn.Boundary, rn.ID)
 	}
 	// Record mode (M78, ADR 0071 §1): when this run opted into record capture, carry its id on the
 	// exec context so the invoke adapter stamps X-Ctxmesh-Record: <runId> — the SDK relays it on each

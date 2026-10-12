@@ -178,6 +178,10 @@ const (
 // signer and a verifier does not spuriously reject a capability or voucher.
 const clockSkew = 30 * time.Second
 
+// VerifiableUntil is the last instant Verify still accepts c. A verifier that remembers a capability as
+// spent must remember it at least this long, or a copy verifies again after it has been forgotten.
+func (c Capability) VerifiableUntil() time.Time { return c.ExpiresAt.Add(clockSkew) }
+
 // ApprovalVoucher is the decoded, VERIFIED approval voucher (ADR 0074 §3): the stateless proof that
 // a human approved a specific require-approval tool for a specific run. The egress sidecar mints
 // nothing — the BFF mints a voucher on approval-grant, the SDK relays it as X-Ctxmesh-Approval on the
