@@ -164,6 +164,8 @@ spec:
           value: {{ .Values.bff.mcp.credentialNamespace | default .Values.namespace }}
         - name: TOKEN_SERVICE_URL
           value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default (printf "%s://ctxmesh-token-service.%s.svc:8443" (ternary "https" "http" .Values.tokenService.tls.required) .Values.namespace) }}
+        - name: TOKEN_SERVICE_TOKEN_PATH
+          value: /var/run/secrets/ctxmesh-token-service/token
         - name: MODEL_GATEWAY_URL
           value: {{ .Values.bff.modelGatewayURL | default (printf "http://ctxmesh-gateway.%s.svc:4000" .Values.namespace) }}
         - name: MANAGED_AGENT_IMAGE
@@ -189,7 +191,11 @@ spec:
         - name: MCP_OBO_REQUIRED
           value: {{ .Values.controllerManager.oboEgress.enabled | quote }}
         - name: MCP_GRANT_HMAC_KEY
-          value: {{ .Values.bff.mcp.grantHmacKey | default "" | quote }}
+          valueFrom:
+            secretKeyRef:
+              key: MCP_GRANT_HMAC_KEY
+              name: {{ .Values.bff.mcp.grantHmacKeySecret | default "ctxmesh-grant-hmac" }}
+              optional: {{ not .Values.bff.mcp.grantHmacKeySecret }}
         - name: OIDC_ENABLED
           value: {{ .Values.auth.oidc.enabled | quote }}
         - name: OIDC_ISSUER
@@ -260,6 +266,9 @@ spec:
         - mountPath: /etc/ctxmesh/recipes
           name: recipe-overlay
           readOnly: true
+        - mountPath: /var/run/secrets/ctxmesh-token-service
+          name: token-service-token
+          readOnly: true
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -271,4 +280,11 @@ spec:
           name: ctxmesh-recipes
           optional: true
         name: recipe-overlay
+      - name: token-service-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: ctxmesh-token-service
+              expirationSeconds: 600
+              path: token
 {{- end }}

@@ -302,6 +302,11 @@ tokenService:
     # kustomize, no drift). true ⇒ the token-service (credential plane) REFUSES to start
     # without mTLS — no silent HTTP downgrade. profile=production requires this true.
     required: false
+  # Admits only the BFF from the install namespace, and pods from every other namespace, to the
+  # service's port (ADR 0154). Defence in depth: every request is authenticated by a token
+  # review either way, and the policy does nothing on a CNI that does not enforce NetworkPolicy.
+  networkPolicy:
+    enabled: true
   # Where per-user MCP grants (OAuth tokens) are stored (ADR 0152). One backend per install,
   # built by the token-service at startup. The keys mirror the spec.provider.<type> block of
   # the retired CredentialStore kind, with two exceptions: kubernetes.credentialNamespace is
@@ -736,7 +741,15 @@ bff:
     # Per-cluster salt for MCP grant identity hashes (ADR 0029 §7). Empty ⇒ legacy
     # UNSALTED SHA-256, which is enumerable: a known username hashes to a known value, so
     # a reader of the grant Secrets can identify users without reading a token.
-    # REQUIRED under profile=production. Changing it later re-keys grants (re-consent).
+    # REQUIRED under profile=production (one of the two below). Changing it later re-keys
+    # grants (re-consent).
+    #
+    # grantHmacKeySecret names a Secret you create, holding the key under MCP_GRANT_HMAC_KEY.
+    # Preferred: the key never passes through Helm values, and an upgrade that forgets it
+    # cannot drop it. The BFF and the run-worker read it from there.
+    grantHmacKeySecret: ""
+    # grantHmacKey makes the chart create that Secret (ctxmesh-grant-hmac) from this value.
+    # Every upgrade must pass the same value again, or the Secret is removed.
     grantHmacKey: ""
     enabled: true
     requireApproval: false
@@ -747,7 +760,7 @@ bff:
     # `ctxmesh-credentials`) to render the dedicated namespace + a
     # credential-component-only Role/RoleBinding (templates/mcp-credentials.yaml) and
     # route grants there, so a tenant sharing the cluster cannot read another user's
-    # OAuth tokens. Pair it with a per-cluster MCP_GRANT_HMAC_KEY (bff-adapters Secret).
+    # OAuth tokens. Pair it with a per-cluster grant key (grantHmacKeySecret above).
     # Changing it later re-keys grants (dev re-consent). PRODUCTION SHOULD SET THIS.
     credentialNamespace: ""
 

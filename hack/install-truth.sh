@@ -129,7 +129,14 @@ grep -q 'name: TOKEN_SERVICE_TLS_REQUIRED' <<<"$PRODOUT" \
 awk '/<!-- ctxmesh:install production -->/{on=1} on&&/^```/{n++} on&&n<2{print} n>=2{exit}' "$README_DOC" \
   | grep -q 'secret tls token-service-tls' \
   || fail "the production profile runs the token service with TLS required, and $README_DOC's production block does not create the token-service-tls Secret it starts from"
-ok "the README's production command renders and creates the token-service-tls Secret first"
+# A grant-key Secret the command names is not optional (ADR 0154): the BFF does not start without it.
+PRODBLOCK="$(awk '/<!-- ctxmesh:install production -->/{on=1} on&&/^```/{n++} on&&n<2{print} n>=2{exit}' "$README_DOC")"
+HMACSECRET="$(grep -o 'grantHmacKeySecret=[A-Za-z0-9.-]*' <<<"$PRODBLOCK" | head -1 | cut -d= -f2)"
+if [ -n "$HMACSECRET" ]; then
+  grep -q "secret generic $HMACSECRET" <<<"$PRODBLOCK" \
+    || fail "$README_DOC's production command names the grant-key Secret $HMACSECRET and its block does not create it: the BFF would not start"
+fi
+ok "the README's production command renders and creates the Secrets it names first"
 
 # 9. The DURABLE run path, which profile=production makes mandatory.
 #

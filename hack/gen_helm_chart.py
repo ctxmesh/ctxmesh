@@ -202,10 +202,36 @@ DURABILITY_KNOB_ENV = [
     ("KNOWLEDGE_SETTLE_WINDOW", "knowledgeSettleWindow"),
 ]
 
-# MCP_GRANT_HMAC_KEY (M150 m150.2): the per-cluster salt for MCP grant identity hashes.
-# config/bff hardcodes "" so the render is unchanged and the honest warning still fires;
-# the chart templates it so an install can actually provide one.
-MCP_HMAC_ENV = [("MCP_GRANT_HMAC_KEY", "bff.mcp.grantHmacKey")]
+# MCP_GRANT_HMAC_KEY (M150 m150.2, ADR 0154): the per-cluster salt for MCP grant identity
+# hashes, read from a Secret. config/bff references the chart's default Secret name; the chart
+# renders that Secret from bff.mcp.grantHmacKey (templates/grant-hmac-secret.yaml) or points at
+# an operator's own Secret named by bff.mcp.grantHmacKeySecret.
+# A Secret the operator names must exist: optional only for the chart's own, so a missing one stops the
+# pod at CreateContainerConfigError instead of starting with unsalted hashes.
+GRANT_HMAC_SECRET_KUSTOMIZE = (
+    "              key: MCP_GRANT_HMAC_KEY\n"
+    "              name: ctxmesh-grant-hmac\n"
+    "              optional: true\n"
+)
+GRANT_HMAC_SECRET_HELM = (
+    "              key: MCP_GRANT_HMAC_KEY\n"
+    '              name: {{ .Values.bff.mcp.grantHmacKeySecret | default "ctxmesh-grant-hmac" }}\n'
+    "              optional: {{ not .Values.bff.mcp.grantHmacKeySecret }}\n"
+)
+
+# The token service's NetworkPolicy admits agent pods from every namespace but the install's
+# (ADR 0154). The install namespace is an entry in a value list, which the namespace: rule cannot
+# reach.
+TOKEN_SERVICE_NP_NAMESPACE_KUSTOMIZE = (
+    "          operator: NotIn\n"
+    "          values:\n"
+    f"          - {NS_KUSTOMIZE}\n"
+)
+TOKEN_SERVICE_NP_NAMESPACE_HELM = (
+    "          operator: NotIn\n"
+    "          values:\n"
+    "          - {{ .Values.namespace }}\n"
+)
 
 OPTIONAL_MODEL_ENV = [
     ("INGEST_OCR_URL", "bff.ingestOcrURL"),
@@ -758,7 +784,10 @@ def substitute(doc: str) -> str:
             % (env_name, val_path),
         )
     doc = doc.replace(MANAGED_AGENT_IMAGE_ENV_KUSTOMIZE, MANAGED_AGENT_IMAGE_ENV_HELM)
-    for env_name, val_path in OPTIONAL_MODEL_ENV + MCP_HMAC_ENV:
+    doc = doc.replace(GRANT_HMAC_SECRET_KUSTOMIZE, GRANT_HMAC_SECRET_HELM)
+    if kind_of(doc) == "NetworkPolicy" and "control-plane: token-service" in doc:
+        doc = doc.replace(TOKEN_SERVICE_NP_NAMESPACE_KUSTOMIZE, TOKEN_SERVICE_NP_NAMESPACE_HELM)
+    for env_name, val_path in OPTIONAL_MODEL_ENV:
         doc = doc.replace(
             f'        - name: {env_name}\n          value: ""',
             "        - name: %s\n          value: {{ .Values.%s | default \"\" | quote }}"
@@ -1004,6 +1033,9 @@ def main() -> None:
         }
         cp_docs = []
         for doc in control_plane:
+            # Defence in depth that an operator can turn off where it gets in the way (ADR 0154).
+            if kind_of(doc) == "NetworkPolicy" and "control-plane: token-service" in doc:
+                doc = "{{- if .Values.tokenService.networkPolicy.enabled }}\n" + doc + "\n{{- end }}"
             if kind_of(doc) == "Deployment":
                 for marker, valpath in replica_dials.items():
                     if f"control-plane: {marker}" in doc:

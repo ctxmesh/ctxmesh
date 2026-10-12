@@ -1,7 +1,7 @@
 # Token-service Role — the LEAST privilege the central credential resolver needs (ADR 0030
 # §1, ADR 0029 §7). It reads per-user grant Secrets and writes back rotated tokens
-# (optimistic concurrency) + deletes on revoke; it reads ToolRegistries to classify a
-# server's auth type / scope. NO agent-CRD access, NO create.
+# (optimistic concurrency) + deletes on revoke. NO agent-CRD access. Reviewing callers' tokens
+# needs the cluster-scoped TokenReview grant in tokenreview_rbac.yaml.
 #
 # This Role is namespaced to the platform namespace. When an operator runs OBO with a
 # DEDICATED credential namespace (mcp.credentialNamespace), the Helm chart also binds this

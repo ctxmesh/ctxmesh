@@ -694,6 +694,22 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: ctxmesh
+    control-plane: token-service
+  name: ctxmesh-token-service-tokenreviewer
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
     rbac.ctxmesh.ai/persona: viewer
   name: ctxmesh-viewer
 rules:
@@ -854,6 +870,23 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: ctxmesh-statelayer-proxy
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: token-service
+  name: ctxmesh-token-service-tokenreviewer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ctxmesh-token-service-tokenreviewer
+subjects:
+- kind: ServiceAccount
+  name: ctxmesh-token-service
   namespace: {{ .Values.namespace }}
 ---
 apiVersion: v1
@@ -1315,6 +1348,22 @@ spec:
           value: {{ .Values.tokenService.modelGatewayURL | default (printf "http://ctxmesh-gateway.%s.svc:4000" .Values.namespace) }}
         - name: KNOWLEDGE_RERANK_URL
           value: {{ .Values.bff.knowledgeRerankURL | default "" | quote }}
+        - name: MCP_CAPABILITY_PUBLIC_KEY
+          valueFrom:
+            secretKeyRef:
+              key: MCP_CAPABILITY_PUBLIC_KEY
+              name: bff-capability
+              optional: true
+        - name: MCP_CAPABILITY_AUDIENCE
+          value: {{ .Values.controllerManager.oboEgress.capabilityAudience | default "" | quote }}
+        - name: MCP_OBO_REQUIRED
+          value: {{ .Values.controllerManager.oboEgress.enabled | quote }}
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: TOKEN_SERVICE_PLATFORM_SERVICE_ACCOUNTS
+          value: ctxmesh-bff
         - name: TOKEN_SERVICE_TLS_CERT_FILE
           value: /etc/token-service/tls/tls.crt
         - name: TOKEN_SERVICE_TLS_KEY_FILE
@@ -1442,3 +1491,39 @@ spec:
         secret:
           optional: true
           secretName: token-service-tls
+---
+{{- if .Values.tokenService.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: token-service
+  name: ctxmesh-token-service-ingress
+  namespace: {{ .Values.namespace }}
+spec:
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          control-plane: bff
+    ports:
+    - port: 8443
+      protocol: TCP
+  - from:
+    - namespaceSelector:
+        matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+          - {{ .Values.namespace }}
+    ports:
+    - port: 8443
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      control-plane: token-service
+  policyTypes:
+  - Ingress
+{{- end }}

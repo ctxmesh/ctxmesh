@@ -128,22 +128,26 @@ serves the credential API over TLS only:
 kubectl create namespace ctxmesh
 # A certificate for the token service, valid for ctxmesh-token-service.ctxmesh.svc.
 kubectl -n ctxmesh create secret tls token-service-tls --cert=token-service.crt --key=token-service.key
+# The key that salts hashed user identities on MCP grants. Create it once and keep it.
+kubectl -n ctxmesh create secret generic ctxmesh-grant-hmac \
+  --from-literal=MCP_GRANT_HMAC_KEY="$(openssl rand -hex 32)"
 helm install ctxmesh ./deploy/helm/ctxmesh -n ctxmesh \
   --set profile=production \
   -f deploy/helm/ctxmesh/values-production.yaml \
   --set postgres.externalDsn='postgres://user:pass@db.example:5432/ctxmesh?sslmode=require' \
-  --set bff.mcp.grantHmacKey="$(openssl rand -hex 32)" \
+  --set bff.mcp.grantHmacKeySecret=ctxmesh-grant-hmac \
   --set bff.mcp.credentialNamespace=ctxmesh-credentials
 ```
 
-Keep the grant key: changing it later re-keys every grant, and each person reconnects. The chart
-creates `ctxmesh-credentials` with access for the credential components only.
+Keep the grant key: changing it later re-keys every grant, and each person reconnects. It lives in
+a Secret you own, so an upgrade cannot drop it. The chart creates `ctxmesh-credentials` with access
+for the credential components only.
 
 The bundled data plane uses deterministic, obviously-fake dev credentials and is not rendered under
-`profile=production`. The render **fails** if `postgres.externalDsn`, `bff.mcp.grantHmacKey` or
-`bff.mcp.credentialNamespace` is missing rather than installing a control plane that cannot start or
-stores grants where another tenant can read them. Without the `token-service-tls` Secret the token
-service refuses to start.
+`profile=production`. The render **fails** if `postgres.externalDsn`, the grant key
+(`bff.mcp.grantHmacKeySecret`) or `bff.mcp.credentialNamespace` is missing rather than installing a
+control plane that cannot start or stores grants where another tenant can read them. Without the
+`token-service-tls` Secret the token service refuses to start.
 
 **Who enables `vector`.** The schema migration runs `CREATE EXTENSION IF NOT EXISTS vector`, and
 `vector` is **not** a PostgreSQL *trusted* extension — so creating it requires elevated rights that a

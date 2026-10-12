@@ -1,6 +1,7 @@
 # Token-service Service — the central credential plane the injecting egress sidecars
-# delegate to over mTLS (ADR 0030 §1). Sidecars reach it via TOKEN_SERVICE_URL
-# (https://ctxmesh-token-service.<ns>.svc:8443), injected by the controller.
+# delegate to (ADR 0030 §1), authenticating with projected tokens (ADR 0154). Sidecars reach
+# it via TOKEN_SERVICE_URL (https://ctxmesh-token-service.<ns>.svc:8443 when TLS is required),
+# injected by the controller.
 apiVersion: v1
 kind: Service
 metadata:

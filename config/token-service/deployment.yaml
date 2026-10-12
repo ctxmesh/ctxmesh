@@ -1,16 +1,21 @@
 # Central OBO token-service Deployment (ADR 0030 §1). Runs the credresolve backend behind
-# an internal mTLS API; the per-pod injecting egress sidecars DELEGATE grant reads + OAuth
+# an internal API; the per-pod injecting egress sidecars DELEGATE grant reads + OAuth
 # refresh here, so those two ceilings amortize once at the center (global cache + singleflight).
 #
 # The credential backend is this Deployment's own configuration (CREDENTIAL_BACKEND*, ADR 0152);
 # unset means the built-in kubernetes backend, so a plain install needs no external store.
 #
-# mTLS POSTURE: the TLS env below always points at an OPTIONAL cert Secret mount
-# (token-service-tls). Provision that Secret (platform CA-signed server cert + the client CA
-# that authenticates sidecars) and the credential API is mutually authenticated; absent it,
-# the service degrades to plain HTTP with a LOUD warning (dev only). No manifest change to
-# switch mTLS on — just drop in the Secret. The capability keypair is NOT here (the BFF signs
-# the run capability, the sidecar verifies it; the token-service only resolves).
+# CALLER AUTHENTICATION (ADR 0154): every request carries a projected ServiceAccount token,
+# reviewed by TokenReview (the tokenreviewer ClusterRole). The egress sidecar and the BFF
+# present the ctxmesh-token-service audience, an agent's own container the
+# ctxmesh-token-service-agent audience. A credential resolves only for the run capability the
+# sidecar forwards, verified with the capability public key from bff-capability; only the
+# ServiceAccounts in TOKEN_SERVICE_PLATFORM_SERVICE_ACCOUNTS (the BFF's) may store grants.
+#
+# TLS POSTURE: the TLS env below always points at an OPTIONAL cert Secret mount
+# (token-service-tls). Provision that Secret and the wire is encrypted; absent it, the service
+# serves plain HTTP with a LOUD warning (dev only). A ca.crt in it is taken as the client CA
+# and makes the service demand client certificates (ADR 0102 §3).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -97,7 +102,28 @@ spec:
             # separately; empty keeps it off without disabling retrieval.
             - name: KNOWLEDGE_RERANK_URL
               value: ""
-            # TLS files live on the OPTIONAL token-service-tls mount. Present ⇒ mTLS; absent ⇒
+            # Caller authentication (ADR 0154). The capability public key verifies the run
+            # capability a sidecar forwards; optional because the keygen hook creates it after the
+            # install and then restarts this Deployment. Without it credential resolution answers
+            # 503, unless MCP_OBO_REQUIRED, which refuses to start as the BFF does.
+            - name: MCP_CAPABILITY_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: bff-capability
+                  key: MCP_CAPABILITY_PUBLIC_KEY
+                  optional: true
+            - name: MCP_CAPABILITY_AUDIENCE
+              value: ""
+            - name: MCP_OBO_REQUIRED
+              value: "false"
+            # The ServiceAccounts, in this namespace, that may store and revoke grants: the BFF's.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: TOKEN_SERVICE_PLATFORM_SERVICE_ACCOUNTS
+              value: ctxmesh-bff
+            # TLS files live on the OPTIONAL token-service-tls mount. Present ⇒ TLS; absent ⇒
             # plain HTTP (dev). No literal secret material here.
             - name: TOKEN_SERVICE_TLS_CERT_FILE
               value: /etc/token-service/tls/tls.crt
@@ -107,7 +133,7 @@ spec:
               value: /etc/token-service/tls/ca.crt
             # TOKEN_SERVICE_TLS_REQUIRED (SEC-5): false ⇒ absent certs degrade to plain HTTP
             # (dev). The chart templates it from tokenService.tls.required; true ⇒ the
-            # token-service refuses to start without mTLS (no silent HTTP downgrade of the
+            # token-service refuses to start without TLS (no silent HTTP downgrade of the
             # credential plane in production). Default "false" so kustomize/helm-default match.
             - name: TOKEN_SERVICE_TLS_REQUIRED
               value: "false"
@@ -165,7 +191,7 @@ spec:
               mountPath: /etc/token-service/tls
               readOnly: true
       volumes:
-        # Optional: the platform mTLS material. Absent ⇒ the mount is empty ⇒ plain HTTP.
+        # Optional: the platform TLS material. Absent ⇒ the mount is empty ⇒ plain HTTP.
         - name: tls
           secret:
             secretName: token-service-tls

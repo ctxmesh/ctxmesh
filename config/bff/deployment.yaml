@@ -154,6 +154,10 @@ spec:
             # Default renders the in-cluster http addr == the chart's default (no drift). (M124/Gate A.)
             - name: TOKEN_SERVICE_URL
               value: http://ctxmesh-token-service.ctxmesh.svc:8443
+            # The BFF's projected token for the token service, which lets it store grants and run
+            # the knowledge test query in any namespace (ADR 0154).
+            - name: TOKEN_SERVICE_TOKEN_PATH
+              value: /var/run/secrets/ctxmesh-token-service/token
             # --- Model-service + async wiring (M148/m148.5, m52 M141-install) -----
             # Before M148 NONE of these had a chart home. The degradation was honest
             # — no MODEL_GATEWAY_URL ⇒ KB ingest 501s; no DISCOVERY_EMBEDDING_ROUTE ⇒
@@ -228,11 +232,17 @@ spec:
             # patching around a gap that everyone who is not us simply lives with. The
             # Fable re-audit reached the same finding independently (M149 B9).
             #
-            # Empty here so the render is unchanged and today's honest start-up warning
-            # still fires; `profile=production` REQUIRES it (ha-profile-guards), because
-            # shipping enumerable identity hashes is not a posture anyone chose.
+            # Read from a Secret, never a literal in this spec: the key is what makes the
+            # hashes unenumerable, and a Deployment is readable by far more principals than a
+            # Secret. Optional, so an install without it starts with the honest warning;
+            # `profile=production` REQUIRES it (ha-profile-guards). The chart renders the
+            # Secret from bff.mcp.grantHmacKey or references bff.mcp.grantHmacKeySecret.
             - name: MCP_GRANT_HMAC_KEY
-              value: ""
+              valueFrom:
+                secretKeyRef:
+                  name: ctxmesh-grant-hmac
+                  key: MCP_GRANT_HMAC_KEY
+                  optional: true
             # OIDC_ENABLED / OIDC_ISSUER / OIDC_CLIENT_ID are the ADR 0020 console
             # SSO seam (m19.6). OFF by default ("false" + empty) → the BFF advertises
             # NO OIDC at GET /api/authconfig and the SPA uses token login (ADR 0012).
@@ -367,6 +377,9 @@ spec:
             - name: recipe-overlay
               mountPath: /etc/ctxmesh/recipes
               readOnly: true
+            - name: token-service-token
+              mountPath: /var/run/secrets/ctxmesh-token-service
+              readOnly: true
       volumes:
         # optional:true — a cluster that provides no `ctxmesh-recipes` ConfigMap still schedules the
         # pod (the mount dir is empty ⇒ the embedded gallery serves, fail-closed). The operator creates
@@ -376,5 +389,13 @@ spec:
           configMap:
             name: ctxmesh-recipes
             optional: true
+        # A kubelet-rotated token for the token service's audience; the BFF reads it per request.
+        - name: token-service-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: ctxmesh-token-service
+                  expirationSeconds: 600
       serviceAccountName: bff
       terminationGracePeriodSeconds: 10
