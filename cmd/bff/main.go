@@ -118,7 +118,7 @@ func runPreflight(ctx context.Context) int {
 	oboOn := strings.EqualFold(os.Getenv("MCP_OBO_EGRESS_ENABLED"), "true")
 	required := map[string]string{
 		// Always needed for a functional install (all derivable/defaulted by the chart, m124.3):
-		"TOKEN_SERVICE_URL":        os.Getenv("TOKEN_SERVICE_URL"),
+		envTokenServiceURL:         os.Getenv(envTokenServiceURL),
 		"MCP_CREDENTIAL_NAMESPACE": os.Getenv("MCP_CREDENTIAL_NAMESPACE"),
 		"COST_ROLLUP_ENABLED":      os.Getenv("COST_ROLLUP_ENABLED"),
 	}
@@ -371,15 +371,10 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// BFF_TOKEN_SERVICE_TLS_* files are present (the same platform material the sidecars use);
 	// absent ⇒ plain HTTP (dev). Unset TOKEN_SERVICE_URL ⇒ the BFF writes the grant Secret directly.
 	// Every call carries the BFF's projected token, which is what lets it store grants (ADR 0154).
-	var grantStore credresolve.GrantWriter
-	var tsHTTPClient *http.Client // reused by the KB test-query endpoint (m68.13)
-	if tsURL := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")); tsURL != "" {
-		httpClient, tlsErr := tokenServiceClient(log, tsURL)
-		if tlsErr != nil {
-			return fmt.Errorf("build token-service mTLS client: %w", tlsErr)
-		}
-		tsHTTPClient = httpClient
-		grantStore = credplane.NewClient(tsURL, httpClient)
+	// tsHTTPClient is reused by the KB test-query endpoint (m68.13).
+	tsHTTPClient, grantStore, err := tokenServiceWiring(log, os.Getenv)
+	if err != nil {
+		return err
 	}
 
 	// Durable run store (ADR 0034 §durability, m32.1): when RUN_STORE_DSN names a Postgres, runs
@@ -508,7 +503,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		return err
 	}
 	opts := bff.Options{
-		TokenServiceURL:        strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")),
+		TokenServiceURL:        strings.TrimSpace(os.Getenv(envTokenServiceURL)),
 		TokenServiceHTTPClient: tsHTTPClient,
 		GrantStore:             grantStore,
 		TenantUsage:            tenantUsage,
@@ -944,26 +939,44 @@ func newIngestEmbedder(log logr.Logger) credplane.Embedder {
 // the token-service. When the BFF_TOKEN_SERVICE_TLS_* files are all present it is mTLS
 // (the platform client cert + CA); otherwise it returns nil so credplane.NewClient uses a
 // plain default client (dev only — the token-service also degrades to plain HTTP).
-// tokenServiceClient is the BFF's client of the token service: mTLS when the BFF_TOKEN_SERVICE_TLS_*
-// files are present, and on every request the BFF's projected token, which is what lets it store grants
-// (ADR 0154).
-func tokenServiceClient(log logr.Logger, tsURL string) (*http.Client, error) {
+// envTokenServiceURL is the token service the BFF delegates grant writes and knowledge test queries to.
+const envTokenServiceURL = "TOKEN_SERVICE_URL"
+
+// tokenServiceWiring is the BFF's client of the token service and the grant writer over it, or nils when
+// TOKEN_SERVICE_URL is unset (the BFF then writes grant Secrets itself). The client uses mTLS when the
+// BFF_TOKEN_SERVICE_TLS_* files are present and sends the BFF's projected token on every request, which
+// is what lets it store grants (ADR 0154). A BFF pointed at the token service without a readable token
+// refuses to start: every grant write and knowledge test query would be refused.
+func tokenServiceWiring(log logr.Logger, getenv func(string) string) (*http.Client, credresolve.GrantWriter, error) {
+	tsURL := strings.TrimSpace(getenv(envTokenServiceURL))
+	if tsURL == "" {
+		return nil, nil, nil
+	}
+	tokenPath := strings.TrimSpace(getenv("TOKEN_SERVICE_TOKEN_PATH"))
+	if tokenPath == "" {
+		return nil, nil, errors.New("TOKEN_SERVICE_URL is set but TOKEN_SERVICE_TOKEN_PATH is not: mount a " +
+			"projected ServiceAccount token for audience " + runcap.TokenServicePodAudience +
+			" (the chart does) and point TOKEN_SERVICE_TOKEN_PATH at it, or unset TOKEN_SERVICE_URL")
+	}
+	raw, err := os.ReadFile(tokenPath) //nolint:gosec // a path the operator sets
+	if err == nil && strings.TrimSpace(string(raw)) == "" {
+		err = errors.New("the file is empty")
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("TOKEN_SERVICE_TOKEN_PATH %s holds no token (%w): mount a projected "+
+			"ServiceAccount token for audience %s there", tokenPath, err, runcap.TokenServicePodAudience)
+	}
 	httpClient, err := tokenServiceHTTPClient(tsURL)
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("build token-service mTLS client: %w", err)
 	}
 	mtls := httpClient != nil
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 20 * time.Second}
 	}
-	if tokenPath := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_TOKEN_PATH")); tokenPath != "" {
-		httpClient.Transport = credplane.NewBearerTransport(httpClient.Transport, tokenPath)
-	} else {
-		log.Error(errors.New("TOKEN_SERVICE_TOKEN_PATH is unset"),
-			"the token service refuses this BFF's grant writes and knowledge test queries (ADR 0154)")
-	}
+	httpClient.Transport = credplane.NewBearerTransport(httpClient.Transport, tokenPath)
 	log.Info("MCP grant writes delegate to the token-service (SPI write path)", "url", tsURL, "mtls", mtls)
-	return httpClient, nil
+	return httpClient, credplane.NewClient(tsURL, httpClient), nil
 }
 
 func tokenServiceHTTPClient(tsURL string) (*http.Client, error) {
