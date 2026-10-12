@@ -13,7 +13,8 @@
 #
 # Usage: hack/chart-images-pullable.sh [-- extra helm args for every render]
 #   CHART               chart directory (default deploy/helm/ctxmesh)
-#   CHART_IMAGES_PULLER a command run as `<cmd> <ref>` instead of `docker pull`, exit 0 = pullable
+#   CHART_IMAGES_PULLER a command run as `<cmd> <ref>` instead of `docker pull`: exit 0 pullable,
+#                       2 rate-limited, anything else not pullable
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -34,7 +35,24 @@ pull() {
     return
   fi
   docker image inspect "$ref" >/dev/null 2>&1 && had=1
-  DOCKER_CONFIG="$anon" docker pull --quiet "$ref" >/dev/null || return 1
+  # Docker Hub rate-limits anonymous pulls per IP, and CI runners share IPs. A rate limit says
+  # nothing about whether the image is public, so it is retried, and reported as itself if it
+  # persists rather than as an image that does not pull.
+  local attempt out
+  for attempt in 1 2 3; do
+    if out="$(DOCKER_CONFIG="$anon" docker pull --quiet "$ref" 2>&1)"; then
+      break
+    fi
+    if ! grep -qiE 'toomanyrequests|rate limit' <<<"$out"; then
+      printf '%s\n' "$out"
+      return 1
+    fi
+    if [ "$attempt" = 3 ]; then
+      printf 'RATE-LIMITED: the registry refused three anonymous pulls with a rate limit; this is not a verdict on the image\n%s\n' "$out"
+      return 2
+    fi
+    sleep $((attempt * 30))
+  done
   if [ "$had" = 0 ]; then
     docker image rm "$ref" >/dev/null 2>&1 || true
   fi
@@ -42,11 +60,18 @@ pull() {
 
 checked=0
 failed=0
+limited=0
 while read -r ref; do
   [ -n "$ref" ] || continue
   checked=$((checked + 1))
-  if err="$(pull "$ref" 2>&1)"; then
+  rc=0
+  err="$(pull "$ref" 2>&1)" || rc=$?
+  if [ "$rc" = 0 ]; then
     echo "  ok: $ref"
+  elif [ "$rc" = 2 ]; then
+    limited=$((limited + 1))
+    echo "FAIL: $ref could not be checked: rate-limited" >&2
+    printf '%s\n' "$err" | sed 's/^/      /' | tail -3 >&2
   else
     failed=$((failed + 1))
     echo "FAIL: $ref does not pull anonymously" >&2
@@ -57,6 +82,10 @@ done <<< "$refs"
 [ "$checked" -gt 0 ] || { echo "FAIL: no third-party images were listed; this checked nothing" >&2; exit 1; }
 if [ "$failed" -gt 0 ]; then
   echo "FAIL: $failed of $checked third-party images do not pull. Mirror the image, move it to a registry that serves it, or replace it (ADR 0145)." >&2
+  exit 1
+fi
+if [ "$limited" -gt 0 ]; then
+  echo "FAIL: $limited of $checked third-party images could not be checked: the registry rate-limited every attempt. Re-run; this is not a verdict on the images." >&2
   exit 1
 fi
 echo "PASS: all $checked third-party images the chart renders pull anonymously"
