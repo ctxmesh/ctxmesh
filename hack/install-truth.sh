@@ -108,6 +108,29 @@ fi
 grep -q 'postgres.externalDsn' "$PROD" || fail "the production render failed for some reason other than the missing external DSN"
 ok "profile=production refuses without an operator-managed database"
 
+# 8b. The README's production command renders, against the chart it names.
+#
+# It did not: the guards above require bff.mcp.grantHmacKey and bff.mcp.credentialNamespace, the
+# README left both out, and the only other render of "the README's production command" was a
+# hand-kept copy in chart_images.py that carried them. So the command is read from the README itself
+# (hack/readme_install.py), and the Secret the production profile needs at runtime, which no render
+# can see, must be in the same block.
+README_DOC="${README:-README.md}"
+PRODARGS=()
+while IFS= read -r arg; do PRODARGS+=("$arg"); done \
+  < <(python3 hack/readme_install.py production --readme "$README_DOC" --chart "$CHART")
+[ "${#PRODARGS[@]}" -gt 1 ] || fail "read no production command from $README_DOC (above)"
+if ! PRODOUT="$(helm template ctxmesh "${PRODARGS[0]}" -n ctxmesh "${PRODARGS[@]:1}" 2>&1)"; then
+  printf '%s\n' "$PRODOUT" | sed 's/^/      /' | head -12 >&2
+  fail "the production command in $README_DOC does not render: a reader who copies it gets the error above"
+fi
+grep -q 'name: TOKEN_SERVICE_TLS_REQUIRED' <<<"$PRODOUT" \
+  || fail "the README's production command no longer renders the token service with TLS required; recheck what it must create first"
+awk '/<!-- ctxmesh:install production -->/{on=1} on&&/^```/{n++} on&&n<2{print} n>=2{exit}' "$README_DOC" \
+  | grep -q 'secret tls token-service-tls' \
+  || fail "the production profile runs the token service with TLS required, and $README_DOC's production block does not create the token-service-tls Secret it starts from"
+ok "the README's production command renders and creates the token-service-tls Secret first"
+
 # 9. The DURABLE run path, which profile=production makes mandatory.
 #
 # Everything above renders DEFAULT values, where bff.runStore.enabled=false and the

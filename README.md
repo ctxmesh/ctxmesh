@@ -119,19 +119,31 @@ election, PodDisruptionBudgets, an external data plane, and signed images. See
 [`values-production.yaml`](deploy/helm/ctxmesh/values-production.yaml).
 
 A production install **must** supply its own PostgreSQL (with the `pgvector` extension — knowledge
-chunks are searched by vector similarity):
+chunks are searched by vector similarity), a per-cluster key that salts the hashed user identities
+on MCP grants, a namespace that holds the grants, and a certificate for the token service, which
+serves the credential API over TLS only:
 
+<!-- ctxmesh:install production -->
 ```sh
-helm install ctxmesh ./deploy/helm/ctxmesh -n ctxmesh --create-namespace \
+kubectl create namespace ctxmesh
+# A certificate for the token service, valid for ctxmesh-token-service.ctxmesh.svc.
+kubectl -n ctxmesh create secret tls token-service-tls --cert=token-service.crt --key=token-service.key
+helm install ctxmesh ./deploy/helm/ctxmesh -n ctxmesh \
   --set profile=production \
   -f deploy/helm/ctxmesh/values-production.yaml \
-  --set postgres.externalDsn='postgres://user:pass@db.example:5432/ctxmesh?sslmode=require'
+  --set postgres.externalDsn='postgres://user:pass@db.example:5432/ctxmesh?sslmode=require' \
+  --set bff.mcp.grantHmacKey="$(openssl rand -hex 32)" \
+  --set bff.mcp.credentialNamespace=ctxmesh-credentials
 ```
 
+Keep the grant key: changing it later re-keys every grant, and each person reconnects. The chart
+creates `ctxmesh-credentials` with access for the credential components only.
+
 The bundled data plane uses deterministic, obviously-fake dev credentials and is not rendered under
-`profile=production`. The render **fails** if `postgres.externalDsn` is missing rather than
-installing a control plane that cannot start — the alternative is a CrashLoopBackOff whose cause is
-three layers from its symptom.
+`profile=production`. The render **fails** if `postgres.externalDsn`, `bff.mcp.grantHmacKey` or
+`bff.mcp.credentialNamespace` is missing rather than installing a control plane that cannot start or
+stores grants where another tenant can read them. Without the `token-service-tls` Secret the token
+service refuses to start.
 
 **Who enables `vector`.** The schema migration runs `CREATE EXTENSION IF NOT EXISTS vector`, and
 `vector` is **not** a PostgreSQL *trusted* extension — so creating it requires elevated rights that a

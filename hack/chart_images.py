@@ -23,6 +23,9 @@ import sys
 
 import yaml
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from readme_install import production_install  # noqa: E402
+
 REPO = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_CHART = REPO / "deploy/helm/ctxmesh"
 MIRROR_LIST = REPO / "hack/third-party-images.txt"
@@ -33,20 +36,13 @@ MIRROR_REGISTRY = "ghcr.io/ctxmesh/mirror"
 # listed apart and pulled where the version exists (the release, and nightly on main).
 FIRST_PARTY_PREFIX = "ghcr.io/ctxmesh/"
 
-# The README's production command, plus the two bff.mcp values the production guards also require
-# (render-only placeholders, like the DSN, which the render never dials).
-PRODUCTION = [
-    "--set", "profile=production",
-    "-f", "{chart}/values-production.yaml",
-    "--set", "postgres.externalDsn=postgres://user:pass@db.example:5432/ctxmesh?sslmode=require",
-    "--set", "bff.mcp.grantHmacKey=render-only",
-    "--set", "bff.mcp.credentialNamespace=ctxmesh-credentials",
-]
 OPTIONAL_ON = [
     "--set", "devDataPlane.nats.enabled=true",
     "--set", "auth.oidc.enabled=true",
 ]
-RENDERS = {"default": [], "production": PRODUCTION, "optional-on": OPTIONAL_ON}
+# The production render is the README's own command (hack/readme_install.py), read at render time.
+PRODUCTION = "production"
+RENDERS = {"default": [], PRODUCTION: [], "optional-on": OPTIONAL_ON}
 
 # Every values key that names an image. `seamed` points all of them at SEAM and then expects every
 # rendered image to start with it; one that does not is hardcoded in a template. A new image seam
@@ -98,7 +94,12 @@ def images(text: str) -> set[str]:
 
 
 def rendered(chart: pathlib.Path, extra: list[str]) -> dict[str, set[str]]:
-    return {label: images(render(chart, args + extra)) for label, args in RENDERS.items()}
+    out = {}
+    for label, args in RENDERS.items():
+        if label == PRODUCTION:
+            _, args = production_install(REPO / "README.md", str(chart))
+        out[label] = images(render(chart, args + extra))
+    return out
 
 
 def is_first_party(ref: str) -> bool:

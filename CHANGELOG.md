@@ -125,6 +125,14 @@ The release refuses a tag it disagrees with and, before it publishes the Release
 first-party image a clone of the tag renders; the nightly does the same on `main`. A milestone
 branch names its upcoming release, so installing one from a clone needs images built from it.
 
+**Fixed: the README's production command did not render.** The production profile requires
+`bff.mcp.grantHmacKey` and `bff.mcp.credentialNamespace`, and the command set neither, so
+`helm install` stopped at its first guard. It also never said to create the `token-service-tls`
+Secret, without which the token service refuses to start under that profile. The command now sets
+both and creates the Secret first. CI renders the README's own command (`hack/install-truth.sh`,
+which also fails if the block stops creating the Secret), and the image checks list that command's
+images from the README too, where they had used a copy that carried the two missing values.
+
 **Changed: an `/api` route the server cannot serve answers 501, not 404.** Each route is now
 registered once. When something it needs is missing (the caller-scoped cluster client, as under
 `ctxmesh dev --ui`; the trace store; the agent invoker; the config expander), it answers `501`
