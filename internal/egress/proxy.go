@@ -65,7 +65,7 @@ type toolCapture struct {
 type ProxyConfig struct {
 	// Verifier checks the run capability against the platform public key + audience.
 	Verifier *runcap.Verifier
-	// Resolver resolves the invoking user's OBO credential (credresolve.K8sBackend in prod).
+	// Resolver resolves the invoking user's OBO credential (the token-service client in production).
 	Resolver credresolve.CredentialResolver
 	// Namespace is the grant SOURCE namespace — the agent's own namespace (POD_NAMESPACE),
 	// the key under which its users' grants were consented.

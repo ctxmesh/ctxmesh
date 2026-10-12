@@ -41,7 +41,7 @@ var recordEgressConfig = OBOEgressConfig{
 	SidecarImage:           "egress-sidecar:test",
 	CapabilityPublicKeyB64: "PUBKEY",
 	CapabilityAudience:     "aud",
-	CredentialNamespace:    "ae-credentials",
+	TokenServiceURL:        "http://token-service.test:8443",
 }
 
 func newRecordReconciler() *AgentDeploymentReconciler {

@@ -23,8 +23,7 @@ limitations under the License.
 // the rotating-refresh-token race across pods (ADR 0029 §6 R3) disappears.
 //
 // The wire protocol is a tiny JSON request/response over mTLS. The Client implements
-// credresolve.CredentialResolver, so a sidecar swaps an embedded backend for a delegating
-// client with no other change.
+// credresolve.CredentialResolver; it is the egress sidecar's only resolver.
 package credplane
 
 // The internal API paths.

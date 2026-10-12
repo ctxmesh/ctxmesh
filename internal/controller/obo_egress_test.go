@@ -56,7 +56,7 @@ func TestEgressDigest_UrlEditDoesNotRoll(t *testing.T) {
 // + EGRESS_ROUTES_FILE env, the sidecar carries EGRESS_ROUTES_FILE + the mount and NOT the static
 // EGRESS_ROUTES env; with no mount it falls back to the static env (dev/tests).
 func TestEgressSidecarContainer_RoutesFileSupersedesEnv(t *testing.T) {
-	cfg := OBOEgressConfig{SidecarImage: "egress-sidecar:test", CapabilityPublicKeyB64: "K", CapabilityAudience: "a", CredentialNamespace: "ns"}
+	cfg := OBOEgressConfig{SidecarImage: "egress-sidecar:test", CapabilityPublicKeyB64: "K", CapabilityAudience: "a", TokenServiceURL: "http://ts"}
 	mount := &corev1.VolumeMount{Name: egressRoutesVolumeName, MountPath: egressRoutesMountPath, ReadOnly: true}
 	env := []corev1.EnvVar{{Name: envEgressRoutesFile, Value: egressRoutesMountPath + "/" + egressRoutesConfigMapKey}}
 	c := egressSidecarContainer(cfg, "ns", "ns/a", "", `[{"name":"s"}]`, false, nil, nil, nil, mount, env)
@@ -89,7 +89,7 @@ func TestEgressSidecarContainer(t *testing.T) {
 		SidecarImage:           "egress-sidecar:test",
 		CapabilityPublicKeyB64: "PUBKEY",
 		CapabilityAudience:     "aud",
-		CredentialNamespace:    "ae-credentials",
+		TokenServiceURL:        "https://token-service:8443",
 	}
 	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", `[{"name":"scalekit"}]`, false, nil, nil, nil, nil, nil)
 
@@ -104,7 +104,7 @@ func TestEgressSidecarContainer(t *testing.T) {
 	for name, want := range map[string]string{
 		"MCP_CAPABILITY_PUBLIC_KEY": "PUBKEY",
 		"MCP_CAPABILITY_AUDIENCE":   "aud",
-		"MCP_CREDENTIAL_NAMESPACE":  "ae-credentials",
+		"TOKEN_SERVICE_URL":         "https://token-service:8443",
 		"EGRESS_AGENT":              "team-alpha/support",
 		// The trust boundary the sidecar serves — the registry (ADR 0033, m30.3).
 		"EGRESS_BOUNDARY": "r:squad-a",
@@ -118,20 +118,14 @@ func TestEgressSidecarContainer(t *testing.T) {
 		assert.Nil(t, e.ValueFrom, "%s must be a literal value (Knative rejects valueFrom.fieldRef)", name)
 	}
 
-	// No delegation env unless a token-service URL is configured.
-	_, hasDelegate := envValue(c, "TOKEN_SERVICE_URL")
-	assert.False(t, hasDelegate)
+	// The sidecar reads no credential store itself, so it is given no credential namespace.
+	_, hasCredNS := envValue(c, "MCP_CREDENTIAL_NAMESPACE")
+	assert.False(t, hasCredNS)
 	// No record env for a non-record-capable sidecar (byte-for-byte the pre-M78 OBO sidecar).
 	_, hasRecord := envValue(c, "RECORD_CAPABLE")
 	assert.False(t, hasRecord)
 	_, hasStore := envValue(c, "OBJECT_STORE_ADDR")
 	assert.False(t, hasStore, "a non-record sidecar gets no object-store env")
-
-	cfg.TokenServiceURL = "https://token-service:8443"
-	delegating := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false, nil, nil, nil, nil, nil)
-	tsu, ok := envValue(delegating, "TOKEN_SERVICE_URL")
-	require.True(t, ok)
-	assert.Equal(t, "https://token-service:8443", tsu.Value)
 }
 
 // TestEgressSidecarContainer_RecordMode: a RECORD-CAPABLE sidecar (M78, ADR 0071 §1/C1) gets
@@ -142,7 +136,7 @@ func TestEgressSidecarContainer_RecordMode(t *testing.T) {
 		SidecarImage:           "egress-sidecar:test",
 		CapabilityPublicKeyB64: "PUBKEY",
 		CapabilityAudience:     "aud",
-		CredentialNamespace:    "ae-credentials",
+		TokenServiceURL:        "http://ts",
 	}
 	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true, objectStoreEnv(true, newPlatformServices("")), nil, nil, nil, nil)
 
@@ -167,7 +161,7 @@ func TestEgressSidecarContainer_RecordCapableNoDevDataPlane(t *testing.T) {
 		SidecarImage:           "egress-sidecar:test",
 		CapabilityPublicKeyB64: "PUBKEY",
 		CapabilityAudience:     "aud",
-		CredentialNamespace:    "ae-credentials",
+		TokenServiceURL:        "http://ts",
 	}
 	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true, objectStoreEnv(false, newPlatformServices("")), nil, nil, nil, nil)
 
@@ -212,7 +206,7 @@ func TestEgressSidecarContainer_ToolPolicyMount(t *testing.T) {
 		SidecarImage:           "egress-sidecar:test",
 		CapabilityPublicKeyB64: "PUBKEY",
 		CapabilityAudience:     "aud",
-		CredentialNamespace:    "ae-credentials",
+		TokenServiceURL:        "http://ts",
 	}
 	mount := &corev1.VolumeMount{Name: toolPolicyVolumeName, MountPath: toolPolicyMountPath, ReadOnly: true}
 	env := []corev1.EnvVar{{Name: envToolPolicyFile, Value: toolPolicyMountPath + "/" + toolPolicyConfigMapKey}}

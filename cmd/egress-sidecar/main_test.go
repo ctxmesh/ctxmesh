@@ -19,6 +19,10 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/go-logr/logr"
+
+	"github.com/ctxmesh/ctxmesh/internal/credplane"
 )
 
 // TestEgressSidecar_DefaultBindIsLoopback pins the ADR 0072 invariant (m79.3): the egress sidecar —
@@ -32,5 +36,23 @@ func TestEgressSidecar_DefaultBindIsLoopback(t *testing.T) {
 	if !strings.HasPrefix(defaultListenAddr, "127.") {
 		t.Fatalf("egress sidecar default bind %q is not loopback (127.x) — a routable default would expose "+
 			"the credential-plane runcap verifier off-pod (ADR 0072)", defaultListenAddr)
+	}
+}
+
+// Without the token service the sidecar has nowhere to resolve a credential, so it refuses to start
+// rather than serve tool calls it cannot authorize.
+func TestBuildResolverRequiresTheTokenService(t *testing.T) {
+	_, err := buildResolver(logr.Discard(), func(string) string { return "" })
+	if err == nil || !strings.Contains(err.Error(), "TOKEN_SERVICE_URL is required") {
+		t.Fatalf("no TOKEN_SERVICE_URL: want a startup error naming it, got %v", err)
+	}
+
+	env := map[string]string{"TOKEN_SERVICE_URL": "http://token-service.ctxmesh.svc:8443"}
+	r, err := buildResolver(logr.Discard(), func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("with TOKEN_SERVICE_URL: %v", err)
+	}
+	if _, ok := r.(*credplane.Client); !ok {
+		t.Fatalf("resolver is %T, want the token-service client", r)
 	}
 }

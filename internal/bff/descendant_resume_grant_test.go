@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve/secretbackend"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
@@ -75,7 +76,7 @@ func TestResumedSubRunUsesTheGrantGivenInTheChat(t *testing.T) {
 		"the sub-agent is outside any registry, so its own boundary differs")
 
 	// Connect from the chat stores the grant in the chat agent's boundary.
-	grants := credresolve.NewK8sBackend(credresolve.K8sBackendConfig{
+	grants := secretbackend.New(secretbackend.Config{
 		Client: fake.NewClientBuilder().WithScheme(testScheme(t)).Build(),
 	})
 	require.NoError(t, grants.StoreGrant(ctx, "prod", chatBoundary, server, userGrantHash(aliceUser), credresolve.Grant{

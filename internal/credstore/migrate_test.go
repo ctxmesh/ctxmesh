@@ -29,6 +29,7 @@ import (
 
 	"github.com/ctxmesh/ctxmesh/internal/credpostgres"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve/secretbackend"
 )
 
 func legacyGrantSecret(credNS, ns, server, userHash, token string) client.Object {
@@ -57,7 +58,7 @@ func TestMigrate_K8sToPostgres(t *testing.T) {
 		legacyGrantSecret(credNS, "team-b", "srv", "uhB", "tok-b"),
 	).Build()
 
-	source := credresolve.NewK8sBackend(credresolve.K8sBackendConfig{Client: c, CredentialNamespace: credNS})
+	source := secretbackend.New(secretbackend.Config{Client: c, CredentialNamespace: credNS})
 	sealer, _ := credpostgres.NewLocalSealer(make([]byte, 32))
 	target, _ := credpostgres.NewBackend(credpostgres.BackendConfig{Storage: credpostgres.NewMemStore(), Sealer: sealer})
 

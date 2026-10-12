@@ -22,11 +22,12 @@ import (
 	"fmt"
 
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve/secretbackend"
 )
 
-// GrantLister enumerates legacy grants for a backfill (implemented by credresolve.K8sBackend).
+// GrantLister enumerates legacy grants for a backfill (implemented by secretbackend.Backend).
 type GrantLister interface {
-	ListGrants(ctx context.Context) ([]credresolve.MigratableGrant, error)
+	ListGrants(ctx context.Context) ([]secretbackend.MigratableGrant, error)
 }
 
 // Migrate backfills every grant from source into target — a one-time cutover of existing

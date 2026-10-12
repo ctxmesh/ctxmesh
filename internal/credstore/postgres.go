@@ -30,6 +30,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/credpostgres"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve/secretbackend"
 	"github.com/ctxmesh/ctxmesh/internal/dbpool"
 )
 
@@ -81,7 +82,7 @@ func buildPostgresBackend(ctx context.Context, spec *PostgresProvider, deps Deps
 		Sealer:          sealer,
 		Exchanger:       deps.Exchanger,
 		AuthTypeIsOAuth: deps.AuthTypeIsOAuth,
-		OrgCredential:   credresolve.NewOrgCredentialFunc(deps.Client, deps.DefaultCredentialNamespace, deps.IsOrgScoped),
+		OrgCredential:   secretbackend.OrgCredentialFunc(deps.Client, deps.DefaultCredentialNamespace, deps.IsOrgScoped),
 		Audit:           deps.Audit,
 	})
 }

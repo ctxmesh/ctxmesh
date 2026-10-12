@@ -34,6 +34,7 @@ import (
 
 	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve/secretbackend"
 )
 
 const (
@@ -174,7 +175,7 @@ func TestDelegationGlobalSingleflight(t *testing.T) {
 		release: make(chan struct{}),
 		next:    credresolve.Tokens{AccessToken: "FRESH", ExpiresAt: now.Add(time.Hour)},
 	}
-	backend := credresolve.NewK8sBackend(credresolve.K8sBackendConfig{
+	backend := secretbackend.New(secretbackend.Config{
 		Client:    cl,
 		Exchanger: ex,
 		Now:       func() time.Time { return now },

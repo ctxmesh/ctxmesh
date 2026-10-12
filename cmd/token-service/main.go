@@ -49,6 +49,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve/secretbackend"
 	"github.com/ctxmesh/ctxmesh/internal/credstore"
 	"github.com/ctxmesh/ctxmesh/internal/runtimelimit"
 )
@@ -404,12 +405,12 @@ func credentialResolver(
 
 	// A legacy k8s backend — the source for a one-time migration and the fallback for the
 	// dual-read cutover window (m28.2, ADR 0032).
-	k8sBackend := credresolve.NewK8sBackend(credresolve.K8sBackendConfig{
+	k8sBackend := secretbackend.New(secretbackend.Config{
 		Client:              deps.Client,
 		CredentialNamespace: deps.DefaultCredentialNamespace,
 		Exchanger:           deps.Exchanger,
 		AuthTypeIsOAuth:     deps.AuthTypeIsOAuth,
-		OrgCredential:       credresolve.NewOrgCredentialFunc(deps.Client, deps.DefaultCredentialNamespace, deps.IsOrgScoped),
+		OrgCredential:       secretbackend.OrgCredentialFunc(deps.Client, deps.DefaultCredentialNamespace, deps.IsOrgScoped),
 		Audit:               deps.Audit,
 	})
 

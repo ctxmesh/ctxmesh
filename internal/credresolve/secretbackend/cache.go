@@ -14,11 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package credresolve
+package secretbackend
 
 import (
 	"sync"
 	"time"
+
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 // maxCacheTTL caps how long a resolved token is served from the local cache regardless
@@ -78,7 +80,7 @@ func (c *tokenCache) put(key, access string, tokenExpiry, now time.Time) {
 	hardCap := now.Add(maxCacheTTL)
 	servedThru := hardCap
 	if !tokenExpiry.IsZero() {
-		skewed := tokenExpiry.Add(-RefreshSkew)
+		skewed := tokenExpiry.Add(-credresolve.RefreshSkew)
 		if skewed.Before(servedThru) {
 			servedThru = skewed
 		}

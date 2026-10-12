@@ -37,8 +37,7 @@ const defaultTimeout = 20 * time.Second
 const maxResponseBytes = 1 << 16
 
 // Client is the sidecar-side delegating resolver: it implements
-// credresolve.CredentialResolver by calling the central token service over (m)TLS, so the
-// sidecar swaps an embedded backend for this with no other change (ADR 0030 §1).
+// credresolve.CredentialResolver by calling the central token service over (m)TLS (ADR 0030 §1).
 type Client struct {
 	baseURL string
 	http    *http.Client

@@ -42,7 +42,7 @@ type Credential struct {
 // the resolver operates purely in user-hash space and never sees a raw username.
 //
 // This is the seam the injecting egress sidecar and the central token service both
-// implement/consume (ADR 0030). K8sBackend is the self-hosted baseline; external-vault
+// implement/consume (ADR 0030). secretbackend.Backend (grant Secrets) is the self-hosted baseline; external-vault
 // backends (Scalekit / Auth0 / Vault) implement the same interface for managed installs.
 type CredentialResolver interface {
 	// Resolve returns the credential for (boundary, server, userHash). boundary is the

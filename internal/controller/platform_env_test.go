@@ -87,7 +87,7 @@ func TestWithSpecEnv(t *testing.T) {
 // egress sidecar, the discovery sidecar and in-pod tool containers, and the gateway Deployment. spec.env
 // never reaches those containers, so these need no class.
 var envVarLiteralsOutsideAgentContainer = []string{
-	envEgressCredentialNamespace, envEgressAgent, envEgressListenAddr, envEgressRoutes, envEgressBoundary,
+	envEgressAgent, envEgressListenAddr, envEgressRoutes, envEgressBoundary,
 	envEgressResponseHeaderTimeout, envEgressStreamIdleTimeout, envToolPolicyFile, envEgressRoutesFile,
 	"DISCOVERY_PORT", "TOOLS_JSON_PATH", "PORT",
 }

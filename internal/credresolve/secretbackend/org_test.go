@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package credresolve
+package secretbackend
 
 import (
 	"context"
@@ -25,17 +25,19 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 func TestNewOrgCredentialFunc(t *testing.T) {
 	ctx := context.Background()
 	orgSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      OrgSecretName("weather"),
+			Name:      credresolve.OrgSecretName("weather"),
 			Namespace: "team-alpha",
-			Labels:    OrgSecretLabels("weather"),
+			Labels:    credresolve.OrgSecretLabels("weather"),
 		},
-		Data: OrgSecretData("SHARED-ORG-KEY"),
+		Data: credresolve.OrgSecretData("SHARED-ORG-KEY"),
 	}
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(orgSecret).Build()
 
@@ -43,24 +45,24 @@ func TestNewOrgCredentialFunc(t *testing.T) {
 	notOrg := func(context.Context, string, string) (bool, error) { return false, nil }
 
 	t.Run("org-scoped + secret exists → shared bearer", func(t *testing.T) {
-		got, err := NewOrgCredentialFunc(cl, "", orgScoped)(ctx, "team-alpha", "weather")
+		got, err := OrgCredentialFunc(cl, "", orgScoped)(ctx, "team-alpha", "weather")
 		require.NoError(t, err)
-		assert.Equal(t, KindBearer, got.Kind)
+		assert.Equal(t, credresolve.KindBearer, got.Kind)
 		assert.Equal(t, "SHARED-ORG-KEY", got.Value)
 	})
 
 	t.Run("not org-scoped → fall through", func(t *testing.T) {
-		_, err := NewOrgCredentialFunc(cl, "", notOrg)(ctx, "team-alpha", "weather")
-		assert.ErrorIs(t, err, ErrNoCredential)
+		_, err := OrgCredentialFunc(cl, "", notOrg)(ctx, "team-alpha", "weather")
+		assert.ErrorIs(t, err, credresolve.ErrNoCredential)
 	})
 
 	t.Run("org-scoped but no secret → fall through", func(t *testing.T) {
-		_, err := NewOrgCredentialFunc(cl, "", orgScoped)(ctx, "team-alpha", "no-such-server")
-		assert.ErrorIs(t, err, ErrNoCredential)
+		_, err := OrgCredentialFunc(cl, "", orgScoped)(ctx, "team-alpha", "no-such-server")
+		assert.ErrorIs(t, err, credresolve.ErrNoCredential)
 	})
 
 	t.Run("nil isOrgScoped → fail-closed", func(t *testing.T) {
-		_, err := NewOrgCredentialFunc(cl, "", nil)(ctx, "team-alpha", "weather")
-		assert.ErrorIs(t, err, ErrNoCredential)
+		_, err := OrgCredentialFunc(cl, "", nil)(ctx, "team-alpha", "weather")
+		assert.ErrorIs(t, err, credresolve.ErrNoCredential)
 	})
 }

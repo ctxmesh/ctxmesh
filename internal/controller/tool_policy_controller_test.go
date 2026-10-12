@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
@@ -52,7 +53,7 @@ var m82EgressConfig = OBOEgressConfig{
 	SidecarImage:           "egress-sidecar:test",
 	CapabilityPublicKeyB64: "PUBKEY",
 	CapabilityAudience:     "aud",
-	CredentialNamespace:    "ae-credentials",
+	TokenServiceURL:        "http://token-service.test:8443",
 }
 
 func newM82Reconciler() *AgentDeploymentReconciler {
@@ -287,6 +288,33 @@ func TestM82_NonToolAgent_NoSidecar(t *testing.T) {
 	var cm corev1.ConfigMap
 	err := k8sClient.Get(testCtx, client.ObjectKey{Name: toolPolicyConfigMapName(agent.Name), Namespace: ns}, &cm)
 	assert.Error(t, err, "a non-tool agent gets NO <agent>-toolpolicy ConfigMap")
+}
+
+// The egress sidecar resolves every tool credential through the token service and exits at startup
+// without one, so a tool-bound agent on an install with no TOKEN_SERVICE_URL must fail to render with a
+// message naming the setting, not deploy a pod whose sidecar CrashLoops.
+func TestM82_ToolAgentWithoutTokenService_RefusesToRender(t *testing.T) {
+	const ns = "default"
+	agent := mkAgent(t, "m82-no-ts", ns)
+	const url = "http://mcp-echo.default.svc.cluster.local/mcp"
+	mkRegistry(t, "reg-no-ts", ns, agentsv1beta1.ToolEntry{Name: "word-count", URL: url})
+	mkBinding(t, "no-ts-wc", ns, agentsv1beta1.MCPToolBindingSpec{
+		AgentRef: agent.Name, RegistryRef: "reg-no-ts", ToolName: "word-count",
+		Mode: toolmanifest.ModeRemote, Server: agentsv1beta1.ToolServer{URL: url},
+	})
+
+	r := newM82Reconciler()
+	r.OBOEgress.TokenServiceURL = ""
+	_, err := r.Reconcile(testCtx, reconcile.Request{NamespacedName: types.NamespacedName{Name: agent.Name, Namespace: ns}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TOKEN_SERVICE_URL")
+	var ksvc servingv1.Service
+	assert.True(t, apierrors.IsNotFound(k8sClient.Get(testCtx, types.NamespacedName{Name: agent.Name, Namespace: ns}, &ksvc)),
+		"no Service is created for a tool agent whose sidecar could not start")
+
+	// A tool-less agent needs no token service and still deploys.
+	plain := mkAgent(t, "m82-no-ts-plain", ns)
+	reconcileNN(t, r, plain.Name, ns)
 }
 
 // mkAgentWithToolPolicy creates an AgentDeployment carrying spec.runtime.toolPolicy (M82.3 tests).

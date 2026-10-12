@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve/secretbackend"
 )
 
 // Deps carries the shared, provider-independent collaborators a backend needs.
@@ -60,12 +61,12 @@ func BackendFor(ctx context.Context, cfg Config, deps Deps) (credresolve.Credent
 	switch {
 	case p.Kubernetes != nil:
 		credNs := deps.DefaultCredentialNamespace
-		return credresolve.NewK8sBackend(credresolve.K8sBackendConfig{
+		return secretbackend.New(secretbackend.Config{
 			Client:              deps.Client,
 			CredentialNamespace: credNs,
 			Exchanger:           deps.Exchanger,
 			AuthTypeIsOAuth:     deps.AuthTypeIsOAuth,
-			OrgCredential:       credresolve.NewOrgCredentialFunc(deps.Client, credNs, deps.IsOrgScoped),
+			OrgCredential:       secretbackend.OrgCredentialFunc(deps.Client, credNs, deps.IsOrgScoped),
 			Audit:               deps.Audit,
 		}), nil
 	case p.Remote != nil:

@@ -63,7 +63,7 @@ func newReconciler() *AgentDeploymentReconciler {
 		// reject the Service by container index. Tests must therefore supply one -- same shape of
 		// lesson as EventingAvailable above: a production-correct default that every construction
 		// site has to state.
-		OBOEgress: OBOEgressConfig{SidecarImage: "test.local/egress-sidecar:test"},
+		OBOEgress: OBOEgressConfig{SidecarImage: "test.local/egress-sidecar:test", TokenServiceURL: "http://token-service.test:8443"},
 		Client:    k8sClient,
 		Scheme:    k8sClient.Scheme(),
 		Registry:  NewPostgresRegistryReader(testRegStore),

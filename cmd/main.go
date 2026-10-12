@@ -467,7 +467,6 @@ func main() {
 		SidecarImage:           os.Getenv("EGRESS_SIDECAR_IMAGE"),
 		CapabilityPublicKeyB64: os.Getenv("MCP_CAPABILITY_PUBLIC_KEY"),
 		CapabilityAudience:     os.Getenv("MCP_CAPABILITY_AUDIENCE"),
-		CredentialNamespace:    os.Getenv("MCP_CREDENTIAL_NAMESPACE"),
 		TokenServiceURL:        os.Getenv("TOKEN_SERVICE_URL"),
 		// M146.7 (m52.M143-knobs): the two tool-call timeouts finally get a config surface. Both were
 		// read by cmd/egress-sidecar and set by NOTHING, so an operator with a legitimately slow tool

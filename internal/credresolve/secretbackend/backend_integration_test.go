@@ -20,7 +20,7 @@ limitations under the License.
 // fake client): per-user grant isolation and one-refresh-under-herd with genuine
 // resourceVersion optimistic concurrency. Runs only under `make test-integration`
 // (build tag integration).
-package credresolve
+package secretbackend
 
 import (
 	"context"
@@ -40,6 +40,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 var (
@@ -80,12 +82,12 @@ func itClient(t *testing.T, ns string) client.Client {
 }
 
 func itGrant(ns, server, user string, data map[string][]byte) *corev1.Secret {
-	userHash := UserHash(nil, user)
+	userHash := credresolve.UserHash(nil, user)
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      SecretName(server, userHash, ""),
+			Name:      credresolve.SecretName(server, userHash, ""),
 			Namespace: ns,
-			Labels:    SecretLabels(server, userHash, "", ""),
+			Labels:    credresolve.SecretLabels(server, userHash, "", ""),
 		},
 		Data: data,
 	}
@@ -99,23 +101,23 @@ func TestIntegrationPerUserIsolation(t *testing.T) {
 	cl := itClient(t, ns)
 	now := time.Now().UTC()
 
-	alice := itGrant(ns, "weather", "alice@example.com", SecretData(
-		OAuthConfig{TokenEndpoint: "https://as/token", ClientID: "cid"},
-		Tokens{AccessToken: "ALICE-AT", RefreshToken: "ALICE-RT", ExpiresAt: now.Add(time.Hour)},
+	alice := itGrant(ns, "weather", "alice@example.com", credresolve.SecretData(
+		credresolve.OAuthConfig{TokenEndpoint: "https://as/token", ClientID: "cid"},
+		credresolve.Tokens{AccessToken: "ALICE-AT", RefreshToken: "ALICE-RT", ExpiresAt: now.Add(time.Hour)},
 	))
 	require.NoError(t, cl.Create(ctx, alice))
 
-	b := NewK8sBackend(K8sBackendConfig{
+	b := New(Config{
 		Client:          cl,
 		AuthTypeIsOAuth: func(context.Context, string, string) (bool, error) { return true, nil },
 	})
 
-	got, err := b.Resolve(ctx, ns, "", "weather", UserHash(nil, "alice@example.com"))
+	got, err := b.Resolve(ctx, ns, "", "weather", credresolve.UserHash(nil, "alice@example.com"))
 	require.NoError(t, err)
 	assert.Equal(t, "ALICE-AT", got.Value)
 
-	_, err = b.Resolve(ctx, ns, "", "weather", UserHash(nil, "bob@example.com"))
-	assert.ErrorIs(t, err, ErrConsentRequired)
+	_, err = b.Resolve(ctx, ns, "", "weather", credresolve.UserHash(nil, "bob@example.com"))
+	assert.ErrorIs(t, err, credresolve.ErrConsentRequired)
 }
 
 // TestIntegrationOneRefreshUnderHerd proves that a concurrent herd of resolves against a
@@ -127,26 +129,26 @@ func TestIntegrationOneRefreshUnderHerd(t *testing.T) {
 	cl := itClient(t, ns)
 	now := time.Now().UTC()
 
-	grant := itGrant(ns, "weather", "alice@example.com", SecretData(
-		OAuthConfig{TokenEndpoint: "https://as/token", ClientID: "cid"},
-		Tokens{AccessToken: "OLD-AT", RefreshToken: "OLD-RT", ExpiresAt: now.Add(10 * time.Second)},
+	grant := itGrant(ns, "weather", "alice@example.com", credresolve.SecretData(
+		credresolve.OAuthConfig{TokenEndpoint: "https://as/token", ClientID: "cid"},
+		credresolve.Tokens{AccessToken: "OLD-AT", RefreshToken: "OLD-RT", ExpiresAt: now.Add(10 * time.Second)},
 	))
 	require.NoError(t, cl.Create(ctx, grant))
 
 	ex := &fakeExchanger{
-		next:    Tokens{AccessToken: "NEW-AT", RefreshToken: "NEW-RT", ExpiresAt: now.Add(time.Hour)},
+		next:    credresolve.Tokens{AccessToken: "NEW-AT", RefreshToken: "NEW-RT", ExpiresAt: now.Add(time.Hour)},
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
-	b := NewK8sBackend(K8sBackendConfig{
+	b := New(Config{
 		Client:          cl,
 		Exchanger:       ex,
 		AuthTypeIsOAuth: func(context.Context, string, string) (bool, error) { return true, nil },
 	})
-	userHash := UserHash(nil, "alice@example.com")
+	userHash := credresolve.UserHash(nil, "alice@example.com")
 
 	const n = 10
-	results := make([]Credential, n)
+	results := make([]credresolve.Credential, n)
 	errs := make([]error, n)
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
@@ -169,5 +171,5 @@ func TestIntegrationOneRefreshUnderHerd(t *testing.T) {
 
 	var after corev1.Secret
 	require.NoError(t, cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: grant.Name}, &after))
-	assert.Equal(t, "NEW-AT", string(after.Data[KeyAccessToken]))
+	assert.Equal(t, "NEW-AT", string(after.Data[credresolve.KeyAccessToken]))
 }

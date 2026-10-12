@@ -14,7 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package credresolve
+// Package secretbackend stores and resolves OBO grants as Kubernetes Secrets in the locked
+// credential namespace (the grant wire format is credresolve's). The token service and the BFF
+// use it; the per-pod egress sidecar must not, which is why it is not part of credresolve.
+package secretbackend
 
 import (
 	"context"
@@ -28,6 +31,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 // maxRefreshAttempts bounds the optimistic-concurrency retry loop: on a resourceVersion
@@ -35,7 +40,7 @@ import (
 // their token), but we never loop unbounded on a pathologically contended Secret.
 const maxRefreshAttempts = 4
 
-// K8sBackend is the self-hosted CredentialResolver: it resolves the invoking user's OBO
+// Backend is the self-hosted CredentialResolver: it resolves the invoking user's OBO
 // credential from a grant Secret in the (locked) credential namespace, refreshing a
 // near-expiry OAuth token server-side. It is the baseline everyone — including air-gapped
 // installs — gets; external-vault backends implement the same interface for managed
@@ -45,14 +50,14 @@ const maxRefreshAttempts = 4
 // refresh) and written back with OPTIMISTIC CONCURRENCY (resourceVersion) so a stale
 // token is never persisted (ADR 0029 §6 R3). A short-TTL cache serves repeat calls
 // without touching the Secret (the sidecar latency win).
-type K8sBackend struct {
-	cfg   K8sBackendConfig
+type Backend struct {
+	cfg   Config
 	cache *tokenCache
 	group singleflight.Group
 }
 
-// K8sBackendConfig configures a K8sBackend.
-type K8sBackendConfig struct {
+// Config configures a Backend.
+type Config struct {
 	// Client reads + writes grant Secrets. At the egress hop it carries the credential-
 	// component identity scoped to the locked namespace (ADR 0029 §7).
 	Client client.Client
@@ -61,7 +66,7 @@ type K8sBackendConfig struct {
 	CredentialNamespace string
 	// Exchanger performs the OAuth refresh + revoke network calls. Required for refresh;
 	// a nil Exchanger serves only non-expiring / still-valid tokens and skips AS revoke.
-	Exchanger TokenExchanger
+	Exchanger credresolve.TokenExchanger
 	// Now is the clock (default time.Now), overridable in tests.
 	Now func() time.Time
 	// AuthTypeIsOAuth reports whether a server needs per-user OAuth, so an absent grant is
@@ -75,38 +80,38 @@ type K8sBackendConfig struct {
 	// when the server is org-scoped and an org credential is set, else ErrNoCredential (so
 	// resolution falls through to personal-consent / public). nil ⇒ never resolve org.
 	// Personal-before-org holds: this is only reached when no personal grant was found.
-	OrgCredential func(ctx context.Context, ns, server string) (Credential, error)
+	OrgCredential func(ctx context.Context, ns, server string) (credresolve.Credential, error)
 	// Audit records credential-plane actions (never a token). Nil ⇒ no-op.
-	Audit func(AuditEvent)
+	Audit func(credresolve.AuditEvent)
 }
 
-// NewK8sBackend builds a K8sBackend with a fresh cache + a default clock.
-func NewK8sBackend(cfg K8sBackendConfig) *K8sBackend {
+// New builds a Backend with a fresh cache + a default clock.
+func New(cfg Config) *Backend {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &K8sBackend{cfg: cfg, cache: newTokenCache()}
+	return &Backend{cfg: cfg, cache: newTokenCache()}
 }
 
 // Resolve implements CredentialResolver: cache fast-path → find the user's grant →
 // refresh (singleflight + optimistic writeback) → cache + audit. Per-user isolation is
 // structural — the grant is selected by BOTH the server AND the invoking user's hash, so
 // user A can never resolve user B's grant.
-func (b *K8sBackend) Resolve(ctx context.Context, ns, boundary, server, userHash string) (Credential, error) {
-	boundaryHash := BoundaryHash(boundary)
-	readNS, name := SecretCoordinates(b.cfg.CredentialNamespace, ns, server, userHash, boundaryHash)
+func (b *Backend) Resolve(ctx context.Context, ns, boundary, server, userHash string) (credresolve.Credential, error) {
+	boundaryHash := credresolve.BoundaryHash(boundary)
+	readNS, name := credresolve.SecretCoordinates(b.cfg.CredentialNamespace, ns, server, userHash, boundaryHash)
 	cacheKey := readNS + "/" + name
 	now := b.cfg.Now()
 
 	// Fast path: a cached, still-valid token skips the Secret read + refresh entirely.
 	if access, ok := b.cache.get(cacheKey, now); ok {
-		b.audit(ActionUse, server, userHash, ns, ClassPersonalGrant)
-		return Credential{Kind: KindBearer, Value: access}, nil
+		b.audit(credresolve.ActionUse, server, userHash, ns, credresolve.ClassPersonalGrant)
+		return credresolve.Credential{Kind: credresolve.KindBearer, Value: access}, nil
 	}
 
 	secret, found, err := b.findGrant(ctx, readNS, name, ns, server, userHash, boundaryHash)
 	if err != nil {
-		return Credential{}, err
+		return credresolve.Credential{}, err
 	}
 	if !found && boundaryHash != "" {
 		// Migration bridge (ADR 0033, m30.6): no boundary-scoped grant yet, but the user may
@@ -114,10 +119,10 @@ func (b *K8sBackend) Resolve(ctx context.Context, ns, boundary, server, userHash
 		// during the cutover; a later boundary-scoped write (re-consent for this agent's
 		// registry) supersedes it. This is what makes it safe to introduce the boundary on the
 		// read side before every write is boundary-scoped.
-		legacyNS, legacyName := SecretCoordinates(b.cfg.CredentialNamespace, ns, server, userHash, "")
+		legacyNS, legacyName := credresolve.SecretCoordinates(b.cfg.CredentialNamespace, ns, server, userHash, "")
 		ls, lok, lerr := b.findGrant(ctx, legacyNS, legacyName, ns, server, userHash, "")
 		if lerr != nil {
-			return Credential{}, lerr
+			return credresolve.Credential{}, lerr
 		}
 		if lok {
 			secret, found, cacheKey = ls, true, legacyNS+"/"+legacyName
@@ -130,19 +135,19 @@ func (b *K8sBackend) Resolve(ctx context.Context, ns, boundary, server, userHash
 			cred, oErr := b.cfg.OrgCredential(ctx, ns, server)
 			switch {
 			case oErr == nil:
-				b.audit(ActionUse, server, userHash, ns, ClassOrgCredential)
+				b.audit(credresolve.ActionUse, server, userHash, ns, credresolve.ClassOrgCredential)
 				return cred, nil
-			case errors.Is(oErr, ErrNoCredential):
+			case errors.Is(oErr, credresolve.ErrNoCredential):
 				// Not org-scoped / no org credential set — fall through to consent/open.
 			default:
-				return Credential{}, oErr
+				return credresolve.Credential{}, oErr
 			}
 		}
 		// An OAuth (personal) server needs this user's consent; an open server needs none.
 		if b.authTypeIsOAuth(ctx, ns, server) {
-			return Credential{}, ErrConsentRequired
+			return credresolve.Credential{}, credresolve.ErrConsentRequired
 		}
-		return Credential{}, ErrNoCredential
+		return credresolve.Credential{}, credresolve.ErrNoCredential
 	}
 
 	// The user has a grant. Refresh (rotate if near expiry) server-side against the
@@ -157,22 +162,22 @@ func (b *K8sBackend) Resolve(ctx context.Context, ns, boundary, server, userHash
 		//     refresh token is expired/revoked (RFC 6749 §5.2).
 		// Both are indistinguishable from "no grant" to the user, so they get the same
 		// consent_required outcome — the run re-prompts to reconnect instead of erroring.
-		if errors.Is(rErr, ErrNoRefreshToken) || IsInvalidGrant(rErr) {
-			return Credential{}, ErrConsentRequired
+		if errors.Is(rErr, credresolve.ErrNoRefreshToken) || credresolve.IsInvalidGrant(rErr) {
+			return credresolve.Credential{}, credresolve.ErrConsentRequired
 		}
-		return Credential{}, rErr
+		return credresolve.Credential{}, rErr
 	}
 
 	b.cache.put(cacheKey, access, expiresAt, now)
-	b.audit(ActionUse, server, userHash, ns, ClassPersonalGrant)
-	return Credential{Kind: KindBearer, Value: access}, nil
+	b.audit(credresolve.ActionUse, server, userHash, ns, credresolve.ClassPersonalGrant)
+	return credresolve.Credential{Kind: credresolve.KindBearer, Value: access}, nil
 }
 
 // Revoke implements CredentialResolver: forget the grant (delete the Secret) and
 // best-effort revoke it at the AS (RFC 7009). A missing grant is a no-op.
-func (b *K8sBackend) Revoke(ctx context.Context, ns, boundary, server, userHash string) error {
-	boundaryHash := BoundaryHash(boundary)
-	readNS, name := SecretCoordinates(b.cfg.CredentialNamespace, ns, server, userHash, boundaryHash)
+func (b *Backend) Revoke(ctx context.Context, ns, boundary, server, userHash string) error {
+	boundaryHash := credresolve.BoundaryHash(boundary)
+	readNS, name := credresolve.SecretCoordinates(b.cfg.CredentialNamespace, ns, server, userHash, boundaryHash)
 	cacheKey := readNS + "/" + name
 
 	secret, found, err := b.findGrant(ctx, readNS, name, ns, server, userHash, boundaryHash)
@@ -187,10 +192,10 @@ func (b *K8sBackend) Revoke(ctx context.Context, ns, boundary, server, userHash 
 	// Best-effort revoke at the AS BEFORE we forget locally (RFC 7009). A failure here is
 	// advisory only — the primary effect of revoke is that WE forget the grant.
 	if b.cfg.Exchanger != nil {
-		if revEnd := string(secret.Data[KeyRevocationEndpoint]); revEnd != "" {
-			token := string(secret.Data[KeyRefreshToken])
+		if revEnd := string(secret.Data[credresolve.KeyRevocationEndpoint]); revEnd != "" {
+			token := string(secret.Data[credresolve.KeyRefreshToken])
 			if token == "" {
-				token = string(secret.Data[KeyAccessToken])
+				token = string(secret.Data[credresolve.KeyAccessToken])
 			}
 			_ = b.cfg.Exchanger.Revoke(ctx, revEnd, token)
 		}
@@ -200,7 +205,7 @@ func (b *K8sBackend) Revoke(ctx context.Context, ns, boundary, server, userHash 
 		return err
 	}
 	b.cache.evict(cacheKey)
-	b.audit(ActionRevoke, server, userHash, ns, ClassPersonalGrant)
+	b.audit(credresolve.ActionRevoke, server, userHash, ns, credresolve.ClassPersonalGrant)
 	return nil
 }
 
@@ -209,7 +214,7 @@ func (b *K8sBackend) Revoke(ctx context.Context, ns, boundary, server, userHash 
 // source namespace — so a truncated-hash NAME collision can NEVER return another user's
 // (or another namespace's) grant (the labels are the authoritative match). A missing
 // Secret is (nil, false, nil).
-func (b *K8sBackend) findGrant(ctx context.Context, readNS, name, sourceNS, server, userHash, boundaryHash string) (*corev1.Secret, bool, error) {
+func (b *Backend) findGrant(ctx context.Context, readNS, name, sourceNS, server, userHash, boundaryHash string) (*corev1.Secret, bool, error) {
 	var secret corev1.Secret
 	if err := b.cfg.Client.Get(ctx, client.ObjectKey{Name: name, Namespace: readNS}, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -217,19 +222,19 @@ func (b *K8sBackend) findGrant(ctx context.Context, readNS, name, sourceNS, serv
 		}
 		return nil, false, err
 	}
-	if secret.Labels[LabelGrantUser] != userHash || secret.Labels[LabelGrantServer] != server {
+	if secret.Labels[credresolve.LabelGrantUser] != userHash || secret.Labels[credresolve.LabelGrantServer] != server {
 		return nil, false, nil
 	}
 	// The boundary is an authoritative match key too (ADR 0033): a boundary-scoped lookup
 	// must never return a grant from a different boundary (or the legacy unscoped grant),
 	// and an unscoped lookup (boundaryHash "") must not return a boundary-scoped grant.
-	if secret.Labels[LabelGrantBoundary] != boundaryHash {
+	if secret.Labels[credresolve.LabelGrantBoundary] != boundaryHash {
 		return nil, false, nil
 	}
 	// In locked mode many namespaces' grants coexist in one namespace, so the source
 	// namespace is also an authoritative match key (a name hash-collision must never
 	// cross the namespace boundary).
-	if b.cfg.CredentialNamespace != "" && secret.Labels[LabelGrantSourceNS] != sourceNS {
+	if b.cfg.CredentialNamespace != "" && secret.Labels[credresolve.LabelGrantSourceNS] != sourceNS {
 		return nil, false, nil
 	}
 	return &secret, true, nil
@@ -240,7 +245,7 @@ func (b *K8sBackend) findGrant(ctx context.Context, readNS, name, sourceNS, serv
 // ONE refresh via singleflight (the herd guard). Cross-PROCESS deduplication is the
 // central token service's job (ADR 0030 increment 5); here a cross-process write conflict
 // is handled by the optimistic-concurrency retry in refreshOnce.
-func (b *K8sBackend) refresh(ctx context.Context, ns, name string) (string, time.Time, error) {
+func (b *Backend) refresh(ctx context.Context, ns, name string) (string, time.Time, error) {
 	type result struct {
 		access    string
 		expiresAt time.Time
@@ -255,7 +260,7 @@ func (b *K8sBackend) refresh(ctx context.Context, ns, name string) (string, time
 }
 
 // Compile-time assertion: the kubernetes backend is a config-selected grant writer.
-var _ GrantWriter = (*K8sBackend)(nil)
+var _ credresolve.GrantWriter = (*Backend)(nil)
 
 // MigratableGrant is a legacy k8s-Secret grant reconstructed for migration into another
 // backend — the (identity) coordinates plus the full token material.
@@ -266,13 +271,13 @@ type MigratableGrant struct {
 	Boundary string
 	Server   string
 	UserHash string
-	Grant    Grant
+	Grant    credresolve.Grant
 }
 
 // ListGrants enumerates the per-user grant Secrets in the locked credential namespace and
 // reconstructs each as a MigratableGrant — the READ side of a backfill into another backend
 // (m28.2). It requires a locked credential namespace (the normal OBO deployment).
-func (b *K8sBackend) ListGrants(ctx context.Context) ([]MigratableGrant, error) {
+func (b *Backend) ListGrants(ctx context.Context) ([]MigratableGrant, error) {
 	if b.cfg.CredentialNamespace == "" {
 		return nil, errors.New("credresolve: ListGrants requires a locked credential namespace")
 	}
@@ -283,28 +288,28 @@ func (b *K8sBackend) ListGrants(ctx context.Context) ([]MigratableGrant, error) 
 	out := make([]MigratableGrant, 0, len(secs.Items))
 	for i := range secs.Items {
 		s := &secs.Items[i]
-		userHash, server := s.Labels[LabelGrantUser], s.Labels[LabelGrantServer]
+		userHash, server := s.Labels[credresolve.LabelGrantUser], s.Labels[credresolve.LabelGrantServer]
 		if userHash == "" || server == "" {
 			continue // not a grant Secret
 		}
-		ns := s.Labels[LabelGrantSourceNS]
+		ns := s.Labels[credresolve.LabelGrantSourceNS]
 		if ns == "" {
 			ns = s.Namespace
 		}
 		out = append(out, MigratableGrant{
-			Namespace: ns, Boundary: s.Annotations[AnnGrantBoundary], Server: server, UserHash: userHash,
-			Grant: Grant{
-				Tokens: Tokens{
-					AccessToken:  string(s.Data[KeyAccessToken]),
-					RefreshToken: string(s.Data[KeyRefreshToken]),
-					ExpiresAt:    ParseExpiry(string(s.Data[KeyExpiry])),
+			Namespace: ns, Boundary: s.Annotations[credresolve.AnnGrantBoundary], Server: server, UserHash: userHash,
+			Grant: credresolve.Grant{
+				Tokens: credresolve.Tokens{
+					AccessToken:  string(s.Data[credresolve.KeyAccessToken]),
+					RefreshToken: string(s.Data[credresolve.KeyRefreshToken]),
+					ExpiresAt:    credresolve.ParseExpiry(string(s.Data[credresolve.KeyExpiry])),
 				},
-				Config: OAuthConfig{
-					TokenEndpoint:      string(s.Data[KeyTokenEndpoint]),
-					ClientID:           string(s.Data[KeyClientID]),
-					RevocationEndpoint: string(s.Data[KeyRevocationEndpoint]),
+				Config: credresolve.OAuthConfig{
+					TokenEndpoint:      string(s.Data[credresolve.KeyTokenEndpoint]),
+					ClientID:           string(s.Data[credresolve.KeyClientID]),
+					RevocationEndpoint: string(s.Data[credresolve.KeyRevocationEndpoint]),
 				},
-				ServerURL: s.Annotations[AnnGrantServerURL],
+				ServerURL: s.Annotations[credresolve.AnnGrantServerURL],
 			},
 		})
 	}
@@ -315,21 +320,21 @@ func (b *K8sBackend) ListGrants(ctx context.Context) ([]MigratableGrant, error) 
 // the SPI (ADR 0032). A re-consent for the same (user, server) REPLACES the stored grant
 // (rotated tokens) rather than failing. This is the same shape the BFF OAuth callback writes,
 // so grants are interchangeable across the two write paths.
-func (b *K8sBackend) StoreGrant(ctx context.Context, ns, boundary, server, userHash string, g Grant) error {
+func (b *Backend) StoreGrant(ctx context.Context, ns, boundary, server, userHash string, g credresolve.Grant) error {
 	sourceNsLabel := ""
 	if b.cfg.CredentialNamespace != "" {
 		sourceNsLabel = ns
 	}
-	boundaryHash := BoundaryHash(boundary)
-	grantNS, grantName := SecretCoordinates(b.cfg.CredentialNamespace, ns, server, userHash, boundaryHash)
-	data := SecretData(g.Config, g.Tokens)
-	labels := SecretLabels(server, userHash, sourceNsLabel, boundaryHash)
+	boundaryHash := credresolve.BoundaryHash(boundary)
+	grantNS, grantName := credresolve.SecretCoordinates(b.cfg.CredentialNamespace, ns, server, userHash, boundaryHash)
+	data := credresolve.SecretData(g.Config, g.Tokens)
+	labels := credresolve.SecretLabels(server, userHash, sourceNsLabel, boundaryHash)
 	ann := map[string]string{}
 	if g.ServerURL != "" {
-		ann[AnnGrantServerURL] = g.ServerURL
+		ann[credresolve.AnnGrantServerURL] = g.ServerURL
 	}
 	if boundary != "" {
-		ann[AnnGrantBoundary] = boundary
+		ann[credresolve.AnnGrantBoundary] = boundary
 	}
 
 	var sec corev1.Secret
@@ -367,31 +372,31 @@ func (b *K8sBackend) StoreGrant(ctx context.Context, ns, boundary, server, userH
 // token is no longer near expiry and we adopt it WITHOUT a second authorization-server
 // call (avoiding a rotating-refresh-token double-use). It returns ErrNoRefreshToken when a
 // near-expiry grant has no refresh token to rotate.
-func (b *K8sBackend) refreshOnce(ctx context.Context, ns, name string) (string, time.Time, error) {
+func (b *Backend) refreshOnce(ctx context.Context, ns, name string) (string, time.Time, error) {
 	for range maxRefreshAttempts {
 		var secret corev1.Secret
 		if err := b.cfg.Client.Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, &secret); err != nil {
 			return "", time.Time{}, err
 		}
 
-		expiry := string(secret.Data[KeyExpiry])
+		expiry := string(secret.Data[credresolve.KeyExpiry])
 		now := b.cfg.Now()
-		if !NeedsRefresh(expiry, now) {
+		if !credresolve.NeedsRefresh(expiry, now) {
 			// Still valid — attach the current token, no network call.
-			return string(secret.Data[KeyAccessToken]), ParseExpiry(expiry), nil
+			return string(secret.Data[credresolve.KeyAccessToken]), credresolve.ParseExpiry(expiry), nil
 		}
 
-		refreshToken := string(secret.Data[KeyRefreshToken])
+		refreshToken := string(secret.Data[credresolve.KeyRefreshToken])
 		if refreshToken == "" {
 			// Near expiry and nothing to rotate with → the caller must re-consent.
-			return string(secret.Data[KeyAccessToken]), ParseExpiry(expiry), ErrNoRefreshToken
+			return string(secret.Data[credresolve.KeyAccessToken]), credresolve.ParseExpiry(expiry), credresolve.ErrNoRefreshToken
 		}
 		if b.cfg.Exchanger == nil {
 			return "", time.Time{}, fmt.Errorf("credresolve: grant needs refresh but no TokenExchanger is configured")
 		}
 
-		tokenEndpoint := string(secret.Data[KeyTokenEndpoint])
-		clientID := string(secret.Data[KeyClientID])
+		tokenEndpoint := string(secret.Data[credresolve.KeyTokenEndpoint])
+		clientID := string(secret.Data[credresolve.KeyClientID])
 		toks, err := b.cfg.Exchanger.Refresh(ctx, tokenEndpoint, clientID, refreshToken)
 		if err != nil {
 			return "", time.Time{}, err
@@ -401,15 +406,15 @@ func (b *K8sBackend) refreshOnce(ctx context.Context, ns, name string) (string, 
 		if toks.RefreshToken == "" {
 			toks.RefreshToken = refreshToken
 		}
-		cfg := OAuthConfig{
+		cfg := credresolve.OAuthConfig{
 			TokenEndpoint:      tokenEndpoint,
 			ClientID:           clientID,
-			RevocationEndpoint: string(secret.Data[KeyRevocationEndpoint]),
+			RevocationEndpoint: string(secret.Data[credresolve.KeyRevocationEndpoint]),
 		}
 		if secret.Data == nil {
 			secret.Data = map[string][]byte{}
 		}
-		maps.Copy(secret.Data, SecretData(cfg, toks))
+		maps.Copy(secret.Data, credresolve.SecretData(cfg, toks))
 
 		if err := b.cfg.Client.Update(ctx, &secret); err != nil {
 			if apierrors.IsConflict(err) {
@@ -426,7 +431,7 @@ func (b *K8sBackend) refreshOnce(ctx context.Context, ns, name string) (string, 
 // authTypeIsOAuth consults the AuthTypeIsOAuth seam conservatively: a nil seam or a
 // lookup error is treated as "not OAuth" so a transient failure never turns an absent
 // grant into a spurious consent prompt.
-func (b *K8sBackend) authTypeIsOAuth(ctx context.Context, ns, server string) bool {
+func (b *Backend) authTypeIsOAuth(ctx context.Context, ns, server string) bool {
 	if b.cfg.AuthTypeIsOAuth == nil {
 		return false
 	}
@@ -438,11 +443,11 @@ func (b *K8sBackend) authTypeIsOAuth(ctx context.Context, ns, server string) boo
 }
 
 // audit emits one credential-plane audit event when an auditor is configured (never a token).
-func (b *K8sBackend) audit(action AuditAction, server, userHash, ns string, class CredentialClass) {
+func (b *Backend) audit(action credresolve.AuditAction, server, userHash, ns string, class credresolve.CredentialClass) {
 	if b.cfg.Audit == nil {
 		return
 	}
-	b.cfg.Audit(AuditEvent{
+	b.cfg.Audit(credresolve.AuditEvent{
 		Action:    action,
 		Server:    server,
 		UserHash:  userHash,
@@ -451,5 +456,5 @@ func (b *K8sBackend) audit(action AuditAction, server, userHash, ns string, clas
 	})
 }
 
-// Compile-time assertion that K8sBackend satisfies the CredentialResolver seam.
-var _ CredentialResolver = (*K8sBackend)(nil)
+// Compile-time assertion that Backend satisfies the CredentialResolver seam.
+var _ credresolve.CredentialResolver = (*Backend)(nil)

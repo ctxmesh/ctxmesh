@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package credresolve
+package secretbackend
 
 import (
 	"context"
@@ -32,6 +32,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 const testNS = "team-alpha"
@@ -54,12 +56,12 @@ const (
 
 // grantSecret builds a legacy-mode (source-namespace) grant Secret for testUser on testServer.
 func grantSecret(data map[string][]byte) *corev1.Secret {
-	userHash := UserHash(nil, testUser)
+	userHash := credresolve.UserHash(nil, testUser)
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      SecretName(testServer, userHash, ""),
+			Name:      credresolve.SecretName(testServer, userHash, ""),
 			Namespace: testNS,
-			Labels:    SecretLabels(testServer, userHash, "", ""),
+			Labels:    credresolve.SecretLabels(testServer, userHash, "", ""),
 		},
 		Data: data,
 	}
@@ -67,8 +69,8 @@ func grantSecret(data map[string][]byte) *corev1.Secret {
 
 // oauthData assembles grant-Secret token data with the given access token + expiry.
 func oauthData(access, refresh string, expiry time.Time) map[string][]byte {
-	toks := Tokens{AccessToken: access, RefreshToken: refresh, ExpiresAt: expiry}
-	return SecretData(OAuthConfig{TokenEndpoint: "https://as.example/token", ClientID: "cid"}, toks)
+	toks := credresolve.Tokens{AccessToken: access, RefreshToken: refresh, ExpiresAt: expiry}
+	return credresolve.SecretData(credresolve.OAuthConfig{TokenEndpoint: "https://as.example/token", ClientID: "cid"}, toks)
 }
 
 // fakeExchanger is a counting, optionally-blocking TokenExchanger.
@@ -77,7 +79,7 @@ type fakeExchanger struct {
 	refreshCalls int
 	revokeCalls  int
 	revokedTok   string
-	next         Tokens
+	next         credresolve.Tokens
 	err          error
 
 	entered   chan struct{} // closed on the first Refresh entry (singleflight test)
@@ -85,7 +87,7 @@ type fakeExchanger struct {
 	enterOnce sync.Once
 }
 
-func (f *fakeExchanger) Refresh(_ context.Context, _, _, _ string) (Tokens, error) {
+func (f *fakeExchanger) Refresh(_ context.Context, _, _, _ string) (credresolve.Tokens, error) {
 	f.mu.Lock()
 	f.refreshCalls++
 	f.mu.Unlock()
@@ -112,12 +114,12 @@ func (f *fakeExchanger) calls() int {
 	return f.refreshCalls
 }
 
-// backendWith builds a legacy-mode K8sBackend over the given objects, with a fixed clock
+// backendWith builds a legacy-mode Backend over the given objects, with a fixed clock
 // and an OAuth auth-type lookup, returning the backend + the underlying client.
-func backendWith(t *testing.T, ex TokenExchanger, isOAuth bool, objs ...client.Object) (*K8sBackend, client.Client) {
+func backendWith(t *testing.T, ex credresolve.TokenExchanger, isOAuth bool, objs ...client.Object) (*Backend, client.Client) {
 	t.Helper()
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
-	b := NewK8sBackend(K8sBackendConfig{
+	b := New(Config{
 		Client:          cl,
 		Exchanger:       ex,
 		Now:             func() time.Time { return fixedNow },
@@ -136,13 +138,13 @@ func TestResolveLegacyBoundaryFallback(t *testing.T) {
 	b, _ := backendWith(t, &fakeExchanger{}, true, legacy)
 
 	// A registry-boundary-scoped resolve finds no scoped grant → falls back to the legacy one.
-	got, err := b.Resolve(ctx, testNS, RegistryBoundary(testNS, "reg-a"), "weather", UserHash(nil, testUser))
+	got, err := b.Resolve(ctx, testNS, credresolve.RegistryBoundary(testNS, "reg-a"), "weather", credresolve.UserHash(nil, testUser))
 	require.NoError(t, err)
 	assert.Equal(t, "LEGACY-AT", got.Value)
 
 	// A user with NO grant at all still gets consent-required under a boundary (no false fallback).
-	_, err = b.Resolve(ctx, testNS, RegistryBoundary(testNS, "reg-a"), "weather", UserHash(nil, "nobody@example.com"))
-	require.ErrorIs(t, err, ErrConsentRequired)
+	_, err = b.Resolve(ctx, testNS, credresolve.RegistryBoundary(testNS, "reg-a"), "weather", credresolve.UserHash(nil, "nobody@example.com"))
+	require.ErrorIs(t, err, credresolve.ErrConsentRequired)
 }
 
 func TestResolvePerUserIsolation(t *testing.T) {
@@ -151,36 +153,36 @@ func TestResolvePerUserIsolation(t *testing.T) {
 	alice := grantSecret(oauthData("ALICE-AT", "ALICE-RT", fixedNow.Add(time.Hour)))
 	b, _ := backendWith(t, &fakeExchanger{}, true, alice)
 
-	got, err := b.Resolve(ctx, testNS, "", "weather", UserHash(nil, testUser))
+	got, err := b.Resolve(ctx, testNS, "", "weather", credresolve.UserHash(nil, testUser))
 	require.NoError(t, err)
 	assert.Equal(t, "ALICE-AT", got.Value)
 
 	// Bob has no grant on an OAuth server → consent-required, and NEVER alice's token.
-	_, err = b.Resolve(ctx, testNS, "", "weather", UserHash(nil, "bob@example.com"))
-	require.ErrorIs(t, err, ErrConsentRequired)
+	_, err = b.Resolve(ctx, testNS, "", "weather", credresolve.UserHash(nil, "bob@example.com"))
+	require.ErrorIs(t, err, credresolve.ErrConsentRequired)
 }
 
 func TestResolveOpenServerNoGrant(t *testing.T) {
 	ctx := context.Background()
 	b, _ := backendWith(t, &fakeExchanger{}, false /* not OAuth */)
-	_, err := b.Resolve(ctx, testNS, "", "open-mcp", UserHash(nil, testUser))
-	assert.ErrorIs(t, err, ErrNoCredential)
+	_, err := b.Resolve(ctx, testNS, "", "open-mcp", credresolve.UserHash(nil, testUser))
+	assert.ErrorIs(t, err, credresolve.ErrNoCredential)
 }
 
 func TestResolveOrgCredentialWhenNoPersonalGrant(t *testing.T) {
 	ctx := context.Background()
 	orgCalls := 0
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).Build() // no personal grant
-	b := NewK8sBackend(K8sBackendConfig{
+	b := New(Config{
 		Client:          cl,
 		Now:             func() time.Time { return fixedNow },
 		AuthTypeIsOAuth: func(context.Context, string, string) (bool, error) { return true, nil },
-		OrgCredential: func(context.Context, string, string) (Credential, error) {
+		OrgCredential: func(context.Context, string, string) (credresolve.Credential, error) {
 			orgCalls++
-			return Credential{Kind: KindBearer, Value: "ORG-SHARED"}, nil
+			return credresolve.Credential{Kind: credresolve.KindBearer, Value: "ORG-SHARED"}, nil
 		},
 	})
-	got, err := b.Resolve(ctx, testNS, "", testServer, UserHash(nil, "bob@example.com"))
+	got, err := b.Resolve(ctx, testNS, "", testServer, credresolve.UserHash(nil, "bob@example.com"))
 	require.NoError(t, err)
 	assert.Equal(t, "ORG-SHARED", got.Value, "an org-scoped server resolves the shared org credential")
 	assert.Equal(t, 1, orgCalls)
@@ -191,16 +193,16 @@ func TestResolvePersonalBeforeOrg(t *testing.T) {
 	orgCalls := 0
 	grant := grantSecret(oauthData("ALICE-AT", "RT", fixedNow.Add(time.Hour)))
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(grant).Build()
-	b := NewK8sBackend(K8sBackendConfig{
+	b := New(Config{
 		Client:          cl,
 		Now:             func() time.Time { return fixedNow },
 		AuthTypeIsOAuth: func(context.Context, string, string) (bool, error) { return true, nil },
-		OrgCredential: func(context.Context, string, string) (Credential, error) {
+		OrgCredential: func(context.Context, string, string) (credresolve.Credential, error) {
 			orgCalls++
-			return Credential{Value: "ORG"}, nil
+			return credresolve.Credential{Value: "ORG"}, nil
 		},
 	})
-	got, err := b.Resolve(ctx, testNS, "", testServer, UserHash(nil, testUser))
+	got, err := b.Resolve(ctx, testNS, "", testServer, credresolve.UserHash(nil, testUser))
 	require.NoError(t, err)
 	assert.Equal(t, "ALICE-AT", got.Value, "a personal grant overrides the org credential")
 	assert.Equal(t, 0, orgCalls, "the org credential is not consulted when a personal grant exists")
@@ -209,16 +211,16 @@ func TestResolvePersonalBeforeOrg(t *testing.T) {
 func TestResolveOrgNoCredentialFallsThroughToConsent(t *testing.T) {
 	ctx := context.Background()
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	b := NewK8sBackend(K8sBackendConfig{
+	b := New(Config{
 		Client:          cl,
 		Now:             func() time.Time { return fixedNow },
 		AuthTypeIsOAuth: func(context.Context, string, string) (bool, error) { return true, nil },
-		OrgCredential: func(context.Context, string, string) (Credential, error) {
-			return Credential{}, ErrNoCredential // not org-scoped / no org credential
+		OrgCredential: func(context.Context, string, string) (credresolve.Credential, error) {
+			return credresolve.Credential{}, credresolve.ErrNoCredential // not org-scoped / no org credential
 		},
 	})
-	_, err := b.Resolve(ctx, testNS, "", testServer, UserHash(nil, "bob@example.com"))
-	assert.ErrorIs(t, err, ErrConsentRequired, "no org credential + OAuth server → consent")
+	_, err := b.Resolve(ctx, testNS, "", testServer, credresolve.UserHash(nil, "bob@example.com"))
+	assert.ErrorIs(t, err, credresolve.ErrConsentRequired, "no org credential + OAuth server → consent")
 }
 
 func TestResolveStillValidSkipsRefresh(t *testing.T) {
@@ -227,7 +229,7 @@ func TestResolveStillValidSkipsRefresh(t *testing.T) {
 	grant := grantSecret(oauthData("AT", "RT", fixedNow.Add(time.Hour)))
 	b, _ := backendWith(t, ex, true, grant)
 
-	got, err := b.Resolve(ctx, testNS, "", "weather", UserHash(nil, testUser))
+	got, err := b.Resolve(ctx, testNS, "", "weather", credresolve.UserHash(nil, testUser))
 	require.NoError(t, err)
 	assert.Equal(t, "AT", got.Value)
 	assert.Equal(t, 0, ex.calls(), "a still-valid token must not hit the token endpoint")
@@ -235,11 +237,11 @@ func TestResolveStillValidSkipsRefresh(t *testing.T) {
 
 func TestResolveRefreshesNearExpiryAndWritesBack(t *testing.T) {
 	ctx := context.Background()
-	ex := &fakeExchanger{next: Tokens{AccessToken: "NEW-AT", RefreshToken: "NEW-RT", ExpiresAt: fixedNow.Add(time.Hour)}}
+	ex := &fakeExchanger{next: credresolve.Tokens{AccessToken: "NEW-AT", RefreshToken: "NEW-RT", ExpiresAt: fixedNow.Add(time.Hour)}}
 	grant := grantSecret(oauthData("OLD-AT", "OLD-RT", fixedNow.Add(10*time.Second)))
 	b, cl := backendWith(t, ex, true, grant)
 
-	got, err := b.Resolve(ctx, testNS, "", "weather", UserHash(nil, testUser))
+	got, err := b.Resolve(ctx, testNS, "", "weather", credresolve.UserHash(nil, testUser))
 	require.NoError(t, err)
 	assert.Equal(t, "NEW-AT", got.Value)
 	assert.Equal(t, 1, ex.calls())
@@ -247,8 +249,8 @@ func TestResolveRefreshesNearExpiryAndWritesBack(t *testing.T) {
 	// The rotated tokens are written back to the SAME Secret, server-side.
 	var after corev1.Secret
 	require.NoError(t, cl.Get(ctx, client.ObjectKey{Namespace: testNS, Name: grant.Name}, &after))
-	assert.Equal(t, "NEW-AT", string(after.Data[KeyAccessToken]))
-	assert.Equal(t, "NEW-RT", string(after.Data[KeyRefreshToken]))
+	assert.Equal(t, "NEW-AT", string(after.Data[credresolve.KeyAccessToken]))
+	assert.Equal(t, "NEW-RT", string(after.Data[credresolve.KeyRefreshToken]))
 }
 
 func TestResolveNearExpiryNoRefreshTokenNeedsConsent(t *testing.T) {
@@ -258,8 +260,8 @@ func TestResolveNearExpiryNoRefreshTokenNeedsConsent(t *testing.T) {
 	grant := grantSecret(oauthData("OLD-AT", "", fixedNow.Add(10*time.Second)))
 	b, _ := backendWith(t, ex, true, grant)
 
-	_, err := b.Resolve(ctx, testNS, "", "weather", UserHash(nil, testUser))
-	assert.ErrorIs(t, err, ErrConsentRequired)
+	_, err := b.Resolve(ctx, testNS, "", "weather", credresolve.UserHash(nil, testUser))
+	assert.ErrorIs(t, err, credresolve.ErrConsentRequired)
 	assert.Equal(t, 0, ex.calls(), "no refresh token ⇒ no token-endpoint call")
 }
 
@@ -269,12 +271,12 @@ func TestResolveRefreshRejectedInvalidGrantNeedsConsent(t *testing.T) {
 	// invalid_grant (the stored refresh token is expired/revoked/rotated). The dead grant
 	// must degrade to re-consent (surface the Connect CTA), NOT a hard resolve_failed — an
 	// unrefreshable grant is indistinguishable from "no grant" to the user.
-	ex := &fakeExchanger{err: &TokenError{Kind: TokenErrOAuth, Code: "invalid_grant"}}
+	ex := &fakeExchanger{err: &credresolve.TokenError{Kind: credresolve.TokenErrOAuth, Code: "invalid_grant"}}
 	grant := grantSecret(oauthData("OLD-AT", "OLD-RT", fixedNow.Add(10*time.Second)))
 	b, _ := backendWith(t, ex, true, grant)
 
-	_, err := b.Resolve(ctx, testNS, "", "weather", UserHash(nil, testUser))
-	assert.ErrorIs(t, err, ErrConsentRequired, "invalid_grant on refresh ⇒ re-consent, not resolve_failed")
+	_, err := b.Resolve(ctx, testNS, "", "weather", credresolve.UserHash(nil, testUser))
+	assert.ErrorIs(t, err, credresolve.ErrConsentRequired, "invalid_grant on refresh ⇒ re-consent, not resolve_failed")
 	assert.Equal(t, 1, ex.calls(), "the refresh was attempted, then rejected → re-consent")
 }
 
@@ -283,7 +285,7 @@ func TestResolveCacheFastPath(t *testing.T) {
 	ex := &fakeExchanger{}
 	grant := grantSecret(oauthData("AT", "RT", fixedNow.Add(time.Hour)))
 	b, cl := backendWith(t, ex, true, grant)
-	userHash := UserHash(nil, testUser)
+	userHash := credresolve.UserHash(nil, testUser)
 
 	first, err := b.Resolve(ctx, testNS, "", "weather", userHash)
 	require.NoError(t, err)
@@ -299,16 +301,16 @@ func TestResolveCacheFastPath(t *testing.T) {
 func TestResolveSingleflightCollapsesHerd(t *testing.T) {
 	ctx := context.Background()
 	ex := &fakeExchanger{
-		next:    Tokens{AccessToken: "NEW-AT", ExpiresAt: fixedNow.Add(time.Hour)},
+		next:    credresolve.Tokens{AccessToken: "NEW-AT", ExpiresAt: fixedNow.Add(time.Hour)},
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
 	grant := grantSecret(oauthData("OLD-AT", "OLD-RT", fixedNow.Add(10*time.Second)))
 	b, _ := backendWith(t, ex, true, grant)
-	userHash := UserHash(nil, testUser)
+	userHash := credresolve.UserHash(nil, testUser)
 
 	const n = 8
-	results := make([]Credential, n)
+	results := make([]credresolve.Credential, n)
 	errs := make([]error, n)
 	var wg sync.WaitGroup
 	for i := range n {
@@ -335,7 +337,7 @@ func TestResolveSingleflightCollapsesHerd(t *testing.T) {
 
 func TestResolveOptimisticConcurrencyAdoptsWinner(t *testing.T) {
 	ctx := context.Background()
-	userHash := UserHash(nil, testUser)
+	userHash := credresolve.UserHash(nil, testUser)
 	grant := grantSecret(oauthData("OLD-AT", "OLD-RT", fixedNow.Add(10*time.Second)))
 
 	var conflicted bool
@@ -350,8 +352,8 @@ func TestResolveOptimisticConcurrencyAdoptsWinner(t *testing.T) {
 					if err := c.Get(ctx, client.ObjectKey{Namespace: testNS, Name: grant.Name}, &winner); err != nil {
 						return err
 					}
-					winner.Data[KeyAccessToken] = []byte("WINNER-AT")
-					winner.Data[KeyExpiry] = []byte(fixedNow.Add(time.Hour).UTC().Format(time.RFC3339))
+					winner.Data[credresolve.KeyAccessToken] = []byte("WINNER-AT")
+					winner.Data[credresolve.KeyExpiry] = []byte(fixedNow.Add(time.Hour).UTC().Format(time.RFC3339))
 					if err := c.Update(ctx, &winner); err != nil {
 						return err
 					}
@@ -361,8 +363,8 @@ func TestResolveOptimisticConcurrencyAdoptsWinner(t *testing.T) {
 			},
 		}).Build()
 
-	ex := &fakeExchanger{next: Tokens{AccessToken: "OUR-AT", ExpiresAt: fixedNow.Add(time.Hour)}}
-	b := NewK8sBackend(K8sBackendConfig{
+	ex := &fakeExchanger{next: credresolve.Tokens{AccessToken: "OUR-AT", ExpiresAt: fixedNow.Add(time.Hour)}}
+	b := New(Config{
 		Client:          cl,
 		Exchanger:       ex,
 		Now:             func() time.Time { return fixedNow },
@@ -381,10 +383,10 @@ func TestRevokeForgetsAndBestEffortRevokes(t *testing.T) {
 	ctx := context.Background()
 	ex := &fakeExchanger{}
 	data := oauthData("AT", "RT", fixedNow.Add(time.Hour))
-	data[KeyRevocationEndpoint] = []byte("https://as.example/revoke")
+	data[credresolve.KeyRevocationEndpoint] = []byte("https://as.example/revoke")
 	grant := grantSecret(data)
 	b, cl := backendWith(t, ex, true, grant)
-	userHash := UserHash(nil, testUser)
+	userHash := credresolve.UserHash(nil, testUser)
 
 	require.NoError(t, b.Revoke(ctx, testNS, "", "weather", userHash))
 	assert.Equal(t, 1, ex.revokeCalls, "a stored revocation endpoint ⇒ best-effort RFC 7009 revoke")
@@ -405,17 +407,17 @@ func TestRevokeForgetsAndBestEffortRevokes(t *testing.T) {
 func TestResolveSameRegistryIDInTwoNamespaces(t *testing.T) {
 	ctx := context.Background()
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	b := NewK8sBackend(K8sBackendConfig{
+	b := New(Config{
 		Client:              cl,
 		CredentialNamespace: "ctxmesh-credentials",
 		Now:                 func() time.Time { return fixedNow },
 		AuthTypeIsOAuth:     func(context.Context, string, string) (bool, error) { return true, nil },
 	})
-	user := UserHash(nil, testUser)
-	alpha := RegistryBoundary("team-alpha", "squad")
-	beta := RegistryBoundary("team-beta", "squad")
-	grant := func(token string) Grant {
-		return Grant{Tokens: Tokens{AccessToken: token, ExpiresAt: fixedNow.Add(time.Hour)}}
+	user := credresolve.UserHash(nil, testUser)
+	alpha := credresolve.RegistryBoundary("team-alpha", "squad")
+	beta := credresolve.RegistryBoundary("team-beta", "squad")
+	grant := func(token string) credresolve.Grant {
+		return credresolve.Grant{Tokens: credresolve.Tokens{AccessToken: token, ExpiresAt: fixedNow.Add(time.Hour)}}
 	}
 	require.NoError(t, b.StoreGrant(ctx, "team-alpha", alpha, "github", user, grant("ALPHA-AT")))
 	require.NoError(t, b.StoreGrant(ctx, "team-beta", beta, "github", user, grant("BETA-AT")))
@@ -430,7 +432,7 @@ func TestResolveSameRegistryIDInTwoNamespaces(t *testing.T) {
 	// A capability scoped to team-beta's registry, presented where team-alpha's grant lives,
 	// resolves nothing: the boundary itself names the namespace.
 	_, err = b.Resolve(ctx, "team-alpha", beta, "github", user)
-	require.ErrorIs(t, err, ErrConsentRequired)
+	require.ErrorIs(t, err, credresolve.ErrConsentRequired)
 	_, err = b.Resolve(ctx, "team-beta", alpha, "github", user)
-	require.ErrorIs(t, err, ErrConsentRequired)
+	require.ErrorIs(t, err, credresolve.ErrConsentRequired)
 }

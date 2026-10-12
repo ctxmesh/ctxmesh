@@ -59,11 +59,8 @@ type OBOEgressConfig struct {
 	// capabilities against; CapabilityAudience is the audience it accepts.
 	CapabilityPublicKeyB64 string
 	CapabilityAudience     string
-	// CredentialNamespace is the locked namespace holding grant Secrets (the sidecar reads
-	// them in embedded mode, or the central service does in delegation mode).
-	CredentialNamespace string
-	// TokenServiceURL, when set, makes the sidecar DELEGATE resolution to the central token
-	// service (the scaling split); empty ⇒ the sidecar embeds the backend (first working cut).
+	// TokenServiceURL is the central token service the sidecar resolves every tool credential
+	// through (ADR 0030 §1). Required for any agent with a tool: the sidecar has no other source.
 	TokenServiceURL string
 	// ResponseHeaderTimeout and StreamIdleTimeout bound a tool call's two distinct hangs (M146.7,
 	// m52.M143-knobs). Both were previously read from the sidecar's env by cmd/egress-sidecar and set
@@ -99,7 +96,6 @@ type OBOEgressConfig struct {
 // NOT yet enforced (enforcement is a later M82 task).
 // The egress sidecar's own variables. spec.env never reaches the sidecar.
 const (
-	envEgressCredentialNamespace   = "MCP_CREDENTIAL_NAMESPACE"
 	envEgressAgent                 = "EGRESS_AGENT"
 	envEgressListenAddr            = "EGRESS_LISTEN_ADDR"
 	envEgressRoutes                = "EGRESS_ROUTES"
@@ -117,7 +113,7 @@ func egressSidecarContainer(
 	env := []corev1.EnvVar{
 		{Name: envMCPCapPublicKey, Value: cfg.CapabilityPublicKeyB64},
 		{Name: envMCPCapAudience, Value: cfg.CapabilityAudience},
-		{Name: envEgressCredentialNamespace, Value: cfg.CredentialNamespace},
+		{Name: envTokenServiceURL, Value: cfg.TokenServiceURL},
 		{Name: envEgressAgent, Value: agentIdentity},
 		{Name: envPodNamespace, Value: namespace},
 		// Bind the port the manifest rewrite points at — chosen to avoid every other in-pod
@@ -137,9 +133,6 @@ func egressSidecarContainer(
 	// relayed capability (team-OBO); empty ⇒ the per-agent gate (standalone / OBO-boundary off).
 	if boundary != "" {
 		env = append(env, corev1.EnvVar{Name: envEgressBoundary, Value: boundary})
-	}
-	if cfg.TokenServiceURL != "" {
-		env = append(env, corev1.EnvVar{Name: envTokenServiceURL, Value: cfg.TokenServiceURL})
 	}
 	// The two tool-call timeouts (M146.7). STATIC env, and folded into egressDigest below — a sidecar
 	// env change that does NOT move the revision name is silently dropped by the CreateOrUpdate guard

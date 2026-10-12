@@ -1840,6 +1840,16 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 					"The egress sidecar is the always-on tool-call chokepoint, so it cannot be skipped",
 				deploy.Namespace, deploy.Name, len(egressRoutes))
 		}
+		// The sidecar resolves every tool credential through the token service and exits at startup
+		// without one, so an agent rendered without it would CrashLoop with the cause only in the
+		// sidecar's log.
+		if r.OBOEgress.TokenServiceURL == "" {
+			return podTemplate{}, fmt.Errorf(
+				"agent %s/%s has %d tool route(s) but this install has no token service URL: "+
+					"set TOKEN_SERVICE_URL on the controller (chart: controllerManager.oboEgress.tokenServiceURL); "+
+					"the egress sidecar resolves every tool credential through it",
+				deploy.Namespace, deploy.Name, len(egressRoutes))
+		}
 		agentIdentity := deploy.Namespace + "/" + deploy.Name
 		containers = append(containers, egressSidecarContainer(
 			r.OBOEgress, deploy.Namespace, agentIdentity, agentEgressBoundary(deploy, membership),
