@@ -202,6 +202,8 @@ func TestHandleExtAuth_EndUser(t *testing.T) {
 		"the runcap subject is the end-user's EndUserHash (not a console identity)")
 	assert.Equal(t, credresolve.AgentBoundary("ns1", "chatbot"), capb.Boundary,
 		"end-user runs use the per-agent standalone boundary")
+	assert.Equal(t, "ns1/chatbot", capb.Agent,
+		"the capability names the host's agent, which is what a registry member admits (ADR 0153)")
 
 	// A verified end-user hitting a NON-exposed agent in the same tenant → 403 (two-key: agent opt-in).
 	rec2 := httptest.NewRecorder()

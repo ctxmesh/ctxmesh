@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
 	authnv1 "k8s.io/api/authentication/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -74,6 +75,34 @@ func TestExtAuth_ValidToken_Allows(t *testing.T) {
 	s.handleExtAuth(rec, extAuthReq("valid-token", "scalekit-agent.default.127.0.0.1.sslip.io"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("valid token: ext-auth status = %d, want 200 (allow authenticated)", rec.Code)
+	}
+}
+
+// A registry member admits an /invoke from outside only with a run capability minted for it (ADR 0153),
+// so the capability ext-auth injects for an authenticated caller must name the agent its host names. It
+// does so whether or not the caller has any grant: a grant decides what the egress can resolve, not
+// whether a capability is minted.
+func TestExtAuth_CapabilityNamesTheHostsAgent(t *testing.T) {
+	pub, priv, err := runcap.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{
+		callerClients:    &fakeCallerClientFactory{client: ssrClient("alice@example.com", nil), requireToken: true},
+		capabilitySigner: runcap.NewSigner(priv, "test-plane", nil),
+		log:              logr.Discard(),
+	}
+	rec := httptest.NewRecorder()
+	s.handleExtAuth(rec, extAuthReq("valid-token", "research.team-a.agents.example.com"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ext-auth status = %d, want 200", rec.Code)
+	}
+	capb, err := runcap.NewVerifier(pub, "test-plane", nil).Verify(rec.Header().Get(runcap.HeaderName))
+	if err != nil {
+		t.Fatalf("ext-auth injected no verifiable capability: %v", err)
+	}
+	if capb.Agent != "team-a/research" {
+		t.Errorf("capability names %q, want the host's agent team-a/research", capb.Agent)
 	}
 }
 
