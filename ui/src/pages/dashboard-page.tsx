@@ -81,7 +81,9 @@ import { FIRST_RUN_CHECKLIST, RES_AGENTS } from "@/lib/nav";
 //   • A 501 (not part of this install) renders a QuietNote saying what is
 //     missing and why. Never an empty chart, never a zero.
 //   • A 403 collapses ONE panel to a ForbiddenInline; the page never fully 403s
-//     (§7 A11, panel isolation). An error takes one panel, not the page.
+//     (§7 A11, panel isolation). An error takes one panel, not the page. The
+//     exception is Spending: a 403 on the tenant list means the caller is not a
+//     tenant admin, so the panel is absent rather than refused.
 //   • Cost is TENANT-SCOPED (ADR 0077) and `/api/cost` 400s without `?tenant=`,
 //     so this page never calls it. Spending reads live gateway usage
 //     (`/api/tenants/usage`) against the caps tenants declare (`/api/tenants`) —
@@ -1165,18 +1167,23 @@ export function DashboardPage() {
         />
       )}
 
-      {/* 3 + 4 ── What is waiting on a person · what it is spending. */}
-      {!firstRun && (
+      {/* 3 + 4 ── What is waiting on a person · what it is spending. Spending
+          is drawn against tenant caps, so it is absent for a caller who cannot
+          list tenants: they are not a tenant admin, and a refusal they did not
+          ask about is not something to report. */}
+      {!firstRun && (queue.kind !== "ready" || tenants.kind !== "forbidden") && (
         <div className="grid min-w-0 items-start gap-5 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
           {queue.kind !== "ready" && (
             <WaitingPanel state={queue} items={queueItems} onRetry={() => load()} />
           )}
-          <SpendingPanel
-            tenants={tenants}
-            usage={usage}
-            rows={boundRows}
-            onRetry={() => load()}
-          />
+          {tenants.kind !== "forbidden" && (
+            <SpendingPanel
+              tenants={tenants}
+              usage={usage}
+              rows={boundRows}
+              onRetry={() => load()}
+            />
+          )}
         </div>
       )}
 
@@ -1679,12 +1686,6 @@ function SpendingPanel({
           <Skeleton className="h-4 w-full" />
           <Skeleton className="h-4 w-full" />
           <Skeleton className="h-4 w-full" />
-        </div>
-      )}
-
-      {tenants.kind === "forbidden" && (
-        <div className="p-5">
-          <ForbiddenInline resource="tenants" />
         </div>
       )}
 

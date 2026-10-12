@@ -550,19 +550,34 @@ describe("Home (render proof)", () => {
     expect(within(spending).queryByText("$0.00")).toBeNull();
   });
 
-  it("collapses ONE panel to a forbidden state on a 403 — the page never fully 403s", async () => {
+  // Tenants are cluster-scoped, so anyone bound to a namespace is refused the list. That
+  // caller is not a tenant admin: Spending, which is drawn against tenant caps, is absent,
+  // and nothing on the page reports a refusal they never asked about.
+  it("a caller who cannot list tenants gets no Spending panel and no alert", async () => {
     routeFetch(
       { "/api/agents": agentsResponse(FLEET), "/api/providers": providersConnected },
-      { "/api/tenants": 403 },
+      { "/api/tenants": 403, "/api/tenants/usage": 403 },
     );
     renderHome();
 
-    expect(
-      await screen.findByText("You don't have permission to view tenants"),
-    ).toBeInTheDocument();
-    // The rest of the page still rendered.
-    expect(screen.getByTestId("home-fleet-bar")).toBeInTheDocument();
+    expect(await screen.findByTestId("home-fleet-bar")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId("home-spending")).toBeNull());
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/permission to view tenants/)).toBeNull();
     expect(screen.getByTestId("home-needs-you")).toBeInTheDocument();
+  });
+
+  it("a tenant list that fails is still reported, with a retry", async () => {
+    routeFetch(
+      { "/api/agents": agentsResponse(FLEET), "/api/providers": providersConnected },
+      { "/api/tenants": 500 },
+    );
+    renderHome();
+
+    const spending = await screen.findByTestId("home-spending");
+    expect(
+      await within(spending).findByText("The budgets could not be read"),
+    ).toBeInTheDocument();
   });
 
   it("counts the workspaces that refused the queue instead of reading them as empty", async () => {

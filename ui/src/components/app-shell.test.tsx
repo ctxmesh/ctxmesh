@@ -176,6 +176,27 @@ describe("AppShell — the approved IA", () => {
     expect(screen.queryByTestId("capability-banner")).toBeNull();
   });
 
+  // Tenants are cluster-scoped: a person bound to a namespace cannot list them and is not a
+  // tenant admin, so the destination is absent rather than a page that refuses them.
+  it("hides Tenants from a caller who cannot list them, and shows it to one who can", async () => {
+    const withTenants = (list: boolean) => ({
+      ...DENY_WRITE,
+      body: {
+        ...DENY_WRITE.body,
+        allowed: { ...DENY_WRITE.body.allowed, tenants: { list, create: false } },
+      },
+    });
+    installFetch(withTenants(false));
+    const first = renderShell();
+    expect(await screen.findByRole("link", { name: /Agents/ })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("link", { name: /Tenants/ })).toBeNull());
+    first.unmount();
+
+    installFetch(withTenants(true));
+    renderShell();
+    expect(await screen.findByRole("link", { name: /Tenants/ })).toBeInTheDocument();
+  });
+
   it("shows the honest capability banner (not all-disabled) on a probe 500, and keeps write nav visible", async () => {
     installFetch({
       ok: false,

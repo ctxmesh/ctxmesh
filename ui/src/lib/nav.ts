@@ -478,13 +478,15 @@ export const NAV_SECTIONS: NavSection[] = [
       },
       {
         // Tenants (M47) — cluster-scoped namespace groupings with compute + model
-        // quotas. Read-only for everyone; operators manage them (RBAC enforced at
-        // the API server, ADR 0011).
+        // quotas; operators manage them (RBAC enforced at the API server, ADR
+        // 0011). Hidden from a caller who cannot list them, which is anyone bound
+        // to a namespace: a RoleBinding never grants a cluster-scoped list.
         id: "tenants",
         label: "Tenants",
         icon: Building2,
         milestone: "M47",
         route: "/tenants",
+        requiresCapability: { resource: RES_TENANTS, verb: "list" },
       },
     ],
   },

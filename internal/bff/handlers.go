@@ -581,15 +581,17 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 // agent (m16.5). It groups a bounded window of recent Langfuse traces by their
 // `agent:<ns>/<name>` identity tag and returns per-agent cost/token/run counts.
 //
-// Caller-scoped SSAR on `costrollups` (same persona gate as forecast/chargeback/cost).
-// Cluster-wide (empty namespace) — mirrors handleCostForecast exactly.
-// A denial is 403, never a leaked or empty response.
+// Scope (ADR 0077). With ?tenant= the breakdown keeps the tenant's namespaces, behind one
+// cluster-wide SSAR on `costrollups`. Without one, see costScopeWithoutTenant: a caller who sees
+// a tenant must name it, and anyone else gets the namespaces where they may read cost. A denial
+// is 403, never a leaked or empty response.
 //
 // Supported query params:
 //
 //	?by=agent   the grouping axis; REQUIRED and "agent" is the ONLY supported
 //	             value. Any other `by` value (including missing/empty) → 400
 //	             (honest: don't silently accept a by you don't implement).
+//	?tenant=T    the tenant whose namespaces the breakdown covers
 //	?limit=N     page size over the agent list (default defaultRunLimit, no max)
 //	?cursor=TOKEN opaque next-page token from a prior response's nextCursor
 //
@@ -604,26 +606,15 @@ func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// ADR 0077: tenant-scope the per-agent breakdown — require ?tenant= (closes the m52.Q4
-	// cross-tenant leak; the Langfuse breakdown is otherwise cluster-wide).
-	// M99 B1: a missing tenant is allowed ONLY when the cluster has genuinely ZERO tenants — then
-	// there is no tenant boundary to leak across, so the cluster-wide per-agent breakdown is safe
-	// (this is the "per-agent fallback" so the Cost page isn't empty on a tenant-less cluster). With
-	// ≥1 tenant, or if we can't verify the count (a can't-list-tenants RBAC error), keep the strict
-	// gate — never serve a cluster-wide breakdown when tenant boundaries exist.
 	tenant := strings.TrimSpace(r.URL.Query().Get("tenant"))
+	// scope is the namespaces the breakdown is narrowed to; nil is cluster-wide.
+	var scope []string
 	if tenant == "" {
-		var tenants agentsv1beta1.TenantList
-		if err := caller.List(r.Context(), &tenants); err != nil || len(tenants.Items) > 0 {
-			writeError(w, http.StatusBadRequest, "missing required query param: tenant")
+		if scope, ok = s.costScopeWithoutTenant(w, r, caller); !ok {
 			return
 		}
-		// zero tenants → fall through to the cluster-wide per-agent breakdown (safe).
-	}
-
-	// Persona gate (never per-row): one SSAR on `costrollups`. Cluster-wide
-	// (empty namespace) — mirrors handleCostForecast exactly.
-	if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceCostRollups, "", ""); err != nil {
+	} else if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceCostRollups, "", ""); err != nil {
+		// Persona gate (never per-row): one cluster-wide SSAR, as forecast and chargeback.
 		s.writeAuthzError(w, err, "read the cost breakdown")
 		return
 	}
@@ -669,6 +660,7 @@ func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 				Total:      CostSummary{ByModel: []MetricPoint{}},
 				NextCursor: "",
 				Notice:     noticeObservabilityDegraded,
+				Namespaces: scope,
 			})
 			return
 		}
@@ -679,30 +671,75 @@ func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 	if resp.Agents == nil {
 		resp.Agents = []AgentCostItem{}
 	}
-	// M99 B1 zero-tenant fallback: with no tenant there is nothing to filter/isolate against — return
-	// the cluster-wide per-agent breakdown as-is (only reachable when the cluster has zero tenants, per
-	// the guard above).
-	if tenant == "" {
-		writeJSON(w, http.StatusOK, resp)
-		return
+	switch {
+	case tenant != "":
+		// One Tenant GET as the caller; Tenant.spec.namespaces is the membership set.
+		var tnt agentsv1beta1.Tenant
+		if err := caller.Get(r.Context(), client.ObjectKey{Name: tenant}, &tnt); err != nil {
+			s.writeGetError(w, err, "tenant")
+			return
+		}
+		keepNamespaces(&resp, tnt.Spec.Namespaces)
+	case scope != nil:
+		keepNamespaces(&resp, scope)
+		resp.Namespaces = scope
 	}
-	// ADR 0077: keep only agents whose namespace belongs to the requested tenant (one Tenant GET;
-	// Tenant.spec.namespaces is the membership set) + recompute the page total over the kept rows —
-	// the tenant-isolation filter over the cluster-wide Langfuse breakdown. NB pagination is over the
-	// pre-filter list; a tenant's agent set is bounded (one page in practice — documented, ADR 0077).
-	var tnt agentsv1beta1.Tenant
-	if err := caller.Get(r.Context(), client.ObjectKey{Name: tenant}, &tnt); err != nil {
-		s.writeGetError(w, err, "tenant")
-		return
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// msgCostTenantRequired refuses a breakdown that would cross a tenant boundary.
+const msgCostTenantRequired = "missing required query param: tenant"
+
+// costScopeWithoutTenant decides what a breakdown given no tenant covers, and reports whether the
+// request may proceed (a refusal has been written).
+//
+// A caller who can list Tenants and sees one must name it: that is tenant scoping, unchanged. A
+// caller who cannot list Tenants is not a tenant admin, and one who sees none has no boundary to
+// pick; either way the breakdown covers the namespaces where the caller may read cost, by the
+// All-workspaces rule. It is cluster-wide (nil) only for a caller who may read cost cluster-wide
+// and can see the cluster has no tenants. One who may read cost cluster-wide but cannot list
+// Tenants must still name one, because the boundaries they cannot see may exist.
+func (s *Server) costScopeWithoutTenant(w http.ResponseWriter, r *http.Request, caller client.Client) ([]string, bool) {
+	var tenants agentsv1beta1.TenantList
+	err := caller.List(r.Context(), &tenants)
+	seesTenants := err == nil
+	switch {
+	case err != nil && !apierrors.IsForbidden(err):
+		if status, msg, isRBAC := classifyReadError(err); isRBAC {
+			writeError(w, status, msg)
+			return nil, false
+		}
+		s.log.Error(err, "list Tenants for the cost breakdown failed")
+		writeError(w, http.StatusInternalServerError, "failed to list tenants")
+		return nil, false
+	case seesTenants && len(tenants.Items) > 0:
+		writeError(w, http.StatusBadRequest, msgCostTenantRequired)
+		return nil, false
 	}
-	nsSet := make(map[string]struct{}, len(tnt.Spec.Namespaces))
-	for _, ns := range tnt.Spec.Namespaces {
-		nsSet[ns] = struct{}{}
+	all, namespaces, err := s.listableNamespaces(r.Context(), caller, resourceCostRollups)
+	if err != nil {
+		s.writeAuthzError(w, err, "read the cost breakdown")
+		return nil, false
+	}
+	if all && !seesTenants {
+		writeError(w, http.StatusBadRequest, msgCostTenantRequired)
+		return nil, false
+	}
+	return namespaces, true
+}
+
+// keepNamespaces narrows a cluster-wide breakdown to agents in namespaces and recomputes the total
+// over the kept rows. Pagination is over the unfiltered list, so a page may hold fewer rows than
+// its limit (ADR 0077).
+func keepNamespaces(resp *CostBreakdownResponse, namespaces []string) {
+	in := make(map[string]struct{}, len(namespaces))
+	for _, ns := range namespaces {
+		in[ns] = struct{}{}
 	}
 	kept := make([]AgentCostItem, 0, len(resp.Agents))
 	total := CostSummary{ByModel: []MetricPoint{}}
 	for _, a := range resp.Agents {
-		if _, in := nsSet[a.AgentNs]; in {
+		if _, ok := in[a.AgentNs]; ok {
 			kept = append(kept, a)
 			// An UNPRICED agent contributes nothing to the total and does not make it wrong:
 			// the total is the sum of what is known. Treating unknown as zero would report a
@@ -713,7 +750,6 @@ func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.Agents = kept
 	resp.Total = total
-	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleTraceLink serves GET /api/traces/{id} — resolves a traceId to its one

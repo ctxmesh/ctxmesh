@@ -552,6 +552,9 @@ type CostBreakdownResponse struct {
 	// Notice — see CostResponse.Notice: a calm degrade message when the trace store
 	// is transiently unavailable. Omitted on the normal path (backward-compatible).
 	Notice string `json:"notice,omitempty"`
+	// Namespaces is set when a breakdown given no tenant covers only the caller's workspaces:
+	// the namespaces where they may read cost. Total then sums the rows. Omitted otherwise.
+	Namespaces []string `json:"namespaces,omitempty"`
 }
 
 // --- Recent runs (GET /api/runs) --------------------------------------------

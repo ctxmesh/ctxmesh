@@ -540,21 +540,72 @@ describe("CostPage — query params sent to API (m16.10)", () => {
     expect(screen.queryByTestId("cost-no-tenant")).toBeNull();
   });
 
-  it("says WHY the page is blank when the tenant list can't be read — never 'no spend'", async () => {
-    // The breakdown is 400 without ?tenant=, so a caller who cannot list
-    // tenants has nothing to scope by. That is a permission boundary, and the
-    // page must say so: an empty table here would read as "this tenant spent
-    // nothing", which is a claim nobody made.
+  // Tenants are cluster-scoped, so anyone bound to a namespace is refused the list. That
+  // caller is not a tenant admin: the page asks for no tenant, the BFF answers for the
+  // namespaces where they may read cost, and the page says that is what it shows.
+  it("a caller who cannot list tenants reads spend in their workspaces, with no alert", async () => {
+    const captured: string[] = [];
     vi.stubGlobal(
       "fetch",
       vi.fn((input: string | URL) => {
         const url = typeof input === "string" ? input : input.toString();
-        const forbidden = url.includes("/api/tenants");
+        captured.push(url);
+        if (url.includes("/api/tenants")) {
+          return Promise.resolve({
+            ok: false,
+            status: 403,
+            json: async () => ({ error: "forbidden" }),
+            text: async () => JSON.stringify({ error: "forbidden" }),
+          } as Response);
+        }
+        const body = {
+          agents: [item({ agentNs: "team-a", agentName: "billing-agent", totalCostUSD: 1.5 })],
+          total: summary({ totalCostUSD: 1.5, totalTokens: 50000, observations: 0 }),
+          nextCursor: "",
+          namespaces: ["team-a"],
+        };
         return Promise.resolve({
-          ok: !forbidden,
-          status: forbidden ? 403 : 200,
-          json: async () => (forbidden ? { error: "forbidden" } : { agents: [], total: summary(), nextCursor: "" }),
-          text: async () => JSON.stringify({ error: "forbidden" }),
+          ok: true,
+          status: 200,
+          json: async () => body,
+          text: async () => JSON.stringify(body),
+        } as Response);
+      }),
+    );
+
+    renderPage(""); // no ?tenant=
+
+    const note = await screen.findByTestId("cost-workspaces-note");
+    expect(note).toHaveTextContent(/your workspaces/i);
+    expect(note).toHaveTextContent("team-a");
+    expect(screen.getByTestId("cost-summary-card")).toBeInTheDocument();
+    expect(screen.getByTestId("cost-row-team-a-billing-agent")).toBeInTheDocument();
+    expect(screen.getByTestId("cost-window-note")).toHaveTextContent(/your workspaces/i);
+    const breakdown = captured.filter((u) => u.includes("/api/cost/breakdown"));
+    expect(breakdown.length).toBeGreaterThan(0);
+    expect(breakdown.every((u) => !u.includes("tenant="))).toBe(true);
+    // Not a tenant admin: no picker, no tenant to create, and no refusal reported.
+    expect(screen.queryByTestId("cost-tenant-picker")).toBeNull();
+    expect(screen.queryByTestId("cost-create-tenant")).toBeNull();
+    expect(screen.queryByTestId("cost-no-tenant")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("says WHY the page is blank when the tenant list failed — never 'no spend'", async () => {
+    // A list that failed is not a permission answer: the caller may be a tenant admin, so
+    // the breakdown is not fetched without a tenant and the page says nothing was asked.
+    const captured: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        captured.push(url);
+        const failed = url.includes("/api/tenants");
+        return Promise.resolve({
+          ok: !failed,
+          status: failed ? 500 : 200,
+          json: async () => (failed ? { error: "etcd" } : { agents: [], total: summary(), nextCursor: "" }),
+          text: async () => JSON.stringify({ error: "etcd" }),
         } as Response);
       }),
     );
@@ -562,11 +613,12 @@ describe("CostPage — query params sent to API (m16.10)", () => {
     renderPage(""); // no ?tenant=
 
     const note = await screen.findByTestId("cost-no-tenant");
-    expect(note).toHaveTextContent(/permission/i);
-    expect(note).toHaveTextContent(/grouped by tenant/i);
+    expect(note).toHaveTextContent(/didn’t load/i);
+    expect(screen.getByTestId("cost-retry-tenants")).toBeInTheDocument();
     // No table, and above all no empty one that could be read as zero spend.
     expect(screen.queryByTestId("cost-breakdown-table")).toBeNull();
     expect(screen.queryByText("No cost data yet")).toBeNull();
+    expect(captured.some((u) => u.includes("/api/cost/breakdown"))).toBe(false);
   });
 });
 

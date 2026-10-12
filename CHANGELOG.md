@@ -151,6 +151,15 @@ everyone. The `developer` and `operator` roles now grant `get` and `list` on `po
 `viewer` role now grants `get`, `list` and `watch` on `skills`, and the `developer` and `operator`
 roles grant the same verbs they hold on `promptversions`, in the namespaces they are bound in.
 
+**Fixed: a person bound to one namespace saw an error on Home and could not open Cost.** Tenants
+are cluster-scoped, so a RoleBinding never lets anyone list them, and Home reported that refusal
+as an error. The Cost page could not render either: without a tenant the breakdown answered 400.
+A person who cannot list tenants is now treated as not a tenant admin. Home leaves out Spending,
+the navigation hides Tenants, and the Cost page shows spend in the namespaces where they may read
+cost (`/api/cost/breakdown` with no tenant answers for those, and names them in `namespaces`). It
+is never cluster-wide for them. Tenant admins see no change: with tenants to see, the breakdown
+still needs one. `/api/capabilities` now reports `tenants` (`list`, `create`), probed cluster-wide.
+
 **Fixed: skills did not work on any install.** Neither the BFF nor the controller created the
 skills store, so `/api/skills` answered 501 and an agent with `skillRefs` was never deployed: the
 controller failed every reconcile with "this install has no skill store". Both now use the

@@ -260,8 +260,24 @@ func probeCapabilities(ctx context.Context, caller client.Client, namespace stri
 		}
 		allowed[resSecrets][verb] = ok
 	}
+
+	// Tenants are cluster-scoped, so these probes name no namespace: asked "in" a namespace, a
+	// RoleBinding there would answer yes for a list that Kubernetes refuses. The console hides its
+	// tenant surfaces from a caller who cannot list them.
+	allowed[resourceTenants] = make(map[string]bool, len(tenantProbeVerbs))
+	for _, verb := range tenantProbeVerbs {
+		ok, err := reviewAccess(ctx, caller, "", resourceTenants, verb)
+		if err != nil {
+			return nil, err
+		}
+		allowed[resourceTenants][verb] = ok
+	}
 	return allowed, nil
 }
+
+// tenantProbeVerbs are the Tenant verbs the console gates on: list for every tenant surface,
+// create for the Tenants page's create action.
+var tenantProbeVerbs = []string{verbList, verbCreate}
 
 // reviewAccess issues one SelfSubjectAccessReview for (namespace, resource, verb)
 // in the agents API group and returns the API server's allow decision. A

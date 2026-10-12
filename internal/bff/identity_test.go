@@ -234,6 +234,10 @@ func TestCapabilitiesBatchesTheMatrix(t *testing.T) {
 	for _, verb := range flowNeedsCoreSecretVerbs() {
 		want[probe{"secrets", verb, "prod", ""}] = true
 	}
+	// Tenants are cluster-scoped: probed with no namespace whatever namespace was asked for.
+	for _, verb := range tenantProbeVerbs {
+		want[probe{resourceTenants, verb, "", agentsAPIGroup}] = true
+	}
 	require.Contains(t, flowNeedsCoreSecretVerbs(), verbUpdate,
 		"rotate must contribute a core-secret update probe, or the flow evaluates an unprobed cell")
 	require.Len(t, got, len(want), "one SSAR per golden resource×verb, plus the core-group probes")
@@ -247,7 +251,7 @@ func TestCapabilitiesBatchesTheMatrix(t *testing.T) {
 	var body CapabilitiesResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, "prod", body.Namespace)
-	require.Len(t, body.Allowed, len(goldenResources)+2) // golden kinds + "logs" + "secrets"
+	require.Len(t, body.Allowed, len(goldenResources)+3) // golden kinds + "logs" + "secrets" + "tenants"
 	for _, res := range goldenResources {
 		require.Contains(t, body.Allowed, res)
 		for _, verb := range goldenVerbs {
@@ -260,6 +264,7 @@ func TestCapabilitiesBatchesTheMatrix(t *testing.T) {
 	// optimistic-allow and re-opens the flow that refuses with the key already sent.
 	require.Contains(t, body.Allowed, resSecrets)
 	assert.True(t, body.Allowed[resSecrets][verbCreate], "the secrets capability should reflect the core-group SSAR")
+	assert.True(t, body.Allowed[resourceTenants][verbList], "the tenants capability should reflect the cluster-scoped SSAR")
 }
 
 // TestCapabilitiesProbesLogsGate proves the synthetic `logs` capability tracks the caller's
