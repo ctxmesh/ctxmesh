@@ -49,6 +49,29 @@ jobs:
     secrets:
       BRAIN_CHECKOUT_TOKEN: ${{ secrets.BRAIN_CHECKOUT_TOKEN }}
 
+  # Every third-party image the chart renders, pulled anonymously (hack/chart-images-pullable.sh).
+  # Upstream registries change without a commit here, so this runs on the schedule as well as in CI.
+  images:
+    name: nightly-images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.9"
+      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: v3.16.3
+      - name: Install PyYAML (the image lister parses the render)
+        run: python3 -m pip install --quiet pyyaml
+      - name: Pull every third-party image the chart renders, anonymously
+        run: ./hack/chart-images-pullable.sh
+
   # Upgrade from the newest published release to this tree, on a cluster carrying real data: the
   # upgrade every user makes next (m184.17). Red until a published release installs (beta.8's
   # bundled MinIO image can no longer be pulled), which is the truth about that upgrade path.

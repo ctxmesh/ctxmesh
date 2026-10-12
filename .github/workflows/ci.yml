@@ -11,6 +11,7 @@
 #   py           — Py   (setup-python 3.9): make py-lint py-test
 #   ui           — Node (setup-node via ui/.nvmrc + corepack pnpm): eslint/tsc/vitest/build
 #   helm         — helm (no cluster): make helm-verify (no-drift) + helm-lint
+#   images       — docker: pulls every third-party image the chart renders, anonymously
 # e2e is owned by the agent-brain harness (ADR 0004): it checks out the
 # (private) brain with the fine-grained BRAIN_CHECKOUT_TOKEN secret and drives
 # `make -C harness tier2 SLICE=m2-gateway` on a kind cluster with Knative Serving.
@@ -338,6 +339,11 @@ jobs:
       # workload, which gets copied from an old one and quietly reopens the gap.
       - name: Chart resources are tunable (no baked-in limits)
         run: ./hack/chart-resources-tunable.sh
+      # Every image the chart renders comes from a value (a mirror or a private registry can move
+      # it), every third-party image is digest-pinned, and hack/third-party-images.txt records each
+      # one's licence. Render-only, no network.
+      - name: Image seams (no hardcoded image refs)
+        run: python3 hack/chart_images.py seamed
       # M149 m149.3 — least privilege, asserted on what we SHIP.
       #
       # M146's acceptance found ctxmesh-operator holding verbs:["*"] on agentdeployments,
@@ -433,6 +439,32 @@ jobs:
         env:
           CTXMESH_SITE: ${{ github.workspace }}/ctxmesh.github.io
         run: ./hack/bff-route-callers.sh
+
+  # Every third-party image the chart renders must pull anonymously. A digest pins the bytes, not
+  # their availability: the bundled MinIO was pinned when its vendor closed anonymous pulls, and the
+  # first sign was a stranger's failed install (ADR 0145). The nightly runs the same check, so an
+  # upstream that closes shows up without a commit.
+  images:
+    name: images
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.9"
+      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: v3.16.3
+      - name: Install PyYAML (the image lister parses the render)
+        run: python3 -m pip install --quiet pyyaml
+      - name: Pull every third-party image the chart renders, anonymously
+        run: ./hack/chart-images-pullable.sh
 
   envtest:
     name: envtest

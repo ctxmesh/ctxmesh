@@ -1,0 +1,18 @@
+# Third-party images the chart renders: the licence each is distributed under, and whether
+# .github/workflows/mirror.yml copies it to ghcr.io/ctxmesh/mirror/<repository>:<tag>.
+#
+# One row per thirdPartyImages entry in deploy/helm/ctxmesh/values.yaml; hack/chart_images.py seamed
+# fails when the two disagree. The licence is the project's own. Each image also carries its base
+# distribution's packages under their own licences, redistributed unmodified as their upstream does.
+#
+# Mirror only what the licence lets anyone redistribute. litellm is not mirrored: the image ships the
+# repository's enterprise/ directory, whose BerriAI Enterprise License forbids copying, publishing or
+# distributing it outside development and testing.
+#
+# key        licence                          mirror
+litellm      MIT+BerriAI-Enterprise           no
+valkey       BSD-3-Clause                     yes
+postgres     PostgreSQL                       yes
+seaweedfs    Apache-2.0                       yes
+nats         Apache-2.0                       yes
+dex          Apache-2.0                       yes
