@@ -189,6 +189,17 @@ func main() {
 	// disabled → agents without feedback wiring are unchanged.
 	fbSrv := buildFeedbackServer(cfg)
 
+	// ── Tool discovery (:2999) ────────────────────────────────────────────
+	// Started ONLY when the agent has a tool binding (TOOLS_JSON_PATH injected): serves the mounted
+	// manifest and follows its changes. nil otherwise.
+	discSrv, disc := buildDiscoveryServer(os.Getenv, func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, format+"\n", args...)
+	})
+	discStop := make(chan struct{})
+	if disc != nil {
+		go disc.watch(discStop)
+	}
+
 	// ── Child process ─────────────────────────────────────────────────────
 	child, err := startChild(cfg)
 	if err != nil {
@@ -225,6 +236,7 @@ func main() {
 	startBestEffort(delSrv, "delegate")
 	startBestEffort(gwSrv, "gateway")
 	startBestEffort(fbSrv, "feedback")
+	startBestEffort(discSrv, "discovery")
 
 	// ── Wait for child to exit, then shut down cleanly ────────────────────
 	exitCode := <-childExitCh
@@ -232,7 +244,8 @@ func main() {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	for _, listener := range []*http.Server{srv, memSrv, ampSrv, delSrv, gwSrv, fbSrv} {
+	close(discStop)
+	for _, listener := range []*http.Server{srv, memSrv, ampSrv, delSrv, gwSrv, fbSrv, discSrv} {
 		if listener != nil {
 			_ = listener.Shutdown(shutCtx)
 		}
@@ -243,7 +256,8 @@ func main() {
 }
 
 // startBestEffort runs an optional listener in a goroutine, logging a real bind failure without taking
-// the agent down (each side listener — memory / AMP / delegate / gateway / feedback — is best-effort). A
+// the agent down (each side listener — memory / AMP / delegate / gateway / feedback / discovery — is
+// best-effort). A
 // nil server is a no-op (the feature is disabled).
 func startBestEffort(srv *http.Server, name string) {
 	if srv == nil {

@@ -67,13 +67,11 @@ func refuseRedirect(_ *http.Request, _ []*http.Request) error {
 
 const (
 	// defaultAMPPort is the localhost port the outbound AMP listener binds when
-	// A2A_PORT is unset. The launcher-local ports are :2998 memory, :2999 the
-	// MCP discovery sidecar (internal/controller/toolinject.go discoveryPort;
-	// injected whenever the agent has tool bindings, orthogonal to registry
-	// membership) — so AMP takes :2997. A registry member that ALSO has tool
-	// bindings (a mesh orchestrator with tools) shares one pod netns with the
-	// sidecar; binding :2999 would EADDRINUSE and fail silently on the
-	// best-effort listener path, so AMP must not collide with the sidecar.
+	// A2A_PORT is unset. The launcher-local ports are :2998 memory and :2999 tool
+	// discovery (discoveryPort, started whenever the agent has tool bindings,
+	// orthogonal to registry membership) — so AMP takes :2997. A registry member
+	// with tool bindings runs both listeners; sharing :2999 would EADDRINUSE and
+	// fail silently on the best-effort listener path.
 	defaultAMPPort = 2997
 
 	// ampDialTimeout bounds the TCP dial to a peer. A cross-registry target is
