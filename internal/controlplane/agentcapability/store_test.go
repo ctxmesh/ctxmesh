@@ -59,6 +59,7 @@ func TestStore_RegistrationRoundTrip(t *testing.T) {
 
 		want := agentcapability.AgentCapability{
 			Namespace: "ns1", Agent: "summarizer", RegistryID: "team-a", Role: "worker",
+			Endpoint:    "http://summarizer.ns1.svc.cluster.local",
 			Description: "Summarizes long documents and extracts action items.",
 			Tags:        []string{"summarization", "pdf"}, Ready: true,
 		}
@@ -68,8 +69,10 @@ func TestStore_RegistrationRoundTrip(t *testing.T) {
 		require.Len(t, got, 1)
 		assert.Equal(t, want, got[0], "the registration round-trips verbatim (descriptor + tags + readiness)")
 
-		// Re-registering the same agent REPLACES its descriptor and role (a spec edit, not a duplicate row).
+		// Re-registering the same agent REPLACES its descriptor, role and address (a spec edit, not a
+		// duplicate row) — an execution-model change moves where it receives deliveries.
 		want.Role = "reviewer"
+		want.Endpoint = "http://summarizer-eventing.ns1.svc.cluster.local"
 		want.Description = "Answers questions about SQL schemas."
 		want.Tags = nil
 		want.Ready = false
@@ -86,6 +89,8 @@ func TestStore_RegistrationRoundTrip(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, "team-a", self.RegistryID, "the caller's own row supplies its discovery scope")
 		assert.Equal(t, "reviewer", self.Role, "and the role the BFF attests for it")
+		assert.Equal(t, "http://summarizer-eventing.ns1.svc.cluster.local", self.Endpoint,
+			"and the address the async dispatcher delivers to")
 		_, ok, err = s.Get(ctx, "ns1", "nobody")
 		require.NoError(t, err)
 		assert.False(t, ok, "an unregistered agent has no scope (fail-closed)")

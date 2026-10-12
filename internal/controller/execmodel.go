@@ -239,6 +239,26 @@ func eventingServiceName(agentName string) string {
 	return agentName + eventingServiceSuffix
 }
 
+// agentServiceURL is the in-cluster address of a Service in the agent's namespace.
+func agentServiceURL(service, namespace string) string {
+	return fmt.Sprintf("http://%s.%s.svc.cluster.local", service, namespace)
+}
+
+// deliveryEndpoint is where an agent receives async AMP deliveries, by execution model: the Knative route
+// (named after the ksvc) for serving, the <agent>-eventing Service for eventing, and nowhere for a job,
+// which runs to completion with no Service in front of it and so can send AMP calls but never receive
+// one. It is recorded in the capability registry, where the JetStream dispatcher reads it.
+func deliveryEndpoint(deploy *agentsv1beta1.AgentDeployment) string {
+	switch deploy.Spec.ExecutionModel {
+	case execModelEventing:
+		return agentServiceURL(eventingServiceName(deploy.Name), deploy.Namespace)
+	case execModelJob:
+		return ""
+	default: // serving
+		return agentServiceURL(deploy.Name, deploy.Namespace)
+	}
+}
+
 // eventingSelectorLabels returns the immutable selector label set the eventing
 // Deployment and Service match on. A Deployment's spec.selector is immutable
 // post-create, so this must never change for an existing agent — it is derived
@@ -558,6 +578,9 @@ func (r *AgentDeploymentReconciler) setJobReady(
 	// A job-model agent exposes no HTTP URL; clear any stale one from a prior
 	// serving/eventing model.
 	deploy.Status.URL = ""
+	// A job agent in a registry calls other agents over AMP, which needs its row: the BFF attests a
+	// sender, and accepts its async publishes, only from the registry and role recorded there.
+	r.syncCapabilityRegistration(ctx, deploy, true)
 	return r.Status().Update(ctx, deploy)
 }
 
@@ -603,8 +626,11 @@ func (r *AgentDeploymentReconciler) setEventingReady(
 	// The eventing agent's HTTP endpoint is its in-cluster Service, which is
 	// named <agent>-eventing (the bare <agent> name is the KEDA-targeted
 	// Deployment, and would collide with a Knative route Service).
-	deploy.Status.URL = fmt.Sprintf("http://%s.%s.svc.cluster.local", eventingServiceName(deploy.Name), deploy.Namespace)
+	deploy.Status.URL = deliveryEndpoint(deploy)
 	deploy.Status.LatestVersion = latestVersion
 	deploy.Status.ObservedGeneration = deploy.Generation
+	// Without its row the JetStream dispatcher cannot route a hop to this agent, and the BFF refuses to
+	// attest it as a sender or accept its async publishes.
+	r.syncCapabilityRegistration(ctx, deploy, readyStatus == metav1.ConditionTrue)
 	return r.Status().Update(ctx, deploy)
 }

@@ -154,6 +154,19 @@ the chart leaves unset, so it expected an empty audience while the BFF mints for
 `ctxmesh-credential-plane`. Every launcher check now defaults to the BFF's audience, through one
 constructor.
 
+**Fixed: async AMP hops to eventing and job agents were lost, and those agents could not call other
+agents.** Only serving agents were recorded in the capability registry, so the JetStream dispatcher
+acknowledged every hop to an eventing or job agent as outside its sender's registry and dropped it,
+and the BFF refused to attest either kind as an AMP caller (HTTP 403) or to accept its async
+publishes. The dispatcher also delivered to `<agent>.<namespace>.svc`, and an eventing agent has no
+Service by that name. Eventing and job agents in a registry now have a row with their registry and
+role, and every row records where the agent receives deliveries: its Knative route when serving,
+its `<agent>-eventing` Service when eventing, and nowhere for a job, which can make AMP calls but has
+no Service to receive one. A hop to an agent with no row or no address is now retried instead of
+acknowledged, and the dispatcher logs every failed delivery with its reason, so a hop to a job agent
+fails where it can be seen once its retries are spent. Migration 0031 adds the address; a hop to an
+agent whose row the controller has not rewritten since the upgrade is retried until it has.
+
 **Security: the Langfuse key was readable in every agent's pod spec.** The trace collector carried
 it as a literal environment value, so anyone who could `kubectl get pods` in an agent namespace
 could read it. And an agent whose namespace had no `langfuse-otlp` Secret was given the *platform*

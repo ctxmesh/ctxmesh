@@ -73,10 +73,10 @@ func TestAsyncHop_SurvivesADispatcherRestart(t *testing.T) {
 	caller := mkParentRun("run-async-e2e")
 	s, signer, _ := newAsyncServer(t, caller,
 		cap0("team-ns", "supervisor", "reg-a", "Coordinates work."),
-		cap0("team-ns", "reviewer", "reg-a", "Reviews things."),
+		reviewerIn("reg-a"),
 	)
 	s.asyncPublisher = bus
-	s.agentURL = func(string, string) string { return agent.URL }
+	client, _ := redirectTo(agent)
 
 	// (1) PUBLISH with NO dispatcher running — the hop has nowhere to go yet and must not be lost.
 	rec := postAsyncPublish(t, s, mintCap(t, signer, caller.ID), ceHeaders(), `{"messageId":"msg-1"}`)
@@ -86,7 +86,7 @@ func TestAsyncHop_SurvivesADispatcherRestart(t *testing.T) {
 	// consumer was down is delivered once it comes back.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s.StartAsyncDispatcher(ctx, AsyncDispatcherConfig{Subscriber: bus, Client: agent.Client()})
+	s.StartAsyncDispatcher(ctx, AsyncDispatcherConfig{Subscriber: bus, Client: client})
 
 	select {
 	case <-delivered:

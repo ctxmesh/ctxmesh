@@ -232,8 +232,8 @@ type Server struct {
 	// at several.
 	proofSpender             runcap.ProofSpender
 	requireProofOfPossession bool
-	// agentURL resolves an agent's in-cluster address for async delivery. nil ⇒ the cluster-DNS default;
-	// set only by tests, which point it at an httptest server.
+	// agentURL resolves a spawned sub-agent's in-cluster address. nil ⇒ the cluster-DNS default; set only
+	// by tests. Async deliveries go to the address the capability registry records instead.
 	agentURL func(agent, namespace string) string
 
 	// datasetStore is the control-plane Postgres store for eval datasets (M69, ADR 0062 Fork 1), built from

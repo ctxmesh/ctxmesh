@@ -141,6 +141,38 @@ func TestAMPAttestation_ClaimsComeFromThePlatform(t *testing.T) {
 	assert.Equal(t, "reader", att.Receiver)
 }
 
+// Eventing and job agents are senders like any member: an eventing agent serves at its eventing Service and
+// may not be Ready yet, and a job agent receives nothing, so its row records no address. Neither changes
+// whether the agent is attested — that rests on its registry and role alone.
+func TestAMPAttestation_EventingAndJobAgentsAreAttestedAsSenders(t *testing.T) {
+	s, verifier := newAttestationServer(t)
+	require.NoError(t, s.agentCapabilities.Set(context.Background(), agentcapability.AgentCapability{
+		Namespace: "team-a", Agent: "consumer", RegistryID: "research", Role: "worker",
+		Endpoint: "http://consumer-eventing.team-a.svc.cluster.local",
+	}))
+	require.NoError(t, s.agentCapabilities.Set(context.Background(), agentcapability.AgentCapability{
+		Namespace: "team-a", Agent: "reporter", RegistryID: "research", Role: "reporter", Ready: true,
+	}))
+	auth := s.podAuth.(tokenPodAuth)
+	auth.ids["consumer-token"] = statelayer.PodIdentity{Namespace: "team-a", ServiceAccount: "agent-consumer"}
+	auth.ids["reporter-token"] = statelayer.PodIdentity{Namespace: "team-a", ServiceAccount: "agent-reporter"}
+
+	for _, sender := range []struct{ token, agent, role string }{
+		{"consumer-token", "consumer", "worker"},
+		{"reporter-token", "reporter", "reporter"},
+	} {
+		rec := postAttestation(t, s, "Bearer "+sender.token, `{"receiver":"planner"}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp ampAttestationResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		att, err := verifier.VerifyAttestation(resp.Attestation)
+		require.NoError(t, err)
+		assert.Equal(t, sender.agent, att.Agent)
+		assert.Equal(t, "research", att.RegistryID)
+		assert.Equal(t, sender.role, att.Role)
+	}
+}
+
 func TestAMPAttestation_Refusals(t *testing.T) {
 	s, _ := newAttestationServer(t)
 	for _, tc := range []struct {

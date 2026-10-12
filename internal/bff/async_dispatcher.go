@@ -88,7 +88,14 @@ func (s *Server) StartAsyncDispatcher(ctx context.Context, cfg AsyncDispatcherCo
 		// nothing is delivered, and that is not a state to discover from a user report.
 		if err := cfg.Subscriber.Subscribe(ctx, asyncAllRegistries, asyncDurableName,
 			func(hctx context.Context, msg asyncbus.Message) error {
-				return s.deliverAsyncHop(hctx, client, msg)
+				// The backend records nothing about a nack, so every failed attempt is logged here with
+				// its reason; past the delivery budget the backend stops redelivering the message.
+				err := s.deliverAsyncHop(hctx, client, msg)
+				if err != nil {
+					s.log.Error(err, "async dispatch: delivery failed; redelivering after a backoff",
+						"messageId", msg.ID, "subject", msg.Subject)
+				}
+				return err
 			},
 		); err != nil && ctx.Err() == nil {
 			s.log.Error(err, "async dispatcher stopped; async AMP hops are queuing undelivered")
@@ -102,10 +109,12 @@ func (s *Server) StartAsyncDispatcher(ctx context.Context, cfg AsyncDispatcherCo
 // messageId, both set by the producer (cmd/launcher/cloudevent.go). The namespace and registry come from
 // the PLATFORM headers the publish edge stamped from the verified run, never from the producer.
 //
-// Returning an error nacks, so the message is redelivered after the backend's backoff. That is the right
-// answer for a cold-starting or briefly-unavailable callee; it is the wrong answer for a message that can
-// never be delivered, which is why the un-routable cases below are ACKED with a logged reason instead of
-// being retried forever.
+// Returning an error nacks, so the message is redelivered after the backend's backoff until its delivery
+// budget is spent. That is the answer for a cold-starting callee, and for a receiver the capability registry
+// has no row or no address for: the row may not be written yet, and a receiver that never gets one (a job
+// agent receives nothing) fails visibly rather than being acked away. Only a message that can never be
+// delivered for a settled reason (no routing context, a registry boundary, the callee's own refusal) is
+// ACKED, with that reason logged.
 func (s *Server) deliverAsyncHop(ctx context.Context, client *http.Client, msg asyncbus.Message) error {
 	namespace := strings.TrimSpace(msg.Headers[headerAsyncNamespace])
 	registryID := strings.TrimSpace(msg.Headers[headerAsyncRegistry])
@@ -126,10 +135,17 @@ func (s *Server) deliverAsyncHop(ctx context.Context, client *http.Client, msg a
 	if err != nil {
 		return fmt.Errorf("async dispatch: resolving %s/%s: %w", namespace, receiver, err)
 	}
-	if !ok || target.RegistryID != registryID {
+	if !ok {
+		return fmt.Errorf("async dispatch: %s/%s has no capability-registry row", namespace, receiver)
+	}
+	if target.RegistryID != registryID {
 		s.log.Info("async dispatch: refusing delivery outside the sender's registry",
 			"messageId", msg.ID, "receiver", namespace+"/"+receiver, "senderRegistry", registryID)
 		return nil // ack: this will never become deliverable
+	}
+	if target.Endpoint == "" {
+		return fmt.Errorf("async dispatch: %s/%s has no delivery address (a job agent receives no AMP deliveries)",
+			namespace, receiver)
 	}
 
 	attestation, deliverable, err := s.attestAsyncSender(ctx, msg, namespace, registryID, receiver)
@@ -137,8 +153,7 @@ func (s *Server) deliverAsyncHop(ctx context.Context, client *http.Client, msg a
 		return err // an error nacks; undeliverable is acked, and logged there
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		s.agentEndpoint(receiver, namespace), bytes.NewReader(msg.Data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.Endpoint, bytes.NewReader(msg.Data))
 	if err != nil {
 		return fmt.Errorf("async dispatch: building the delivery request: %w", err)
 	}
@@ -210,9 +225,8 @@ func (s *Server) attestAsyncSender(
 	return attestation, true, nil
 }
 
-// agentEndpoint is the in-cluster address of an agent's service — the same shape the launcher's delegate
-// path resolves, so an async hop lands exactly where a synchronous one would. Injectable (agentURL) so a
-// unit test can point delivery at an httptest server instead of cluster DNS.
+// agentEndpoint is the in-cluster address of a serving agent's Knative route, the shape the launcher's
+// delegate path resolves. Injectable (agentURL) for tests.
 func (s *Server) agentEndpoint(agent, namespace string) string {
 	if s.agentURL != nil {
 		return s.agentURL(agent, namespace)

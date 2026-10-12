@@ -3096,8 +3096,8 @@ func (r *AgentDeploymentReconciler) syncCapabilityRegistration(
 	}
 	if membership.IsMember {
 		// The role is what the BFF attests for this agent's AMP calls (ADR 0153), so it is recorded
-		// beside the membership it qualifies.
-		row.RegistryID, row.Role = membership.RegistryID, deploy.Spec.Role
+		// beside the membership it qualifies; the endpoint is where its async deliveries go.
+		row.RegistryID, row.Role, row.Endpoint = membership.RegistryID, deploy.Spec.Role, deliveryEndpoint(deploy)
 	}
 	if err := r.AgentCapabilityStore.Set(ctx, row); err != nil {
 		logf.FromContext(ctx).Error(err, "capability registration failed; will re-converge next reconcile",
