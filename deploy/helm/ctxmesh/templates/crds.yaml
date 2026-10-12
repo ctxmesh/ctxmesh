@@ -1332,6 +1332,14 @@ spec:
                   Used to detect spec changes that have not yet been processed.
                 format: int64
                 type: integer
+              registryRef:
+                description: |-
+                  registryRef is the name of the AgentRegistry, in this namespace, that this agent belongs to:
+                  the one whose memberSelector matches its labels, or the first by name when several do.
+                  Empty when it belongs to none. It records the membership the agent's current revision was
+                  built with, so it changes when a membership change rolls a new revision. Other components
+                  read an agent's registry here rather than resolving the selectors themselves.
+                type: string
               resolvedSkills:
                 description: |-
                   resolvedSkills records what each spec.skillRefs entry RESOLVED TO at reconcile time —

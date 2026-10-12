@@ -1135,6 +1135,14 @@ type AgentDeploymentStatus struct {
 	// +optional
 	ExternalURL string `json:"externalURL,omitempty"`
 
+	// registryRef is the name of the AgentRegistry, in this namespace, that this agent belongs to:
+	// the one whose memberSelector matches its labels, or the first by name when several do.
+	// Empty when it belongs to none. It records the membership the agent's current revision was
+	// built with, so it changes when a membership change rolls a new revision. Other components
+	// read an agent's registry here rather than resolving the selectors themselves.
+	// +optional
+	RegistryRef string `json:"registryRef,omitempty"`
+
 	// latestVersion is the name of the most recent version of this deployment's spec,
 	// "<name>-<spec-hash-8>", e.g. "echo-agent-7d9f4c1a". Each version's spec snapshot is
 	// kept in the control-plane version history, which the console lists and diffs and a

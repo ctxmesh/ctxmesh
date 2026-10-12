@@ -1077,6 +1077,9 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	if err != nil {
 		return podTemplate{}, fmt.Errorf("resolving registry membership: %w", err)
 	}
+	// Recorded where the pod's registry env is decided, so status.registryRef always names the
+	// registry the revision was built for. The next status write persists it; the BFF reads it.
+	deploy.Status.RegistryRef = membership.RegistryName
 
 	// Platform env vars come first so they are always present; user env is appended
 	// last and may override platform defaults if the operator deliberately sets the

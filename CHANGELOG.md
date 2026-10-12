@@ -76,6 +76,14 @@ server`. Some routes had no such answer and fell through to a 404, among them
 with it; nothing ever served it. Cost is `GET /api/cost`, and `GET /api/metrics/eval-gated` is
 unchanged. `GET /api/traces/{id}/…` paths other than `/detail` now answer 404 rather than 501.
 
+**Changed: an agent's registry is recorded in `status.registryRef`.** The controller writes the
+name of the AgentRegistry an agent belongs to, the one its current revision was built with, into
+`AgentDeployment.status.registryRef`, empty when it belongs to none. The BFF reads it to choose the
+trust boundary a personal grant is scoped to, instead of listing the namespace's registries and
+matching their selectors itself, so the two can no longer disagree about membership. Until the
+controller has reconciled an agent once after an upgrade, which it does for every agent when it
+starts, that agent's runs use its own boundary.
+
 **Removed: `GET /api/end-user/runs`.** The end-user "my runs" list at an agent's own hostname had
 no caller: the chat page never offered it, and no SDK, script or page of the docs named it. It goes
 with the run-store query behind it. A run an end-user owns is still readable at

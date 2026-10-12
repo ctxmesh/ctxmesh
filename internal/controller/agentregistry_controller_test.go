@@ -795,6 +795,29 @@ func TestRegistry_MemberRemoved(t *testing.T) {
 		"a departed member must lose AGENT_REGISTRY_ID on re-render")
 }
 
+// TestRegistry_StatusRegistryRef: the agent's reconcile records the registry its revision was
+// built with in status.registryRef — the first by name when two registries select it — and clears
+// it when the agent leaves. The BFF reads an agent's registry from here.
+func TestRegistry_StatusRegistryRef(t *testing.T) {
+	const namespace = "default"
+	mkRegistryMesh(t, "ref-mesh-b", namespace, "ref-mesh-b", "ref-mesh")
+	mkRegistryMesh(t, "ref-mesh-a", namespace, "ref-mesh-a", "ref-mesh")
+	agent := mkLabeledAgent(t, "ref-mesh-member", namespace, map[string]string{"registry": "ref-mesh"})
+
+	reconcileNN(t, newReconciler(), agent.Name, namespace)
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(agent), agent))
+	assert.Equal(t, "ref-mesh-a", agent.Status.RegistryRef, "two registries select it: the first by name")
+	ksvc := getKsvc(t, agent.Name, namespace)
+	assert.Equal(t, "ref-mesh-a", envByName(ksvc.Spec.Template.Spec.Containers[0].Env)["AGENT_REGISTRY_ID"],
+		"status names the registry the revision was built with")
+
+	agent.Labels = map[string]string{"registry": "elsewhere"}
+	require.NoError(t, k8sClient.Update(testCtx, agent))
+	reconcileNN(t, newReconciler(), agent.Name, namespace)
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(agent), agent))
+	assert.Empty(t, agent.Status.RegistryRef, "an agent that left every registry records none")
+}
+
 // TestRegistry_EmptySelectorNoMembers verifies an empty memberSelector selects
 // NO members (a footgun guard: an all-selecting registry would isolate every
 // agent in the namespace).
