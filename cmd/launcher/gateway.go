@@ -557,16 +557,12 @@ func buildUserQuota(policyJSON string, cfg gatewayConfig, logf func(string, ...a
 // id: the per-user quota and the cancel-check both fail OPEN (skipped) rather than fail-closed,
 // which would break every guarded call whose capability didn't propagate (ADR 0059 §8).
 func buildCapVerifier(logf func(string, ...any)) *runcap.Verifier {
-	pubB64 := strings.TrimSpace(os.Getenv("MCP_CAPABILITY_PUBLIC_KEY"))
-	if pubB64 == "" {
+	v, err := capabilityVerifierFromEnv(os.Getenv)
+	if err != nil {
+		logf("launcher: gateway: %v — per-user limits / cancel fail OPEN (skipped)", err)
 		return nil
 	}
-	pub, derr := runcap.DecodePublicKey(pubB64)
-	if derr != nil {
-		logf("launcher: gateway: bad MCP_CAPABILITY_PUBLIC_KEY (%v) — per-user limits / cancel fail OPEN (skipped)", derr)
-		return nil
-	}
-	return runcap.NewVerifier(pub, strings.TrimSpace(os.Getenv("MCP_CAPABILITY_AUDIENCE")), nil)
+	return v
 }
 
 // handler returns the HTTP handler for the proxy listener.

@@ -46,7 +46,7 @@ const invokePath = "/invoke"
 // defaultCapabilityAudience is the credential-plane audience a run capability targets
 // when MCP_CAPABILITY_AUDIENCE is unset — the value the sidecar / central token service
 // verify against by default (runcap, ADR 0030 §2).
-const defaultCapabilityAudience = "ctxmesh-credential-plane"
+const defaultCapabilityAudience = runcap.DefaultAudience
 
 // runCapabilityTTL bounds a minted run capability's lifetime — comfortably longer than a
 // single run (which may cold-start + call an LLM) yet short enough that a leaked

@@ -87,13 +87,11 @@ func newLongTermProxy(logf func(string, ...any), tracer trace.Tracer) *longTermP
 	}
 	// A verifier is needed only for per-user scope (to trust the invoking user's id). Reuse the OBO
 	// capability public key + audience the platform already provisions.
-	if pubB64 := strings.TrimSpace(os.Getenv("MCP_CAPABILITY_PUBLIC_KEY")); pubB64 != "" {
-		if pub, err := runcap.DecodePublicKey(pubB64); err == nil {
-			p.verifier = runcap.NewVerifier(pub, strings.TrimSpace(os.Getenv("MCP_CAPABILITY_AUDIENCE")), nil)
-		} else {
-			logf("launcher: long-term memory: bad MCP_CAPABILITY_PUBLIC_KEY (%v) — per-user memory refused", err)
-		}
+	v, err := capabilityVerifierFromEnv(os.Getenv)
+	if err != nil {
+		logf("launcher: long-term memory: %v — per-user memory refused", err)
 	}
+	p.verifier = v
 	return p
 }
 

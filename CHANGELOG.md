@@ -58,6 +58,12 @@ not delivering a hop whose sender has left the registry. A producer publishing s
 registry's Knative Broker must attach its own attestation, fetched from
 `POST /api/internal/amp/attestation` with the sending agent's pod token.
 
+**Fixed: per-user memory, per-user knowledge bases and per-user quota refused every run under the
+default install.** The launcher checked run capabilities against `MCP_CAPABILITY_AUDIENCE`, which
+the chart leaves unset, so it expected an empty audience while the BFF mints for
+`ctxmesh-credential-plane`. Every launcher check now defaults to the BFF's audience, through one
+constructor.
+
 **Security: the Langfuse key was readable in every agent's pod spec.** The trace collector carried
 it as a literal environment value, so anyone who could `kubectl get pods` in an agent namespace
 could read it. And an agent whose namespace had no `langfuse-otlp` Secret was given the *platform*

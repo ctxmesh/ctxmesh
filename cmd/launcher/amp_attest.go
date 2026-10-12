@@ -88,25 +88,6 @@ func requireAttestation(raw string) bool {
 	return !strings.EqualFold(strings.TrimSpace(raw), "false")
 }
 
-// capabilityVerifierFromEnv builds the verifier for attestations and run capabilities from the platform
-// public key. nil, nil when the pod has no key: a member then admits only its own loopback calls, and an
-// accept-posture member what it admitted before.
-func capabilityVerifierFromEnv(lookup func(string) string) (*runcap.Verifier, error) {
-	pubB64 := strings.TrimSpace(lookup("MCP_CAPABILITY_PUBLIC_KEY"))
-	if pubB64 == "" {
-		return nil, nil
-	}
-	pub, err := runcap.DecodePublicKey(pubB64)
-	if err != nil {
-		return nil, fmt.Errorf("MCP_CAPABILITY_PUBLIC_KEY: %w", err)
-	}
-	aud := strings.TrimSpace(lookup("MCP_CAPABILITY_AUDIENCE"))
-	if aud == "" {
-		aud = runcap.DefaultAudience
-	}
-	return runcap.NewVerifier(pub, aud, nil), nil
-}
-
 var (
 	loopbackOnce   sync.Once
 	loopbackSecret string

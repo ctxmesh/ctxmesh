@@ -166,13 +166,11 @@ func newKnowledgeProxy(logf func(string, ...any), tracer trace.Tracer) *knowledg
 	// capability public key + audience the platform already provisions (mirrors newLongTermProxy).
 	// Without it, a per-user KB search is refused (never degraded to org-wide, which would leak
 	// across users); org-wide KBs are unaffected.
-	if pubB64 := strings.TrimSpace(os.Getenv("MCP_CAPABILITY_PUBLIC_KEY")); pubB64 != "" {
-		if pub, err := runcap.DecodePublicKey(pubB64); err == nil {
-			p.verifier = runcap.NewVerifier(pub, strings.TrimSpace(os.Getenv("MCP_CAPABILITY_AUDIENCE")), nil)
-		} else {
-			logf("launcher: knowledge: bad MCP_CAPABILITY_PUBLIC_KEY (%v) — per-user KB retrieval refused", err)
-		}
+	v, err := capabilityVerifierFromEnv(os.Getenv)
+	if err != nil {
+		logf("launcher: knowledge: %v — per-user KB retrieval refused", err)
 	}
+	p.verifier = v
 	return p
 }
 

@@ -46,9 +46,8 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
-// defaultCapabilityAudience mirrors the BFF default (internal/bff) — the credential-plane
-// audience run capabilities are minted for and this sidecar verifies against.
-const defaultCapabilityAudience = "ctxmesh-credential-plane"
+// defaultCapabilityAudience is the audience the BFF mints run capabilities for when none is set.
+const defaultCapabilityAudience = runcap.DefaultAudience
 
 const (
 	defaultListenAddr   = "127.0.0.1:8081"
