@@ -1,0 +1,92 @@
+# Mirror — copy the permissively licensed third-party images the chart uses to
+# ghcr.io/ctxmesh/mirror/<repository>:<tag>, digest for digest.
+#
+# A digest pins the bytes, not their availability: MinIO closed anonymous pulls twice and each time
+# every default install failed (ADR 0145). A copy under this organisation's registry is one the
+# project controls. Which images are copied, and why, is hack/third-party-images.txt; the source
+# references and digests are the chart's thirdPartyImages values, so the mirror follows the chart.
+#
+# `crane copy` copies the whole index (every platform and its attestations), so the mirrored
+# reference has the same digest as the upstream one and an install can switch registries without
+# changing a pin. Each copy is read back anonymously at the end: a package GHCR keeps private would
+# otherwise look mirrored and still fail every install.
+name: Mirror
+
+on:
+  schedule:
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - deploy/helm/ctxmesh/values.yaml
+      - hack/third-party-images.txt
+      - hack/chart_images.py
+      - .github/workflows/mirror.yml
+
+permissions: {}
+
+concurrency:
+  group: mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: mirror
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.9"
+      - name: Install crane and PyYAML
+        run: |
+          set -euo pipefail
+          go install github.com/google/go-containerregistry/cmd/crane@v0.22.1
+          python3 -m pip install --quiet pyyaml
+      - name: Plan the copies from the chart's values
+        run: |
+          set -euo pipefail
+          python3 hack/chart_images.py mirror-plan > plan.txt
+          cat plan.txt
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$GH_TOKEN" | "$(go env GOPATH)/bin/crane" auth login ghcr.io -u "$ACTOR" --password-stdin
+      - name: Copy each image, digest for digest
+        run: |
+          set -euo pipefail
+          crane="$(go env GOPATH)/bin/crane"
+          while read -r src dst digest; do
+            "$crane" copy "$src" "$dst"
+            got="$("$crane" digest "$dst")"
+            if [ "$got" != "$digest" ]; then
+              echo "::error::$dst has digest $got, expected $digest"
+              exit 1
+            fi
+            echo "copied $src -> $dst"
+          done < plan.txt
+      - name: Read each copy back anonymously
+        run: |
+          set -euo pipefail
+          crane="$(go env GOPATH)/bin/crane"
+          DOCKER_CONFIG="$(mktemp -d)"
+          export DOCKER_CONFIG
+          rc=0
+          while read -r _ dst digest; do
+            if ! "$crane" manifest "${dst%:*}@${digest}" >/dev/null; then
+              echo "::error::${dst} is not anonymously pullable; set the package's visibility to public in the organisation's package settings"
+              rc=1
+            fi
+          done < plan.txt
+          exit "$rc"
