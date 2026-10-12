@@ -62,9 +62,10 @@ export class MeshClient {
    *
    * Throws ConfigError when the mesh is unwired or `target` is malformed, and EndpointError
    * (carrying `.status`) when the launcher refuses the hop: 403 for a disallowed caller or a
-   * cross-registry target, 404 for an unknown one, 502 for a blocked or failed peer. A
-   * refusal is an OUTCOME delivered typed — the launcher fails fast precisely so a governed
-   * mesh never presents as a hang.
+   * cross-registry target, 404 for an unknown one, 502 for a blocked or failed peer, 503
+   * (`attestation_unavailable`) when this agent could not get the platform's attestation, so
+   * the hop was not sent. A refusal is an OUTCOME delivered typed — the launcher fails fast
+   * precisely so a governed mesh never presents as a hang.
    */
   async call(
     target: string,
