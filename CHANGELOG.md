@@ -76,6 +76,11 @@ server`. Some routes had no such answer and fell through to a 404, among them
 with it; nothing ever served it. Cost is `GET /api/cost`, and `GET /api/metrics/eval-gated` is
 unchanged. `GET /api/traces/{id}/…` paths other than `/detail` now answer 404 rather than 501.
 
+**Removed: `GET /api/end-user/runs`.** The end-user "my runs" list at an agent's own hostname had
+no caller: the chat page never offered it, and no SDK, script or page of the docs named it. It goes
+with the run-store query behind it. A run an end-user owns is still readable at
+`GET /api/runs/{id}`.
+
 **Fixed: per-user memory, per-user knowledge bases and per-user quota refused every run under the
 default install.** The launcher checked run capabilities against `MCP_CAPABILITY_AUDIENCE`, which
 the chart leaves unset, so it expected an empty audience while the BFF mints for
