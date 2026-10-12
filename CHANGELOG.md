@@ -414,8 +414,9 @@ still needs one. `/api/capabilities` now reports `tenants` (`list`, `create`), p
 **Fixed: skills did not work on any install.** Neither the BFF nor the controller created the
 skills store, so `/api/skills` answered 501 and an agent with `skillRefs` was never deployed: the
 controller failed every reconcile with "this install has no skill store". Both now use the
-control-plane database. A skill a developer creates in the console resolves for an agent in the
-same namespace, pinned to its digest. Skill bodies are still not mounted, so `load()` answers 501.
+control-plane database. A skill created with `POST /api/skills` resolves for an agent in the same
+namespace, pinned to its digest; the console has no skills page yet. Skill bodies are still not
+mounted, so `load()` answers 501.
 
 **Fixed: creating an agent on a connection that does not exist made an agent that could never
 answer.** A model-first create (`POST /api/agents` with `model.connection`) naming a connection the
