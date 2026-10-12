@@ -370,16 +370,16 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// backend and DB/vault creds stay out of this user-facing BFF. mTLS engages when the
 	// BFF_TOKEN_SERVICE_TLS_* files are present (the same platform material the sidecars use);
 	// absent ⇒ plain HTTP (dev). Unset TOKEN_SERVICE_URL ⇒ the BFF writes the grant Secret directly.
+	// Every call carries the BFF's projected token, which is what lets it store grants (ADR 0154).
 	var grantStore credresolve.GrantWriter
 	var tsHTTPClient *http.Client // reused by the KB test-query endpoint (m68.13)
 	if tsURL := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")); tsURL != "" {
-		httpClient, tlsErr := tokenServiceHTTPClient(tsURL)
+		httpClient, tlsErr := tokenServiceClient(log, tsURL)
 		if tlsErr != nil {
 			return fmt.Errorf("build token-service mTLS client: %w", tlsErr)
 		}
 		tsHTTPClient = httpClient
 		grantStore = credplane.NewClient(tsURL, httpClient)
-		log.Info("MCP grant writes delegate to the token-service (SPI write path)", "url", tsURL, "mtls", httpClient != nil)
 	}
 
 	// Durable run store (ADR 0034 §durability, m32.1): when RUN_STORE_DSN names a Postgres, runs
@@ -944,6 +944,28 @@ func newIngestEmbedder(log logr.Logger) credplane.Embedder {
 // the token-service. When the BFF_TOKEN_SERVICE_TLS_* files are all present it is mTLS
 // (the platform client cert + CA); otherwise it returns nil so credplane.NewClient uses a
 // plain default client (dev only — the token-service also degrades to plain HTTP).
+// tokenServiceClient is the BFF's client of the token service: mTLS when the BFF_TOKEN_SERVICE_TLS_*
+// files are present, and on every request the BFF's projected token, which is what lets it store grants
+// (ADR 0154).
+func tokenServiceClient(log logr.Logger, tsURL string) (*http.Client, error) {
+	httpClient, err := tokenServiceHTTPClient(tsURL)
+	if err != nil {
+		return nil, err
+	}
+	mtls := httpClient != nil
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 20 * time.Second}
+	}
+	if tokenPath := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_TOKEN_PATH")); tokenPath != "" {
+		httpClient.Transport = credplane.NewBearerTransport(httpClient.Transport, tokenPath)
+	} else {
+		log.Error(errors.New("TOKEN_SERVICE_TOKEN_PATH is unset"),
+			"the token service refuses this BFF's grant writes and knowledge test queries (ADR 0154)")
+	}
+	log.Info("MCP grant writes delegate to the token-service (SPI write path)", "url", tsURL, "mtls", mtls)
+	return httpClient, nil
+}
+
 func tokenServiceHTTPClient(tsURL string) (*http.Client, error) {
 	certFile := strings.TrimSpace(os.Getenv("BFF_TOKEN_SERVICE_TLS_CERT_FILE"))
 	keyFile := strings.TrimSpace(os.Getenv("BFF_TOKEN_SERVICE_TLS_KEY_FILE"))

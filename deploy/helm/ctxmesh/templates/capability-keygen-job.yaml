@@ -55,12 +55,12 @@ rules:
     resourceNames: ["bff-capability"]
   # rollout-restart the named consumers only, so they pick up the freshly-provisioned key. NOTE: k8s
   # `patch` on a Deployment is full-spec mutation (not just the restart annotation), so this SA can in
-  # principle re-image these 3 Deployments — an accepted, bounded risk (a narrow, name-pinned, in-namespace
+  # principle re-image these 4 Deployments — an accepted, bounded risk (a narrow, name-pinned, in-namespace
   # exception per ADR 0095/0011; the SA/Role persist between hook runs by design for ordering).
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["patch"]
-    resourceNames: ["ctxmesh-bff", "ctxmesh-controller-manager", "run-worker"]
+    resourceNames: ["ctxmesh-bff", "ctxmesh-controller-manager", "ctxmesh-token-service", "run-worker"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
