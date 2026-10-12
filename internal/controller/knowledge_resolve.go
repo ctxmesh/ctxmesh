@@ -122,8 +122,8 @@ func resolveKnowledgeBases(
 		return kbResolveResult{}, fmt.Errorf("marshalling KNOWLEDGE_BASES roster: %w", err)
 	}
 	res.env = []corev1.EnvVar{
-		{Name: "KNOWLEDGE_BASE_ENABLED", Value: gatewaySyncValue},
-		{Name: "KNOWLEDGE_BASES", Value: string(rosterJSON)},
+		{Name: envKnowledgeBaseEnabled, Value: gatewaySyncValue},
+		{Name: envKnowledgeBases, Value: string(rosterJSON)},
 	}
 	return res, nil
 }

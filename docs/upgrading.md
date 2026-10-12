@@ -164,8 +164,29 @@ refused for that window. To roll out in two steps, upgrade with
 `agent.invoke` until no member reports `unattested`, then upgrade again without it. A bad attestation
 is refused under either setting.
 
-**After upgrading,** a member's `IdentityEnvIgnored` condition names any identity variable its
+**After upgrading,** a member's `PlatformEnvIgnored` condition names any identity variable its
 `spec.env` still sets.
+
+## A variable the platform sets is the platform's, whatever spec.env says
+
+**What changed.** A `spec.env` entry with the name of a variable the platform sets for the agent
+(`MODEL_GATEWAY_URL`, `AGENT_PORT`, `BFF_INTERNAL_URL`, the `BUDGET_*` and `TENANT_*` caps, the memory
+and knowledge wiring and the rest) used to put the name in the container twice, and Kubernetes used
+whichever came last. The platform's value is now always used, and the entry is dropped. A name the
+platform does not set for that agent, such as `PROMPT_FILE` when `promptRef` is unset, is used as
+given. The `IdentityEnvIgnored` condition is now `PlatformEnvIgnored` and covers every dropped entry.
+
+**Before upgrading,** list the agents whose `spec.env` names a variable the platform sets, and move
+each to the field that sets it: `port` for `AGENT_PORT`, `allowedCallers` for
+`AGENT_ALLOWED_CALLERS`, `budget` or `guardrailPolicyRef` for `MODEL_GATEWAY_URL`.
+
+**During the upgrade** each such agent rolls one new revision carrying the platform's value. Its
+approval carries to the new revision, even where the old one ran the author's value, such as a
+`MODEL_GATEWAY_URL` that went straight to the provider: the change is the platform correcting the
+pod, not a new spec.
+
+**After upgrading,** an agent's `PlatformEnvIgnored` condition names every entry the platform did
+not use.
 
 ## M162 — the agent container is hardened by default (BREAKING for root images)
 

@@ -541,17 +541,17 @@ describe("AgentDetailPage (landing page)", () => {
     expect(screen.getByTestId("versions-list")).toHaveTextContent("billing-v2");
   });
 
-  it("tells an author whose identity variables were replaced, as governance and not as a passed check", async () => {
+  it("tells an author whose platform variables were replaced, as governance and not as a passed check", async () => {
     installFetch({
       detail: {
         ...DEFAULT_DETAIL,
         conditions: [
           ...(DEFAULT_DETAIL.conditions ?? []),
           {
-            type: "IdentityEnvIgnored",
+            type: "PlatformEnvIgnored",
             status: "True",
-            reason: "IdentityEnvSet",
-            message: "spec.env sets POD_NAMESPACE, which identify the agent in traces, cost and authorization",
+            reason: "PlatformEnvSet",
+            message: "spec.env sets POD_NAMESPACE, MODEL_GATEWAY_URL, which the platform sets for this agent",
             lastTransitionTime: "",
           },
         ],
@@ -559,11 +559,11 @@ describe("AgentDetailPage (landing page)", () => {
     });
     renderAt();
     const timeline = await screen.findByTestId("status-timeline");
-    const step = within(timeline).getByTestId("condition-IdentityEnvIgnored");
+    const step = within(timeline).getByTestId("condition-PlatformEnvIgnored");
     expect(step).toHaveTextContent("Its environment names variables only the platform sets");
-    expect(timeline).toHaveTextContent(/POD_NAMESPACE/);
+    expect(timeline).toHaveTextContent(/MODEL_GATEWAY_URL/);
     expect(within(timeline).getByText(/Governance step:/)).toBeInTheDocument();
-    expect(timeline).not.toHaveTextContent(/identity env ignored check passed/i);
+    expect(timeline).not.toHaveTextContent(/platform env ignored check passed/i);
   });
 
   it("groups tool bindings by MCP server, collapsed by default, with a ready rollup", async () => {

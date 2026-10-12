@@ -88,10 +88,10 @@ func TestAnIdentityVariableInSpecEnvIsThePlatforms(t *testing.T) {
 
 	var stored agentsv1beta1.AgentDeployment
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(deploy), &stored))
-	cond := apimeta.FindStatusCondition(stored.Status.Conditions, conditionIdentityEnvIgnored)
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, conditionPlatformEnvIgnored)
 	require.NotNil(t, cond, "the attempt is visible on the agent")
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
-	assert.Equal(t, reasonIdentityEnvSet, cond.Reason)
+	assert.Equal(t, reasonPlatformEnvSet, cond.Reason)
 	assert.Contains(t, cond.Message, "POD_NAMESPACE, AGENT_NAME, AGENT_VERSION, TENANT_ID")
 
 	// Removing them clears the report.
@@ -100,7 +100,7 @@ func TestAnIdentityVariableInSpecEnvIsThePlatforms(t *testing.T) {
 	require.NoError(t, err)
 	var cleared agentsv1beta1.AgentDeployment
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(deploy), &cleared))
-	assert.Nil(t, apimeta.FindStatusCondition(cleared.Status.Conditions, conditionIdentityEnvIgnored))
+	assert.Nil(t, apimeta.FindStatusCondition(cleared.Status.Conditions, conditionPlatformEnvIgnored))
 }
 
 // Where a Tenant owns the namespace, TENANT_ID is that tenant's, whatever spec.env says.
@@ -156,30 +156,4 @@ func TestDroppingIdentityEnvRenamesTheRevision(t *testing.T) {
 	again, err := r.candidateRevisionName(context.Background(), forged, hash)
 	require.NoError(t, err)
 	assert.Equal(t, cand.name, again.name, "the name is stable, or the agent would restart on every reconcile")
-}
-
-func TestWithoutIdentityEnv(t *testing.T) {
-	t.Parallel()
-
-	env := []corev1.EnvVar{
-		{Name: "A", Value: "1"},
-		{Name: envAMPRequireAttestation},
-		{Name: envAgentVersion},
-		{Name: "agent_name"},
-		{Name: envAgentName},
-		{Name: envAgentVersion},
-	}
-	kept, ignored := withoutIdentityEnv(env, false)
-	assert.Equal(t, []corev1.EnvVar{{Name: "A", Value: "1"}, {Name: envAMPRequireAttestation}, {Name: "agent_name"}}, kept,
-		"environment names are case-sensitive: agent_name is not AGENT_NAME")
-	assert.Equal(t, []string{envAgentName, envAgentVersion}, ignored)
-
-	kept, ignored = withoutIdentityEnv(env, true)
-	assert.Equal(t, []corev1.EnvVar{{Name: "A", Value: "1"}, {Name: "agent_name"}}, kept,
-		"a member's attestation wiring is the platform's")
-	assert.Equal(t, []string{envAgentName, envAgentVersion, envAMPRequireAttestation}, ignored)
-
-	kept, ignored = withoutIdentityEnv(nil, true)
-	assert.Empty(t, kept)
-	assert.Empty(t, ignored)
 }

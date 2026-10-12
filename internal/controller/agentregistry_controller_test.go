@@ -927,7 +927,7 @@ func TestRegistry_RoleInSpecEnvIsThePlatforms(t *testing.T) {
 
 	var stored agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(agent), &stored))
-	cond := apimeta.FindStatusCondition(stored.Status.Conditions, conditionIdentityEnvIgnored)
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, conditionPlatformEnvIgnored)
 	require.NotNil(t, cond)
 	assert.Contains(t, cond.Message, "AGENT_REGISTRY_ID, AGENT_ROLE")
 }

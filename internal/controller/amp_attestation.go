@@ -31,9 +31,8 @@ const envAMPRequireAttestation = "AMP_REQUIRE_ATTESTATION"
 
 // ampAttestationEnv is what a registry member's launcher needs to take part in attested AMP: the path of
 // its BFF-audience pod token, the capability public key (and audience, when the install sets one) to
-// verify attestations and run capabilities, and the posture. env is the platform's so far, with a
-// member's spec.env values for these already dropped (memberPlatformEnvNames); a variable the platform
-// already set there is not repeated.
+// verify attestations and run capabilities, and the posture. env is the platform's so far; a variable it
+// already holds is not repeated.
 func ampAttestationEnv(env []corev1.EnvVar, obo OBOEgressConfig, require bool) []corev1.EnvVar {
 	var out []corev1.EnvVar
 	present := func(name string) bool { return envVarPresent(env, name) || envVarPresent(out, name) }

@@ -172,16 +172,24 @@ spec:
               env:
                 description: |-
                   env is an optional list of environment variables injected directly into
-                  the agent container alongside the controller-managed variables such as
+                  the agent container alongside the variables the platform sets, such as
                   $AGENT_PORT. Uses the standard Kubernetes EnvVar schema.
 
+                  A variable the platform sets for this agent is always the platform's: an
+                  entry here with the same name is not used, and the PlatformEnvIgnored
+                  condition names it. Change such a variable through the field that sets it,
+                  for example port for AGENT_PORT, or budget and guardrailPolicyRef for
+                  MODEL_GATEWAY_URL. A name the platform does not set for this agent is used
+                  as given, such as PROMPT_FILE for a prompt in the image when promptRef is
+                  unset.
+
                   POD_NAMESPACE, AGENT_NAME, AGENT_VERSION, TENANT_ID, AGENT_REGISTRY_ID and
-                  AGENT_ROLE are always set by the platform: they identify the agent in its
-                  traces, cost, authorization and calls to other agents. For an agent in an
-                  AgentRegistry, so are AMP_REQUIRE_ATTESTATION, MCP_CAPABILITY_PUBLIC_KEY,
+                  AGENT_ROLE identify the agent in its traces, cost, authorization and calls
+                  to other agents, so a value here for one of them is never used, even where
+                  the platform leaves it unset. For an agent in an AgentRegistry the same
+                  holds for AMP_REQUIRE_ATTESTATION, MCP_CAPABILITY_PUBLIC_KEY,
                   MCP_CAPABILITY_AUDIENCE and BFF_POD_TOKEN_PATH, which decide how it checks
-                  its callers. A value given here for one of them is not used, and the
-                  IdentityEnvIgnored condition names it.
+                  its callers.
                 items:
                   description: EnvVar represents an environment variable present in
                     a Container.

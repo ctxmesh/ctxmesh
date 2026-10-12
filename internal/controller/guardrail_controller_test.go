@@ -429,12 +429,10 @@ func TestReconcile_GuardedSupervisorGetsBFFURLOnce(t *testing.T) {
 
 // TestReconcile_EveryAgentGetsBFFURL: an unguarded, non-delegate agent gets BFF_INTERNAL_URL too.
 //
-// This replaces TestReconcile_UnguardedAgentNoBFFURL, which asserted the opposite. That test guarded
-// m66.15's scope (only guarded agents gained the variable), not a security property. Since ADR 0124's
-// amendment (m184.5) every launcher binds its run capability at the BFF before the agent sees it, and a
-// launcher without the BFF's address hands its agent a bearer capability anyone could bind first. The
-// property worth guarding is now the inverse: every agent has it, exactly once, and a user's own value
-// wins.
+// Every launcher binds its run capability at the BFF before the agent sees it (ADR 0124, m184.5), and a
+// launcher without the BFF's address hands its agent a bearer capability anyone could bind first. So every
+// agent has it, exactly once, and it is the platform's: a spec.env value would bind the capability at an
+// address the author picks, so it is dropped and reported like any platform variable (platform_env.go).
 func TestReconcile_EveryAgentGetsBFFURL(t *testing.T) {
 	const namespace = "default"
 	for _, tc := range []struct {
@@ -445,7 +443,7 @@ func TestReconcile_EveryAgentGetsBFFURL(t *testing.T) {
 		{name: "unguarded-gets-bff", want: bffInternalURL},
 		{
 			name: "unguarded-own-bff", userEnv: []corev1.EnvVar{{Name: "BFF_INTERNAL_URL", Value: "http://own:9090"}},
-			want: "http://own:9090",
+			want: bffInternalURL,
 		},
 	} {
 		deploy := &agentsv1beta1.AgentDeployment{
@@ -468,7 +466,7 @@ func TestReconcile_EveryAgentGetsBFFURL(t *testing.T) {
 				values = append(values, e.Value)
 			}
 		}
-		assert.Equal(t, []string{tc.want}, values, "%s: BFF_INTERNAL_URL exactly once, the user's value winning", tc.name)
+		assert.Equal(t, []string{tc.want}, values, "%s: BFF_INTERNAL_URL exactly once, the platform's", tc.name)
 	}
 }
 

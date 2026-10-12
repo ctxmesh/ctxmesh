@@ -73,7 +73,7 @@ func TestAnAgentCannotNameAnotherAgentsIdentity(t *testing.T) {
 	assert.Empty(t, servedEnv(t, name, envTenantID))
 	assert.Equal(t, []string{"bar"}, servedEnv(t, name, "FOO"))
 
-	cond := apimeta.FindStatusCondition(getDeploy(t, name, namespace).Status.Conditions, conditionIdentityEnvIgnored)
+	cond := apimeta.FindStatusCondition(getDeploy(t, name, namespace).Status.Conditions, conditionPlatformEnvIgnored)
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 	assert.Contains(t, cond.Message, "POD_NAMESPACE, AGENT_NAME, AGENT_VERSION, TENANT_ID")
@@ -82,7 +82,7 @@ func TestAnAgentCannotNameAnotherAgentsIdentity(t *testing.T) {
 	current.Spec.Env = []corev1.EnvVar{{Name: "FOO", Value: "bar"}}
 	require.NoError(t, k8sClient.Update(testCtx, current))
 	reconcileNN(t, r, name, namespace)
-	assert.Nil(t, apimeta.FindStatusCondition(getDeploy(t, name, namespace).Status.Conditions, conditionIdentityEnvIgnored))
+	assert.Nil(t, apimeta.FindStatusCondition(getDeploy(t, name, namespace).Status.Conditions, conditionPlatformEnvIgnored))
 	assert.Equal(t, []string{namespace}, servedEnv(t, name, envPodNamespace))
 }
 

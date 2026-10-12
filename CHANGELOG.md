@@ -28,7 +28,7 @@ A registry member now admits `/invoke` only from:
 
 Anything else gets HTTP 403 `caller_not_allowed`. Agents in no registry are unchanged. A chained hop
 claims its own registry. `AGENT_REGISTRY_ID` and `AGENT_ROLE` are now platform identity variables:
-a value in `spec.env` is not used, and `IdentityEnvIgnored` names it. On a member the same holds for
+a value in `spec.env` is not used, and `PlatformEnvIgnored` names it. On a member the same holds for
 `AMP_REQUIRE_ATTESTATION`, `MCP_CAPABILITY_PUBLIC_KEY`, `MCP_CAPABILITY_AUDIENCE` and
 `BFF_POD_TOKEN_PATH`, so an author cannot switch one agent to accept unattested calls or verify
 against a key of their own. The edge also removes `Ce-Ampattestation`, and the platform edge's
@@ -88,6 +88,25 @@ starts, that agent's runs use its own boundary.
 no caller: the chat page never offered it, and no SDK, script or page of the docs named it. It goes
 with the run-store query behind it. A run an end-user owns is still readable at
 `GET /api/runs/{id}`.
+
+**Fixed: a `spec.env` name the platform also sets put the variable in the pod twice.** Beyond the
+identity variables, the controller sets 48 variables on the agent container, and for most of them
+(`MODEL_GATEWAY_URL`, `AGENT_PORT`, the `BUDGET_*` and `TENANT_*` caps, `MEMORY_PORT`,
+`MEMORY_KEY_NAMESPACE`, `STATELAYER_PROXY_URL`, `KNOWLEDGE_BASES` and others) a `spec.env` entry of
+the same name left the container carrying both. Kubernetes uses the last entry of a repeated name,
+so which one won depended on where the controller happened to add the variable: an author could
+point `MODEL_GATEWAY_URL` past the in-pod proxy that enforces a budget, a tenant's caps and
+guardrails, while the platform silently beat the author's value for the tenant caps and memory
+wiring. Now one rule decides every platform variable. When the platform sets a variable for an
+agent, its value is used, the `spec.env` entry is dropped, and the agent's `PlatformEnvIgnored`
+condition names it; the field that sets the variable (`port`, `budget`, `guardrailPolicyRef`,
+`allowedCallers`, `sessionMemory` and so on) is how to change it. A name the platform does not set
+for that agent is used as given, such as `PROMPT_FILE` without a `promptRef`, or `TOKEN_SERVICE_URL`
+on an install with no token service. The identity variables, and a member's attestation wiring, stay
+reserved even where the platform leaves them unset. No variable is overridable any more, including
+`BFF_INTERNAL_URL` and `AGENT_ALLOWED_CALLERS`, which were. The condition replaces
+`IdentityEnvIgnored`, which the controller removes. An agent whose `spec.env` named a platform
+variable rolls one new revision with the platform's value; an approval carries to it.
 
 **Fixed: per-user memory, per-user knowledge bases and per-user quota refused every run under the
 default install.** The launcher checked run capabilities against `MCP_CAPABILITY_AUDIENCE`, which
@@ -251,7 +270,7 @@ values, and the launcher tags every trace `agent:<POD_NAMESPACE>/<AGENT_NAME>` a
 namespace's agent (a trace that no run maps is authorized by that tag), score one version as another,
 which steers regression detection, rollback and canary decisions, and charge calls to another
 tenant's quota and spend ledger. These four are now always the platform's. A value for one in
-`spec.env` is not used, and the agent's `IdentityEnvIgnored` condition names it until it is removed.
+`spec.env` is not used, and the agent's `PlatformEnvIgnored` condition names it until it is removed.
 An agent that set one rolls one new revision with the platform's values; an approval carries to it,
 and the old revision is not kept as a canary arm. Setting `TENANT_ID` in `spec.env` of an agent whose
 namespace a Tenant owns no longer produces two `TENANT_ID` entries, which the Knative Service refused.

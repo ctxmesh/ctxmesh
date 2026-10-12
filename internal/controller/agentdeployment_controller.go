@@ -175,7 +175,7 @@ const (
 
 	// envAgentName is the AGENT_NAME env var — the agent's identity, injected
 	// once in the base env (the tracing identity) and read by the memory,
-	// registry, and budget paths. An identity variable (identity_env.go).
+	// registry, and budget paths. An identity variable (platform_env.go).
 	envAgentName = "AGENT_NAME"
 
 	// envAgentVersion is the AGENT_VERSION env var: the AgentVersion the pod serves. The launcher tags
@@ -1046,7 +1046,7 @@ type podTemplate struct {
 	// resolves), used as the "-h<digest>" revision/name suffix.
 	digest string
 	// supersededDigests is digest as each of supersededPodContracts computed it, then, for a spec that
-	// sets an identity variable, as it was before they were dropped.
+	// sets a variable the platform owns, as it was before those entries were dropped.
 	supersededDigests []string
 	// resolvedSkills is what spec.skillRefs resolved to — "<name>@sha256:…", always digests.
 	// Carried out so the reconciler can record it in status and in the version snapshot:
@@ -1093,17 +1093,10 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// registry the revision was built for. The next status write persists it; the BFF reads it.
 	deploy.Status.RegistryRef = membership.RegistryName
 
-	// Platform env vars come first so they are always present; user env is appended
-	// last and may override platform defaults if the operator deliberately sets the
-	// same name (consistent with the treatment of AGENT_PORT). The identity variables,
-	// and a member's attestation wiring, are the exception: they are always the
-	// platform's (identity_env.go).
-	userEnv, ignoredIdentity := withoutIdentityEnv(deploy.Spec.Env, membership.IsMember)
-	if err := r.syncIdentityEnvCondition(ctx, deploy, ignoredIdentity); err != nil {
-		return podTemplate{}, err
-	}
+	// env is the platform's alone until the end: spec.env goes in at specEnvAt, without the names the
+	// platform owns (platform_env.go), once every platform variable is known.
 	env := make([]corev1.EnvVar, 0, 2+len(deploy.Spec.Env))
-	env = append(env, corev1.EnvVar{Name: "AGENT_PORT", Value: strconv.Itoa(int(port))})
+	env = append(env, corev1.EnvVar{Name: envAgentPort, Value: strconv.Itoa(int(port))})
 
 	// Tenancy (M47, ADR 0046): resolve the owning tenant EARLY — it decides both whether the gateway
 	// quota proxy is interposed (a tenant's model caps flow through the SAME launcher proxy as an M8
@@ -1142,7 +1135,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	gatewayURL := litellmGatewayURL
 	if deploy.Spec.Budget != nil || tenantQuota || gr.referenced || recordCapable {
 		gatewayURL = budgetProxyURL
-		env = append(env, corev1.EnvVar{Name: "GATEWAY_UPSTREAM_URL", Value: litellmGatewayURL})
+		env = append(env, corev1.EnvVar{Name: envGatewayUpstreamURL, Value: litellmGatewayURL})
 	}
 	if deploy.Spec.Budget != nil {
 		env = append(
@@ -1150,12 +1143,12 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			// Either cap may be empty (that dimension unenforced); softThreshold
 			// carries the CRD default (80) when unset because the field defaults
 			// server-side, but guard against a zero value defensively.
-			corev1.EnvVar{Name: "BUDGET_PER_CONVERSATION_USD", Value: deploy.Spec.Budget.PerConversationUSD},
-			corev1.EnvVar{Name: "BUDGET_PER_AGENT_USD", Value: deploy.Spec.Budget.PerAgentUSD},
-			corev1.EnvVar{Name: "BUDGET_SOFT_PCT", Value: strconv.Itoa(int(budgetSoftPct(deploy.Spec.Budget)))},
+			corev1.EnvVar{Name: envBudgetPerConversation, Value: deploy.Spec.Budget.PerConversationUSD},
+			corev1.EnvVar{Name: envBudgetPerAgent, Value: deploy.Spec.Budget.PerAgentUSD},
+			corev1.EnvVar{Name: envBudgetSoftPct, Value: strconv.Itoa(int(budgetSoftPct(deploy.Spec.Budget)))},
 		)
 	}
-	env = append(env, corev1.EnvVar{Name: "MODEL_GATEWAY_URL", Value: gatewayURL})
+	env = append(env, corev1.EnvVar{Name: envModelGatewayURL, Value: gatewayURL})
 
 	// Guardrails (M66, ADR 0059 §8; K3, ADR 0059 Fork-2): deliver the resolved+validated GuardrailPolicy
 	// JSON as a MOUNTED, read-only per-agent ConfigMap file (<agent>-guardrail) rather than the pre-K3
@@ -1180,22 +1173,21 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// BFF_INTERNAL_URL goes to EVERY agent: its launcher binds the run capability at the BFF before the
 	// agent's code sees it (ADR 0124), and guardrail audits and delegation call the BFF too. An agent
 	// without it would hand its code a bearer capability anyone could bind first.
-	if !envVarPresent(env, "BFF_INTERNAL_URL") && !envVarPresent(deploy.Spec.Env, "BFF_INTERNAL_URL") {
-		env = append(env, corev1.EnvVar{Name: "BFF_INTERNAL_URL", Value: bffInternalURL})
+	if !envVarPresent(env, envBFFInternalURL) {
+		env = append(env, corev1.EnvVar{Name: envBFFInternalURL, Value: bffInternalURL})
 	}
 
 	// Record mode (M78, ADR 0071 §1): a record-capable agent gets RECORD_CAPABLE=true, which flips
 	// the launcher gateway's record-mode on (GatewayProxyEnabled + the per-run capture path). Its
 	// presence — combined with GATEWAY_UPSTREAM_URL forced above — is the interposition reason. The
 	// fixture is a DURABLE object-store blob (internal/objectstore, keyed fixtures/{runId}/…), so the
-	// record-capable agent also needs OBJECT_STORE_ADDR + the dev creds to reach MinIO. Inject them
-	// here (env-present-guarded so a record-capable registry MEMBER — which already got them in the
-	// membership block below is not the concern; that block runs later, so guard defensively) — a
-	// record-capable non-member would otherwise have no store to write the fixture to. STATIC env,
+	// record-capable agent also needs OBJECT_STORE_ADDR + the dev creds to reach MinIO — a
+	// record-capable non-member would otherwise have no store to write the fixture to. The membership
+	// block below guards on the same name, so a record-capable member gets them once. STATIC env,
 	// NEVER valueFrom (the m5.7 Knative landmine). All values are reconcile-time constants.
 	if recordCapable {
-		env = append(env, corev1.EnvVar{Name: "RECORD_CAPABLE", Value: gatewaySyncValue})
-		if !envVarPresent(env, envObjectStoreAddr) && !envVarPresent(deploy.Spec.Env, envObjectStoreAddr) {
+		env = append(env, corev1.EnvVar{Name: envRecordCapable, Value: gatewaySyncValue})
+		if !envVarPresent(env, envObjectStoreAddr) {
 			env = append(env, objectStoreEnv(r.devObjectStore())...)
 		}
 	}
@@ -1204,20 +1196,16 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// without its approvers (runtimeForPod) as JSON and inject it as AGENT_RUNTIME — a
 	// STATIC platform env var (NEVER valueFrom, the m5.7 Knative landmine). The SDK parses
 	// it at startup.
-	// Injected before spec.env, which is appended last; by the platform convention a
-	// user's spec.env may override a platform default (K8s uses the last value for a
-	// duplicate name). That's harmless here — the authoritative output-schema validator
-	// reads spec.runtime from the CRD (m65.4), not this env var. When nil, inject
-	// nothing — the no-runtime path is byte-for-byte unchanged (backward-compat).
+	// When nil, inject nothing — the no-runtime path is byte-for-byte unchanged (backward-compat).
 	if deploy.Spec.Runtime != nil {
 		rtBytes, err := json.Marshal(runtimeForPod(deploy.Spec.Runtime))
 		if err != nil {
 			return podTemplate{}, fmt.Errorf("marshaling spec.runtime: %w", err)
 		}
-		env = append(env, corev1.EnvVar{Name: "AGENT_RUNTIME", Value: string(rtBytes)})
+		env = append(env, corev1.EnvVar{Name: envAgentRuntime, Value: string(rtBytes)})
 	}
 
-	env = append(env, userEnv...)
+	specEnvAt := len(env)
 
 	// The identity variables, for every agent and before the blocks below that read them: the
 	// `<namespace>/<name>` the launcher tags traces with (two same-named agents in different
@@ -1259,9 +1247,9 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// LANGFUSE_HOST the launcher does not start the relay. Prod-functional feedback against an
 	// operator-provided Langfuse is m52.G1a.
 	if r.DevDataPlane && traceExporting {
-		env = append(env, corev1.EnvVar{Name: "LANGFUSE_HOST", Value: langfuseHost})
+		env = append(env, corev1.EnvVar{Name: envLangfuseHost, Value: langfuseHost})
 		env = append(env, telemetry.LangfuseScoresEnv(telemetry.LangfuseSecretName)...)
-		env = append(env, corev1.EnvVar{Name: "FEEDBACK_PORT", Value: feedbackPort})
+		env = append(env, corev1.EnvVar{Name: envFeedbackPort, Value: feedbackPort})
 	}
 
 	// Prompt-only deploy (M9): when spec.promptRef is set, resolve the referenced
@@ -1285,15 +1273,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	if err != nil {
 		return podTemplate{}, err
 	}
-	// Append the platform prompt env (PROMPT_FILE / PROMPT_VERSION) only for names
-	// the operator has NOT already set in spec.env — a duplicate container env var
-	// name is invalid, and a deliberate user override must win (consistent with the
-	// AGENT_PORT / AGENT_NAME treatment).
-	for _, e := range promptEnv {
-		if !envVarPresent(deploy.Spec.Env, e.Name) {
-			env = append(env, e)
-		}
-	}
+	env = append(env, promptEnv...)
 
 	// MCP tools (M4): resolve the agent's valid bindings. When ≥1 exists, inject
 	// the discovery sidecar + tools ConfigMap volume + (sidecar-mode) tool
@@ -1396,11 +1376,11 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// holds no direct Valkey path — the launcher's :2998 listener uses the proxy
 		// forward when MEMORY_BACKEND_ADDR is absent + STATELAYER_PROXY_URL is set.
 		if r.StatelayerProxyURL == "" {
-			env = append(env, corev1.EnvVar{Name: "MEMORY_BACKEND_ADDR", Value: memAddr})
+			env = append(env, corev1.EnvVar{Name: envMemoryBackendAddr, Value: memAddr})
 		}
 		env = append(
 			env,
-			corev1.EnvVar{Name: "MEMORY_PORT", Value: "2998"},
+			corev1.EnvVar{Name: envMemoryPort, Value: "2998"},
 			// MEMORY_KEY_NAMESPACE: the agent's own namespace, the Valkey key
 			// prefix. Set as a STATIC value (the pod always runs in the
 			// AgentDeployment's namespace, known here at reconcile time) — a
@@ -1411,14 +1391,14 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			// the backend lives, so no downward reference is needed. (Unused on the
 			// proxy path — the proxy derives the key namespace from the token — but
 			// harmless + still correct for a proxy-less install.)
-			corev1.EnvVar{Name: "MEMORY_KEY_NAMESPACE", Value: deploy.Namespace},
+			corev1.EnvVar{Name: envMemoryKeyNamespace, Value: deploy.Namespace},
 		)
 		// STATELAYER_PROXY_URL (M51, ADR 0050 §8 phase 1): when the controller is
 		// configured with it, route this agent's session/shared memory through the
 		// state-layer proxy (the launcher reverse-proxies; it still holds MEMORY_BACKEND_ADDR
 		// in phase 1 for dual-mode fallback). Empty ⇒ direct Valkey, no drift.
 		if r.StatelayerProxyURL != "" {
-			env = append(env, corev1.EnvVar{Name: "STATELAYER_PROXY_URL", Value: r.StatelayerProxyURL})
+			env = append(env, corev1.EnvVar{Name: envStatelayerProxyURL, Value: r.StatelayerProxyURL})
 		}
 		// Per-user session memory (M98, EU1a, ADR 0080): isolate each invoking end-user's conversation
 		// memory into its own bucket. The launcher stamps X-Memory-User from the VERIFIED run capability
@@ -1429,7 +1409,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// a new revision (it is part of the pod template), so a toggle takes effect on the next reconcile.
 		if sm := deploy.Spec.SessionMemory; sm != nil && sm.PerUser &&
 			memScope != memoryScopeShared && r.StatelayerProxyURL != "" {
-			env = append(env, corev1.EnvVar{Name: "MEMORY_PER_USER", Value: annotationTrue})
+			env = append(env, corev1.EnvVar{Name: envMemoryPerUser, Value: annotationTrue})
 		}
 	}
 
@@ -1445,26 +1425,26 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			ltScope = "agent_user"
 		}
 		env = append(env,
-			corev1.EnvVar{Name: "MEMORY_LONGTERM_ENABLED", Value: "true"},
-			corev1.EnvVar{Name: "MEMORY_LONGTERM_SCOPE", Value: ltScope},
+			corev1.EnvVar{Name: envMemoryLongTermEnabled, Value: "true"},
+			corev1.EnvVar{Name: envMemoryLongTermScope, Value: ltScope},
 		)
 		if lt.EmbeddingRoute != "" {
-			env = append(env, corev1.EnvVar{Name: "EMBEDDING_ROUTE", Value: lt.EmbeddingRoute})
+			env = append(env, corev1.EnvVar{Name: envEmbeddingRoute, Value: lt.EmbeddingRoute})
 		}
 		// The launcher proxies memory.remember/search_agent to the token-service; reuse the OBO
 		// token-service URL (guard against a duplicate the OBO path may already have set).
 		if r.OBOEgress.TokenServiceURL != "" &&
-			!envVarPresent(env, envTokenServiceURL) && !envVarPresent(deploy.Spec.Env, envTokenServiceURL) {
+			!envVarPresent(env, envTokenServiceURL) {
 			env = append(env, corev1.EnvVar{Name: envTokenServiceURL, Value: r.OBOEgress.TokenServiceURL})
 		}
 		// Per-user memory: the launcher verifies the invoking user's run capability, so inject the platform
 		// capability public key + audience on the MAIN container (the OBO path sets them on the egress
 		// sidecar). Without them the launcher fail-closes per-user memory (never falls back to agent-wide).
 		if lt.PerUser && r.OBOEgress.CapabilityPublicKeyB64 != "" &&
-			!envVarPresent(env, envMCPCapPublicKey) && !envVarPresent(deploy.Spec.Env, envMCPCapPublicKey) {
+			!envVarPresent(env, envMCPCapPublicKey) {
 			env = append(env, corev1.EnvVar{Name: envMCPCapPublicKey, Value: r.OBOEgress.CapabilityPublicKeyB64})
 			if r.OBOEgress.CapabilityAudience != "" &&
-				!envVarPresent(env, envMCPCapAudience) && !envVarPresent(deploy.Spec.Env, envMCPCapAudience) {
+				!envVarPresent(env, envMCPCapAudience) {
 				env = append(env, corev1.EnvVar{Name: envMCPCapAudience, Value: r.OBOEgress.CapabilityAudience})
 			}
 		}
@@ -1496,7 +1476,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// the in-pod auto-inject retrieval got "connection refused" → no RAG. Inject it here too when
 	// knowledge is enabled (guarded against a duplicate the memory/OBO path may already have set).
 	if len(kbRes.env) > 0 && r.OBOEgress.TokenServiceURL != "" &&
-		!envVarPresent(env, envTokenServiceURL) && !envVarPresent(deploy.Spec.Env, envTokenServiceURL) {
+		!envVarPresent(env, envTokenServiceURL) {
 		env = append(env, corev1.EnvVar{Name: envTokenServiceURL, Value: r.OBOEgress.TokenServiceURL})
 	}
 
@@ -1542,23 +1522,23 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	if hasTenant {
 		env = append(env, corev1.EnvVar{Name: envTenantID, Value: tenantCtx.id})
 		if tenantCtx.budgetUSD != "" {
-			env = append(env, corev1.EnvVar{Name: "TENANT_BUDGET_USD", Value: tenantCtx.budgetUSD})
+			env = append(env, corev1.EnvVar{Name: envTenantBudgetUSD, Value: tenantCtx.budgetUSD})
 		}
 		if tenantCtx.rpm > 0 {
-			env = append(env, corev1.EnvVar{Name: "TENANT_RPM", Value: strconv.Itoa(int(tenantCtx.rpm))})
+			env = append(env, corev1.EnvVar{Name: envTenantRPM, Value: strconv.Itoa(int(tenantCtx.rpm))})
 		}
 		if tenantCtx.maxConcurrent > 0 {
-			env = append(env, corev1.EnvVar{Name: "TENANT_MAX_CONCURRENT", Value: strconv.Itoa(int(tenantCtx.maxConcurrent))})
+			env = append(env, corev1.EnvVar{Name: envTenantMaxConcurrent, Value: strconv.Itoa(int(tenantCtx.maxConcurrent))})
 		}
 		if tenantQuota {
 			// M53 (ADR 0050 §8): route tenant quota through the state-layer proxy
 			// (pod-identity authed) when the controller is configured with it — the
 			// launcher then holds NO Valkey credential for quota.
 			if r.StatelayerProxyURL != "" {
-				if !envVarPresent(env, envStatelayerProxyURL) && !envVarPresent(deploy.Spec.Env, envStatelayerProxyURL) {
+				if !envVarPresent(env, envStatelayerProxyURL) {
 					env = append(env, corev1.EnvVar{Name: envStatelayerProxyURL, Value: r.StatelayerProxyURL})
 				}
-				if !envVarPresent(env, envStatelayerTokenPath) && !envVarPresent(deploy.Spec.Env, envStatelayerTokenPath) {
+				if !envVarPresent(env, envStatelayerTokenPath) {
 					env = append(env, corev1.EnvVar{Name: envStatelayerTokenPath, Value: statelayerPodTokenFilePath})
 				}
 				injectPodToken = true
@@ -1568,7 +1548,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 				// the proxy is on (the m53.7 cutover, phase 3), this is NOT injected — the
 				// agent has no direct Valkey path; quota flows through the proxy on the
 				// SAME accumulator.
-				env = append(env, corev1.EnvVar{Name: "TENANT_QUOTA_ADDR", Value: memoryDefaultAddr})
+				env = append(env, corev1.EnvVar{Name: envTenantQuotaAddr, Value: memoryDefaultAddr})
 			}
 		}
 	}
@@ -1584,14 +1564,14 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		env = append(
 			env,
 			corev1.EnvVar{Name: envAgentRegistryID, Value: membership.RegistryID},
-			corev1.EnvVar{Name: "A2A_MAX_DEPTH", Value: strconv.Itoa(int(membership.MaxDepth))},
-			corev1.EnvVar{Name: "A2A_HOP_BUDGET", Value: strconv.Itoa(int(membership.HopBudget))},
+			corev1.EnvVar{Name: envA2AMaxDepth, Value: strconv.Itoa(int(membership.MaxDepth))},
+			corev1.EnvVar{Name: envA2AHopBudget, Value: strconv.Itoa(int(membership.HopBudget))},
 			// M141.4 (ADR 0121): where a fire-and-forget hop goes to become durable. The agent pod holds
 			// no broker credential — it hands the CloudEvent to the control plane, which owns the
 			// connection. Injected for every registry member; the BFF only serves the edge when an async
 			// backend is actually configured, so an install without one answers 404 and the launcher's
 			// `?mode=async` degrades to an honest refusal rather than a silent no-op.
-			corev1.EnvVar{Name: "ASYNC_PUBLISH_URL", Value: bffInternalURL + "/api/internal/async/publish"},
+			corev1.EnvVar{Name: envAsyncPublishURL, Value: bffInternalURL + "/api/internal/async/publish"},
 		)
 		// Shared memory scope (ADR 0035, m33.3): a sessionMemory scope=shared keys the team
 		// scratchpad under this registry (mem:shared:{registry}:{conversationId}), so agents in the
@@ -1600,22 +1580,19 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// agent gets no MEMORY_SCOPE and the launcher keeps its private layout (a visible misconfig,
 		// not a broken key).
 		if hasMemory && memScope == memoryScopeShared {
-			env = append(env, corev1.EnvVar{Name: "MEMORY_SCOPE", Value: memoryScopeShared})
+			env = append(env, corev1.EnvVar{Name: envMemoryScope, Value: memoryScopeShared})
 		}
 		// POD_NAMESPACE (the namespace AMP targets resolve in, clusterHost()) and AGENT_NAME (the
 		// envelope's senderAgentId) are in the base env.
-		// AGENT_ROLE: from spec.role, always (an identity variable, identity_env.go). The launcher stamps
+		// AGENT_ROLE: from spec.role, always (an identity variable, platform_env.go). The launcher stamps
 		// it into the envelope, and a callee admits the call only when it equals the attested role.
 		env = append(env, corev1.EnvVar{Name: envAgentRole, Value: deploy.Spec.Role})
-		// AGENT_ALLOWED_CALLERS: comma-join of spec.allowedCallers (user-override-
-		// wins). Empty when the list is unset → the launcher applies its default
-		// (registry-membership) policy.
-		if !envVarPresent(deploy.Spec.Env, "AGENT_ALLOWED_CALLERS") {
-			env = append(env, corev1.EnvVar{
-				Name:  "AGENT_ALLOWED_CALLERS",
-				Value: strings.Join(deploy.Spec.AllowedCallers, ","),
-			})
-		}
+		// AGENT_ALLOWED_CALLERS: comma-join of spec.allowedCallers. Empty when the list is unset → the
+		// launcher applies its default (registry-membership) policy.
+		env = append(env, corev1.EnvVar{
+			Name:  envAgentAllowedCallers,
+			Value: strings.Join(deploy.Spec.AllowedCallers, ","),
+		})
 
 		// AMP attestation (ADR 0153): as a caller, the launcher trades this pod's BFF-audience token for the
 		// platform's attestation of who it is and stamps it on every AMP hop; as a callee, it verifies a
@@ -1634,11 +1611,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		}
 		if team != nil {
 			for _, e := range delegateEnv(team) {
-				// Guard against duplicates: a guarded supervisor already has BFF_INTERNAL_URL
-				// injected by the guardrail block (m66.15). All other delegateEnv vars are
-				// delegate-only so the check is symmetric with the rest of the platform env
-				// injection pattern (envVarPresent before append).
-				if !envVarPresent(env, e.Name) && !envVarPresent(deploy.Spec.Env, e.Name) {
+				// Every agent already has BFF_INTERNAL_URL; the rest are delegate-only.
+				if !envVarPresent(env, e.Name) {
 					env = append(env, e)
 				}
 			}
@@ -1646,15 +1620,15 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			// holds NO direct :6379 path — the last direct-Valkey consumer, so `:6379` can leave the egress
 			// allowlist). Otherwise (proxy-less) fall back to the direct Valkey addr.
 			if r.StatelayerProxyURL != "" {
-				if !envVarPresent(env, envStatelayerProxyURL) && !envVarPresent(deploy.Spec.Env, envStatelayerProxyURL) {
+				if !envVarPresent(env, envStatelayerProxyURL) {
 					env = append(env, corev1.EnvVar{Name: envStatelayerProxyURL, Value: r.StatelayerProxyURL})
 				}
-				if !envVarPresent(env, envStatelayerTokenPath) && !envVarPresent(deploy.Spec.Env, envStatelayerTokenPath) {
+				if !envVarPresent(env, envStatelayerTokenPath) {
 					env = append(env, corev1.EnvVar{Name: envStatelayerTokenPath, Value: statelayerPodTokenFilePath})
 				}
 				injectPodToken = true
-			} else if !envVarPresent(env, "TENANT_QUOTA_ADDR") && !envVarPresent(deploy.Spec.Env, "TENANT_QUOTA_ADDR") {
-				env = append(env, corev1.EnvVar{Name: "TENANT_QUOTA_ADDR", Value: memoryDefaultAddr})
+			} else if !envVarPresent(env, envTenantQuotaAddr) {
+				env = append(env, corev1.EnvVar{Name: envTenantQuotaAddr, Value: memoryDefaultAddr})
 			}
 			// The delegate spawn guard needs the run-capability verifier to recover THIS supervisor's run id
 			// as the spawn-tree ROOT when the X-Ctxmesh-Spawn-Root header doesn't propagate (L11) — the case
@@ -1664,10 +1638,10 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			// only injects this key for perUser agents, so a plain supervisor got nothing. Inject it (+ the
 			// audience) on the supervisor's main container whenever the platform provides it.
 			if r.OBOEgress.CapabilityPublicKeyB64 != "" &&
-				!envVarPresent(env, envMCPCapPublicKey) && !envVarPresent(deploy.Spec.Env, envMCPCapPublicKey) {
+				!envVarPresent(env, envMCPCapPublicKey) {
 				env = append(env, corev1.EnvVar{Name: envMCPCapPublicKey, Value: r.OBOEgress.CapabilityPublicKeyB64})
 				if r.OBOEgress.CapabilityAudience != "" &&
-					!envVarPresent(env, envMCPCapAudience) && !envVarPresent(deploy.Spec.Env, envMCPCapAudience) {
+					!envVarPresent(env, envMCPCapAudience) {
 					env = append(env, corev1.EnvVar{Name: envMCPCapAudience, Value: r.OBOEgress.CapabilityAudience})
 				}
 			}
@@ -1688,7 +1662,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// record-capable agent (M78) may have already been given the same env by the
 		// record-mode block above — inject only when not already present (last-write
 		// semantics would otherwise leave a duplicate env entry).
-		if !envVarPresent(env, envObjectStoreAddr) && !envVarPresent(deploy.Spec.Env, envObjectStoreAddr) {
+		if !envVarPresent(env, envObjectStoreAddr) {
 			env = append(env, objectStoreEnv(r.devObjectStore())...)
 		}
 
@@ -1705,7 +1679,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// any memory agent; this adds the token path + flips injectPodToken. The env-present
 	// guard keeps it duplicate-safe against the tenant-quota block.
 	if r.StatelayerProxyURL != "" && hasMemory {
-		if !envVarPresent(env, envStatelayerTokenPath) && !envVarPresent(deploy.Spec.Env, envStatelayerTokenPath) {
+		if !envVarPresent(env, envStatelayerTokenPath) {
 			env = append(env, corev1.EnvVar{Name: envStatelayerTokenPath, Value: statelayerPodTokenFilePath})
 		}
 		injectPodToken = true
@@ -2034,6 +2008,14 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// than a longer prompt.
 	containers = injectSkills(containers, resolvedSkills, skillDescriptions, false)
 
+	// The platform's env is complete, so spec.env goes in now: an entry the platform owns is dropped
+	// rather than duplicated, and the drop is reported.
+	var ignoredEnv []string
+	containers[0].Env, ignoredEnv = withSpecEnv(containers[0].Env, specEnvAt, deploy.Spec.Env, membership.IsMember)
+	if err := r.syncPlatformEnvCondition(ctx, deploy, ignoredEnv); err != nil {
+		return podTemplate{}, err
+	}
+
 	// The hardened securityContext MUST move the revision name, or it never reaches a running
 	// pod. This is the M4 silent-loss landmine the file warns about elsewhere: the controller
 	// derives a deterministic revision name, and a pod-spec change that leaves that name
@@ -2094,13 +2076,14 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		foldAfterContract("|egress-redirect:" + r.EgressRedirect.Image)
 	}
 
-	// Dropping a spec's identity variables changes its pod without changing anything a digest reads, so
-	// the drop must move the revision name or it never reaches a running pod. The pod built before it
-	// is the same pod renamed, as across a contract change: its approval carries, and it is not kept as
-	// a canary arm beside the corrected one.
-	if len(ignoredIdentity) > 0 {
+	// Dropping spec.env entries the platform owns changes the pod without changing anything a digest
+	// reads, so the drop must move the revision name or it never reaches a running pod. The pod built
+	// before it is the same pod renamed, as across a contract change: its approval carries, and it is not
+	// kept as a canary arm beside the corrected one. The fold keeps its first spelling, from when only
+	// identity variables were dropped, so the revisions it already named keep their names.
+	if len(ignoredEnv) > 0 {
 		supersededDigests = append(supersededDigests, combinedDigest)
-		combinedDigest = foldDigest(combinedDigest, "|identity-env:"+strings.Join(ignoredIdentity, ","))
+		combinedDigest = foldDigest(combinedDigest, "|identity-env:"+strings.Join(ignoredEnv, ","))
 	}
 
 	// A registry member's attestation wiring (the BFF token, the capability key, the posture) is read by

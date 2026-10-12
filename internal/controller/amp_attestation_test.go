@@ -114,7 +114,7 @@ func TestARegistryAndRoleInSpecEnvAreThePlatforms(t *testing.T) {
 
 	var stored agentsv1beta1.AgentDeployment
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(member), &stored))
-	cond := apimeta.FindStatusCondition(stored.Status.Conditions, conditionIdentityEnvIgnored)
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, conditionPlatformEnvIgnored)
 	require.NotNil(t, cond)
 	assert.Contains(t, cond.Message, "AGENT_REGISTRY_ID, AGENT_ROLE")
 
@@ -287,7 +287,7 @@ func TestAMembersAttestationWiringInSpecEnvIsThePlatforms(t *testing.T) {
 
 	var stored agentsv1beta1.AgentDeployment
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(member), &stored))
-	cond := apimeta.FindStatusCondition(stored.Status.Conditions, conditionIdentityEnvIgnored)
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, conditionPlatformEnvIgnored)
 	require.NotNil(t, cond)
 	assert.Contains(t, cond.Message,
 		"BFF_POD_TOKEN_PATH, MCP_CAPABILITY_PUBLIC_KEY, MCP_CAPABILITY_AUDIENCE, AMP_REQUIRE_ATTESTATION")
@@ -306,5 +306,5 @@ func TestAMembersAttestationWiringInSpecEnvIsThePlatforms(t *testing.T) {
 		"an agent in no registry is not checked by these, and keeps what spec.env says")
 	assert.Equal(t, []string{"YXV0aG9ycy1vd24ta2V5"}, envValues(t, pod, envMCPCapPublicKey))
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(loner), &stored))
-	assert.Nil(t, apimeta.FindStatusCondition(stored.Status.Conditions, conditionIdentityEnvIgnored))
+	assert.Nil(t, apimeta.FindStatusCondition(stored.Status.Conditions, conditionPlatformEnvIgnored))
 }

@@ -97,6 +97,17 @@ type OBOEgressConfig struct {
 // sidecar reads + fsnotify-watches it). Both nil ⇒ no toolPolicy set (permissive; the sidecar
 // starts with no policy). This task is PLUMBING only — the policy is delivered + parsed + held but
 // NOT yet enforced (enforcement is a later M82 task).
+// The egress sidecar's own variables. spec.env never reaches the sidecar.
+const (
+	envEgressCredentialNamespace   = "MCP_CREDENTIAL_NAMESPACE"
+	envEgressAgent                 = "EGRESS_AGENT"
+	envEgressListenAddr            = "EGRESS_LISTEN_ADDR"
+	envEgressRoutes                = "EGRESS_ROUTES"
+	envEgressBoundary              = "EGRESS_BOUNDARY"
+	envEgressResponseHeaderTimeout = "EGRESS_RESPONSE_HEADER_TIMEOUT"
+	envEgressStreamIdleTimeout     = "EGRESS_STREAM_IDLE_TIMEOUT"
+)
+
 func egressSidecarContainer(
 	cfg OBOEgressConfig, namespace, agentIdentity, boundary, routesJSON string,
 	recordCapable, devObjectStore bool,
@@ -104,14 +115,14 @@ func egressSidecarContainer(
 	routesMount *corev1.VolumeMount, routesEnv []corev1.EnvVar,
 ) corev1.Container {
 	env := []corev1.EnvVar{
-		{Name: "MCP_CAPABILITY_PUBLIC_KEY", Value: cfg.CapabilityPublicKeyB64},
-		{Name: "MCP_CAPABILITY_AUDIENCE", Value: cfg.CapabilityAudience},
-		{Name: "MCP_CREDENTIAL_NAMESPACE", Value: cfg.CredentialNamespace},
-		{Name: "EGRESS_AGENT", Value: agentIdentity},
-		{Name: "POD_NAMESPACE", Value: namespace},
+		{Name: envMCPCapPublicKey, Value: cfg.CapabilityPublicKeyB64},
+		{Name: envMCPCapAudience, Value: cfg.CapabilityAudience},
+		{Name: envEgressCredentialNamespace, Value: cfg.CredentialNamespace},
+		{Name: envEgressAgent, Value: agentIdentity},
+		{Name: envPodNamespace, Value: namespace},
 		// Bind the port the manifest rewrite points at — chosen to avoid every other in-pod
 		// port (the managed-agent's own listener collided at the default 8081).
-		{Name: "EGRESS_LISTEN_ADDR", Value: egressSidecarListenAddr},
+		{Name: envEgressListenAddr, Value: egressSidecarListenAddr},
 	}
 	// Routes delivery (J7): prefer the hot-reloadable mounted ConfigMap (EGRESS_ROUTES_FILE) so a
 	// remote-tool-URL edit reloads live without a revision roll; fall back to the static EGRESS_ROUTES
@@ -119,31 +130,31 @@ func egressSidecarContainer(
 	if routesMount != nil {
 		env = append(env, routesEnv...)
 	} else {
-		env = append(env, corev1.EnvVar{Name: "EGRESS_ROUTES", Value: routesJSON})
+		env = append(env, corev1.EnvVar{Name: envEgressRoutes, Value: routesJSON})
 	}
 	// The trust boundary (ADR 0033) the sidecar serves — the agent's registry, or the agent
 	// itself. It supersedes EGRESS_AGENT as the scoping gate so registry teammates can redeem a
 	// relayed capability (team-OBO); empty ⇒ the per-agent gate (standalone / OBO-boundary off).
 	if boundary != "" {
-		env = append(env, corev1.EnvVar{Name: "EGRESS_BOUNDARY", Value: boundary})
+		env = append(env, corev1.EnvVar{Name: envEgressBoundary, Value: boundary})
 	}
 	if cfg.TokenServiceURL != "" {
-		env = append(env, corev1.EnvVar{Name: "TOKEN_SERVICE_URL", Value: cfg.TokenServiceURL})
+		env = append(env, corev1.EnvVar{Name: envTokenServiceURL, Value: cfg.TokenServiceURL})
 	}
 	// The two tool-call timeouts (M146.7). STATIC env, and folded into egressDigest below — a sidecar
 	// env change that does NOT move the revision name is silently dropped by the CreateOrUpdate guard
 	// (the M4 landmine), so an operator would edit the chart value and see nothing happen.
 	if cfg.ResponseHeaderTimeout != "" {
-		env = append(env, corev1.EnvVar{Name: "EGRESS_RESPONSE_HEADER_TIMEOUT", Value: cfg.ResponseHeaderTimeout})
+		env = append(env, corev1.EnvVar{Name: envEgressResponseHeaderTimeout, Value: cfg.ResponseHeaderTimeout})
 	}
 	if cfg.StreamIdleTimeout != "" {
-		env = append(env, corev1.EnvVar{Name: "EGRESS_STREAM_IDLE_TIMEOUT", Value: cfg.StreamIdleTimeout})
+		env = append(env, corev1.EnvVar{Name: envEgressStreamIdleTimeout, Value: cfg.StreamIdleTimeout})
 	}
 	// Record mode (M78, ADR 0071 §1/C1): give the sidecar a fixture sink + flip on capture.
 	// RECORD_CAPABLE=true forces the C2 fail-closed at startup if OBJECT_STORE_ADDR is unset —
 	// STATIC env (reconcile-time constants), never valueFrom.
 	if recordCapable {
-		env = append(env, corev1.EnvVar{Name: "RECORD_CAPABLE", Value: gatewaySyncValue})
+		env = append(env, corev1.EnvVar{Name: envRecordCapable, Value: gatewaySyncValue})
 		env = append(env, objectStoreEnv(devObjectStore)...)
 	}
 	// Tool-call governance (M82, ADR 0074 §1): the resolved tool-policy file path (TOOL_POLICY_FILE)
