@@ -127,6 +127,14 @@ attestation of its caller, its own async consumer, and a run capability minted f
 capability opens one invoke: a bound one, or one already presented, is refused. Anything else is HTTP
 403 `caller_not_allowed`. Agents in no registry are unchanged.
 
+Async deliveries follow the same rule: a CloudEvent reaches a member only with the platform's
+attestation of its sender, in the extension attribute `ampattestation`, matching the envelope's
+sender, registry and role. Hops sent with `mode=async` through the JetStream backend are attested
+by the dispatcher. Anything that publishes straight to a registry's Knative Broker must attach the
+sending agent's attestation, fetched from `POST /api/internal/amp/attestation` with that agent's
+projected pod token (audience `ctxmesh-bff`) and `{"receiver": "<agent>"}`; an event without one is
+refused with 403 and goes to the registry's dead-letter sink.
+
 **Before upgrading,** find anything that calls a member's `/invoke` directly, such as scripts that
 `curl` an agent's cluster-local URL or an edge installed with `extAuth.enabled=false`, and move it to
 `POST /api/invoke` or `/api/runs`. Remove `AGENT_REGISTRY_ID` and `AGENT_ROLE` from `spec.env`; they

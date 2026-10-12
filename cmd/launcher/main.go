@@ -72,16 +72,19 @@ func main() {
 	// registry member (AGENT_REGISTRY_ID injected). nil otherwise, so a
 	// non-mesh agent's /invoke path is unchanged.
 	var guard inboundGuard
+	var ampG *ampGuard
 	if cfg.AMPEnabled() {
 		verifier, vErr := capabilityVerifierFromEnv(os.Getenv)
 		if vErr != nil {
 			fmt.Fprintf(os.Stderr, "launcher: AMP: %v; attested calls and run capabilities are refused\n", vErr)
 		}
-		guard = newAMPGuard(cfg.AMP, tracer, verifier, processLoopbackSecret())
+		ampG = newAMPGuard(cfg.AMP, tracer, verifier, processLoopbackSecret())
+		guard = ampG
 	}
 
 	// Async AMP consumer (eventing path): wired when the agent is a registry
-	// member (a Trigger can deliver CloudEvents to it). The seen-set reuses the
+	// member (a Trigger can deliver CloudEvents to it). The guard admits a delivery
+	// only with the platform's attestation of its sender. The seen-set reuses the
 	// M5 Valkey (MEMORY_BACKEND_ADDR); when that is absent the consumer still
 	// runs but dedupe is fail-open by construction (no store to consult). The
 	// production invoker POSTs the decoded payload back through the launcher's own
@@ -123,6 +126,7 @@ func main() {
 			offload: off,
 			invoke: newProxyInvoker(cfg.ProxyPort, processLoopbackSecret(),
 				&http.Client{Timeout: ampRequestTimeout, CheckRedirect: refuseRedirect}),
+			guard: ampG,
 		}
 	}
 	handler := buildHandler(tracer, prop, upstreamURL, cfg, guard, consumer)

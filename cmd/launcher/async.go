@@ -19,8 +19,9 @@ package main
 // The async AMP consumer + publisher (M7, specs/eventing-scaling.md).
 //
 // A Knative Trigger delivers a CloudEvent to the agent's ksvc; the launcher recognises it,
-// decodes the platform envelope, dedupes on the envelope's messageId against a short-TTL
-// Valkey seen-set, invokes the user container with the payload, and emits an
+// decodes the platform envelope, admits it only with the platform's attestation of its
+// sender (amp_attest.go admitDelivery), dedupes on the envelope's messageId against a
+// short-TTL Valkey seen-set, invokes the user container with the payload, and emits an
 // amp.async.consume span recording the dedupe hit or miss.
 //
 // FAIL-CLOSED on the dedupe store: if it is unreachable or the per-op timeout fires, the
@@ -149,6 +150,8 @@ type asyncConsumer struct {
 	// without a real upstream. In production it POSTs to the launcher's own proxy
 	// path (which spans + forwards to the agent).
 	invoke func(ctx context.Context, env envelope) (int, error)
+	// guard admits a delivery (amp_attest.go admitDelivery). nil ⇒ every delivery is refused.
+	guard *ampGuard
 }
 
 // isCloudEventRequest reports whether an inbound HTTP request carries a
@@ -220,6 +223,18 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 		attribute.String("amp.receiver", env.ReceiverAgentID),
 		attribute.String("amp.conversation.id", env.ConversationID),
 	)
+
+	// Admission comes before dedupe, so a refused delivery cannot spend a message id that a real one
+	// will carry.
+	if c.guard == nil {
+		span.SetStatus(codes.Error, "no admission policy")
+		writeAMPError(w, http.StatusForbidden, errCallerNotAllowed, "this agent admits no async deliveries")
+		return
+	}
+	if !c.guard.admitDelivery(ctx, w, r, &env) {
+		span.SetStatus(codes.Error, "delivery refused")
+		return
+	}
 
 	// Dedupe on messageId (fail-closed, M11). Three outcomes from markSeen:
 	//   (true, nil)  — first-seen: proceed to invoke.

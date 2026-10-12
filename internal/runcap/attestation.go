@@ -42,6 +42,12 @@ import (
 // inbound requests: a callee's code holding its caller's attestation could replay it as that caller.
 const AttestationHeaderName = "X-AMP-Attestation"
 
+// CloudEventAttestationHeader carries the attestation on an async hop: the binary-mode header of the
+// CloudEvent extension attribute "ampattestation". An extension, because a Knative Broker delivers a
+// CloudEvent's attributes and extensions and drops other headers. The platform's dispatcher sets it on
+// every delivery; the receiving launcher requires it and never hands it to the agent's code.
+const CloudEventAttestationHeader = "Ce-Ampattestation"
+
 // DefaultAudience is the audience the BFF mints run capabilities for when MCP_CAPABILITY_AUDIENCE is
 // unset. A verifier that is not told the audience must use this one, or it refuses every capability.
 const DefaultAudience = "ctxmesh-credential-plane"

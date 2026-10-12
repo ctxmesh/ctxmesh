@@ -238,8 +238,16 @@ func newTestConsumer(seen SeenSet, invokeStatus int, invokeErr error) (*asyncCon
 			atomic.AddInt32(&invokeCount, 1)
 			return invokeStatus, invokeErr
 		},
+		guard: acceptingDeliveryGuard(),
 	}
 	return c, &invokeCount
+}
+
+// acceptingDeliveryGuard admits unattested deliveries, as the accept posture does, so a test of dedupe,
+// offload or ack semantics is not a test of admission.
+func acceptingDeliveryGuard() *ampGuard {
+	return newAMPGuard(ampConfig{SelfName: "worker-agent", Namespace: "team-a", AcceptUnattested: true},
+		noop.NewTracerProvider().Tracer("test"), nil, "")
 }
 
 // cloudEventRequest builds an HTTP request carrying env as a CloudEvent (binary

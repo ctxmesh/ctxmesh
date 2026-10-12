@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // THE M141 ASYNC BAR, end to end and against the REAL broker: an agent publishes a hop, it is DURABLY
@@ -54,11 +55,12 @@ func TestAsyncHop_SurvivesADispatcherRestart(t *testing.T) {
 
 	// The receiving agent.
 	var mu sync.Mutex
-	var received []string
+	var received, attestations []string
 	delivered := make(chan struct{}, 1)
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		received = append(received, r.Header.Get("Ce-Id"))
+		attestations = append(attestations, r.Header.Get(runcap.CloudEventAttestationHeader))
 		mu.Unlock()
 		w.WriteHeader(http.StatusAccepted)
 		select {
@@ -96,4 +98,9 @@ func TestAsyncHop_SurvivesADispatcherRestart(t *testing.T) {
 	defer mu.Unlock()
 	assert.Equal(t, []string{"msg-1"}, received,
 		"the target agent receives the CloudEvent, identified by the same messageId it was published with")
+	att, err := signer.Verifier().VerifyAttestation(attestations[0])
+	require.NoError(t, err, "the delivery carries the platform's attestation of its sender")
+	assert.Equal(t, "supervisor", att.Agent, "the sender is the agent whose run published the hop")
+	assert.Equal(t, "reviewer", att.Receiver)
+	assert.Equal(t, "reg-a", att.RegistryID)
 }

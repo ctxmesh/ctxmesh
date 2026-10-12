@@ -6,10 +6,12 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -296,4 +298,100 @@ func TestAsyncDispatch_UnroutableMessageIsAckedNotRetried(t *testing.T) {
 	require.NoError(t, s.deliverAsyncHop(context.Background(), http.DefaultClient, asyncbus.Message{
 		ID: "msg-1", Data: []byte(`{}`), Headers: map[string]string{headerAsyncNamespace: "team-ns"},
 	}), "no receiver ⇒ acked")
+}
+
+// The publish edge records which agent sent a hop, from the verified run: a producer cannot name another
+// sender, and cannot vouch for itself with an attestation of its own.
+func TestAsyncPublish_StampsTheVerifiedSender(t *testing.T) {
+	caller := mkParentRun("run-async-7")
+	s, signer, bus := newAsyncServer(t, caller, cap0("team-ns", "supervisor", "reg-a", "Coordinates."))
+
+	headers := ceHeaders()
+	headers[headerAsyncSender] = "someone-else"
+	headers[runcap.CloudEventAttestationHeader] = "a-producers-own-attestation"
+	rec := postAsyncPublish(t, s, mintCap(t, signer, caller.ID), headers, `{"m":1}`)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	sent := bus.published()[0].Headers
+	assert.Equal(t, "supervisor", sent[headerAsyncSender], "the sender is the verified run's agent")
+	for k := range sent {
+		assert.NotEqual(t, runcap.CloudEventAttestationHeader, http.CanonicalHeaderKey(k),
+			"a producer's attestation is not carried to the receiver")
+	}
+}
+
+// deliverCapturing delivers msg to a recording agent and returns the headers it received, or nil.
+func deliverCapturing(t *testing.T, s *Server, msg asyncbus.Message) (http.Header, error) {
+	t.Helper()
+	var got http.Header
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer agent.Close()
+	s.agentURL = func(string, string) string { return agent.URL }
+	err := s.deliverAsyncHop(context.Background(), agent.Client(), msg)
+	return got, err
+}
+
+func hopFrom(sender string, extra map[string]string) asyncbus.Message {
+	h := map[string]string{
+		"Ce-Id": "msg-1", "Ce-Type": "reviewer", "Content-Type": "application/json",
+		headerAsyncNamespace: "team-ns", headerAsyncRegistry: "reg-a",
+	}
+	if sender != "" {
+		h[headerAsyncSender] = sender
+	}
+	maps.Copy(h, extra)
+	return asyncbus.Message{ID: "msg-1", Subject: asyncbus.Subject("reg-a"), Data: []byte(`{}`), Headers: h}
+}
+
+// The dispatcher attests every hop's sender to its receiver at delivery, from the control plane's
+// current record of the sender, so the receiver can hold the envelope to it (ADR 0153).
+func TestAsyncDispatch_AttestsTheSenderToTheReceiver(t *testing.T) {
+	supervisor := cap0("team-ns", "supervisor", "reg-a", "Coordinates.")
+	supervisor.Role = "orchestrator"
+	s, signer, _ := newAsyncServer(t, nil, supervisor, cap0("team-ns", "reviewer", "reg-a", "Reviews."))
+
+	got, err := deliverCapturing(t, s, hopFrom("supervisor", map[string]string{
+		runcap.CloudEventAttestationHeader: "forged",
+	}))
+	require.NoError(t, err)
+	require.NotNil(t, got, "delivered")
+	att, err := signer.Verifier().VerifyAttestation(got.Get(runcap.CloudEventAttestationHeader))
+	require.NoError(t, err, "the delivery carries the platform's attestation, not the one in the message")
+	assert.Equal(t, runcap.Attestation{
+		Namespace: "team-ns", Agent: "supervisor", RegistryID: "reg-a", Role: "orchestrator", Receiver: "reviewer",
+		IssuedAt: att.IssuedAt, ExpiresAt: att.ExpiresAt,
+	}, att)
+	assert.WithinDuration(t, att.IssuedAt.Add(asyncDeliveryAttestationTTL), att.ExpiresAt, time.Second)
+	assert.Empty(t, got.Get(headerAsyncSender), "the platform's record of the sender is not delivered")
+}
+
+// A sender that is no longer in the registry its hop was published into is not attested into it, and the
+// hop is not delivered: it never will be, so it is acked.
+func TestAsyncDispatch_ASenderOutsideTheRegistryIsNotAttested(t *testing.T) {
+	for name, rows := range map[string][]agentcapability.AgentCapability{
+		"moved to another registry": {
+			cap0("team-ns", "supervisor", "reg-b", "Coordinates."), cap0("team-ns", "reviewer", "reg-a", "Reviews."),
+		},
+		"no longer registered": {cap0("team-ns", "reviewer", "reg-a", "Reviews.")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, _, _ := newAsyncServer(t, nil, rows...)
+			got, err := deliverCapturing(t, s, hopFrom("supervisor", nil))
+			require.NoError(t, err, "acked: it will never become deliverable")
+			assert.Nil(t, got, "not delivered")
+		})
+	}
+}
+
+// A hop published before senders were recorded is delivered without an attestation, so the receiver's
+// posture decides; one carried in the message is never passed on.
+func TestAsyncDispatch_AnUnrecordedSenderIsDeliveredUnattested(t *testing.T) {
+	s, _, _ := newAsyncServer(t, nil, cap0("team-ns", "reviewer", "reg-a", "Reviews."))
+	got, err := deliverCapturing(t, s, hopFrom("", map[string]string{"ce-ampattestation": "forged"}))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Empty(t, got.Get(runcap.CloudEventAttestationHeader))
 }

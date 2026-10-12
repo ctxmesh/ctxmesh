@@ -79,7 +79,7 @@ func TestAsyncPublishHeaders_DropCapabilityAndProof(t *testing.T) {
 	in.Set(runcap.HeaderName, "cap")
 	in.Set(runcap.PoPHeaderName, "proof")
 	in.Set("Ce-Type", "x")
-	out := asyncPublishHeaders(in, "ns", "reg")
+	out := asyncPublishHeaders(in, "ns", "reg", "sender")
 	_, hasCap := out[http.CanonicalHeaderKey(runcap.HeaderName)]
 	_, hasProof := out[http.CanonicalHeaderKey(runcap.PoPHeaderName)]
 	assert.False(t, hasCap)

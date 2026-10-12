@@ -347,6 +347,22 @@ func (s *spentCapabilities) spend(id string, until, now time.Time) (bool, error)
 // admitAttested checks an attested AMP call: the attestation, that it is for this agent in this
 // namespace, that the envelope says what it attests, and then the registry and the callee's policy.
 func (g *ampGuard) admitAttested(ctx context.Context, w http.ResponseWriter, raw, attTok string) bool {
+	env, err := parseIncomingEnvelope(raw)
+	switch {
+	case err != nil:
+		g.deny(ctx, w, "", "malformed AMP envelope")
+		return false
+	case env == nil:
+		g.deny(ctx, w, "", "an attestation without an AMP envelope is not an AMP call")
+		return false
+	}
+	return g.admitAttestedEnvelope(ctx, w, env, attTok)
+}
+
+// admitAttestedEnvelope is admitAttested for an envelope already decoded.
+func (g *ampGuard) admitAttestedEnvelope(
+	ctx context.Context, w http.ResponseWriter, env *envelope, attTok string,
+) bool {
 	if g.verifier == nil {
 		g.deny(ctx, w, "", "this agent cannot verify attestations: it has no capability public key")
 		return false
@@ -367,15 +383,6 @@ func (g *ampGuard) admitAttested(ctx context.Context, w http.ResponseWriter, raw
 		g.deny(ctx, w, caller, fmt.Sprintf("the attestation is for %q, not this agent", att.Receiver))
 		return false
 	}
-	env, err := parseIncomingEnvelope(raw)
-	switch {
-	case err != nil:
-		g.deny(ctx, w, caller, "malformed AMP envelope")
-		return false
-	case env == nil:
-		g.deny(ctx, w, caller, "an attestation without an AMP envelope is not an AMP call")
-		return false
-	}
 	if env.SenderAgentID != att.Agent || env.RegistryID != att.RegistryID || env.Role != att.Role {
 		g.deny(ctx, w, caller, fmt.Sprintf(
 			"the envelope names sender %q in registry %q with role %q, but the caller is attested as %q in %q with role %q",
@@ -383,4 +390,29 @@ func (g *ampGuard) admitAttested(ctx context.Context, w http.ResponseWriter, raw
 		return false
 	}
 	return g.checkEnvelope(ctx, w, env)
+}
+
+// admitDelivery decides an async delivery before it is deduplicated or reaches the agent. It is admitted
+// as an attested call is: the sender's attestation (runcap.CloudEventAttestationHeader), made for this
+// agent, must vouch for the envelope's sender, registry and role. The JetStream dispatcher attests the
+// sender of every hop it delivers; a producer publishing to a Knative Broker attaches its own attestation,
+// fetched from the BFF as for a synchronous hop. Without one, only the accept posture admits a delivery,
+// and its envelope is then checked as it claims when it is invoked. A refusal is written as the typed 403,
+// which a Knative Broker does not retry and the JetStream dispatcher acknowledges.
+func (g *ampGuard) admitDelivery(ctx context.Context, w http.ResponseWriter, r *http.Request, env *envelope) bool {
+	span := trace.SpanFromContext(ctx)
+	if attTok := strings.TrimSpace(r.Header.Get(runcap.CloudEventAttestationHeader)); attTok != "" {
+		if !g.admitAttestedEnvelope(ctx, w, env, attTok) {
+			return false
+		}
+		span.SetAttributes(attribute.String("amp.admission", admissionAttested))
+		return true
+	}
+	if !g.cfg.AcceptUnattested {
+		g.deny(ctx, w, "", "an async AMP delivery must carry the platform's attestation of its sender")
+		return false
+	}
+	span.AddEvent("amp.unattested_admitted")
+	span.SetAttributes(attribute.String("amp.admission", admissionUnattested))
+	return true
 }

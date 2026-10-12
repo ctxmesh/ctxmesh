@@ -434,6 +434,7 @@ func newTestConsumerWithOffload(off *offloader, invokeStatus int, invokeErr erro
 			mu.Unlock()
 			return invokeStatus, invokeErr
 		},
+		guard: acceptingDeliveryGuard(),
 	}
 	return c, &lastPayload
 }

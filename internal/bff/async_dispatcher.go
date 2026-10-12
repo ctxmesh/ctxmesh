@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // The async AMP DISPATCHER (M141.4, ADR 0121) — the half that turns a durable message back into a call.
@@ -51,6 +52,10 @@ const (
 	// fixed name on purpose: a generated one would create a NEW consumer on every boot, so the messages
 	// waiting for the old one would never be delivered — the exact failure durability is meant to prevent.
 	asyncDurableName = "ctxmesh-async-dispatcher"
+
+	// asyncDeliveryAttestationTTL bounds the attestation minted for one delivery attempt: it is used at once,
+	// by a receiver that may be cold-starting.
+	asyncDeliveryAttestationTTL = asyncDispatchTimeout + time.Minute
 
 	// asyncAllRegistries is the subject filter covering every registry's traffic. One dispatcher serves
 	// them all; isolation is not weakened by that, because the callee still hard-denies a cross-registry
@@ -127,17 +132,25 @@ func (s *Server) deliverAsyncHop(ctx context.Context, client *http.Client, msg a
 		return nil // ack: this will never become deliverable
 	}
 
+	attestation, deliverable, err := s.attestAsyncSender(ctx, msg, namespace, registryID, receiver)
+	if err != nil || !deliverable {
+		return err // an error nacks; undeliverable is acked, and logged there
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		s.agentEndpoint(receiver, namespace), bytes.NewReader(msg.Data))
 	if err != nil {
 		return fmt.Errorf("async dispatch: building the delivery request: %w", err)
 	}
 	for k, v := range msg.Headers {
-		switch k {
-		case headerAsyncNamespace, headerAsyncRegistry:
-			continue // platform routing context; not part of the CloudEvent the agent sees
+		switch http.CanonicalHeaderKey(k) {
+		case headerAsyncNamespace, headerAsyncRegistry, headerAsyncSender, runcap.CloudEventAttestationHeader:
+			continue // platform context; not part of the CloudEvent the agent sees
 		}
 		req.Header.Set(k, v)
+	}
+	if attestation != "" {
+		req.Header.Set(runcap.CloudEventAttestationHeader, attestation)
 	}
 
 	resp, err := client.Do(req)
@@ -158,6 +171,43 @@ func (s *Server) deliverAsyncHop(ctx context.Context, client *http.Client, msg a
 		return nil
 	}
 	return fmt.Errorf("async dispatch: %s/%s answered %d", namespace, receiver, resp.StatusCode)
+}
+
+// attestAsyncSender mints the platform's attestation of a hop's sender for its receiver, which a registry
+// member requires before it admits a delivery (ADR 0153). The sender is the agent whose verified run
+// published the hop; its registry and role are read now, from the capability registry, so a sender that
+// left the registry the hop was published into since is not attested into it. A message published before
+// senders were recorded is delivered without one, and the receiver's posture decides.
+//
+// deliverable is false, with the reason logged, for a hop that can never be attested; the caller acks it.
+func (s *Server) attestAsyncSender(
+	ctx context.Context, msg asyncbus.Message, namespace, registryID, receiver string,
+) (attestation string, deliverable bool, err error) {
+	senderName := strings.TrimSpace(msg.Headers[headerAsyncSender])
+	if senderName == "" || s.capabilitySigner == nil {
+		return "", true, nil
+	}
+	sender, ok, err := s.agentCapabilities.Get(ctx, namespace, senderName)
+	if err != nil {
+		return "", false, fmt.Errorf("async dispatch: resolving the sender %s/%s: %w", namespace, senderName, err)
+	}
+	if !ok || sender.RegistryID != registryID {
+		s.log.Info("async dispatch: the sender is no longer in the registry it published into; not delivering",
+			"messageId", msg.ID, "sender", namespace+"/"+senderName, "registry", registryID)
+		return "", false, nil
+	}
+	attestation, err = s.capabilitySigner.MintAttestation(runcap.AttestationRequest{
+		Namespace:  namespace,
+		Agent:      senderName,
+		RegistryID: sender.RegistryID,
+		Role:       sender.Role,
+		Receiver:   receiver,
+		TTL:        asyncDeliveryAttestationTTL,
+	})
+	if err != nil {
+		return "", false, fmt.Errorf("async dispatch: attesting the sender of %q: %w", msg.ID, err)
+	}
+	return attestation, true, nil
 }
 
 // agentEndpoint is the in-cluster address of an agent's service — the same shape the launcher's delegate

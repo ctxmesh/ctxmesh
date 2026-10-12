@@ -45,8 +45,18 @@ revision on upgrade, with its BFF token, the capability key and the posture adde
 revision stays approved. `controllerManager.amp.requireAttestation: false` keeps admitting
 unattested calls during a staged upgrade, while still refusing a bad attestation; the
 `amp.admission` span attribute says how each call was admitted, so the flag can be turned back on
-once `unattested` stops appearing. Async deliveries (Knative Eventing and the JetStream dispatcher)
-still carry a self-asserted envelope.
+once `unattested` stops appearing.
+
+Async deliveries are held to the same rule. A member's launcher took any POST with a `Ce-Id` header
+as a CloudEvent and admitted its envelope as its own async consumer, so any pod could reach a member
+that way too. A delivery is now admitted only with the platform's attestation of its sender, made
+for the receiver and carried as the CloudEvent extension `ampattestation`, and the envelope must
+match it; anything else is HTTP 403 `caller_not_allowed`, before the message id is recorded. The
+JetStream dispatcher attests the sender of every hop it delivers: the publish edge records which
+agent's run published it, and the dispatcher reads that agent's registry and role when it delivers,
+not delivering a hop whose sender has left the registry. A producer publishing straight to a
+registry's Knative Broker must attach its own attestation, fetched from
+`POST /api/internal/amp/attestation` with the sending agent's pod token.
 
 **Security: the Langfuse key was readable in every agent's pod spec.** The trace collector carried
 it as a literal environment value, so anyone who could `kubectl get pods` in an agent namespace
