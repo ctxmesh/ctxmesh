@@ -487,6 +487,10 @@ release-truth-sdks: ## Ask all 7 published artifacts what version they actually 
 release-truth: ## Assert the release publishes every artifact an install needs, at a version (M154). Static, no cluster.
 	./hack/release-truth.sh
 
+.PHONY: bff-route-callers
+bff-route-callers: ## Assert every BFF /api route has a caller in the console, an SDK or the platform, or a reasoned allowlist entry (m184.38). Needs the docs checkout.
+	./hack/bff-route-callers.sh
+
 .PHONY: provider-parity
 provider-parity: ## Assert the console offers exactly the providers the BFF supports (M153). Static, no cluster.
 	./hack/provider-parity.sh

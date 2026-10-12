@@ -68,8 +68,8 @@ fi
 # binding and reaches the console; `internal/controlplane/namespacetenant/` decides whether the
 # namespace picker has anything in it. Both are console surfaces and neither is under ui/.
 MAP='
-console;^ui/;ux-review tier0 tier2-ui
-console;^internal/bff/;ux-review tier0 tier1
+console;^ui/;ux-review tier0 tier2-ui bff-route-callers
+console;^internal/bff/;ux-review tier0 tier1 bff-route-callers
 console-authz;^config/rbac/;flow-completability ux-review tier1
 console-authz;^deploy/helm/.*/(dex|control-plane)\.yaml$;flow-completability install-truth ux-review
 console-authz;^internal/controlplane/namespacetenant/;flow-completability tier0 tier1
@@ -96,13 +96,13 @@ api;^api/;tier0 tier1 helm-generate crd-version-parity ux-review
 # internal/controller/, and its config decides whether a run is visible at all -- the gap that hid a
 # trace-fragmentation defect and a memory path that emitted no spans.
 runtime;^internal/telemetry/;tier0 tier1 tier2
-runtime;^cmd/launcher/;tier0 tier1 sdk-live
+runtime;^cmd/launcher/;tier0 tier1 sdk-live bff-route-callers
 runtime;^internal/controller/;tier0 tier1 tier2 prereqs-are-real
 runtime;^internal/(run|gateway|egress|pki|statelayer)/;tier0 tier1
 # The run-capability wire format and proof-of-possession, ADR 0124: minted and bound by the BFF,
 # held and proven by the launcher, verified by the egress sidecar and the state-layer proxy.
 runtime;^internal/runcap/;tier0 tier1 tier2 sdk-live
-sdk;^sdk/;sdk-contract sdk-readme-truth tier0
+sdk;^sdk/;sdk-contract sdk-readme-truth tier0 bff-route-callers
 # The credential plane behind the token service: where an on-behalf-of grant is stored, sealed and
 # refreshed. A change here decides whether a tool call can authenticate at all, so it needs the e2e
 # credential flows, not only unit tests.

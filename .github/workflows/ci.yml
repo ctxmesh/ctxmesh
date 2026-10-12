@@ -426,6 +426,13 @@ jobs:
         env:
           CTXMESH_SITE: ${{ github.workspace }}/ctxmesh.github.io
         run: ./hack/shipped-truth.sh
+      # Every /api route the BFF serves has a caller in the console, an SDK or the platform, or a
+      # reasoned entry in hack/bff-route-callers.allow. Documented-only entries are checked against
+      # the docs checkout above, so the allowlist cannot claim a route the docs do not show.
+      - name: BFF route callers (no route without a caller)
+        env:
+          CTXMESH_SITE: ${{ github.workspace }}/ctxmesh.github.io
+        run: ./hack/bff-route-callers.sh
 
   envtest:
     name: envtest
