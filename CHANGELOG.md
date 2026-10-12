@@ -167,6 +167,18 @@ acknowledged, and the dispatcher logs every failed delivery with its reason, so 
 fails where it can be seen once its retries are spent. Migration 0031 adds the address; a hop to an
 agent whose row the controller has not rewritten since the upgrade is retried until it has.
 
+**Fixed: an async AMP message whose delivery failed was lost instead of retried.** With session
+memory on, an agent's async consumer recorded a message id as seen before invoking the agent and
+never cleared it, so when the invoke failed the broker's retry was answered 204 as a duplicate and
+the message was dropped without reaching the dead-letter queue. The consumer now claims the id while
+the agent processes the message, records it as done only once the agent succeeded, and releases it
+when the agent failed, so a retry is processed and a message that keeps failing reaches the
+dead-letter queue. A duplicate that arrives while the first delivery is still being processed is
+answered 503 and retried. A claim expires after two minutes, so a message whose consumer died while
+invoking the agent is processed by a later JetStream retry; Knative Eventing's retries finish sooner,
+so there it goes to the dead-letter queue. The state-layer proxy's `/dedup` endpoint takes an `op`
+(`claim`, `complete`, `release`); a launcher that sends none gets the previous behaviour.
+
 **Security: the Langfuse key was readable in every agent's pod spec.** The trace collector carried
 it as a literal environment value, so anyone who could `kubectl get pods` in an agent namespace
 could read it. And an agent whose namespace had no `langfuse-otlp` Secret was given the *platform*

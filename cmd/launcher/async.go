@@ -20,9 +20,11 @@ package main
 //
 // A Knative Trigger delivers a CloudEvent to the agent's ksvc; the launcher recognises it,
 // decodes the platform envelope, admits it only with the platform's attestation of its
-// sender (amp_attest.go admitDelivery), dedupes on the envelope's messageId against a
-// short-TTL Valkey seen-set, invokes the user container with the payload, and emits an
-// amp.async.consume span recording the dedupe hit or miss.
+// sender (amp_attest.go admitDelivery), claims the envelope's messageId in Valkey
+// (deliveryclaim), invokes the user container with the payload, and emits an
+// amp.async.consume span recording the dedupe hit or miss. The claim becomes a done marker
+// when the agent succeeded and is released when it failed, so a retry of a failed delivery
+// is processed and only a delivery that succeeded is ever answered as a duplicate.
 //
 // FAIL-CLOSED on the dedupe store: if it is unreachable or the per-op timeout fires, the
 // message is NOT processed — the consumer NACKs so the broker retries. A blip means the
@@ -36,6 +38,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -50,6 +54,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/ctxmesh/ctxmesh/internal/deliveryclaim"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
@@ -62,6 +67,15 @@ const (
 	// the M11 retention work (specs/eventing-scaling.md §"Open questions":
 	// dedupe-window TTL tuning per registry).
 	dedupeTTL = 10 * time.Minute
+
+	// dedupeClaimTTL is how long a delivery holds its messageId while it is processed. It
+	// outlasts asyncProcessTimeout, so a live claim never expires under its holder, and it is
+	// what lets the message through again once a consumer that died holding it is gone: the
+	// JetStream dispatcher's later retries land past it.
+	dedupeClaimTTL = 2 * time.Minute
+
+	// asyncProcessTimeout bounds rehydrating and invoking one delivery, inside its claim.
+	asyncProcessTimeout = 90 * time.Second
 
 	// dedupeOpTimeout bounds a single seen-set round-trip. A slow/hung Valkey
 	// must never wedge the consume path beyond this — on timeout we fail CLOSED
@@ -78,23 +92,21 @@ const (
 	maxAsyncBody = 1 << 20
 )
 
-// SeenSet is the minimal dedupe-store surface the async consumer needs. It is an
-// interface (not *redis.Client) so unit tests drive the consumer against a fake
-// — including one that ERRORS, to prove the fail-open behaviour — without a real
-// Valkey.
+// SeenSet is the dedupe store the async consumer claims message ids in (deliveryclaim). It is
+// an interface so unit tests drive the consumer against a fake, including one that errors.
+// An error from any method means the store could not answer.
 type SeenSet interface {
-	// MarkSeen atomically records messageID as seen with the given TTL and
-	// reports whether this was the FIRST sighting: true ⇒ first-seen (process),
-	// false ⇒ already seen within the window (duplicate — ack without
-	// re-invoking). An error means the store is unreachable; the caller MUST
-	// fail closed (NACK — do not process, let the broker retry).
-	MarkSeen(ctx context.Context, messageID string, ttl time.Duration) (bool, error)
+	// Claim claims messageID for the delivery identified by token, for ttl.
+	Claim(ctx context.Context, messageID, token string, ttl time.Duration) (deliveryclaim.State, error)
+	// Complete records messageID as processed for ttl.
+	Complete(ctx context.Context, messageID string, ttl time.Duration) error
+	// Release drops token's claim on messageID so the next delivery of it is processed.
+	Release(ctx context.Context, messageID, token string) error
 }
 
-// redisSeenSet is the production SeenSet backed by the same go-redis client the
-// M5 memory endpoint uses (MEMORY_BACKEND_ADDR / the injected Valkey). SetNX is
-// a single atomic op: it sets the key iff absent and returns whether it did, so
-// first-seen vs duplicate is one round-trip with no read-modify-write race.
+// redisSeenSet is the SeenSet over the Valkey the M5 memory endpoint uses
+// (MEMORY_BACKEND_ADDR), for agents that reach it directly rather than through the
+// state-layer proxy.
 type redisSeenSet struct {
 	rdb *redis.Client
 }
@@ -110,11 +122,18 @@ func newRedisSeenSet(addr string) *redisSeenSet {
 	}
 }
 
-func (s *redisSeenSet) MarkSeen(ctx context.Context, messageID string, ttl time.Duration) (bool, error) {
-	// SetNX: set key=1 iff absent, with a TTL, atomically. Result() is true when
-	// the key was newly set (first-seen), false when it already existed
-	// (duplicate). A single op — no race between a GET and a SET.
-	return s.rdb.SetNX(ctx, dedupeKeyPrefix+messageID, 1, ttl).Result()
+func (s *redisSeenSet) Claim(
+	ctx context.Context, messageID, token string, ttl time.Duration,
+) (deliveryclaim.State, error) {
+	return deliveryclaim.Claim(ctx, s.rdb, dedupeKeyPrefix+messageID, token, ttl)
+}
+
+func (s *redisSeenSet) Complete(ctx context.Context, messageID string, ttl time.Duration) error {
+	return deliveryclaim.Complete(ctx, s.rdb, dedupeKeyPrefix+messageID, ttl)
+}
+
+func (s *redisSeenSet) Release(ctx context.Context, messageID, token string) error {
+	return deliveryclaim.Release(ctx, s.rdb, dedupeKeyPrefix+messageID, token)
 }
 
 // asyncConfig is the async-consumer configuration. The consumer is enabled iff
@@ -181,12 +200,14 @@ func isCloudEventRequest(r *http.Request) bool {
 //
 // Ack semantics (Knative Eventing at-least-once): a 2xx acks the event (the
 // broker drops it); a non-2xx is a NACK (the broker retries, then DLQs after the
-// retry budget). A DUPLICATE is acked (2xx, no re-invoke) — it has already been
-// processed. A decode failure is a 400 (a malformed event the broker should not
-// retry endlessly — it will DLQ). An agent FAILURE is a 502 NACK (retry/DLQ). A
-// DEDUPE-STORE ERROR is a 503 NACK (fail-closed: broker retries; on a transient
-// blip the retry's dedupe check succeeds → exactly-once; persistent outage →
-// bounded retries exhaust → DLQ, no infinite block).
+// retry budget). A DUPLICATE of a delivery that succeeded is acked (2xx, no
+// re-invoke); one whose first delivery is still being processed is a 503 NACK. A
+// decode failure is a 400 (a malformed event the broker should not retry endlessly
+// — it will DLQ). An agent FAILURE is a 502 NACK (retry/DLQ), and releases the
+// message id so the retry is processed. A DEDUPE-STORE ERROR is a 503 NACK
+// (fail-closed: broker retries; on a transient blip the retry's dedupe check
+// succeeds → exactly-once; persistent outage → bounded retries exhaust → DLQ, no
+// infinite block).
 func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 	ctx, span := c.tracer.Start(r.Context(), "amp.async.consume",
 		trace.WithSpanKind(trace.SpanKindConsumer))
@@ -236,13 +257,15 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Dedupe on messageId (fail-closed, M11). Three outcomes from markSeen:
-	//   (true, nil)  — first-seen: proceed to invoke.
-	//   (false, nil) — duplicate within the TTL: ack (204) without re-invoking.
-	//   (_, err)     — dedupe-store error/timeout: NACK (503) so the broker
-	//                  retries; a transient blip means the retry succeeds →
-	//                  exactly-once; persistent outage → DLQ (M7 machinery).
-	firstSeen, seenErr := c.markSeen(ctx, span, env.MessageID)
+	// Dedupe on messageId (fail-closed, M11) by claiming it for this delivery:
+	//   claimed  — process it, then complete the claim (success) or release it (failure).
+	//   done     — a delivery of it succeeded: ack (204) without re-invoking.
+	//   inflight — another delivery holds it: 503, so the broker retries once that one has
+	//              finished or its claim has expired. Acking here would lose the message
+	//              whenever the holder fails or died holding it.
+	//   error    — the store could not answer: 503, never process.
+	token := newClaimToken()
+	state, seenErr := c.claim(ctx, span, env.MessageID, token)
 	if seenErr != nil {
 		// Fail-closed: do NOT process — NACK so the broker retries.
 		span.SetStatus(codes.Error, "dedupe store error: "+seenErr.Error())
@@ -250,31 +273,47 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusServiceUnavailable, "dedupe store unavailable: "+seenErr.Error())
 		return
 	}
-	if !firstSeen {
+	switch state {
+	case deliveryclaim.Done:
 		span.SetAttributes(attribute.Bool("amp.dedup_hit", true))
 		span.AddEvent("amp.async.dedup_hit")
 		// 204: acked, not re-processed.
 		w.WriteHeader(http.StatusNoContent)
 		return
+	case deliveryclaim.InFlight:
+		span.SetAttributes(attribute.Bool("amp.dedup_hit", false), attribute.Bool("amp.dedup_in_flight", true))
+		writeJSONError(w, http.StatusServiceUnavailable, "another delivery of this message is being processed; retry")
+		return
 	}
 	span.SetAttributes(attribute.Bool("amp.dedup_hit", false))
 
+	procCtx, cancel := context.WithTimeout(ctx, asyncProcessTimeout)
+	defer cancel()
+	if failure := c.process(procCtx, span, &env); failure != "" {
+		// NACK (502) so the broker retries, then dead-letters after its retry budget. The
+		// claim is released first, or the retry would be answered as a duplicate.
+		c.release(ctx, span, env.MessageID, token)
+		writeJSONError(w, http.StatusBadGateway, failure)
+		return
+	}
+	c.complete(ctx, span, env.MessageID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// process rehydrates the payload and invokes the agent with it. It returns "" when the agent
+// processed the message (any status below 500), otherwise why it was not processed.
+func (c *asyncConsumer) process(ctx context.Context, span trace.Span, env *envelope) string {
 	// Blob rehydrate (m7.6b): if the payload is a $ref (offloaded on publish
 	// because it was >256KiB), GET the original bytes from the object store BEFORE
 	// invoking the agent so the agent sees the real payload — never a $ref. A
-	// dangling / failed GET is a NACK (502): the message DLQs rather than
-	// delivering a broken payload (specs/eventing-scaling.md §"Edge cases:
-	// Oversize payload"). Runs AFTER dedupe (a duplicate is acked without a
-	// needless GET) and BEFORE invoke (the X-A2A-Envelope the invoker stamps
-	// carries the rehydrated payload).
+	// dangling / failed GET is a failure: the message DLQs rather than delivering a
+	// broken payload (specs/eventing-scaling.md §"Edge cases: Oversize payload").
 	if c.offload != nil {
 		rehydrated, wasRef, rErr := c.offload.rehydrate(ctx, env.Payload)
 		if rErr != nil {
 			span.SetStatus(codes.Error, "rehydrate payload: "+rErr.Error())
 			span.SetAttributes(attribute.String("amp.async.error", "rehydrate_failed"))
-			// NACK (502): a $ref we cannot resolve must DLQ, not reach the agent.
-			writeJSONError(w, http.StatusBadGateway, "rehydrate payload failed: "+rErr.Error())
-			return
+			return "rehydrate payload failed: " + rErr.Error()
 		}
 		if wasRef {
 			span.SetAttributes(
@@ -285,56 +324,80 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// First sighting: invoke the agent with the envelope payload.
-	status, err := c.invoke(ctx, env)
+	status, err := c.invoke(ctx, *env)
 	if err != nil {
-		// The agent could not be reached / errored: NACK (502) so the broker
-		// retries, then DLQs after the retry budget. NOT an ack — the message was
-		// not processed.
 		span.SetStatus(codes.Error, "agent invoke: "+err.Error())
 		span.SetAttributes(attribute.String("amp.async.error", "agent_unreachable"))
-		writeJSONError(w, http.StatusBadGateway, "agent invoke failed: "+err.Error())
-		return
+		return "agent invoke failed: " + err.Error()
 	}
 	span.SetAttributes(attribute.Int("amp.agent.status", status))
 	if status >= http.StatusInternalServerError {
-		// The agent processed but failed (5xx): NACK so the broker retries/DLQs.
-		// A poison message that fails every time lands in the DLQ after the retry
-		// budget — the 🧪. We surface the agent's status so the broker's
-		// retry/DLQ logic sees a failure.
+		// The agent processed but failed: a poison message that fails every time lands in
+		// the DLQ after the retry budget.
 		span.SetStatus(codes.Error, fmt.Sprintf("agent status %d", status))
-		w.WriteHeader(http.StatusBadGateway)
-		return
+		return fmt.Sprintf("agent answered %d", status)
 	}
-	// Processed successfully: ack.
-	w.WriteHeader(http.StatusNoContent)
+	return ""
 }
 
-// markSeen consults the seen-set for messageID and returns (firstSeen, err).
-// A nil store (dedupe disabled) yields (true, nil) — treat every message as
-// first-seen when there is no store to consult. An error from the store (Valkey
-// unreachable, per-op timeout) is returned as-is so the caller can FAIL CLOSED
-// (NACK — do not process), preventing a dedupe-store blip from causing
-// double-processing (M11, resolves M7 deferral). The error and the fail-closed
-// decision are recorded on the span for observability.
-func (c *asyncConsumer) markSeen(ctx context.Context, span trace.Span, messageID string) (bool, error) {
+// newClaimToken identifies one delivery's claim, so only that delivery can release it.
+func newClaimToken() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:]) // crypto/rand.Read never returns an error
+	return hex.EncodeToString(b[:])
+}
+
+// claim claims messageID for this delivery. With no store (dedupe disabled) every
+// delivery is processed. A store error is returned as-is so consume FAILS CLOSED (NACK —
+// do not process), so a dedupe-store blip cannot cause double-processing (M11).
+func (c *asyncConsumer) claim(
+	ctx context.Context, span trace.Span, messageID, token string,
+) (deliveryclaim.State, error) {
 	if c.seen == nil {
 		span.SetAttributes(attribute.Bool("amp.dedup_enabled", false))
-		return true, nil
+		return deliveryclaim.Claimed, nil
 	}
 	opCtx, cancel := context.WithTimeout(ctx, dedupeOpTimeout)
 	defer cancel()
-
-	firstSeen, err := c.seen.MarkSeen(opCtx, messageID, dedupeTTL)
+	state, err := c.seen.Claim(opCtx, messageID, token, dedupeClaimTTL)
 	if err != nil {
-		// Fail CLOSED: surface the error so consume NACKs. Record it on the span
-		// so the operator can observe the fail-closed decision and error detail.
 		span.AddEvent("amp.async.dedup_fail_closed", trace.WithAttributes(
 			attribute.String("error", err.Error()),
 		))
-		return false, err
+		return "", err
 	}
-	return firstSeen, nil
+	return state, nil
+}
+
+// complete records messageID as processed. If the store cannot answer, the claim lapses
+// after dedupeClaimTTL; the delivery is still acked, since the agent did the work and a
+// redelivery would do it twice.
+func (c *asyncConsumer) complete(ctx context.Context, span trace.Span, messageID string) {
+	if c.seen == nil {
+		return
+	}
+	opCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dedupeOpTimeout)
+	defer cancel()
+	if err := c.seen.Complete(opCtx, messageID, dedupeTTL); err != nil {
+		span.AddEvent("amp.async.dedup_complete_failed", trace.WithAttributes(
+			attribute.String("error", err.Error()),
+		))
+	}
+}
+
+// release drops this delivery's claim after a failure, so the broker's retry is processed.
+// If the store cannot answer, retries are refused as in flight until the claim lapses.
+func (c *asyncConsumer) release(ctx context.Context, span trace.Span, messageID, token string) {
+	if c.seen == nil {
+		return
+	}
+	opCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dedupeOpTimeout)
+	defer cancel()
+	if err := c.seen.Release(opCtx, messageID, token); err != nil {
+		span.AddEvent("amp.async.dedup_release_failed", trace.WithAttributes(
+			attribute.String("error", err.Error()),
+		))
+	}
 }
 
 // newProxyInvoker builds the production invoke func: it POSTs the envelope's
