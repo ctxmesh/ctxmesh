@@ -45,6 +45,7 @@ type AgentCapability struct {
 	Namespace   string
 	Agent       string
 	RegistryID  string   // the agent's AgentRegistry membership — the discovery scope; "" ⇒ unscoped
+	Role        string   // the agent's registry role (spec.role), which the BFF attests for AMP (ADR 0153)
 	Description string   // the natural-language capability statement (the embedded text); "" ⇒ not discoverable
 	Tags        []string // coarse labels; they FILTER the candidate set, they never rank
 	Ready       bool     // the agent's Ready condition at registration — a caller may skip a not-Ready agent

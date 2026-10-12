@@ -58,7 +58,7 @@ func TestStore_RegistrationRoundTrip(t *testing.T) {
 		assert.Empty(t, got, "an empty registry has no discoverable agents")
 
 		want := agentcapability.AgentCapability{
-			Namespace: "ns1", Agent: "summarizer", RegistryID: "team-a",
+			Namespace: "ns1", Agent: "summarizer", RegistryID: "team-a", Role: "worker",
 			Description: "Summarizes long documents and extracts action items.",
 			Tags:        []string{"summarization", "pdf"}, Ready: true,
 		}
@@ -68,7 +68,8 @@ func TestStore_RegistrationRoundTrip(t *testing.T) {
 		require.Len(t, got, 1)
 		assert.Equal(t, want, got[0], "the registration round-trips verbatim (descriptor + tags + readiness)")
 
-		// Re-registering the same agent REPLACES its descriptor (a spec edit, not a duplicate row).
+		// Re-registering the same agent REPLACES its descriptor and role (a spec edit, not a duplicate row).
+		want.Role = "reviewer"
 		want.Description = "Answers questions about SQL schemas."
 		want.Tags = nil
 		want.Ready = false
@@ -84,6 +85,7 @@ func TestStore_RegistrationRoundTrip(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, ok)
 		assert.Equal(t, "team-a", self.RegistryID, "the caller's own row supplies its discovery scope")
+		assert.Equal(t, "reviewer", self.Role, "and the role the BFF attests for it")
 		_, ok, err = s.Get(ctx, "ns1", "nobody")
 		require.NoError(t, err)
 		assert.False(t, ok, "an unregistered agent has no scope (fail-closed)")
@@ -136,7 +138,7 @@ func TestStore_MembershipOnlyRowScopesButIsNotACandidate(t *testing.T) {
 	eachStore(t, func(t *testing.T, s agentcapability.Store) {
 		ctx := context.Background()
 		require.NoError(t, s.Set(ctx, agentcapability.AgentCapability{
-			Namespace: "ns1", Agent: "supervisor", RegistryID: "team-a", Ready: true, // no description
+			Namespace: "ns1", Agent: "supervisor", RegistryID: "team-a", Role: "orchestrator", Ready: true, // no description
 		}))
 		require.NoError(t, s.Set(ctx, agentcapability.AgentCapability{
 			Namespace: "ns1", Agent: "worker", RegistryID: "team-a",
@@ -147,6 +149,7 @@ func TestStore_MembershipOnlyRowScopesButIsNotACandidate(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, ok, "a member registers even with nothing advertised — it still needs a scope")
 		assert.Equal(t, "team-a", self.RegistryID)
+		assert.Equal(t, "orchestrator", self.Role, "a member's role is recorded with nothing advertised")
 		assert.Empty(t, self.Description)
 
 		got, err := s.List(ctx, "ns1", "team-a")
