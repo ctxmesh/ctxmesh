@@ -228,7 +228,8 @@ func parseAgentRunLimit(raw string) int {
 // The response is Server-Sent Events. Failures surface, never hang:
 //   - anon (no token)                → 401 before any K8s call.
 //   - caller denied pods list/log    → 403 BEFORE the SSE stream opens.
-//   - agent has no pod yet (starting) → a "waiting" SSE event, HTTP 200, no 500.
+//   - agent has no pod yet, or its container has not started (scheduling, pulling, init)
+//     → a "waiting" SSE event, HTTP 200, and the connection closes; the console asks again.
 //   - the pod's log stream ends       → a terminal SSE event, the connection closes.
 func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request) {
 	// The pod-log stream needs a CALLER-SCOPED typed core client (the CRD client
@@ -275,7 +276,7 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pod := selectActivePod(pods.Items)
+	pod := activePod(pods.Items)
 
 	// We are committed to an SSE response from here on. Set the streaming headers
 	// and get a flusher so each event reaches the browser immediately.
@@ -284,11 +285,21 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if pod == "" {
+	if pod == nil {
 		// The agent is still starting — no pod is running yet. Emit a waiting event
 		// and close cleanly (NOT a 500): the UI shows "waiting for the agent to
 		// start" and retries. This is the pod-not-running graceful path.
 		writeSSEEvent(w, flusher, "waiting", "agent is starting; no running pod yet")
+		return
+	}
+	if container == "" {
+		container = logContainer(pod)
+	}
+	if !containerStarted(pod, container) {
+		// A pod that is scheduling, pulling its image or running init containers has no
+		// log to read: the API server refuses it, or answers an empty log for a pod not yet
+		// on a node. Either would end the tail just before the agent comes up.
+		writeSSEEvent(w, flusher, "waiting", "agent is starting; its container has not started yet")
 		return
 	}
 
@@ -296,13 +307,13 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request) {
 	// list pods but not read their logs) can only be surfaced as an SSE error event
 	// now — the SSE headers (200) are already written. It is still SURFACED (an
 	// "error" event the UI shows), never a silent hang.
-	stream, err := accessor.StreamPodLog(r.Context(), ns, pod, container, follow, tail)
+	stream, err := accessor.StreamPodLog(r.Context(), ns, pod.Name, container, follow, tail)
 	if err != nil {
 		if apierrors.IsForbidden(err) {
 			writeSSEEvent(w, flusher, "error", "forbidden: not allowed to read pod logs")
 			return
 		}
-		s.log.Error(err, "open pod-log stream failed", "namespace", ns, "pod", pod)
+		s.log.Error(err, "open pod-log stream failed", "namespace", ns, "pod", pod.Name, "container", container)
 		writeSSEEvent(w, flusher, "error", "failed to open log stream")
 		return
 	}
@@ -374,13 +385,13 @@ func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, event, data stri
 	flusher.Flush()
 }
 
-// selectActivePod picks the pod whose logs to tail from an agent's pods. It
-// prefers a Running pod (the live revision serving traffic); if none is Running it
-// falls back to the newest pod by creation time (e.g. a Pending pod that is still
-// pulling the image, so the user can watch it come up). It returns "" when there
-// are no pods at all — the agent is still starting / scaled to zero. Ties are
-// broken by name for a deterministic pick.
-func selectActivePod(pods []corev1.Pod) string {
+// activePod picks the pod whose logs to tail from an agent's pods. It prefers a
+// Running pod (the live revision serving traffic); if none is Running it falls back
+// to the newest pod by creation time (e.g. a Pending pod that is still pulling the
+// image, so the user can watch it come up). It returns nil when there are no pods at
+// all — the agent is still starting / scaled to zero. Ties are broken by name for a
+// deterministic pick.
+func activePod(pods []corev1.Pod) *corev1.Pod {
 	best := -1
 	for i := range pods {
 		if best == -1 || betterPod(&pods[i], &pods[best]) {
@@ -388,9 +399,56 @@ func selectActivePod(pods []corev1.Pod) string {
 		}
 	}
 	if best == -1 {
-		return ""
+		return nil
 	}
-	return pods[best].Name
+	return &pods[best]
+}
+
+// defaultContainerAnnotation is the standard declaration of a pod's default container.
+const defaultContainerAnnotation = "kubectl.kubernetes.io/default-container"
+
+// agentUserContainer is the agent's own container in every agent pod (the controller names it).
+const agentUserContainer = "user-container"
+
+// logContainer is the container to tail when the request names none. The API server refuses a
+// log read without a container name on a pod with more than one, and does not consult the
+// default-container annotation itself (kubectl does), so every Knative pod, which runs
+// queue-proxy beside the agent, needs a name. "" leaves the choice to the API server.
+func logContainer(pod *corev1.Pod) string {
+	if name := pod.Annotations[defaultContainerAnnotation]; name != "" && hasContainer(pod, name) {
+		return name
+	}
+	if hasContainer(pod, agentUserContainer) {
+		return agentUserContainer
+	}
+	return ""
+}
+
+func hasContainer(pod *corev1.Pod, name string) bool {
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// containerStarted reports whether the pod has a log to read for container: false while the pod
+// is Pending (unscheduled, pulling, running init containers) or while the container has never
+// run. A container that ran before and is waiting to restart still has its last run's log. With
+// no status to go on, it is assumed started and the stream answers for itself.
+func containerStarted(pod *corev1.Pod, container string) bool {
+	if pod.Status.Phase == corev1.PodPending {
+		return false
+	}
+	for i := range pod.Status.ContainerStatuses {
+		cs := &pod.Status.ContainerStatuses[i]
+		if cs.Name != container {
+			continue
+		}
+		return cs.State.Running != nil || cs.State.Terminated != nil || cs.LastTerminationState.Terminated != nil
+	}
+	return true
 }
 
 // betterPod reports whether a is a better log target than b: a Running pod beats a

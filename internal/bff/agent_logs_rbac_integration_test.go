@@ -38,7 +38,9 @@ import (
 
 // TestAgentLogTailFollowsShippedPersonas: against a real API server and the shipped persona roles,
 // developer and operator read an agent's live output through the BFF and are told by
-// /api/capabilities that they can, while viewer is refused with 403 and told it cannot.
+// /api/capabilities that they can, while viewer is refused with 403 and told it cannot. The pod
+// runs queue-proxy beside the agent, as every Knative pod does, so the API server refuses a read
+// that names no container; and an agent whose pod is still pending is waited for, not an error.
 //
 // The API server streams a pod log from the pod's node's kubelet, so a fake kubelet serves the log
 // and a Node points at it. The API server does not verify a kubelet's serving certificate unless
@@ -81,12 +83,17 @@ func TestAgentLogTailFollowsShippedPersonas(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: pod, Namespace: ns, Labels: map[string]string{knativeServiceLabel: agent}},
 		Spec: corev1.PodSpec{
 			NodeName:   node.Name,
-			Containers: []corev1.Container{{Name: container, Image: "echo:1"}},
+			Containers: []corev1.Container{{Name: container, Image: "echo:1"}, {Name: "queue-proxy", Image: "qp:1"}},
 		},
 	}
 	require.NoError(t, admin.Create(ctx, p))
 	p.Status.Phase = corev1.PodRunning
 	require.NoError(t, admin.Status().Update(ctx, p))
+	starting := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "starting-00001-deployment-abc", Namespace: ns, Labels: map[string]string{knativeServiceLabel: "starting"}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: container, Image: "echo:1"}, {Name: "queue-proxy", Image: "qp:1"}}},
+	}
+	require.NoError(t, admin.Create(ctx, starting))
 
 	for _, tc := range []struct {
 		role    string
@@ -130,6 +137,11 @@ func TestAgentLogTailFollowsShippedPersonas(t *testing.T) {
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 			assert.Contains(t, rec.Body.String(), sseFrame("", "log", line), "the tail carries the pod's output")
 			assert.Contains(t, rec.Body.String(), sseFrame("", "end", "log stream ended"))
+			assert.NotContains(t, rec.Body.String(), "event: error")
+
+			rec = get("/api/agents/" + ns + "/starting/logs?follow=true")
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "event: waiting")
 			assert.NotContains(t, rec.Body.String(), "event: error")
 		})
 	}

@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { AgentDetailPage, lifecycleStage } from "@/pages/agent-detail-page";
+import { LOG_WAIT_GIVE_UP_MS, logWaitDelay } from "@/lib/log-tail";
 import { CapabilitiesProvider } from "@/lib/capabilities";
 import { NamespaceProvider } from "@/lib/namespace";
 import { ToastProvider } from "@/components/kit";
@@ -24,6 +25,8 @@ interface DetailOpts {
   detail?: unknown;
   detailStatus?: number;
   logFrames?: string[]; // SSE chunks the /logs stream yields.
+  // Successive /logs requests answer these in turn (the last repeats); overrides logFrames.
+  logSequence?: string[][];
   logStatus?: number; // pre-stream status for /logs (403 → forbidden).
   caps?: Record<string, Record<string, boolean>>;
   invoke?: { ok: boolean; status?: number; body: unknown };
@@ -112,9 +115,12 @@ function installFetch(opts: DetailOpts = {}) {
       if (url.includes("/logs")) {
         const status = opts.logStatus ?? 200;
         const ok = status < 400;
+        const seq = opts.logSequence;
+        const asked = calls.filter((c) => c.url.includes("/logs")).length - 1;
+        const frames = seq ? seq[Math.min(asked, seq.length - 1)] : opts.logFrames;
         return Promise.resolve({
           ok, status,
-          body: ok ? sseBody(opts.logFrames ?? ["event: end\ndata: done\n\n"]) : null,
+          body: ok ? sseBody(frames ?? ["event: end\ndata: done\n\n"]) : null,
           json: async () => ({ error: "forbidden: not allowed to read pods" }),
           text: async () => JSON.stringify({ error: "forbidden: not allowed to read pods" }),
         } as unknown as Response);
@@ -318,6 +324,117 @@ function renderAt(path = "/agents/prod/billing") {
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+// "Watch it come alive": the BFF answers "waiting" and closes while the agent has no started
+// container, so the tab asks again on a backoff and follows the tail once a container runs.
+describe("AgentDetailPage — the log tail waits for the agent to start (m184.37c)", () => {
+  const WAITING = ["event: waiting\ndata: agent is starting; no running pod yet\n\n"];
+  const advance = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  const logAsks = (calls: { url: string }[]) => calls.filter((c) => c.url.includes("/logs")).length;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("asks again while the agent is starting, then tails it, with no error on the way", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const calls = installFetch({
+      logSequence: [WAITING, WAITING, ["event: log\ndata: agent listening on :8080\n\n"]],
+    });
+    renderAt();
+    fireEvent.click(await screen.findByRole("tab", { name: "Runs" }));
+
+    expect(await screen.findByTestId("logs-waiting")).toBeInTheDocument();
+    expect(logAsks(calls)).toBe(1);
+    await advance(logWaitDelay(0));
+    await waitFor(() => expect(logAsks(calls)).toBe(2));
+    expect(screen.getByTestId("logs-waiting")).toBeInTheDocument();
+    await advance(logWaitDelay(1));
+    await waitFor(() =>
+      expect(screen.getAllByTestId("log-line").map((n) => n.textContent)).toEqual([
+        "agent listening on :8080",
+      ]),
+    );
+    expect(logAsks(calls)).toBe(3);
+    expect(screen.queryByTestId("logs-error")).toBeNull();
+    expect(screen.queryByTestId("logs-waiting")).toBeNull();
+  });
+
+  it("asks at once when the agent turns ready, not at the next backoff", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let up = false;
+    const calls = installFetch({
+      detail: { ...DEFAULT_DETAIL, ready: false, phase: "Pending" },
+      logSequence: [WAITING],
+    });
+    const base = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (up && url === "/api/agents/prod/billing" && (init?.method ?? "GET") === "GET") {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => DEFAULT_DETAIL,
+            text: async () => JSON.stringify(DEFAULT_DETAIL),
+          } as Response);
+        }
+        return base(input, init);
+      }),
+    );
+    renderAt();
+    fireEvent.click(await screen.findByRole("tab", { name: "Runs" }));
+    expect(await screen.findByTestId("logs-waiting")).toBeInTheDocument();
+    // Walk the backoff to its ceiling.
+    for (let i = 0; i < 4; i++) await advance(logWaitDelay(i));
+    const before = logAsks(calls);
+    expect(logWaitDelay(4)).toBeGreaterThan(5_000);
+
+    up = true;
+    await advance(5_000); // one settle poll reads the agent as ready
+    await waitFor(() => expect(logAsks(calls)).toBe(before + 1));
+  });
+
+  it("an error that is not the agent starting still shows", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    installFetch({
+      logSequence: [WAITING, ["event: error\ndata: failed to open log stream\n\n"]],
+    });
+    renderAt();
+    fireEvent.click(await screen.findByRole("tab", { name: "Runs" }));
+
+    expect(await screen.findByTestId("logs-waiting")).toBeInTheDocument();
+    await advance(logWaitDelay(0));
+    await waitFor(() =>
+      expect(screen.getByTestId("logs-error")).toHaveTextContent("failed to open log stream"),
+    );
+  });
+
+  it("stops asking after the bound, says so without an alert, and asks again on request", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const calls = installFetch({ logSequence: [WAITING] });
+    renderAt();
+    fireEvent.click(await screen.findByRole("tab", { name: "Runs" }));
+    expect(await screen.findByTestId("logs-waiting")).toBeInTheDocument();
+
+    await advance(LOG_WAIT_GIVE_UP_MS + 30_000);
+    expect(await screen.findByTestId("logs-stalled")).toHaveTextContent(/No container has started/);
+    expect(screen.queryByRole("alert")).toBeNull();
+    const atBound = logAsks(calls);
+    // Bounded: the backoff reaches its 15s ceiling, so ten minutes is a few dozen asks.
+    expect(atBound).toBeLessThanOrEqual(LOG_WAIT_GIVE_UP_MS / 15_000 + 6);
+    await advance(LOG_WAIT_GIVE_UP_MS);
+    expect(logAsks(calls)).toBe(atBound);
+
+    fireEvent.click(screen.getByTestId("logs-ask-again"));
+    await waitFor(() => expect(logAsks(calls)).toBe(atBound + 1));
+    expect(await screen.findByTestId("logs-waiting")).toBeInTheDocument();
+  });
 });
 
 // ── m14.11 original tests ────────────────────────────────────────────────────

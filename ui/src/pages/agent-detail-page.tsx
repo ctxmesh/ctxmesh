@@ -93,6 +93,7 @@ const LABEL_FORK_ORIGIN_NAME = "agents.ctxmesh.ai/fork-origin-name";
 const LABEL_FORK_ORIGIN_VERSION = "agents.ctxmesh.ai/fork-origin-version";
 import { useCapabilitiesIn } from "@/lib/capabilities";
 import { formatDateTime, formatLatency, formatUSD } from "@/lib/format";
+import { LOG_WAIT_GIVE_UP_MS, logWaitDelay } from "@/lib/log-tail";
 import { navRoute, RES_AGENTS, RES_LOGS, RES_SCALING } from "@/lib/nav";
 
 // AgentDetailPage — the landing page for ONE agent, and the second-most-read
@@ -2404,20 +2405,38 @@ function VersionDiffPanel({
 
 // ── Logs tab (live SSE tail, bearer-attached fetch-stream) ───────────────────
 type LogLine = { seq: number; text: string };
-type LogPhase = "connecting" | "waiting" | "streaming" | "ended" | "error" | "forbidden";
+// "stalled" is a wait that outlasted LOG_WAIT_GIVE_UP_MS: the tab stops asking and says so.
+type LogPhase =
+  | "connecting"
+  | "waiting"
+  | "stalled"
+  | "streaming"
+  | "ended"
+  | "error"
+  | "forbidden";
 
 function LogsTab({ ns, name, ready }: { ns: string; name: string; ready: boolean }) {
   const [lines, setLines] = React.useState<LogLine[]>([]);
   const [phase, setPhase] = React.useState<LogPhase>("connecting");
   const [errorMsg, setErrorMsg] = React.useState<string>("");
   const seqRef = React.useRef(0);
+  // Each change re-opens the tail; it is bumped by a wait's backoff, by the agent turning
+  // ready, and by Try again.
+  const [attempt, setAttempt] = React.useState(0);
+  // The wait in progress, if any: when it began and how many asks it has made.
+  const waitRef = React.useRef<{ since: number; retries: number } | null>(null);
 
+  // A different agent starts a fresh tail.
   React.useEffect(() => {
     setLines([]);
     setPhase("connecting");
     setErrorMsg("");
     seqRef.current = 0;
+    waitRef.current = null;
+  }, [ns, name]);
 
+  React.useEffect(() => {
+    let retry: ReturnType<typeof setTimeout> | undefined;
     // The SSE tail over fetch-stream: the Bearer rides the request (EventSource
     // can't set headers). We follow the stream and render every frame honestly.
     const cancel = openLogStream(
@@ -2426,10 +2445,19 @@ function LogsTab({ ns, name, ready }: { ns: string; name: string; ready: boolean
       {
         onEvent: (type: LogEventType, data: string) => {
           if (type === "log") {
+            waitRef.current = null;
             setPhase("streaming");
             setLines((prev) => [...prev, { seq: seqRef.current++, text: data }]);
           } else if (type === "waiting") {
+            // No started container yet, and the BFF has closed: ask again after a backoff.
+            const wait = (waitRef.current ??= { since: Date.now(), retries: 0 });
+            if (Date.now() - wait.since >= LOG_WAIT_GIVE_UP_MS) {
+              setPhase("stalled");
+              return;
+            }
             setPhase((p) => (p === "streaming" ? p : "waiting"));
+            if (retry !== undefined) clearTimeout(retry);
+            retry = setTimeout(() => setAttempt((n) => n + 1), logWaitDelay(wait.retries++));
           } else if (type === "error") {
             // An IN-STREAM error frame (mid-stream break / pods-log denied after
             // the stream opened) — surfaced honestly, distinct from a pre-stream
@@ -2454,9 +2482,29 @@ function LogsTab({ ns, name, ready }: { ns: string; name: string; ready: boolean
       { follow: true, tailLines: 200 },
     );
 
-    // Cancel the stream on unmount / tab-switch — no leak.
-    return cancel;
-  }, [ns, name]);
+    // Cancel the stream and any pending ask on unmount / tab-switch — no leak.
+    return () => {
+      cancel();
+      if (retry !== undefined) clearTimeout(retry);
+    };
+  }, [ns, name, attempt]);
+
+  // The agent turning ready is the moment a pod appears: ask now, not at the next backoff.
+  const wasReady = React.useRef(ready);
+  React.useEffect(() => {
+    const becameReady = ready && !wasReady.current;
+    wasReady.current = ready;
+    if (becameReady && waitRef.current) {
+      waitRef.current = { since: Date.now(), retries: 0 };
+      setAttempt((n) => n + 1);
+    }
+  }, [ready]);
+
+  const askAgain = () => {
+    waitRef.current = { since: Date.now(), retries: 0 };
+    setPhase("waiting");
+    setAttempt((n) => n + 1);
+  };
 
   if (phase === "forbidden") {
     return (
@@ -2488,13 +2536,30 @@ function LogsTab({ ns, name, ready }: { ns: string; name: string; ready: boolean
           )}
           {phase === "connecting" && "connecting…"}
           {phase === "waiting" && "waiting for the agent to start"}
+          {phase === "stalled" && "not started"}
           {phase === "streaming" && `${lines.length} lines`}
           {phase === "ended" && "stream ended"}
           {phase === "error" && "stream error"}
         </span>
       </div>
 
-      {phase === "waiting" && lines.length === 0 ? (
+      {phase === "stalled" ? (
+        <div className="px-5 py-8 text-sm text-secondary-foreground" data-testid="logs-stalled">
+          <p>
+            No container has started in {Math.round(LOG_WAIT_GIVE_UP_MS / 60_000)} minutes, so
+            there is no output to show. The agent&rsquo;s status says why it has not started.
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            className="mt-3"
+            onClick={askAgain}
+            data-testid="logs-ask-again"
+          >
+            Try again
+          </Button>
+        </div>
+      ) : phase === "waiting" && lines.length === 0 ? (
         <p
           className="px-5 py-8 text-sm text-secondary-foreground"
           data-testid="logs-waiting"

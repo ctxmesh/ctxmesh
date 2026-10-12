@@ -151,6 +151,16 @@ everyone. The `developer` and `operator` roles now grant `get` and `list` on `po
 `viewer` role now grants `get`, `list` and `watch` on `skills`, and the `developer` and `operator`
 roles grant the same verbs they hold on `promptversions`, in the namespaces they are bound in.
 
+**Fixed: an agent's live output never showed.** The log tail on an agent's page named no
+container, and Kubernetes refuses a log read without one on a pod with more than one container,
+which every agent pod is (Knative runs `queue-proxy` beside it). The tail now reads the agent's own
+container, or the pod's `kubectl.kubernetes.io/default-container`, unless the request names one.
+It also showed an error while a new agent was starting: a pod that is scheduling, pulling its
+image or running init containers has no log yet. The tail now answers `waiting` until the
+container has started, and the page asks again with a backoff (1 to 15 seconds), and at once when
+the agent turns ready, so the output appears as the agent comes up. After ten minutes without a
+started container it stops asking and offers Try again. Any other failure is still shown.
+
 **Fixed: a person bound to one namespace saw an error on Home and could not open Cost.** Tenants
 are cluster-scoped, so a RoleBinding never lets anyone list them, and Home reported that refusal
 as an error. The Cost page could not render either: without a tenant the breakdown answered 400.

@@ -417,14 +417,15 @@ func TestAgentDetailRuntimeAbsentIsNil(t *testing.T) {
 // real cluster. It records the last request so a test can assert the follow/tail
 // flags and the label selector flowed through.
 type fakePodLogAccessor struct {
-	pods        []corev1.Pod
-	listErr     error
-	stream      io.ReadCloser
-	streamErr   error
-	gotFollow   bool
-	gotTail     *int64
-	gotPod      string
-	gotSelector string
+	pods         []corev1.Pod
+	listErr      error
+	stream       io.ReadCloser
+	streamErr    error
+	gotFollow    bool
+	gotTail      *int64
+	gotPod       string
+	gotContainer string
+	gotSelector  string
 }
 
 func (a *fakePodLogAccessor) ListPods(ctx context.Context, namespace, labelSelector string) (*corev1.PodList, error) {
@@ -437,6 +438,7 @@ func (a *fakePodLogAccessor) ListPods(ctx context.Context, namespace, labelSelec
 
 func (a *fakePodLogAccessor) StreamPodLog(ctx context.Context, namespace, pod, container string, follow bool, tailLines *int64) (io.ReadCloser, error) {
 	a.gotPod = pod
+	a.gotContainer = container
 	a.gotFollow = follow
 	a.gotTail = tailLines
 	if a.streamErr != nil {
@@ -569,6 +571,100 @@ func TestAgentLogsPodNotRunningIsWaiting(t *testing.T) {
 	assert.Empty(t, acc.gotPod)
 }
 
+// knativePod is an agent pod as Knative runs it: the agent's container beside queue-proxy.
+func knativePod(phase corev1.PodPhase, user corev1.ContainerStatus) corev1.Pod {
+	p := runningPod("echo-xyz", time.Now())
+	p.Spec.Containers = []corev1.Container{{Name: agentUserContainer}, {Name: "queue-proxy"}}
+	p.Status.Phase = phase
+	user.Name = agentUserContainer
+	p.Status.ContainerStatuses = []corev1.ContainerStatus{
+		user,
+		{Name: "queue-proxy", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+	}
+	return p
+}
+
+var (
+	userRunning  = corev1.ContainerStatus{State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}
+	userCreating = corev1.ContainerStatus{State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}}}
+)
+
+// The API server refuses a log read with no container on a pod with two, so the tail names the
+// agent's own container unless the request or the pod's default-container annotation says otherwise.
+func TestAgentLogsTailsTheAgentsContainer(t *testing.T) {
+	for _, c := range []struct {
+		name, query, annotation, want string
+	}{
+		{"by default, the agent's container", "", "", agentUserContainer},
+		{"the one the request names", "container=queue-proxy", "", "queue-proxy"},
+		{"the pod's declared default", "", "queue-proxy", "queue-proxy"},
+		{"never a declared default the pod does not have", "", "sidecar", agentUserContainer},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			pod := knativePod(corev1.PodRunning, userRunning)
+			if c.annotation != "" {
+				pod.Annotations = map[string]string{defaultContainerAnnotation: c.annotation}
+			}
+			acc := &fakePodLogAccessor{pods: []corev1.Pod{pod}, stream: io.NopCloser(strings.NewReader("hello\n"))}
+			s := newCallerServer(t, &fakeCallerClientFactory{client: fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), podLogs: acc})
+
+			body := getLogs(t, s, c.query, true).Body.String()
+			assert.Equal(t, c.want, acc.gotContainer)
+			assert.Contains(t, body, "event: log\ndata: hello\n")
+		})
+	}
+}
+
+// A pod that exists but has no log yet is the agent starting, not a broken tail: the console
+// asks again until the container runs. A container that ran before still has a log to read.
+func TestAgentLogsWaitForTheContainerToStart(t *testing.T) {
+	crashed := corev1.ContainerStatus{
+		State:                corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
+		RestartCount:         3,
+	}
+	for _, c := range []struct {
+		name    string
+		pod     corev1.Pod
+		waiting bool
+	}{
+		{"a pod still pending", knativePod(corev1.PodPending, userCreating), true},
+		{"a running pod whose agent container has not started", knativePod(corev1.PodRunning, userCreating), true},
+		{"a running agent container", knativePod(corev1.PodRunning, userRunning), false},
+		{"a container restarting after a crash keeps its last log", knativePod(corev1.PodRunning, crashed), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			acc := &fakePodLogAccessor{pods: []corev1.Pod{c.pod}, stream: io.NopCloser(strings.NewReader("hello\n"))}
+			s := newCallerServer(t, &fakeCallerClientFactory{client: fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), podLogs: acc})
+
+			rec := getLogs(t, s, "follow=true", true)
+			require.Equal(t, http.StatusOK, rec.Code)
+			body := rec.Body.String()
+			if c.waiting {
+				assert.Contains(t, body, "event: waiting\n")
+				assert.NotContains(t, body, "event: error")
+				assert.Empty(t, acc.gotPod, "no log read is attempted before the container starts")
+				return
+			}
+			assert.Contains(t, body, "event: log\ndata: hello\n")
+			assert.NotContains(t, body, "event: waiting")
+		})
+	}
+}
+
+// A started container whose log cannot be read is a real failure, and still says so.
+func TestAgentLogsAStreamFailureOnAStartedContainerIsAnError(t *testing.T) {
+	acc := &fakePodLogAccessor{
+		pods:      []corev1.Pod{knativePod(corev1.PodRunning, userRunning)},
+		streamErr: apierrors.NewBadRequest("kubelet unreachable"),
+	}
+	s := newCallerServer(t, &fakeCallerClientFactory{client: fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), podLogs: acc})
+
+	body := getLogs(t, s, "follow=true", true).Body.String()
+	assert.Contains(t, body, "event: error\ndata: failed to open log stream\n")
+	assert.NotContains(t, body, "event: waiting")
+}
+
 // TestAgentLogsAnonIs401 proves a request with no bearer token is rejected 401
 // BEFORE any K8s call — the caller-scoped seam never falls back to the BFF SA.
 func TestAgentLogsAnonIs401(t *testing.T) {
@@ -594,11 +690,11 @@ func TestSelectActivePod(t *testing.T) {
 	newer := runningPod("run-new", base.Add(2*time.Hour))
 
 	// Running beats a newer Pending.
-	assert.Equal(t, "run-old", selectActivePod([]corev1.Pod{pending, older}))
+	assert.Equal(t, "run-old", activePod([]corev1.Pod{pending, older}).Name)
 	// Between two Running, the newer wins.
-	assert.Equal(t, "run-new", selectActivePod([]corev1.Pod{older, newer}))
-	// No pods → "".
-	assert.Equal(t, "", selectActivePod(nil))
+	assert.Equal(t, "run-new", activePod([]corev1.Pod{older, newer}).Name)
+	// No pods → nil.
+	assert.Nil(t, activePod(nil))
 }
 
 // TestParseTailLines proves the bound: default when absent/invalid, honored when in

@@ -2502,7 +2502,8 @@ export async function whoami(opts: WhoAmIOptions = {}): Promise<WhoAmI> {
 
 // LogEventType names the four SSE frame types the BFF emits (agent_detail.go):
 //   log     — one log line, in order.
-//   waiting — no running pod yet (the agent is starting) — HTTP 200, clean close.
+//   waiting — no started container yet (the agent is starting) — HTTP 200, clean
+//             close; the caller asks again (lib/log-tail.ts).
 //   error   — an IN-STREAM failure (forbidden pods/log, or a mid-stream break).
 //   end     — a clean end of the stream.
 export type LogEventType = "log" | "waiting" | "error" | "end";
