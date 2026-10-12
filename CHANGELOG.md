@@ -70,6 +70,11 @@ them, and every screen they drew has since been built. `VITE_DESIGN_GALLERY` no 
 anything, and `make ui-build` no longer runs `hack/ui-no-internal-routes.sh`, which only checked that
 the gallery stayed out of a production build.
 
+**Removed: the console's `/soon/…` placeholder pages.** A nav destination that a later milestone
+would ship used to lead to `/soon/<id>`, a page naming the milestone it would arrive in. Every
+destination has since shipped and nothing linked there any more; an old `/soon/…` link now shows the
+console's not-found page.
+
 **Changed: an `/api` route the server cannot serve answers 501, not 404.** Each route is now
 registered once. When something it needs is missing (the caller-scoped cluster client, as under
 `ctxmesh dev --ui`; the trace store; the agent invoker; the config expander), it answers `501`

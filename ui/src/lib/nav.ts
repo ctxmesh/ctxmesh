@@ -33,32 +33,6 @@ import type { LucideIcon } from "lucide-react";
 // (ui-foundation §6 re-housing). The shell's sidebar, its drawer, the command
 // palette, the breadcrumbs and Home's first-run checklist all read it.
 //
-// Milestone tags mark which arc milestone SHIPS each surface. Only surfaces that
-// exist TODAY carry a `route`; the rest render a PlaceholderPage ("arrives in
-// M<n>") so the full IA is walkable without pulling later features forward.
-
-// Milestone is display-only: the placeholder page names it.
-export type Milestone =
-  | "M13"
-  | "M14"
-  | "M15"
-  | "M16"
-  | "M17"
-  | "M18"
-  | "M47"
-  | "M63"
-  | "M64"
-  | "M66"
-  | "M67"
-  | "M68"
-  | "M69"
-  | "M70"
-  | "M73"
-  | "M74"
-  | "M76"
-  | "M112"
-  | "M151";
-
 // The golden CRD resources the console probes capabilities for — the plural
 // names the BFF's SelfSubjectAccessReview uses (internal/bff/identity.go). A nav
 // item or action gates on `capabilities.allowed[resource][verb]`.
@@ -120,13 +94,8 @@ export interface NavItem {
   id: string;
   label: string;
   icon: LucideIcon;
-  milestone: Milestone;
-  /**
-   * The router path this nav item routes to. Present only for surfaces that
-   * exist in the current build; absent items render a PlaceholderPage keyed on
-   * the milestone. `/` for the index (Home).
-   */
-  route?: string;
+  /** The router path this item routes to; `/` for the index (Home). */
+  route: string;
   /**
    * When set, this destination is capability-gated — hidden from any chrome whose
    * caller isn't `allowed[requiresCapability.resource][requiresCapability.verb]`
@@ -185,7 +154,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "home",
         label: "Home",
         icon: House,
-        milestone: "M13",
         route: "/",
       },
     ],
@@ -197,7 +165,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "agents",
         label: "Agents",
         icon: Boxes,
-        milestone: "M13",
         route: "/agents",
       },
       {
@@ -206,7 +173,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "teams",
         label: "Teams",
         icon: Waypoints,
-        milestone: "M64",
         route: "/teams",
       },
       {
@@ -216,7 +182,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "playground",
         label: "Playground",
         icon: FlaskConical,
-        milestone: "M13",
         route: "/playground",
         requiresCapability: { resource: RES_AGENTS, verb: "create" },
       },
@@ -237,7 +202,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "gallery",
         label: "Gallery",
         icon: Library,
-        milestone: "M74",
         route: "/gallery",
       },
       {
@@ -246,7 +210,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "mcp-servers",
         label: "MCP servers",
         icon: Wrench,
-        milestone: "M14",
         route: "/tools/mcp-servers",
       },
       {
@@ -255,7 +218,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "tool-catalog",
         label: "Tool catalog",
         icon: BookOpen,
-        milestone: "M17",
         route: "/tools/catalog",
       },
       {
@@ -265,7 +227,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "knowledgebases",
         label: "Knowledge bases",
         icon: Database,
-        milestone: "M68",
         route: "/knowledgebases",
         requiresCapability: { resource: RES_KNOWLEDGEBASES, verb: "list" },
       },
@@ -274,7 +235,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "prompts",
         label: "Prompts",
         icon: GitBranch,
-        milestone: "M17",
         route: "/prompts",
       },
       {
@@ -283,7 +243,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "workflows",
         label: "Workflows",
         icon: GitFork,
-        milestone: "M67",
         route: "/workflows",
       },
       {
@@ -294,7 +253,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "config",
         label: "Config builder",
         icon: SlidersHorizontal,
-        milestone: "M13",
         route: "/config",
         requiresCapability: { resource: RES_AGENTS, verb: "create" },
       },
@@ -313,7 +271,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "approvals",
         label: "Approvals",
         icon: CheckSquare,
-        milestone: "M112",
         route: "/approvals",
         requiresCapability: { resource: "workflows", verb: "list" },
         count: { source: "approvals", tone: "waiting" },
@@ -323,22 +280,18 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "mcp-approvals",
         label: "MCP approvals",
         icon: ShieldCheck,
-        milestone: "M17",
         route: "/tools/approvals",
         requiresCapability: { resource: RES_REGISTRIES, verb: "update" },
       },
       {
         // Stops (ADR 0126, spec §5.23/§6.2) — the scoped kill switch's landing
         // surface: what is stopped, why, by whom, and how to lift it. The frame's
-        // StopControl creates them; this is where they are read. The PAGE shipped
-        // in m151.7 (spec §6.2 gap 2), so the item now walks to the real surface
-        // instead of /soon/stops — and the COUNT is live from GET /api/kills,
-        // because "a scope is halted right now" is the one fact the frame must
-        // not sit on.
+        // StopControl creates them; this is where they are read. The COUNT is
+        // live from GET /api/kills, because "a scope is halted right now" is the
+        // one fact the frame must not sit on.
         id: "stops",
         label: "Stops",
         icon: OctagonX,
-        milestone: "M151",
         route: "/stops",
         count: { source: "stops", tone: "stopped" },
       },
@@ -348,7 +301,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "guardrails",
         label: "Guardrails",
         icon: Shield,
-        milestone: "M66",
         route: "/guardrails",
       },
       {
@@ -356,7 +308,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "evals",
         label: "Evals",
         icon: TestTube2,
-        milestone: "M17",
         route: "/evals",
       },
       {
@@ -365,7 +316,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "datasets",
         label: "Datasets",
         icon: Tags,
-        milestone: "M69",
         route: "/datasets",
       },
       {
@@ -375,7 +325,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "registries",
         label: "Registries",
         icon: Users,
-        milestone: "M15",
         route: "/registries",
       },
       {
@@ -384,7 +333,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "audit",
         label: "Audit",
         icon: ScrollText,
-        milestone: "M63",
         route: "/audit",
         requiresCapability: { resource: RES_AUDITLOGS, verb: "list" },
       },
@@ -400,7 +348,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "runs",
         label: "Runs",
         icon: MessagesSquare,
-        milestone: "M16",
         route: "/runs",
       },
       {
@@ -410,7 +357,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "alerts",
         label: "Alerts",
         icon: Bell,
-        milestone: "M70",
         route: "/alerts",
         requiresCapability: { resource: RES_ALERTPOLICIES, verb: "list" },
       },
@@ -418,7 +364,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "cost",
         label: "Cost",
         icon: Coins,
-        milestone: "M16",
         route: "/cost",
       },
       {
@@ -427,7 +372,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "my-shares",
         label: "My shares",
         icon: Share2,
-        milestone: "M112",
         route: "/my-shares",
       },
       {
@@ -436,7 +380,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "topology",
         label: "Topology",
         icon: Network,
-        milestone: "M15",
         route: "/topology",
       },
     ],
@@ -453,21 +396,18 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "providers",
         label: "Providers",
         icon: PlugZap,
-        milestone: "M14",
         route: "/providers",
       },
       {
         id: "routes",
         label: "Model routes",
         icon: GitBranch,
-        milestone: "M15",
         route: "/routes",
       },
       {
         id: "secrets",
         label: "Secret bindings",
         icon: KeyRound,
-        milestone: "M15",
         route: "/secrets",
       },
       {
@@ -478,7 +418,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "tenants",
         label: "Tenants",
         icon: Building2,
-        milestone: "M47",
         route: "/tenants",
         requiresCapability: { resource: RES_TENANTS, verb: "list" },
       },
@@ -495,7 +434,7 @@ export const NAV_ITEMS: NavItem[] = NAV_SECTIONS.flatMap((s) => s.items);
 // not silently at runtime).
 export function navRoute(id: string): string {
   const item = NAV_ITEMS.find((i) => i.id === id);
-  if (!item?.route) {
+  if (!item) {
     throw new Error(`navRoute: no routed nav item with id "${id}"`);
   }
   return item.route;
@@ -556,9 +495,9 @@ export interface ShellCrumb {
 }
 
 /** Longest-prefix first, so /tools/mcp-servers wins over a hypothetical /tools. */
-const ROUTED_ITEMS: NavItem[] = NAV_ITEMS.filter(
-  (i): i is NavItem & { route: string } => Boolean(i.route) && i.route !== "/",
-).sort((a, b) => (b.route ?? "").length - (a.route ?? "").length);
+const ROUTED_ITEMS: NavItem[] = NAV_ITEMS.filter((i) => i.route !== "/").sort(
+  (a, b) => b.route.length - a.route.length,
+);
 
 function humanizeSegment(seg: string): string {
   const words = decodeURIComponent(seg).replace(/-/g, " ");
@@ -580,25 +519,10 @@ export function buildCrumbs(pathname: string): ShellCrumb[] {
 
   const home: ShellCrumb = { label: "Home", to: "/" };
 
-  // A not-yet-built IA destination: /soon/<nav id>.
-  const soon = /^\/soon\/([^/]+)$/.exec(path);
-  if (soon) {
-    const item = NAV_ITEMS.find((i) => i.id === soon[1]);
-    if (item) {
-      const section = navSectionOf(item.id);
-      return [
-        home,
-        ...(section && section !== item.label ? [{ label: section }] : []),
-        { label: item.label },
-      ];
-    }
-    return [home, { label: humanizeSegment(soon[1]) }];
-  }
-
   const match = ROUTED_ITEMS.find(
     (i) => path === i.route || path.startsWith(`${i.route}/`),
   );
-  if (!match || !match.route) {
+  if (!match) {
     // A route the IA does not name (a not-found, a deep link to a surface reached
     // only from another page). Say what the URL says rather than inventing a home
     // for it.

@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes, useParams } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AppShell } from "@/components/app-shell";
 import { AgentChatboxPage } from "@/pages/agent-chatbox-page";
@@ -31,7 +31,7 @@ import {
   NewModelRoutePage,
 } from "@/pages/model-route-detail-page";
 import { ModelRoutesPage } from "@/pages/model-routes-page";
-import { PlaceholderPage } from "@/pages/placeholder-page";
+import { NotFoundPage } from "@/pages/not-found-page";
 import { PlaygroundPage } from "@/pages/playground-page";
 import { RunsPage } from "@/pages/runs-page";
 import { RunDetailPage } from "@/pages/run-detail-page";
@@ -58,22 +58,6 @@ import { StopsPage } from "@/pages/stops-page";
 import { SharedRunPage } from "@/pages/shared-run-page";
 import { RequireAuth, SessionProvider } from "@/lib/session-provider";
 import { ToastProvider } from "@/components/kit";
-import { NAV_ITEMS } from "@/lib/nav";
-
-// SoonPage resolves the /soon/:id placeholder for a nav destination the approved
-// IA lists but a later milestone ships (m13.5 keeps the full IA walkable without
-// pulling those surfaces forward). It reads the owning milestone + label from the
-// shared nav source so the "arrives in M<n>" copy is always correct.
-function SoonPage() {
-  const { id } = useParams();
-  const item = NAV_ITEMS.find((n) => n.id === id);
-  return (
-    <PlaceholderPage
-      title={item?.label ?? "Coming soon"}
-      milestone={item?.milestone ?? "a later milestone"}
-    />
-  );
-}
 
 // readAgentPin reads the agent this ORIGIN is pinned to (m37.3): when the SPA is served at an agent's
 // OWN hostname, the BFF injects `<meta name="agent-pin" content="namespace/name">` into index.html (a
@@ -202,9 +186,7 @@ export function App() {
             <Route path="agents/new" element={<CreateAgentPage />} />
             <Route path="config" element={<ConfigBuilderPage />} />
             <Route path="playground" element={<PlaygroundPage />} />
-            {/* The M14 first-agent wizards (m14.9) — these nav destinations were
-                /soon placeholders; they're now the real connect-provider +
-                add-MCP flows, the first UI of the aha. */}
+            {/* The M14 first-agent wizards (m14.9): connect a provider. */}
             <Route path="providers" element={<ProvidersPage />} />
             <Route path="providers/connect" element={<ConnectProviderPage />} />
             {/* Tenants (M47) — the multi-tenant quota surface (read-only). */}
@@ -267,16 +249,7 @@ export function App() {
             <Route path="evals" element={<EvalsPage />} />
             {/* m17.12: PromptVersion list + textual diff viewer */}
             <Route path="prompts" element={<PromptsPage />} />
-            {/* Not-yet-built IA destinations (Tools, Traces, … ,
-                Settings) render their milestone placeholder — the full approved
-                nav is walkable without pulling later features forward. */}
-            <Route path="soon/:id" element={<SoonPage />} />
-            <Route
-              path="*"
-              element={
-                <PlaceholderPage title="Not found" milestone="this build" />
-              }
-            />
+            <Route path="*" element={<NotFoundPage />} />
           </Route>
         </Routes>
       </ToastProvider>

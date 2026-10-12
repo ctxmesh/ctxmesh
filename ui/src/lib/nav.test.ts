@@ -205,12 +205,8 @@ describe("live counts are declared by the IA, not invented by the shell", () => 
     ]);
   });
 
-  it("routes Stops at /stops now that its page ships (spec §6.2 gap 2, m151.7)", () => {
-    // It was routeless — walking to /soon/stops — while the surface did not exist. The count was
-    // always live, so the item pointed at a placeholder while carrying a real number; shipping the
-    // page closes that gap.
+  it("routes Stops, which carries a live count, at its real page", () => {
     expect(NAV_ITEMS.find((i) => i.id === "stops")?.route).toBe("/stops");
-    expect(NAV_ITEMS.find((i) => i.id === "stops")?.milestone).toBe("M151");
   });
 });
 
@@ -223,12 +219,12 @@ describe("first-run checklist derives from nav (m54.4)", () => {
     expect(() => navRoute("does-not-exist")).toThrow(/no routed nav item/);
   });
 
-  it("resolves every nav destination — the IA has no /soon placeholders left", () => {
-    // Stops was the last unrouted destination (spec §6.2 gap 2); its page shipped in m151.7. The
-    // /soon/<id> mechanism stays in the router for the next unbuilt surface, but nothing in the
-    // shipped IA walks to it, so navRoute now resolves for every item.
-    expect(NAV_ITEMS.filter((i) => !i.route).map((i) => i.id)).toEqual([]);
-    expect(navRoute("stops")).toBe("/stops");
+  it("resolves every nav destination to a real route — no placeholder destinations", () => {
+    for (const item of NAV_ITEMS) {
+      expect(item.route, item.id).toMatch(/^\//);
+      expect(item.route, item.id).not.toMatch(/^\/soon\b/);
+      expect(navRoute(item.id)).toBe(item.route);
+    }
   });
 
   it("each checklist step's route is anchored to its nav surface", () => {

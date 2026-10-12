@@ -155,9 +155,7 @@ describe("AppShell — the approved IA", () => {
     expect(screen.getByLabelText("Workspace")).toBeInTheDocument();
   });
 
-  it("routes the Stops destination to its real surface (m151.7)", async () => {
-    // Was /soon/stops while the page was unbuilt. The page shipped, so the frame's kill-switch
-    // count now leads somewhere that can actually be acted on.
+  it("routes the Stops destination to its real surface", async () => {
     installFetch(ALLOW_ALL);
     renderShell();
     const stops = await screen.findByRole("link", { name: /Stops/ });
@@ -298,11 +296,10 @@ describe("buildCrumbs — the trail that replaced the 'Control plane' h1", () =>
     expect(crumbs[crumbs.length - 1]).toEqual({ label: "MCP servers" });
   });
 
-  it("resolves a /soon placeholder through the IA", () => {
+  it("no longer resolves the retired /soon placeholder through the IA", () => {
     expect(buildCrumbs("/soon/stops")).toEqual([
       { label: "Home", to: "/" },
-      { label: "Govern" },
-      { label: "Stops" },
+      { label: "Soon" },
     ]);
   });
 

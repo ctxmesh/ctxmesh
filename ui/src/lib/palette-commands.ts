@@ -35,11 +35,7 @@ function isVisible(it: NavItem, can: BuildCommandsArgs["can"]): boolean {
 }
 
 // buildCommands assembles the grouped command list. Navigate commands mirror the
-// RBAC-filtered nav (built surfaces route to their real path; not-yet-shipped IA
-// destinations route to their honest /soon placeholder, labelled with the owning
-// milestone). Actions cover only what genuinely exists in M13: switch namespace
-// (as sub-commands) and sign out. (No theme toggle - the production shell has
-// none; the design gallery's is gallery-only.)
+// RBAC-filtered nav. Actions: switch namespace (as sub-commands) and sign out.
 export function buildCommands({
   can,
   navigate,
@@ -51,21 +47,14 @@ export function buildCommands({
   const navigateCmds: CommandItem[] = NAV_SECTIONS.flatMap((section) =>
     section.items
       .filter((it) => isVisible(it, can))
-      .map((it) => {
-        const to = it.route ?? `/soon/${it.id}`;
-        const isPlaceholder = !it.route;
-        return {
-          id: `nav-${it.id}`,
-          group: "Navigate",
-          label: it.label,
-          icon: it.icon,
-          // Placeholders carry their milestone as a hint so the palette stays
-          // honest about what does / doesn't exist yet.
-          hint: isPlaceholder ? it.milestone : undefined,
-          keywords: `${section.heading} ${it.id} go to`,
-          onRun: () => navigate(to),
-        };
-      }),
+      .map((it) => ({
+        id: `nav-${it.id}`,
+        group: "Navigate",
+        label: it.label,
+        icon: it.icon,
+        keywords: `${section.heading} ${it.id} go to`,
+        onRun: () => navigate(it.route),
+      })),
   );
 
   const actionCmds: CommandItem[] = [];

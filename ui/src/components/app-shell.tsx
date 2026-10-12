@@ -577,9 +577,7 @@ function NavCountDot({
   );
 }
 
-// NavItemLink routes to a re-housed surface (item.route) or, for a not-yet-built
-// destination, to its milestone placeholder route (/soon/<id>). The distinction
-// keeps the full approved IA walkable without pulling later features forward.
+// NavItemLink is one destination in the sidebar.
 //
 // Active state (§4.2): pine text at 600, an `accent` ground, and a 2px pine bar
 // on the leading edge. Pine is the interactive colour and never a status, so an
@@ -593,7 +591,7 @@ function NavItemLink({
   expanded: boolean;
   count: number | undefined;
 }) {
-  const to = item.route ?? `/soon/${item.id}`;
+  const to = item.route;
   const Icon = item.icon;
   const end = item.route === "/";
   const tone = item.count?.tone ?? "quiet";

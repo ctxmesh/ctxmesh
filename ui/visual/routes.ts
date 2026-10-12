@@ -95,7 +95,6 @@ export const ROUTES: RouteCase[] = [
   { id: "tenants", path: "/tenants", label: "Tenants", chrome: "shell", archetype: "index" },
 
   // ── Shells and edges ────────────────────────────────────────────────────
-  { id: "soon", path: "/soon/settings", label: "Placeholder (not yet built)", chrome: "shell", archetype: "placeholder" },
   { id: "notfound", path: "/no-such-page", label: "Not found", chrome: "shell", archetype: "placeholder" },
   { id: "login", path: "/login", label: "Login", chrome: "bare", archetype: "auth", signedOut: true },
   {
