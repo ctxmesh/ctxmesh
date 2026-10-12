@@ -67,6 +67,7 @@ func newReconciler() *AgentDeploymentReconciler {
 		Client:    k8sClient,
 		Scheme:    k8sClient.Scheme(),
 		Registry:  NewPostgresRegistryReader(testRegStore),
+		Versions:  testVersionStore,
 		// Dev posture (OPS-2): the envtest suite seeds the bundled dev data plane (dev Langfuse
 		// Secret, dev MinIO), so the reconciler injects the dev object-store + feedback creds — the
 		// behavior these suites assert. A production render sets this false (no dev-cred injection);
@@ -86,7 +87,7 @@ func reconcileNN(t *testing.T, r *AgentDeploymentReconciler, name, namespace str
 }
 
 // TestReconcile_CreatesAgentVersionAndKsvc is the primary integration test:
-// create an AgentDeployment → reconcile → assert AgentVersion + Knative Service
+// create an AgentDeployment → reconcile → assert the recorded version + Knative Service
 // created with the correct fields and owner references.
 func TestReconcile_CreatesAgentVersionAndKsvc(t *testing.T) {
 	const (
@@ -118,25 +119,16 @@ func TestReconcile_CreatesAgentVersionAndKsvc(t *testing.T) {
 	r := newReconciler()
 	reconcileNN(t, r, name, namespace)
 
-	// ── Assert AgentVersion ───────────────────────────────────────────────────
+	// ── Assert the recorded version ───────────────────────────────────────────
 	hash, err := specHash(deploy.Spec)
 	require.NoError(t, err)
 	versionName := fmt.Sprintf("%s-%s", name, hash)
 
-	var av agentsv1beta1.AgentVersion
-	require.NoError(t, k8sClient.Get(testCtx,
-		types.NamespacedName{Name: versionName, Namespace: namespace}, &av),
-		"AgentVersion %q must exist after reconcile", versionName)
-
-	assert.Equal(t, name, av.Spec.DeploymentName, "AgentVersion.Spec.DeploymentName")
-	assert.Equal(t, deploy.Spec, av.Spec.Snapshot, "AgentVersion.Spec.Snapshot == original spec")
-
-	require.Len(t, av.OwnerReferences, 1, "AgentVersion must have exactly one owner ref")
-	ownerRef := av.OwnerReferences[0]
-	assert.Equal(t, name, ownerRef.Name, "ownerRef.Name == deployment name")
-	require.NotNil(t, ownerRef.Controller, "ownerRef.Controller must be set")
-	assert.True(t, *ownerRef.Controller, "ownerRef.Controller must be true")
-	assert.Equal(t, deploy.UID, ownerRef.UID, "ownerRef.UID matches deployment UID")
+	av, ok, err := testVersionStore.Get(testCtx, namespace, string(deploy.UID), versionName)
+	require.NoError(t, err)
+	require.True(t, ok, "version %q must be recorded after reconcile", versionName)
+	assert.Equal(t, name, av.Agent, "the version belongs to the deployment")
+	assert.Equal(t, deploy.Spec, av.Snapshot, "the snapshot == original spec")
 
 	// ── Assert Knative Service ────────────────────────────────────────────────
 	var ksvc servingv1.Service
@@ -287,7 +279,7 @@ func TestReconcile_IdempotentRereconcile(t *testing.T) {
 		"ksvc ResourceVersion must be unchanged — no spurious update on re-reconcile")
 }
 
-// TestReconcile_SpecUpdate verifies that a spec change produces a new AgentVersion
+// TestReconcile_SpecUpdate verifies that a spec change records a new version
 // (with the new hash) and updates the ksvc template and status.latestVersion.
 func TestReconcile_SpecUpdate(t *testing.T) {
 	const (
@@ -321,9 +313,9 @@ func TestReconcile_SpecUpdate(t *testing.T) {
 	require.NoError(t, err)
 	version1Name := fmt.Sprintf("%s-%s", name, hash1)
 
-	var av1 agentsv1beta1.AgentVersion
-	require.NoError(t, k8sClient.Get(testCtx,
-		types.NamespacedName{Name: version1Name, Namespace: namespace}, &av1))
+	_, ok, err := testVersionStore.Get(testCtx, namespace, string(deploy.UID), version1Name)
+	require.NoError(t, err)
+	require.True(t, ok)
 
 	// Update spec → new image
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
@@ -339,18 +331,14 @@ func TestReconcile_SpecUpdate(t *testing.T) {
 	require.NotEqual(t, hash1, hash2, "spec hashes must differ after image change")
 	version2Name := fmt.Sprintf("%s-%s", name, hash2)
 
-	// New AgentVersion must exist
-	var av2 agentsv1beta1.AgentVersion
-	require.NoError(t, k8sClient.Get(testCtx,
-		types.NamespacedName{Name: version2Name, Namespace: namespace}, &av2),
-		"new AgentVersion %q must exist after spec update", version2Name)
-	assert.Equal(t, "ghcr.io/ctxmesh/example-agent:v2", av2.Spec.Snapshot.Image)
+	// The new version is recorded
+	av2, ok, err := testVersionStore.Get(testCtx, namespace, string(deploy.UID), version2Name)
+	require.NoError(t, err)
+	require.True(t, ok, "new version %q must be recorded after spec update", version2Name)
+	assert.Equal(t, "ghcr.io/ctxmesh/example-agent:v2", av2.Snapshot.Image)
 
-	// Old AgentVersion must still exist (versions are kept)
-	var av1Still agentsv1beta1.AgentVersion
-	require.NoError(t, k8sClient.Get(testCtx,
-		types.NamespacedName{Name: version1Name, Namespace: namespace}, &av1Still),
-		"old AgentVersion %q must still exist", version1Name)
+	// The old version is kept, after the new one in newest-first order
+	assert.Equal(t, []string{version2Name, version1Name}, versionNames(t, testVersionStore, name, namespace))
 
 	// ksvc template must reflect new image and new revision name.
 	var ksvc servingv1.Service

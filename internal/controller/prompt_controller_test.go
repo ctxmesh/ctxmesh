@@ -401,11 +401,9 @@ func TestReconcile_PromptOnlyDeploy_PromptRefSwapRollsRevision(t *testing.T) {
 	// specHash MUST move: promptRef is part of the spec it marshals.
 	assert.NotEqual(t, hash1, hash2, "specHash must change when spec.PromptRef changes")
 
-	// The AgentVersion for the NEW spec must exist — it is what status.latestVersion tracks.
-	var av agentsv1beta1.AgentVersion
-	assert.NoError(t, k8sClient.Get(testCtx,
-		types.NamespacedName{Name: name + "-" + hash2, Namespace: namespace}, &av),
-		"a promptRef swap must produce a new AgentVersion %s-%s", name, hash2)
+	// The version of the NEW spec must be recorded — it is what status.latestVersion tracks.
+	_, recorded := storedVersion(t, testVersionStore, name, namespace, name+"-"+hash2)
+	assert.True(t, recorded, "a promptRef swap must record a new version %s-%s", name, hash2)
 
 	// The pod template must actually roll, and must mount the NEW prompt ConfigMap.
 	assert.NotEqual(t, cm1.Name, cm2.Name, "a promptRef swap must create a new content-addressed CM")

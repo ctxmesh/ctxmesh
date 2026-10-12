@@ -79,8 +79,8 @@ type ChunkingConfig struct {
 //     requires a full background re-ingest.
 //  2. chunking (size/overlap/splitter): re-chunking requires re-ingest and drives retrieval quality.
 //
-// Both are enforced by CEL transition rules (the XValidation pattern used by AgentVersion and
-// AgentRegistry in this codebase, preferred over a validating webhook).
+// Both are enforced by CEL transition rules (the XValidation pattern used by AgentRegistry in
+// this codebase, preferred over a validating webhook).
 //
 // +kubebuilder:validation:XValidation:rule="self.embeddingRoute == oldSelf.embeddingRoute",message="embeddingRoute is immutable after creation (one-way door #1, ADR 0061): changing the embedding model requires a full re-ingest — delete and recreate the KnowledgeBase"
 // +kubebuilder:validation:XValidation:rule="self.chunking.size == oldSelf.chunking.size && self.chunking.overlap == oldSelf.chunking.overlap && self.chunking.splitter == oldSelf.chunking.splitter",message="chunking parameters (size/overlap/splitter) are immutable after creation (one-way door #2, ADR 0061): re-chunking requires a full re-ingest — delete and recreate the KnowledgeBase"

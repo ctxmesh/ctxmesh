@@ -21,7 +21,6 @@ package controller
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -172,18 +171,12 @@ func TestTheDetectorFindsTheVersionsThePodsCarry(t *testing.T) {
 	reconcileNN(t, r, name, namespace)
 	baseline := servedAgentVersion(t, name)
 
-	time.Sleep(1100 * time.Millisecond) // AgentVersions are ordered by a second-granularity timestamp
 	upd := getDeploy(t, name, namespace)
 	upd.Spec.Port = 8090
 	require.NoError(t, k8sClient.Update(testCtx, upd))
 	reconcileNN(t, r, name, namespace)
 	serving := servedAgentVersion(t, name)
 	require.NotEqual(t, baseline, serving)
-	t.Cleanup(func() {
-		for _, v := range []string{baseline, serving} {
-			_ = k8sClient.Delete(testCtx, &agentsv1beta1.AgentVersion{ObjectMeta: metav1.ObjectMeta{Name: v, Namespace: namespace}})
-		}
-	})
 
 	store := onlinescore.NewMemStore()
 	detector := regressionReconciler(store)

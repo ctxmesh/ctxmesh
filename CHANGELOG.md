@@ -521,6 +521,33 @@ kubectl delete crd approvalpolicies.agents.ctxmesh.ai feedbackstores.agents.ctxm
   credentialstores.agents.ctxmesh.ai clustercredentialstores.agents.ctxmesh.ai
 ```
 
+**Breaking: agent version history moves to the control-plane database, and `AgentVersion` is
+retired.** The API serves 13 kinds (ADR 0042). The controller recorded every spec change as an
+`AgentVersion` object and never deleted one; it now records each version in Postgres and keeps an
+agent's 20 newest, plus any still in use (the serving version, the one before it, and every
+version `status.rollback` names). Rollback is unchanged: annotate
+`agents.ctxmesh.ai/rollback=<version>`, or click Roll back in the console.
+
+- **Upgrading needs no preparation.** On its first start the new controller copies the existing
+  `AgentVersion` objects into the database, oldest first, before it reconciles anything. Objects
+  whose agent was deleted, or deleted and recreated, are skipped, as garbage collection would have
+  removed them. The controller logs `Version history import complete` with the counts. Avoid spec
+  changes while the upgrade rolls out: a version the old controller records after the new one has
+  started is not copied. After checking an agent's history in the console, delete the old kind
+  (Helm keeps CRDs): `kubectl delete crd agentversions.agents.ctxmesh.ai`.
+- **The console's version list is newest first.** It was in name order, so Compare's default pair
+  (previous and latest) was effectively random. This is the only change to the API's wire format.
+- **Reading version history takes `get` and `list` on `agentversions`.** The BFF checks them as the
+  caller, so the built-in `viewer`, `developer` and `operator` roles keep them. A custom role
+  without them sees an empty version list and gets 403 from the version diff. The scaffolded
+  `agentversion-admin-role`, `agentversion-editor-role` and `agentversion-viewer-role` are removed.
+- **A database outage does not block a deploy.** If a version cannot be recorded, the agent rolls
+  anyway, shows `VersionRecorded=False`, and the controller retries every 30 seconds and counts the
+  failure in `ctxmesh_agent_version_record_failures_total`. Every agent now carries a
+  `VersionRecorded` condition. A rollback requested while history cannot be read waits with
+  `RolledBack=Unknown` (reason `VersionStoreUnavailable`) and keeps its annotation, and the agent
+  still rolls whatever spec you apply.
+
 **`AgentTeam` and `Workflow` are frozen.** Both stay, but neither gains a field until the install
 path is green (ADR 0152). CI fails on any change to their generated CRDs unless
 `hack/crd-freeze.sum` is updated on purpose.
@@ -529,7 +556,6 @@ path is green (ADR 0152). CI fails on any change to their generated CRDs unless
 any kind (ADR 0100). Author manifests at `agents.ctxmesh.ai/v1beta1`; the fields are identical, so
 the `apiVersion` line is the whole change. `ctxmesh expand` and the console emit `v1beta1`, and Go
 code that imported `github.com/ctxmesh/ctxmesh/api/v1alpha1` imports `.../api/v1beta1` instead.
-`kubectl get agentversions` gains the Deployment column.
 
 Every published release already stores `v1beta1`, so an upgrade rewrites nothing. A cluster whose
 CRDs list `v1alpha1` in `status.storedVersions` cannot take the new CRDs, because Kubernetes

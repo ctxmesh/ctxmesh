@@ -153,7 +153,7 @@ func TestPodContract_PromotedCanaryAgentMovesWithoutSplit(t *testing.T) {
 		const agent = "contract-canary-human"
 		es := mkEvalSuite(t, agent+"-suite", namespace, "0.7", eval.GateBlock)
 		r := gateReconciler(0.9)
-		_, r2, _, _ := promoteOver(t, r, agent, namespace, es.Name, canary(false), false, nil)
+		_, r2, _, _ := promoteOver(t, r, agent, namespace, es.Name, canary(false), nil)
 		require.Equal(t, r2, getDeploy(t, agent, namespace).Annotations[promoteAnnotation])
 		renameToOlderContract(t, agent, namespace, r2, plainRevisionUnder(t, getDeploy(t, agent, namespace), "v4"))
 
@@ -165,7 +165,7 @@ func TestPodContract_PromotedCanaryAgentMovesWithoutSplit(t *testing.T) {
 		const agent = "contract-canary-auto"
 		es := mkEvalSuite(t, agent+"-suite", namespace, "0.7", eval.GateBlock)
 		r := gateReconciler(0.9)
-		_, r2, _, _ := promoteOver(t, r, agent, namespace, es.Name, canary(true), false, nil)
+		_, r2, _, _ := promoteOver(t, r, agent, namespace, es.Name, canary(true), nil)
 		require.Empty(t, getDeploy(t, agent, namespace).Annotations[promoteAnnotation], "no person approved it")
 		renameToOlderContract(t, agent, namespace, r2, plainRevisionUnder(t, getDeploy(t, agent, namespace), "v4"))
 

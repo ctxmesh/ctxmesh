@@ -54,11 +54,11 @@ const defaultLogTailLines = 200
 // a 200; a not-found is a 404; a Forbidden (on the agent OR a namespace the caller
 // can't read) surfaces as 403 — never a swallowed empty body.
 //
-// Bindings and versions are read namespace-scoped and filtered to those referencing
-// this agent. A Forbidden on the AGENT read is fatal (403); a Forbidden on the
-// binding/version lists is DEGRADED, not fatal — a caller allowed to read the agent
-// but not the bindings still gets the agent detail with an empty bindings list,
-// rather than a 403 that hides the agent they can see.
+// Bindings are read namespace-scoped and filtered to those referencing this agent;
+// versions come from the version history (agentVersionNames). A Forbidden on the
+// AGENT read is fatal (403); a Forbidden on the bindings or versions is DEGRADED, not
+// fatal — a caller allowed to read the agent but not the bindings still gets the agent
+// detail with an empty bindings list, rather than a 403 that hides the agent they can see.
 //
 // ?dependencies=0 skips resolving the agent's references (dependencies is then null): one read per
 // reference is a cost a caller that re-reads the agent only for its status should not pay.
@@ -81,11 +81,10 @@ func (s *Server) handleAgentDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Bindings + versions are namespace-scoped lists filtered to this agent. A
-	// Forbidden here is degraded (empty list), not fatal — the caller can see the
-	// agent; hiding it behind a binding-RBAC 403 would be worse than an honest
-	// partial view. Any other list error IS surfaced (500) so a real fault is not
-	// masked as "no bindings".
+	// Bindings are a namespace-scoped list filtered to this agent. A Forbidden here
+	// is degraded (empty list), not fatal — the caller can see the agent; hiding it
+	// behind a binding-RBAC 403 would be worse than an honest partial view. Any other
+	// list error IS surfaced (500) so a real fault is not masked as "no bindings".
 	inNS := []client.ListOption{client.InNamespace(ns)}
 
 	toolBindings := []agentsv1beta1.MCPToolBinding{}
@@ -101,15 +100,9 @@ func (s *Server) handleAgentDetail(w http.ResponseWriter, r *http.Request) {
 		toolBindings = list.Items
 	}
 
-	versions := []agentsv1beta1.AgentVersion{}
-	if list, err := listAgentVersions(r.Context(), caller, inNS...); err != nil {
-		if !apierrors.IsForbidden(err) {
-			s.log.Error(err, "list AgentVersions for detail failed", "namespace", ns)
-			writeError(w, http.StatusInternalServerError, "failed to read agent versions")
-			return
-		}
-	} else {
-		versions = list.Items
+	versions, ok := s.agentVersionNames(w, r, caller, &ad)
+	if !ok {
+		return
 	}
 
 	// Edit-mode flags (ADR 0017). managedOutsideUI is the mechanical "no source-spec

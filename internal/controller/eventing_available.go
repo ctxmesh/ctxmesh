@@ -74,7 +74,7 @@ func eventingAvailableVia(rm meta.RESTMapper) bool {
 //
 //	deleting stale *v1.Trigger hello-agent: no matches for kind "Trigger" in version "eventing.knative.dev/v1"
 //
-// so the agent got an AgentVersion and never a Knative Service. Found by the M179 cold-install gate
+// so the agent got a recorded version and never a Knative Service. Found by the M179 cold-install gate
 // on a real cluster — the unit tests could not see it, because they exercise the eventing entry
 // points rather than the serving path that cleans up after them.
 //

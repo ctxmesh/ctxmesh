@@ -55,7 +55,6 @@ rules:
   - agentregistries
   - agentscalingpolicies
   - agentteams
-  - agentversions
   - alertpolicies
   - guardrailpolicies
   - knowledgebases
@@ -104,6 +103,13 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - agents.ctxmesh.ai
+  resources:
+  - agentversions
+  verbs:
+  - get
+  - list
 - apiGroups:
   - agents.ctxmesh.ai
   resources:

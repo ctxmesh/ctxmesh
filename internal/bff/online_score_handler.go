@@ -153,7 +153,7 @@ func (s *Server) handleAgentOnlineScore(w http.ResponseWriter, r *http.Request) 
 
 // RollbackRequest is the body for POST /api/agents/{ns}/{name}/rollback.
 type RollbackRequest struct {
-	// Version is the AgentVersion name to roll back to
+	// Version is the name of the agent version to roll back to
 	// (sets the `agents.ctxmesh.ai/rollback=<version>` annotation).
 	Version string `json:"version"`
 }

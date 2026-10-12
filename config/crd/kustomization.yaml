@@ -12,7 +12,6 @@ commonAnnotations:
 
 resources:
 - bases/agents.ctxmesh.ai_agentdeployments.yaml
-- bases/agents.ctxmesh.ai_agentversions.yaml
 - bases/agents.ctxmesh.ai_modelroutes.yaml
 - bases/agents.ctxmesh.ai_secretbindings.yaml
 - bases/agents.ctxmesh.ai_mcptoolbindings.yaml

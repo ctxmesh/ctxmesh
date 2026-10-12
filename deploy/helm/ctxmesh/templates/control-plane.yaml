@@ -226,84 +226,6 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: ctxmesh
-  name: ctxmesh-agentversion-admin-role
-rules:
-- apiGroups:
-  - agents.ctxmesh.ai
-  resources:
-  - agentversions
-  verbs:
-  - get
-  - list
-  - watch
-  - create
-  - update
-  - patch
-  - delete
-  - deletecollection
-- apiGroups:
-  - agents.ctxmesh.ai
-  resources:
-  - agentversions/status
-  verbs:
-  - get
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: ctxmesh
-  name: ctxmesh-agentversion-editor-role
-rules:
-- apiGroups:
-  - agents.ctxmesh.ai
-  resources:
-  - agentversions
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - agents.ctxmesh.ai
-  resources:
-  - agentversions/status
-  verbs:
-  - get
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: ctxmesh
-  name: ctxmesh-agentversion-viewer-role
-rules:
-- apiGroups:
-  - agents.ctxmesh.ai
-  resources:
-  - agentversions
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - agents.ctxmesh.ai
-  resources:
-  - agentversions/status
-  verbs:
-  - get
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: ctxmesh
     rbac.ctxmesh.ai/bind-only: "true"
     rbac.ctxmesh.ai/persona: credential-admin
   name: ctxmesh-credential-admin
@@ -365,7 +287,6 @@ rules:
   - agents.ctxmesh.ai
   resources:
   - agentdeployments/status
-  - agentversions/status
   - modelroutes/status
   - secretbindings/status
   - mcptoolbindings/status
@@ -475,7 +396,6 @@ rules:
   - agentregistries
   - agentscalingpolicies
   - agentteams
-  - agentversions
   - alertpolicies
   - guardrailpolicies
   - knowledgebases
@@ -524,6 +444,13 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - agents.ctxmesh.ai
+  resources:
+  - agentversions
+  verbs:
+  - get
+  - list
 - apiGroups:
   - agents.ctxmesh.ai
   resources:
@@ -698,7 +625,6 @@ rules:
   - agents.ctxmesh.ai
   resources:
   - agentdeployments/status
-  - agentversions/status
   - modelroutes/status
   - secretbindings/status
   - mcptoolbindings/status
@@ -800,7 +726,6 @@ rules:
   - agents.ctxmesh.ai
   resources:
   - agentdeployments/status
-  - agentversions/status
   - modelroutes/status
   - secretbindings/status
   - mcptoolbindings/status

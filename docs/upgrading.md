@@ -38,6 +38,8 @@ current release is actually using.
   knowledge store are Postgres-backed and survive.
 - **Your custom resources.** AgentDeployments, ModelRoutes, SecretBindings and the rest
   live in etcd and are untouched by a chart upgrade.
+- **Agent version history.** Each agent's versions, which a rollback reverts to, are in the
+  control-plane database and survive with it.
 - **Your provider credentials.** The Secrets holding API keys are created by the connect
   flow, not by the chart, so an upgrade does not touch them.
 
@@ -76,6 +78,44 @@ before upgrading, not after.
 Upgrade one minor version at a time. Skipping versions is untested, and a schema
 migration that assumes the immediately previous shape has no way to tell you it was
 skipped.
+
+## Agent version history moves to the control-plane database
+
+Releases before this one recorded every spec change of an agent as an `AgentVersion` object and
+never deleted one. Version history now lives in the control-plane Postgres database, and the
+`AgentVersion` kind is retired.
+
+**Before upgrading:** nothing to move. Avoid changing agent specs while the upgrade rolls out: a
+version the old controller records after the new one has started is not copied. The serving spec's
+version is recorded again by the new controller either way.
+
+**During the upgrade** the new controller copies the existing `AgentVersion` objects into the
+database on its first start, before it reconciles anything, so each agent's history keeps its order.
+Objects whose agent no longer exists (or was deleted and recreated) are skipped. The copy runs once
+per database; if it fails, the controller exits and the copy is retried when it restarts.
+
+**After upgrading,** confirm the copy ran and check one agent's history:
+
+```sh
+kubectl -n ctxmesh logs deploy/ctxmesh-controller-manager | grep "Version history import complete"
+```
+
+The line reports how many versions were imported and skipped. In the console, an agent's Versions
+tab lists its history newest first. Then delete the retired kind. Helm keeps CRDs on upgrade, so the
+old definition and its objects are still installed until you do; deleting the CRD deletes its
+objects:
+
+```sh
+kubectl delete crd agentversions.agents.ctxmesh.ai
+```
+
+Until you delete it, rolling the release back with `helm rollback` returns to a controller that
+reads those objects, and versions recorded since the upgrade are not among them. Upgrading again
+does not copy anything a second time.
+
+**Access.** The console's version list and diff are authorized against `get` and `list` on
+`agentversions`, which the built-in `viewer`, `developer` and `operator` roles grant. A custom role
+needs the same two verbs.
 
 ## M162 — the agent container is hardened by default (BREAKING for root images)
 

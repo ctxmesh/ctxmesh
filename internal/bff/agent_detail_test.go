@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/publishedartifact"
 )
 
@@ -101,18 +102,12 @@ func TestAgentDetailHappyPath(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "other-tool", Namespace: "team-a"},
 		Spec:       agentsv1beta1.MCPToolBindingSpec{AgentRef: "other", ToolName: "nope", RegistryRef: "reg", Mode: "remote", Server: agentsv1beta1.ToolServer{URL: "http://y"}},
 	}
-	version := &agentsv1beta1.AgentVersion{
-		ObjectMeta: metav1.ObjectMeta{Name: "echo-abc123", Namespace: "team-a"},
-		Spec:       agentsv1beta1.AgentVersionSpec{DeploymentName: "echo", Snapshot: agentsv1beta1.AgentDeploymentSpec{Image: "img:1"}},
-	}
-	decoyVersion := &agentsv1beta1.AgentVersion{
-		ObjectMeta: metav1.ObjectMeta{Name: "other-v1", Namespace: "team-a"},
-		Spec:       agentsv1beta1.AgentVersionSpec{DeploymentName: "other", Snapshot: agentsv1beta1.AgentDeploymentSpec{Image: "img:1"}},
-	}
+	ad.UID = echoUID
+	versions := agentversion.NewMemStore()
+	recordVersion(t, versions, "echo", echoUID, "echo-abc123", "img:1")
+	recordVersion(t, versions, "other", "other-uid", "other-v1", "img:1")
 
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(ad, toolBinding, decoyBinding, version, decoyVersion).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s := versionServer(t, versions, allowEveryReview, ad, toolBinding, decoyBinding)
 
 	rec := getDetail(t, s, "echo")
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -287,7 +282,7 @@ func TestAgentDetailForbiddenBindingsIsDegraded(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).
 		WithInterceptorFuncs(interceptor.Funcs{
-			// The agent Get succeeds; the binding/version LISTs are forbidden.
+			// The agent Get succeeds; the binding LIST is forbidden.
 			List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 				return apierrors.NewForbidden(
 					schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "mcptoolbindings"}, "", errors.New("viewer denied"),

@@ -82,7 +82,7 @@ func NewResolver(s Store) Resolver { return storeResolver{s: s} }
 func (sr storeResolver) Resolve(ctx context.Context, namespace string, r Ref) (Ref, error) {
 	if r.IsDigest() {
 		// Verify it EXISTS. A digest that names nothing would otherwise be recorded into the
-		// AgentVersion snapshot as though it were content, and the failure would surface when
+		// version snapshot as though it were content, and the failure would surface when
 		// the agent starts rather than when the spec was applied.
 		if _, ok, err := sr.s.GetVersion(ctx, namespace, r.Name, r.Version); err != nil {
 			return Ref{}, err

@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
@@ -50,6 +51,7 @@ import (
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/enduseragent"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/killscope"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/skill"
@@ -241,7 +243,7 @@ const jobBackoffLimit int32 = 2
 // The reconcile loop implements a four-step flow (agent-brain specs/agent-serving.md):
 //
 //  1. Fetch; guard unsupported executionModel.
-//  2. Hash spec → ensure AgentVersion snapshot exists.
+//  2. Hash spec → record the version in the control-plane store (fails open).
 //  3. CreateOrUpdate the Knative Service (same name/namespace, controller owner ref).
 //  4. Mirror ksvc Ready condition + URL into AgentDeployment.status.
 //
@@ -388,6 +390,14 @@ type AgentDeploymentReconciler struct {
 	// auto-trigger a rollback (the auto-trigger is deferred, PRD §17.4).
 	OnlineScore onlineScoreReader
 
+	// Versions is the agent version history (ADR 0042): written at Step 2, read by rollback and the
+	// regression detector's baseline. Nil (a test without a store) records nothing, and a rollback then
+	// finds no target.
+	Versions agentversion.Store
+
+	// recorded holds, per "<namespace>/<name>", the recordedVersion this process last recorded.
+	recorded sync.Map
+
 	// OnlineConfig publishes each agent's online-scoring policy to cpDB (m84.3, ADR 0062 Fork 2 / ADR 0011):
 	// the controller resolves spec.evalSuiteRef → EvalSuite.spec.online and UPSERTS/DELETES the per-(ns,
 	// agent) config row that the BFF online-scoring worker READS (cpDB, no agent-CRD RBAC on the BFF SA).
@@ -407,7 +417,6 @@ func (r *AgentDeploymentReconciler) registryReader() RegistryReader {
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentdeployments/finalizers,verbs=update
-// +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentversions,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentscalingpolicies,verbs=get;list;watch
 // PromptVersion retired to Postgres (ADR 0044) — the controller reads the resolved-prompt annotation, no CRD RBAC.
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=evalsuites,verbs=get;list;watch
@@ -427,8 +436,17 @@ func (r *AgentDeploymentReconciler) registryReader() RegistryReader {
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile implements the AgentDeployment reconciliation loop.
-func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	log := logf.FromContext(ctx)
+
+	// A version-store failure never stops the reconcile (agent_versions.go); it brings the next one
+	// forward instead.
+	storeUnavailable := false
+	defer func() {
+		if storeUnavailable {
+			result = retrySoon(result, err)
+		}
+	}()
 
 	// ── Step 1: Fetch ────────────────────────────────────────────────────────
 	var deploy agentsv1beta1.AgentDeployment
@@ -442,6 +460,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			// M142.6: a deleted supervisor keeps no budget row (the mirror is not K8s-owned, so owner-ref
 			// GC does not reach it).
 			r.pruneSpawnBudget(ctx, req.Namespace, req.Name)
+			r.deleteVersions(ctx, req.Namespace, req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching AgentDeployment: %w", err)
@@ -455,10 +474,11 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// that re-enqueues the object, so the following reconcile rolls the workload, giving the
 	// reverted version all traffic at once (serveRollbackTarget; the actuator never touches Knative
 	// traffic). An auto-path refusal is not handled: the ordinary reconcile below still runs.
-	handled, rerr := r.maybeRollback(ctx, &deploy)
+	handled, retry, rerr := r.maybeRollback(ctx, &deploy)
 	if rerr != nil || handled {
 		return ctrl.Result{}, rerr
 	}
+	storeUnavailable = retry
 
 	// Normalise the execution model. The CRD default fills "serving" for omitted
 	// values; a belt-and-braces default here covers a client that submits the
@@ -477,16 +497,14 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// and it does NOT gate the deploy: a cpDB blip is logged, never a reconcile error. No-op when unwired.
 	r.reconcileOnlineScoreConfig(ctx, &deploy)
 
-	// ── Step 2: Spec hash → AgentVersion ─────────────────────────────────────
+	// ── Step 2: Spec hash → recorded version ─────────────────────────────────
 	hash, err := specHash(deploy.Spec)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("computing spec hash: %w", err)
 	}
 	versionName := agentVersionName(deploy.Name, hash)
-	log.Info("Ensuring AgentVersion", "version", versionName)
-
-	if err = r.ensureAgentVersion(ctx, &deploy, versionName); err != nil {
-		return ctrl.Result{}, fmt.Errorf("ensuring AgentVersion %s: %w", versionName, err)
+	if !r.recordVersion(ctx, &deploy, versionName) {
+		storeUnavailable = true
 	}
 
 	// Settle gate (M143 m143.5, m52.G12): a referenced-but-not-yet-visible KnowledgeBase is
@@ -539,7 +557,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// other kinds — a different object, not a ksvc revision roll — so each branch
 	// tears down the workloads the other branches own before writing its own.
 	log.Info("Reconciling workload", "name", deploy.Name, "executionModel", model)
-	result, err := r.reconcileWorkload(ctx, &deploy, model, hash, versionName)
+	result, err = r.reconcileWorkload(ctx, &deploy, model, hash, versionName)
 
 	// Prompt-only deploy (M9): a promptResolveError is USER input (missing
 	// PromptVersion / unresolvable git ref/path), surfaced from buildPodTemplate
@@ -963,13 +981,13 @@ func specHash(spec agentsv1beta1.AgentDeploymentSpec) (string, error) {
 	return fmt.Sprintf("%x", sum[:])[:8], nil
 }
 
-// agentVersionName is the AgentVersion a spec is served as: status.latestVersion, the AGENT_VERSION its
-// pods carry, and the prefix of its revision name.
+// agentVersionName is the version a spec is served as: status.latestVersion, the AGENT_VERSION its
+// pods carry, the prefix of its revision name, and its name in the version history.
 func agentVersionName(deployName, hash string) string {
 	return deployName + "-" + hash
 }
 
-// versionedSpec is the part of the spec an AgentVersion identifies and snapshots. spec.feedback
+// versionedSpec is the part of the spec a version identifies and snapshots. spec.feedback
 // and spec.runtime.toolPolicy.approvers are left out: only the BFF enforces them, so editing them
 // changes nothing that runs and must not mint a version, and a rollback never restores them, so a
 // snapshot carrying them would show stale governance in the version diff. An agent without them
@@ -979,38 +997,6 @@ func versionedSpec(spec agentsv1beta1.AgentDeploymentSpec) agentsv1beta1.AgentDe
 	out.Feedback = nil
 	out.Runtime = runtimeForPod(out.Runtime)
 	return out
-}
-
-// ensureAgentVersion creates an AgentVersion named versionName if it does not
-// already exist. Existing versions are never modified (spec is CEL-immutable).
-func (r *AgentDeploymentReconciler) ensureAgentVersion(
-	ctx context.Context,
-	deploy *agentsv1beta1.AgentDeployment,
-	versionName string,
-) error {
-	var av agentsv1beta1.AgentVersion
-	err := r.Get(ctx, client.ObjectKey{Name: versionName, Namespace: deploy.Namespace}, &av)
-	if err == nil {
-		return nil // already exists — nothing to do
-	}
-	if !apierrors.IsNotFound(err) {
-		return err
-	}
-
-	av = agentsv1beta1.AgentVersion{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      versionName,
-			Namespace: deploy.Namespace,
-		},
-		Spec: agentsv1beta1.AgentVersionSpec{
-			DeploymentName: deploy.Name,
-			Snapshot:       versionedSpec(deploy.Spec),
-		},
-	}
-	if err = ctrl.SetControllerReference(deploy, &av, r.Scheme); err != nil {
-		return fmt.Errorf("setting owner ref on AgentVersion: %w", err)
-	}
-	return r.Create(ctx, &av)
 }
 
 // podTemplate is the fully-built, model-independent pod spec for an agent: the
@@ -1037,7 +1023,7 @@ type podTemplate struct {
 	// supersededDigests is digest as each of supersededPodContracts computed it, in that order.
 	supersededDigests []string
 	// resolvedSkills is what spec.skillRefs resolved to — "<name>@sha256:…", always digests.
-	// Carried out so the reconciler can record it in status and in the AgentVersion snapshot:
+	// Carried out so the reconciler can record it in status and in the version snapshot:
 	// an alias may move, and the snapshot must describe content that cannot.
 	resolvedSkills []string
 	// membership is the resolved M6 registry context (used by the eventing
@@ -3338,7 +3324,7 @@ func envVarPresent(env []corev1.EnvVar, name string) bool {
 const agentDeploymentWorkers = 4
 
 // SetupWithManager sets up the controller with the Manager.
-// The controller owns AgentVersion and Knative Service so that changes to either
+// The controller owns the Knative Service and the other workload kinds so that their changes
 // (e.g. a Knative controller updating ksvc status) requeue the parent deployment.
 //
 // It also watches MCPToolBinding: add/remove/change events map to a requeue of
@@ -3513,7 +3499,6 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// agents share no mutable state (the reconciler holds configuration and pool-backed stores).
 		WithOptions(controller.Options{MaxConcurrentReconciles: agentDeploymentWorkers}).
 		For(&agentsv1beta1.AgentDeployment{}).
-		Owns(&agentsv1beta1.AgentVersion{}).
 		Owns(&servingv1.Service{})
 	if r.EventingAvailable {
 		b = b.Owns(&eventingv1.Trigger{})

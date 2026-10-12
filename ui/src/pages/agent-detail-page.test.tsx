@@ -66,7 +66,7 @@ const DEFAULT_DETAIL = {
     { type: "RouteReady", status: "True", reason: "RouteReady", message: "", lastTransitionTime: "" },
   ],
   bindings: [{ kind: "tool", name: "get-invoice-binding", detail: "get_invoice", ready: true }],
-  versions: ["billing-v1", "billing-v2"],
+  versions: ["billing-v2", "billing-v1"],
   managedOutsideUI: false,
   drift: false,
 };
@@ -2331,10 +2331,14 @@ describe("AgentDetailPage — live output RBAC gate (M100 UI99-logs)", () => {
 
 // ── V3: read-only version-snapshot diff ──────────────────────────────────────
 describe("AgentDetailPage — version diff (V3)", () => {
-  function installVersionDiffFetch(diff: {
-    diff: string;
-    identical: boolean;
-  }) {
+  function installVersionDiffFetch(
+    diff: {
+      diff: string;
+      identical: boolean;
+    },
+    versions: string[] = ["echo-v2", "echo-v1"],
+    diffURLs: string[] = [],
+  ) {
     vi.stubGlobal(
       "fetch",
       vi.fn((input: string | URL, init?: RequestInit) => {
@@ -2345,8 +2349,10 @@ describe("AgentDetailPage — version diff (V3)", () => {
         if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
         if (url.startsWith("/api/capabilities"))
           return j({ namespace: "", allowed: {} });
-        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/versions\/diff/) && method === "GET")
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/versions\/diff/) && method === "GET") {
+          diffURLs.push(url);
           return j({ resolveMode: "textual", fromName: "echo-v1", toName: "echo-v2", ...diff });
+        }
         if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/runs/)) return j({ runs: [] });
         if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) return j({ enabled: false, perUser: false });
         if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) return j({ items: [] });
@@ -2354,7 +2360,7 @@ describe("AgentDetailPage — version diff (V3)", () => {
         if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/online-score/)) return j({ windows: [] }, false, 501);
         if (url.match(/\/tracepolicy$/) && method === "GET") return j({ customDetectors: [] });
         if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/))
-          return j({ ...DEFAULT_DETAIL, versions: ["echo-v2", "echo-v1"], latestVersion: "echo-v2" }, true, 200);
+          return j({ ...DEFAULT_DETAIL, versions, latestVersion: versions[0] }, true, 200);
         return j({}, false, 404);
       }),
     );
@@ -2376,6 +2382,22 @@ describe("AgentDetailPage — version diff (V3)", () => {
     const out = await screen.findByTestId("version-diff-output");
     expect(out).toHaveTextContent("-tag: v1");
     expect(out).toHaveTextContent("+tag: v2");
+  });
+
+  // The BFF lists versions newest first, so the default compare is the previous version → the latest.
+  it("compares the previous version with the latest by default", async () => {
+    const diffURLs: string[] = [];
+    installVersionDiffFetch({ diff: "-tag: v2\n+tag: v3", identical: false }, ["echo-v3", "echo-v2", "echo-v1"], diffURLs);
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(await screen.findByRole("tab", { name: "Versions" }));
+
+    fireEvent.click(screen.getByTestId("version-diff-compare"));
+    await screen.findByTestId("version-diff-output");
+    expect(diffURLs).toHaveLength(1);
+    const q = new URL(diffURLs[0], "http://console.test").searchParams;
+    expect(q.get("from")).toBe("echo-v2");
+    expect(q.get("to")).toBe("echo-v3");
   });
 
   it("shows a calm 'no changes' state for identical versions (V3)", async () => {

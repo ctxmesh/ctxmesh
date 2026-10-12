@@ -727,7 +727,7 @@ func rollbackAfterPromotion(
 	rollout *agentsv1beta1.RolloutSpec, auto bool, servingPolicy *agentsv1beta1.ToolPolicySpec,
 ) (r1, r2, v1, rolledBackTo string) {
 	t.Helper()
-	r1, r2, v1, v2 := promoteOver(t, r, name, namespace, suite, rollout, auto, servingPolicy)
+	r1, r2, v1, v2 := promoteOver(t, r, name, namespace, suite, rollout, servingPolicy)
 	if auto {
 		setRegressionDetected(t, name, namespace, v2)
 	} else {
@@ -738,10 +738,10 @@ func rollbackAfterPromotion(
 
 // promoteOver creates a gated agent whose R1 serves, then promotes R2 over it, so R2 serves alone.
 // servingPolicy, when set, is a governance change made with R2 that a rollback keeps, so the reverted
-// spec hashes to a version of its own. auto spaces the two versions so the auto path finds R1 as prior.
+// spec hashes to a version of its own.
 func promoteOver(
 	t *testing.T, r *AgentDeploymentReconciler, name, namespace, suite string,
-	rollout *agentsv1beta1.RolloutSpec, auto bool, servingPolicy *agentsv1beta1.ToolPolicySpec,
+	rollout *agentsv1beta1.RolloutSpec, servingPolicy *agentsv1beta1.ToolPolicySpec,
 ) (r1, r2, v1, v2 string) {
 	t.Helper()
 	deploy := &agentsv1beta1.AgentDeployment{
@@ -762,9 +762,6 @@ func promoteOver(
 	v1 = getDeploy(t, name, namespace).Status.LatestVersion
 	require.Equal(t, r1, getKsvc(t, name, namespace).Spec.Template.Name)
 
-	if auto {
-		time.Sleep(1100 * time.Millisecond) // the auto path takes the prior by creation time
-	}
 	upd := getDeploy(t, name, namespace)
 	upd.Spec.Port = 8090
 	if servingPolicy != nil {
@@ -959,7 +956,7 @@ func TestRollback_TargetServesAfterCacheLag(t *testing.T) {
 	es := mkEvalSuite(t, name+"-suite", namespace, "0.7", eval.GateBlock)
 	r := gateReconciler(0.9)
 	r1, _, v1, v2 := promoteOver(t, r, name, namespace, es.Name,
-		&agentsv1beta1.RolloutSpec{Strategy: rolloutStrategyCanary, CanaryPercent: 10}, false, nil)
+		&agentsv1beta1.RolloutSpec{Strategy: rolloutStrategyCanary, CanaryPercent: 10}, nil)
 	annotateRollback(t, name, namespace, v1)
 	before := getDeploy(t, name, namespace)
 	rollBack(t, r, name, namespace, v1, false)
@@ -1085,7 +1082,7 @@ func TestRollback_WithdrawsTheApprovalOfTheVersionItLeaves(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			es := mkEvalSuite(t, tc.agent+"-suite", namespace, "0.7", eval.GateBlock)
 			r := gateReconciler(0.9)
-			r1, r2, v1, _ := promoteOver(t, r, tc.agent, namespace, es.Name, tc.rollout, tc.auto, nil)
+			r1, r2, v1, _ := promoteOver(t, r, tc.agent, namespace, es.Name, tc.rollout, nil)
 			require.Equal(t, r2, getDeploy(t, tc.agent, namespace).Annotations[promoteAnnotation])
 			if tc.auto {
 				setRegressionDetected(t, tc.agent, namespace, getDeploy(t, tc.agent, namespace).Status.LatestVersion)

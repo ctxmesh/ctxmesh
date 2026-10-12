@@ -35,6 +35,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/alertstore"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
@@ -122,6 +123,10 @@ type Server struct {
 	// empty list, because "no skills exist" and "skills are not available here" are different
 	// facts and must not collapse into one.
 	skillStore skill.Store
+
+	// agentVersionStore is agent version history (ADR 0042): the detail page's version list and the
+	// version diff. nil (no control-plane database) ⇒ an empty list and a 501 diff.
+	agentVersionStore agentversion.Store
 
 	// publishedArtifactStore is the control-plane Postgres store for published_artifacts — the
 	// immutable, versioned snapshot-at-publish table (M74, m74.1, ADR 0068 §1). POST /api/templates
@@ -572,6 +577,9 @@ type Options struct {
 	// GET /api/catalog degrades to own-ns + public only (fail-closed), never a panic.
 	NamespaceTenantStore namespacetenant.Store
 	SkillStore           skill.Store
+	// AgentVersionStore is agent version history (ADR 0042), written by the controller. Wired from
+	// CONTROLPLANE_DSN in cmd/bff/main.go.
+	AgentVersionStore agentversion.Store
 
 	// KillScopes records active emergency stops (M146, ADR 0126). Optional: nil leaves the kill switch
 	// inert rather than failing closed on every claim, so an install that never provisions it is
@@ -720,6 +728,7 @@ func NewServer(opts Options) *Server {
 		toolRegistryStore:        opts.ToolRegistryStore,
 		namespaceTenantStore:     opts.NamespaceTenantStore,
 		skillStore:               opts.SkillStore,
+		agentVersionStore:        opts.AgentVersionStore,
 		endUserVerifier:          opts.EndUserVerifier,
 		saIssuer:                 strings.TrimSpace(opts.SAIssuer),
 		endUserAgentStore:        opts.EndUserAgentStore,

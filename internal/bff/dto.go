@@ -163,7 +163,7 @@ type AgentBinding struct {
 // AgentDetailResponse is returned by GET /api/agents/{ns}/{name}. It is the full
 // agent-landing projection: identity, the spec summary (image, executionModel,
 // scaling, role), the live status (conditions + Knative URL + readiness/phase),
-// the bindings referencing this agent, and the AgentVersion history names.
+// the bindings referencing this agent, and the agent's version names, newest first.
 // Bindings and Versions and Conditions are non-nil on the wire ([] not null).
 type AgentDetailResponse struct {
 	Name           string `json:"name"`
@@ -1464,14 +1464,14 @@ type AgentGateDetail struct {
 	ScoredRevision string `json:"scoredRevision,omitempty"`
 }
 
-// newAgentDetail projects an AgentDeployment plus the bindings/versions that
-// reference it onto the flat agent-landing DTO. The caller passes the CRD lists it
-// already read caller-scoped; this helper only projects (no I/O), so it stays
+// newAgentDetail projects an AgentDeployment plus the bindings that reference it and
+// its version names (newest first) onto the flat agent-landing DTO. The caller passes
+// what it already read caller-scoped; this helper only projects (no I/O), so it stays
 // unit-testable in isolation. Every slice is non-nil on the wire.
 func newAgentDetail(
 	ad *agentsv1beta1.AgentDeployment,
 	toolBindings []agentsv1beta1.MCPToolBinding,
-	versions []agentsv1beta1.AgentVersion,
+	versions []string,
 	managedOutsideUI bool,
 	drift bool,
 ) AgentDetailResponse {
@@ -1529,13 +1529,7 @@ func newAgentDetail(
 		})
 	}
 
-	// Versions: the AgentVersion snapshot names pinned to this deployment.
-	versionNames := make([]string, 0, len(versions))
-	for i := range versions {
-		if versions[i].Spec.DeploymentName == ad.Name {
-			versionNames = append(versionNames, versions[i].Name)
-		}
-	}
+	versionNames := append(make([]string, 0, len(versions)), versions...)
 
 	// MODEL_ROUTE env carries the agent's model route (expand: model.route → env),
 	// surfaced so the detail page can link to the ModelRoute (used-by graph).

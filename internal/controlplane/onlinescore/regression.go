@@ -27,7 +27,7 @@ import (
 // persistence — NOT an absolute threshold (which would flap on a noisy judge) and NOT full
 // sequential-testing machinery.
 //
-//   - Baseline  = the PRIOR AgentVersion's aggregate(s) over a comparable window.
+//   - Baseline  = the PRIOR version's aggregate(s) over a comparable window.
 //   - Current   = the SERVING version's recent aggregate(s).
 //   - Operational (error rate / tool-fail rate — well-behaved proportions): a two-proportion
 //     z-test on the rate delta; a single sufficiently-powered window can fire.

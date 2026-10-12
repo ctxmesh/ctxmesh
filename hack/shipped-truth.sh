@@ -39,7 +39,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # The number of rows the table holds. Raise it with the rows; lowering it is a visible edit to a claim.
-FLOOR=152
+FLOOR=160
 
 SITE="${CTXMESH_SITE:-../ctxmesh.github.io}"
 SITE_OK=0
@@ -357,6 +357,17 @@ row m165 has site:src/content/docs/reference/compatibility.md "no independent se
 row m184.23 has internal/controller/agentdeployment_controller.go 'Name: envAgentVersion, Value: agentVersionName(deploy.Name, hash)' "the controller sets AGENT_VERSION on every agent pod"
 row m184.23 test internal/controller/agent_version_integration_test.go TestAnAgentRevisionedBeforeAgentVersionRollsOnce "an agent revisioned before AGENT_VERSION rolls to a new revision name"
 row m184.23 test internal/controller/agent_version_integration_test.go TestTheDetectorFindsTheVersionsThePodsCarry "the regression detector finds the versions the pods carry"
+
+# Version history is in the control-plane store: the kind is gone, a store outage never blocks a deploy
+# or loses a requested rollback, an upgrade keeps its history, and reading it is authorized as the caller.
+row m184.37 absent api/v1beta1/agentversion_types.go - "the AgentVersion kind is retired"
+row m184.37 absent config/crd/bases/agents.ctxmesh.ai_agentversions.yaml - "no AgentVersion CRD is generated"
+row m184.37 test internal/controlplane/agentversion/conformance_test.go TestStoreConformance "the version store passes one contract on memory and Postgres"
+row m184.37 test internal/controller/agent_version_store_test.go TestVersion_RecordFailsOpen "a version that cannot be recorded does not block the deploy"
+row m184.37 test internal/controller/agent_version_store_test.go TestRollback_HumanWaitsForTheStore "a rollback requested during a store outage waits, and the agent still rolls"
+row m184.37 test internal/controller/agentversion_import_test.go TestImportAgentVersions "an upgrade imports existing AgentVersion objects once, and rolls back to them"
+row m184.37 test internal/bff/agent_version_diff_test.go TestAgentVersionDiff_WithoutTheGrantIs403 "the version diff is authorized as the caller"
+row m184.37 has config/rbac/ctxmesh_viewer_role.yaml '  - agentversions' "the viewer persona keeps the grant the version-history SSAR checks"
 
 # ── verdict ───────────────────────────────────────────────────────────────────
 if [ "$total" -eq 0 ]; then

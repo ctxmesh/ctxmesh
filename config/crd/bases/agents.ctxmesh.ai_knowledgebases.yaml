@@ -76,8 +76,8 @@ spec:
                   requires a full background re-ingest.
                2. chunking (size/overlap/splitter): re-chunking requires re-ingest and drives retrieval quality.
 
-              Both are enforced by CEL transition rules (the XValidation pattern used by AgentVersion and
-              AgentRegistry in this codebase, preferred over a validating webhook).
+              Both are enforced by CEL transition rules (the XValidation pattern used by AgentRegistry in
+              this codebase, preferred over a validating webhook).
             properties:
               chunking:
                 description: |-

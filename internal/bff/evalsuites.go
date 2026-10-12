@@ -227,7 +227,7 @@ type GateResultDTO struct {
 	// Score is the weighted-mean score as a decimal STRING (e.g. "0.9182") — never
 	// coerced to a float here; the UI parses it. Empty ⇒ no score yet.
 	Score string `json:"score,omitempty"`
-	// ScoredRevision is the AgentVersion the score was computed against. It MAY lag
+	// ScoredRevision is the revision the score was computed against. It MAY lag
 	// the agent's current revision — the UI badges "stale"; this handler never claims
 	// freshness.
 	ScoredRevision string `json:"scoredRevision,omitempty"`

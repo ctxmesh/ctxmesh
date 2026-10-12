@@ -113,14 +113,13 @@ func TestRollback_Refused_ReasonPersists_UnderCacheLag(t *testing.T) {
 		targetV    = "rb-cachelag-target000"
 		currentImg = "ghcr.io/ctxmesh/example-agent:v2"
 	)
-	mkVersionSnap(t, name, targetV, namespace, "ghcr.io/ctxmesh/example-agent:v1")
-
 	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: currentImg},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	mkVersionSnap(t, deploy, targetV, "ghcr.io/ctxmesh/example-agent:v1")
 
 	// Seed a recent successful rollback so the cooldown guard REFUSES this attempt.
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))

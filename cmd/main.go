@@ -48,6 +48,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -59,6 +60,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/controller"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/alertstore"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/costrollup"
@@ -506,6 +508,23 @@ func main() {
 	defer func() { _ = cpDB.Close() }()
 	toolRegistryStore := toolregistry.NewPostgresStore(cpDB)
 
+	// Agent version history lives in the control-plane store (ADR 0042). An upgrade from a release that
+	// wrote AgentVersion objects copies them in first: the import must precede every version this
+	// controller records, or the order of an agent's history would be wrong. It runs once per database;
+	// a failure exits, and the restart retries it.
+	versionStore := agentversion.NewPostgresStore(cpDB)
+	importCtx, cancelImport := context.WithTimeout(context.Background(), 5*time.Minute)
+	imported, importErr := controller.ImportAgentVersions(
+		logf.IntoContext(importCtx, setupLog), mgr.GetAPIReader(), versionStore)
+	cancelImport()
+	if importErr != nil {
+		setupLog.Error(importErr, "Failed to import AgentVersion objects into the version history")
+		os.Exit(1)
+	}
+	if imported.Ran {
+		setupLog.Info("Version history import complete", "imported", imported.Imported, "skipped", imported.Skipped)
+	}
+
 	// Read-switch: ONE shared Postgres reader for BOTH the MCPToolBinding and
 	// AgentDeployment reconcilers — they compute the pushed manifest and the pod
 	// template from the same resolveAgentBindings logic, so a split reader would
@@ -621,6 +640,8 @@ func main() {
 		// agent's evalSuiteRef → EvalSuite.spec.online and UPSERTS/CLEARS the per-(ns, agent) config row the
 		// BFF online-scoring worker reads (cpDB, no agent-CRD RBAC on the BFF SA). Same cpDB store; nil-safe.
 		OnlineConfig: onlinescore.NewPostgresStore(cpDB),
+		// Version history (ADR 0042): the SAME store the regression detector reads its baseline from.
+		Versions: versionStore,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agentdeployment")
 		os.Exit(1)
@@ -749,7 +770,7 @@ func main() {
 		os.Exit(1)
 	}
 	// Regression detector (M69, ADR 0062 Fork 4): maintains the RegressionDetected condition on
-	// each AgentDeployment by comparing the serving AgentVersion's online-score aggregates against
+	// each AgentDeployment by comparing the serving version's online-score aggregates against
 	// the prior version's baseline (delta-vs-baseline + min-n + persistence). DETECTION ONLY — the
 	// auto-rollback trigger is DEFERRED (PRD §17.4); the console pairs the condition with a
 	// one-click HUMAN rollback (m69.8). The store is the manager's existing cpDB (mirrors the
@@ -757,6 +778,7 @@ func main() {
 	if err := (&controller.RegressionDetectorReconciler{
 		Client:      mgr.GetClient(),
 		OnlineScore: onlinescore.NewPostgresStore(cpDB),
+		Versions:    versionStore,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "regressiondetector")
 		os.Exit(1)

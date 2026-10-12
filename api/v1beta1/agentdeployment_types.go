@@ -365,7 +365,7 @@ type AgentDeploymentSpec struct {
 	//
 	// Each entry is "<name>@<version>", where version is a digest (sha256:…) or an alias. An
 	// alias is resolved ONCE, at reconcile time, and the resolved DIGEST is recorded in the
-	// AgentVersion snapshot — a running agent never follows a moving alias, because replay
+	// version snapshot — a running agent never follows a moving alias, because replay
 	// fixtures and the eval gate both assume a pinned artifact.
 	//
 	// Changing this list rolls a new Knative revision with the image digest unchanged, exactly
@@ -956,13 +956,13 @@ type GateStatus struct {
 // two-version flap detector reads recent events to refuse rolling back TO a version
 // that was recently rolled back FROM.
 type RollbackEvent struct {
-	// toVersion is the AgentVersion the serving spec was reverted to: the rollback
+	// toVersion is the version the serving spec was reverted to: the rollback
 	// target, or, when the governance fields a rollback keeps differ from the target's,
 	// the version the reverted spec hashes to (<deployment>-<hash>).
 	// +kubebuilder:validation:MaxLength=253
 	ToVersion string `json:"toVersion"`
 
-	// fromVersion is the AgentVersion the serving spec matched immediately before the
+	// fromVersion is the version the serving spec matched immediately before the
 	// revert (the version rolled back FROM), captured from status.latestVersion. Empty
 	// when no serving version was recorded yet.
 	// +optional
@@ -981,7 +981,7 @@ type RollbackEvent struct {
 // read this to decide whether to honour a `agents.ctxmesh.ai/rollback=<version>`
 // annotation.
 type RollbackStatus struct {
-	// rolledBackTo is the AgentVersion the serving spec was last reverted to (see
+	// rolledBackTo is the version the serving spec was last reverted to (see
 	// history[].toVersion for which name that is). Empty until the first successful
 	// rollback.
 	// +optional
@@ -1113,7 +1113,7 @@ type AgentDeploymentStatus struct {
 	// This is the field that makes a skilled agent reproducible. An alias may be re-pointed at
 	// any moment; if the deployment kept the alias, a replay fixture recorded today would
 	// exercise different content tomorrow and still report green. Recording the digest means
-	// the AgentVersion snapshot describes content that cannot change.
+	// the version snapshot describes content that cannot change.
 	// +optional
 	// +listType=atomic
 	ResolvedSkills []string `json:"resolvedSkills,omitempty"`
@@ -1127,8 +1127,10 @@ type AgentDeploymentStatus struct {
 	// +optional
 	ExternalURL string `json:"externalURL,omitempty"`
 
-	// latestVersion is the name of the most recently created AgentVersion snapshot
-	// for this deployment, e.g. "echo-agent-7d9f4c1a".
+	// latestVersion is the name of the most recent version of this deployment's spec,
+	// "<name>-<spec-hash-8>", e.g. "echo-agent-7d9f4c1a". Each version's spec snapshot is
+	// kept in the control-plane version history, which the console lists and diffs and a
+	// rollback reverts to.
 	// +optional
 	LatestVersion string `json:"latestVersion,omitempty"`
 
@@ -1151,8 +1153,9 @@ type AgentDeploymentStatus struct {
 
 // AgentDeployment is the Schema for the agentdeployments API.
 // It describes a long-running AI agent deployed as a Knative Service.
-// The controller reconciles each AgentDeployment into an immutable AgentVersion
-// snapshot and a Knative Service that serves HTTP traffic on /invoke.
+// The controller records each spec as an immutable version in the control-plane
+// version history and reconciles it into a Knative Service that serves HTTP traffic
+// on /invoke.
 //
 // The name-length CEL rule above guards the revision-name budget: the
 // controller derives Knative revision names as "<name>-<specHash8>" plus, when

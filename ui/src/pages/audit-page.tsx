@@ -116,9 +116,12 @@ const AUDIT_ACTIONS = [
 //     "GuardrailPolicy" — guardrail_event_handler.go (literal "GuardrailPolicy")
 //     "SharedRun"      — shares.go:auditKindSharedRun
 //   Controller rows (internal/audit/auditor.go:auditedTypes — the scheme-resolved Kind):
-//     "AgentDeployment", "AgentVersion", "ModelRoute", "SecretBinding",
+//     "AgentDeployment", "ModelRoute", "SecretBinding",
 //     "MCPToolBinding", "AgentRegistry", "AgentScalingPolicy",   (MemoryBinding retired, ADR 0101)
 //     "EvalSuite"
+//   Rows no longer written, still listed until audit retention removes them:
+//     "AgentVersion" — the kind moved to the control-plane store (ADR 0042); remove it with the
+//     controller's agentversions read access.
 // NOTE: "PromptVersion"/"ToolRegistry" were retired to Postgres (ADR 0044) and are
 // no longer CRDs — they are NOT in auditedTypes() and produce no controller rows.
 // "AgentTeam"/"Workflow"/"KnowledgeBase" were REMOVED — not in auditedTypes() and

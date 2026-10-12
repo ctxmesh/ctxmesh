@@ -19,8 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"slices"
-	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -33,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
 )
 
@@ -74,7 +73,7 @@ const baselineWindowLimit = 24
 // condition + a metric are the surfacing mechanism, NOT a k8s Event.
 var regressionDetectedGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "ctxmesh_regression_detected",
-	Help: "1 when the online-score regression detector has flagged the serving AgentVersion as regressed " +
+	Help: "1 when the online-score regression detector has flagged the serving version as regressed " +
 		"vs the prior version's baseline (RegressionDetected=True), else 0. DETECTION ONLY — no auto-rollback " +
 		"is wired (ADR 0062 Fork 4; PRD §17.4 defers the auto-trigger). Labels: namespace, agent.",
 }, []string{"namespace", "agent"})
@@ -93,8 +92,8 @@ type onlineScoreReader interface {
 
 // RegressionDetectorReconciler watches AgentDeployments and maintains the RegressionDetected
 // condition from the online-score aggregates (ADR 0062 Fork 4, M69). It is CONTROLLER-side and
-// uses ONLY the manager's client (to read AgentDeployment + AgentVersion history) and the
-// online-score store (from the manager's existing cpDB). It emits DETECTION ONLY — it never
+// uses ONLY the manager's client (to read AgentDeployments), the version history and the
+// online-score store (both from the manager's existing cpDB). It emits DETECTION ONLY — it never
 // promotes, rolls back, or changes traffic (the auto-trigger is deferred; the human console
 // actuator is m69.8).
 //
@@ -108,6 +107,10 @@ type RegressionDetectorReconciler struct {
 	// disabled (the condition is set Unknown/OnlineScoreUnwired); a deployment without cpDB.
 	OnlineScore onlineScoreReader
 
+	// Versions is the agent version history the baseline is resolved from (the store the
+	// AgentDeployment reconciler records into). nil ⇒ no baseline (Unknown/NoBaseline).
+	Versions agentversion.Store
+
 	// Detector carries the detection tunables. Nil ⇒ the package defaults
 	// (onlinescore.NewRegressionDetector with a zero DetectorConfig).
 	Detector *onlinescore.RegressionDetector
@@ -115,7 +118,6 @@ type RegressionDetectorReconciler struct {
 
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentdeployments,verbs=get;list;watch
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentdeployments/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentversions,verbs=get;list;watch
 
 // Reconcile evaluates one AgentDeployment for a regression and maintains its RegressionDetected
 // condition. It always requeues after regressionRequeue so the verdict tracks advancing windows.
@@ -178,18 +180,18 @@ func (r *RegressionDetectorReconciler) evaluate(
 	serving := deploy.Status.LatestVersion
 	if serving == "" {
 		return onlinescore.RegressionVerdict{}, metav1.ConditionUnknown, reasonNoServingVersion,
-			"no serving AgentVersion yet (status.latestVersion is empty)"
+			"no serving version yet (status.latestVersion is empty)"
 	}
 
 	baseline, ok, err := r.priorVersion(ctx, deploy, serving)
 	if err != nil {
 		// A read error is infra — surface Unknown but let the reconcile requeue normally.
 		return onlinescore.RegressionVerdict{}, metav1.ConditionUnknown, reasonNoBaseline,
-			fmt.Sprintf("could not resolve the prior AgentVersion baseline: %v", err)
+			fmt.Sprintf("could not resolve the prior version baseline: %v", err)
 	}
 	if !ok {
 		return onlinescore.RegressionVerdict{}, metav1.ConditionUnknown, reasonNoBaseline,
-			"no prior AgentVersion to baseline against (only one version exists)"
+			"no prior version to baseline against (only one version exists)"
 	}
 
 	// Load aggregates for both versions. ListAggregates returns (ns, agent) rows most-recent-first;
@@ -225,60 +227,35 @@ func (r *RegressionDetectorReconciler) evaluate(
 	}
 }
 
-// priorVersion returns the name of the AgentVersion that immediately precedes `serving` in this
-// deployment's history, ordered by creation time. Returns (name, true, nil) when a prior version
-// exists, ("", false, nil) when `serving` is the only/first version, and an error on a read
-// failure. Versions are the immutable per-spec-hash snapshots; the one created just before the
-// serving version is the natural baseline (ADR 0062 Fork 4).
+// priorVersion returns the version recorded immediately before `serving` in this deployment's
+// history. Returns (name, true, nil) when a prior version exists, ("", false, nil) when `serving` is
+// the only/first version, and an error on a read failure. When `serving` is not recorded (status ahead
+// of the history, e.g. its record failed), the newest recorded version is the baseline. Versions are
+// ordered by when they were first recorded (ADR 0062 Fork 4).
 func (r *RegressionDetectorReconciler) priorVersion(
 	ctx context.Context,
 	deploy *agentsv1beta1.AgentDeployment,
 	serving string,
 ) (string, bool, error) {
-	var list agentsv1beta1.AgentVersionList
-	if err := r.List(ctx, &list, client.InNamespace(deploy.Namespace)); err != nil {
-		return "", false, fmt.Errorf("listing AgentVersions: %w", err)
+	if r.Versions == nil {
+		return "", false, nil
 	}
-	// Keep only this deployment's versions.
-	mine := make([]agentsv1beta1.AgentVersion, 0, len(list.Items))
-	for i := range list.Items {
-		if list.Items[i].Spec.DeploymentName == deploy.Name {
-			mine = append(mine, list.Items[i])
-		}
+	newestFirst, err := r.Versions.List(ctx, deploy.Namespace, string(deploy.UID))
+	if err != nil {
+		return "", false, fmt.Errorf("listing versions: %w", err)
 	}
-	if len(mine) < 2 {
+	if len(newestFirst) < 2 {
 		return "", false, nil // no prior version to baseline against
 	}
-	sortVersionsByCreation(mine)
-	// Find the serving version and return the one immediately before it.
-	for i := range mine {
-		if mine[i].Name == serving {
-			if i == 0 {
+	for i := range newestFirst {
+		if newestFirst[i].Name == serving {
+			if i == len(newestFirst)-1 {
 				return "", false, nil // serving IS the oldest — no baseline
 			}
-			return mine[i-1].Name, true, nil
+			return newestFirst[i+1].Name, true, nil
 		}
 	}
-	// serving not found among versions (e.g. status ahead of the version list) → the newest prior
-	// is the most recent other version.
-	return mine[len(mine)-1].Name, true, nil
-}
-
-// sortVersionsByCreation orders an AgentVersion slice oldest → newest by CreationTimestamp,
-// tie-breaking on name for determinism (second-granularity timestamps collide often). Shared
-// by the regression detector's baseline resolution and the rollback actuator's healthy-target
-// check so both agree on version ordering.
-func sortVersionsByCreation(versions []agentsv1beta1.AgentVersion) {
-	slices.SortFunc(versions, func(a, b agentsv1beta1.AgentVersion) int {
-		ta, tb := a.CreationTimestamp.Time, b.CreationTimestamp.Time
-		if ta.Equal(tb) {
-			return strings.Compare(a.Name, b.Name)
-		}
-		if ta.Before(tb) {
-			return -1
-		}
-		return 1
-	})
+	return newestFirst[0].Name, true, nil
 }
 
 // filterByVersion returns the aggregates for exactly `version`, preserving the input order

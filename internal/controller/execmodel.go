@@ -363,7 +363,7 @@ func (r *AgentDeploymentReconciler) reconcileEventingService(
 //
 // A Job's pod template is immutable once created (spec.template is set-once), so
 // on re-reconcile of an existing Job we leave the template alone — the spec-hash
-// changes the AgentVersion, not this named Job; a spec change that should re-run
+// changes the version, not this named Job; a spec change that should re-run
 // the batch is handled by the operator recreating/renaming, consistent with the
 // one-shot semantics.
 func (r *AgentDeploymentReconciler) reconcileBatchJob(

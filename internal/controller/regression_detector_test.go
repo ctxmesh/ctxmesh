@@ -35,21 +35,11 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
 )
 
-// mkVersion creates an AgentVersion snapshot for `deployment` named `name`. The regression
-// detector orders versions by CreationTimestamp, so tests create the baseline first, then the
-// serving version, giving a deterministic "prior" resolution.
-func mkVersion(t *testing.T, deployment, name, namespace string) *agentsv1beta1.AgentVersion {
+// mkVersion records a version of deploy named `name`. Versions are ordered by when they were
+// recorded, so tests record the baseline first, then the serving version.
+func mkVersion(t *testing.T, deploy *agentsv1beta1.AgentDeployment, name string) {
 	t.Helper()
-	av := &agentsv1beta1.AgentVersion{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1beta1.AgentVersionSpec{
-			DeploymentName: deployment,
-			Snapshot:       agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
-		},
-	}
-	require.NoError(t, k8sClient.Create(testCtx, av))
-	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, av) })
-	return av
+	recordVersionOf(t, deploy, name, agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"})
 }
 
 // seedJudgeWindows upserts K judge windows for (agent, version) at the given per-window mean.
@@ -71,6 +61,7 @@ func regressionReconciler(s onlinescore.Store) *RegressionDetectorReconciler {
 	return &RegressionDetectorReconciler{
 		Client:      k8sClient,
 		OnlineScore: s,
+		Versions:    testVersionStore,
 	}
 }
 
@@ -118,12 +109,10 @@ func TestRegression_FiresConditionOnRealDeployment(t *testing.T) {
 	)
 	store := onlinescore.NewMemStore()
 
-	// Baseline version created first (older), serving version second (newer).
-	mkVersion(t, name, baseV, namespace)
-	time.Sleep(1100 * time.Millisecond) // ensure a distinct CreationTimestamp (second granularity)
-	mkVersion(t, name, curV, namespace)
-
-	mkDeployWithVersion(t, name, namespace, curV)
+	// Baseline version recorded first (older), serving version second (newer).
+	d := mkDeployWithVersion(t, name, namespace, curV)
+	mkVersion(t, d, baseV)
+	mkVersion(t, d, curV)
 
 	// Baseline healthy (0.90 over 200); current drops ~0.20 for K=3 consecutive windows.
 	seedJudgeWindows(t, store, namespace, name, baseV, 200, []float64{0.90})
@@ -147,10 +136,9 @@ func TestRegression_HealthyClearsCondition(t *testing.T) {
 		curV      = "rd-healthy-agent-curr00"
 	)
 	store := onlinescore.NewMemStore()
-	mkVersion(t, name, baseV, namespace)
-	time.Sleep(1100 * time.Millisecond)
-	mkVersion(t, name, curV, namespace)
-	mkDeployWithVersion(t, name, namespace, curV)
+	d := mkDeployWithVersion(t, name, namespace, curV)
+	mkVersion(t, d, baseV)
+	mkVersion(t, d, curV)
 
 	seedJudgeWindows(t, store, namespace, name, baseV, 200, []float64{0.85})
 	seedJudgeWindows(t, store, namespace, name, curV, 100, []float64{0.86, 0.87, 0.85})
@@ -173,10 +161,9 @@ func TestRegression_SparseAbstains(t *testing.T) {
 		curV      = "rd-sparse-agent-curr000"
 	)
 	store := onlinescore.NewMemStore()
-	mkVersion(t, name, baseV, namespace)
-	time.Sleep(1100 * time.Millisecond)
-	mkVersion(t, name, curV, namespace)
-	mkDeployWithVersion(t, name, namespace, curV)
+	d := mkDeployWithVersion(t, name, namespace, curV)
+	mkVersion(t, d, baseV)
+	mkVersion(t, d, curV)
 
 	// A big drop, but only a handful of samples per window → below minSamples.
 	seedJudgeWindows(t, store, namespace, name, baseV, 200, []float64{0.90})
@@ -198,8 +185,8 @@ func TestRegression_NoBaselineAbstains(t *testing.T) {
 		curV      = "rd-nobase-agent-curr000"
 	)
 	store := onlinescore.NewMemStore()
-	mkVersion(t, name, curV, namespace) // the ONLY version
-	mkDeployWithVersion(t, name, namespace, curV)
+	d := mkDeployWithVersion(t, name, namespace, curV)
+	mkVersion(t, d, curV) // the ONLY version
 	seedJudgeWindows(t, store, namespace, name, curV, 100, []float64{0.50, 0.51, 0.49})
 
 	reconcileRegression(t, regressionReconciler(store), name, namespace)
@@ -219,8 +206,8 @@ func TestRegression_RequeuesPeriodically(t *testing.T) {
 		curV      = "rd-requeue-agent-curr00"
 	)
 	store := onlinescore.NewMemStore()
-	mkVersion(t, name, curV, namespace)
-	mkDeployWithVersion(t, name, namespace, curV)
+	d := mkDeployWithVersion(t, name, namespace, curV)
+	mkVersion(t, d, curV)
 
 	res := reconcileRegression(t, regressionReconciler(store), name, namespace)
 	assert.Equal(t, regressionRequeue, res.RequeueAfter, "must requeue periodically")

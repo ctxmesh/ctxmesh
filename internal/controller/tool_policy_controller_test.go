@@ -655,13 +655,13 @@ func TestToolPolicy_InlineApproval_DeliveredToSidecar(t *testing.T) {
 	// not, and a rollback never restores them).
 	hash, err := specHash(updated.Spec)
 	require.NoError(t, err)
-	var av agentsv1beta1.AgentVersion
-	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: agent.Name + "-" + hash, Namespace: ns}, &av))
-	require.NotNil(t, av.Spec.Snapshot.Runtime)
-	require.NotNil(t, av.Spec.Snapshot.Runtime.ToolPolicy)
-	assert.Equal(t, "require-approval", av.Spec.Snapshot.Runtime.ToolPolicy.Default, "the snapshot keeps the rules")
-	assert.Empty(t, av.Spec.Snapshot.Runtime.ToolPolicy.Approvers, "the snapshot carries no approvers")
-	snapHash, err := specHash(av.Spec.Snapshot)
+	av, ok := storedVersion(t, testVersionStore, agent.Name, ns, agent.Name+"-"+hash)
+	require.True(t, ok)
+	require.NotNil(t, av.Snapshot.Runtime)
+	require.NotNil(t, av.Snapshot.Runtime.ToolPolicy)
+	assert.Equal(t, "require-approval", av.Snapshot.Runtime.ToolPolicy.Default, "the snapshot keeps the rules")
+	assert.Empty(t, av.Snapshot.Runtime.ToolPolicy.Approvers, "the snapshot carries no approvers")
+	snapHash, err := specHash(av.Snapshot)
 	require.NoError(t, err)
 	assert.Equal(t, hash, snapHash, "the snapshot hashes to its version's name")
 }

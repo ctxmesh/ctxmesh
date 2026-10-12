@@ -22,7 +22,6 @@ import (
 	"strings"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -36,18 +35,19 @@ import (
 
 // The HUMAN rollback actuator (ADR 0062 Fork 4, M69 — the HUMAN actuator + the damping
 // GUARDS; the AUTO-rollback TRIGGER is DEFERRED per PRD §17.4). An operator sets
-// `agents.ctxmesh.ai/rollback=<agentversion-name>` on an AgentDeployment (symmetric with
+// `agents.ctxmesh.ai/rollback=<version-name>` on an AgentDeployment (symmetric with
 // the `agents.ctxmesh.ai/promote` signal the same controller owns). On the next reconcile
 // the SAME eval-gate controller:
 //
-//  1. resolves the named AgentVersion by its EXACT name (m69.7 finding: AgentVersion
-//     ordering by CreationTimestamp is coarse, so a rollback targets an explicit name — no
-//     ordering guess). NotFound → an honest status condition + reason; NO action.
+//  1. resolves the named version by its EXACT name in this agent's version history (the
+//     control-plane store, ADR 0042). Not found, or a version of another agent → an honest status
+//     condition + reason; NO action. While the store cannot be read the request is kept and
+//     retried, and the ordinary reconcile still runs.
 //  2. runs the DAMPING GUARDS (they apply to a human rollback NOW and, unchanged, to a
 //     future auto-trigger — the guards are the mechanism, the auto-trigger is deferred):
 //     healthy-target, cooldown, two-version flap, freeze-after-auto-action. A refused
 //     rollback surfaces a clear status condition/reason and NEVER silently no-ops.
-//  3. reverts AgentDeployment.spec to the target version's spec.snapshot, keeping the live
+//  3. reverts AgentDeployment.spec to the target version's snapshot, keeping the live
 //     governance fields (rollbackSpec), so the normal reconcile then rolls the workload; records
 //     the action on status.rollback, and CLEARS the annotation so the rollback fires exactly
 //     once. A target that differs from the live spec only in kept fields is refused
@@ -59,9 +59,9 @@ import (
 // to all traffic at once, without a canary or the eval gate (serveRollbackTarget).
 
 // rollbackAnnotation is the HUMAN rollback signal (ADR 0062 Fork 4, PRD §17.4). Set it to
-// an explicit AgentVersion NAME (from status.latestVersion history / the version list) on an
+// an explicit version NAME (from status.latestVersion history / the version list) on an
 // AgentDeployment — e.g. `kubectl annotate agentdeployment <name>
-// agents.ctxmesh.ai/rollback=<agentversion>` — to revert the serving spec to that version's
+// agents.ctxmesh.ai/rollback=<version>` — to revert the serving spec to that version's
 // snapshot. Cleared by the controller after it acts so it fires once. Symmetric with
 // promoteAnnotation; the SAME controller owns both.
 const rollbackAnnotation = "agents.ctxmesh.ai/rollback"
@@ -120,6 +120,10 @@ const (
 // reconcile proceeds, because that reconcile is what rolls a reverted spec and moves
 // status.latestVersion, which RegressionDetected is keyed on.
 //
+// retry is true when the version history could not be read. The rollback is neither taken nor
+// refused: RolledBack=Unknown says so, an annotation stays in place, and the ordinary reconcile
+// runs, so applying a spec by hand still rolls while the store is down. The caller requeues soon.
+//
 // It runs BEFORE the workload reconcile: a rollback rewrites spec, and the workload must be
 // reconciled against the REVERTED spec, not the pre-revert one. Because the revert is a spec
 // Update, controller-runtime re-enqueues the object and the following reconcile serves the
@@ -128,41 +132,33 @@ const (
 func (r *AgentDeploymentReconciler) maybeRollback(
 	ctx context.Context,
 	deploy *agentsv1beta1.AgentDeployment,
-) (bool, error) {
+) (handled, retry bool, err error) {
 	// ── Human path: an explicit `agents.ctxmesh.ai/rollback=<version>` annotation ─────────
 	if target := strings.TrimSpace(deploy.Annotations[rollbackAnnotation]); target != "" {
 		log := logf.FromContext(ctx)
 		log.Info("Rollback annotation present", "target", target)
 
-		// Resolve the target AgentVersion by its EXACT name (no ordering guess). A missing/
-		// mismatched target is a REFUSAL surfaced on status — the annotation is cleared so a
-		// typo does not wedge the reconcile in a requeue loop, and the operator must re-annotate
-		// with a correct name.
-		var av agentsv1beta1.AgentVersion
-		err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: target}, &av)
-		if apierrors.IsNotFound(err) {
-			return true, r.refuseRollback(ctx, deploy, reasonRollbackTargetNotFound,
-				fmt.Sprintf("rollback target AgentVersion %q not found in namespace %q; no action taken", target, deploy.Namespace))
-		}
+		// Resolve the target by its EXACT name (no ordering guess). A missing/mismatched target is
+		// a REFUSAL surfaced on status — the annotation is cleared so a typo does not wedge the
+		// reconcile in a requeue loop, and the operator must re-annotate with a correct name.
+		av, reason, msg, err := r.rollbackTarget(ctx, deploy, target)
 		if err != nil {
-			return true, fmt.Errorf("resolving rollback target %q: %w", target, err)
+			return false, true, r.rollbackUnavailable(ctx, deploy, target, err)
 		}
-		if av.Spec.DeploymentName != deploy.Name {
-			return true, r.refuseRollback(ctx, deploy, reasonRollbackTargetMismatch,
-				fmt.Sprintf("rollback target %q is a version of deployment %q, not %q; no action taken",
-					target, av.Spec.DeploymentName, deploy.Name))
+		if reason != "" {
+			return true, false, r.refuseRollback(ctx, deploy, reason, msg)
 		}
 
 		// ── Damping guards ────────────────────────────────────────────────────────────────
 		// Each guard returns a clear reason on refusal; the spec is left unchanged.
 		if reason, msg, refused := r.rollbackGuards(ctx, deploy, target); refused {
-			return true, r.refuseRollback(ctx, deploy, reason, msg)
+			return true, false, r.refuseRollback(ctx, deploy, reason, msg)
 		}
 
 		// ── Actuate: revert spec → the target's snapshot, record status, clear the annotation ─
 		// A human rollback does NOT freeze auto-actions (freeze=false): the human is present.
-		_, err = r.actuateRollback(ctx, deploy, &av, false)
-		return true, err
+		_, err = r.actuateRollback(ctx, deploy, av.Name, av.Snapshot, false)
+		return true, false, err
 	}
 
 	// ── Auto path: OPT-IN auto-rollback on RegressionDetected (ADR 0062 Fork 4, PRD §17.4) ─
@@ -174,7 +170,7 @@ func (r *AgentDeploymentReconciler) maybeRollback(
 		return r.autoRollback(ctx, deploy)
 	}
 
-	return false, nil // no rollback requested
+	return false, false, nil // no rollback requested
 }
 
 // shouldAutoRollback reports whether the OPT-IN auto-rollback path should fire: the deployment
@@ -211,11 +207,12 @@ func (r *AgentDeploymentReconciler) shouldAutoRollback(deploy *agentsv1beta1.Age
 // on success, freezes further AUTO-actions (status.rollback.frozenUntilAck) until a human acks
 // — the anti-runaway guard. It never rolls back to a version that is itself flagged (the
 // healthy-target guard refuses that). It returns handled=true only when it reverted the spec; a
-// refusal is recorded and returns handled=false, so the ordinary reconcile still runs.
+// refusal is recorded and returns handled=false, so the ordinary reconcile still runs, as it does
+// when version history cannot be read (retry=true).
 func (r *AgentDeploymentReconciler) autoRollback(
 	ctx context.Context,
 	deploy *agentsv1beta1.AgentDeployment,
-) (bool, error) {
+) (handled, retry bool, err error) {
 	log := logf.FromContext(ctx)
 
 	// The rollback target is the version immediately preceding the (regressed) serving
@@ -223,40 +220,61 @@ func (r *AgentDeploymentReconciler) autoRollback(
 	// to; refuse honestly (records RolledBack=False, same as the human path's refusals).
 	target, ok, err := r.priorVersionOf(ctx, deploy, deploy.Status.LatestVersion)
 	if err != nil {
-		return true, fmt.Errorf("resolving auto-rollback prior for %q: %w", deploy.Status.LatestVersion, err)
+		return false, true, r.rollbackUnavailable(ctx, deploy, "", err)
 	}
 	if !ok {
-		return r.refuseAutoRollback(ctx, deploy, reasonAutoRollbackNoPrior,
+		handled, err := r.refuseAutoRollback(ctx, deploy, reasonAutoRollbackNoPrior,
 			fmt.Sprintf("auto-rollback found no prior version before serving version %q; nothing to roll back to — escalate to a human", deploy.Status.LatestVersion))
+		return handled, false, err
 	}
 	log.Info("Auto-rollback triggered", "target", target, "from", deploy.Status.LatestVersion)
 
-	// Resolve the target AgentVersion object (its snapshot is what the spec reverts to) — the
-	// same Get the human path uses.
-	var av agentsv1beta1.AgentVersion
-	if err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: target}, &av); err != nil {
-		if apierrors.IsNotFound(err) {
-			return r.refuseAutoRollback(ctx, deploy, reasonAutoRollbackNoPrior,
-				fmt.Sprintf("auto-rollback prior %q no longer exists in namespace %q; nothing to roll back to — escalate to a human", target, deploy.Namespace))
-		}
-		return true, fmt.Errorf("resolving auto-rollback target %q: %w", target, err)
+	// Resolve the target's snapshot (what the spec reverts to) the way the human path does.
+	av, reason, _, err := r.rollbackTarget(ctx, deploy, target)
+	if err != nil {
+		return false, true, r.rollbackUnavailable(ctx, deploy, target, err)
+	}
+	if reason != "" {
+		handled, err := r.refuseAutoRollback(ctx, deploy, reasonAutoRollbackNoPrior,
+			fmt.Sprintf("auto-rollback prior %q no longer exists in namespace %q; nothing to roll back to — escalate to a human", target, deploy.Namespace))
+		return handled, false, err
 	}
 
 	// The SAME damping guards as the human path (a frozen deployment never gets here, see
 	// shouldAutoRollback); the healthy-target guard is what refuses rolling back to a prior that is
 	// ITSELF flagged.
 	if reason, msg, refused := r.rollbackGuards(ctx, deploy, target); refused {
-		return r.refuseAutoRollback(ctx, deploy, reason, msg)
+		handled, err := r.refuseAutoRollback(ctx, deploy, reason, msg)
+		return handled, false, err
 	}
 
 	// Actuate with freeze=true: a successful AUTO-rollback freezes further auto-actions until
 	// a human acknowledges (clears status.rollback.frozenUntilAck), atomically with the
 	// history/condition record. A no-effect refusal returns acted=false and the reconcile goes on.
-	acted, err := r.actuateRollback(ctx, deploy, &av, true)
+	acted, err := r.actuateRollback(ctx, deploy, av.Name, av.Snapshot, true)
 	if err != nil {
-		return true, err
+		return true, false, err
 	}
-	return acted, nil
+	return acted, false, nil
+}
+
+// rollbackUnavailable records that a rollback (to target, or the automatic one when target is
+// empty) could not read version history: RolledBack=Unknown, the annotation kept. It changes
+// nothing else, so the ordinary reconcile runs and the rollback is retried.
+func (r *AgentDeploymentReconciler) rollbackUnavailable(
+	ctx context.Context,
+	deploy *agentsv1beta1.AgentDeployment,
+	target string,
+	cause error,
+) error {
+	what := "the automatic rollback"
+	if target != "" {
+		what = fmt.Sprintf("the rollback to %q", target)
+	}
+	logf.FromContext(ctx).Error(cause, "Version history unavailable; the rollback is retried", "target", target)
+	return r.recordRolledBack(ctx, deploy, metav1.ConditionUnknown, reasonVersionStoreUnavailable, fmt.Sprintf(
+		"%s is waiting: version history could not be read (%v); retrying every %s",
+		what, cause, versionStoreRetry))
 }
 
 // refuseAutoRollback records an auto-path refusal and returns handled=false, so the ordinary
@@ -387,40 +405,6 @@ func (r *AgentDeploymentReconciler) targetUnhealthy(
 	return "", "", false
 }
 
-// priorVersionOf returns the AgentVersion immediately preceding `version` in this
-// deployment's history (ordered by creation timestamp) — the natural baseline for judging
-// `version`'s health. It mirrors the regression detector's priorVersion resolution so the
-// healthy-target check compares like-for-like.
-func (r *AgentDeploymentReconciler) priorVersionOf(
-	ctx context.Context,
-	deploy *agentsv1beta1.AgentDeployment,
-	version string,
-) (string, bool, error) {
-	var list agentsv1beta1.AgentVersionList
-	if err := r.List(ctx, &list, client.InNamespace(deploy.Namespace)); err != nil {
-		return "", false, fmt.Errorf("listing AgentVersions: %w", err)
-	}
-	mine := make([]agentsv1beta1.AgentVersion, 0, len(list.Items))
-	for i := range list.Items {
-		if list.Items[i].Spec.DeploymentName == deploy.Name {
-			mine = append(mine, list.Items[i])
-		}
-	}
-	if len(mine) < 2 {
-		return "", false, nil
-	}
-	sortVersionsByCreation(mine)
-	for i := range mine {
-		if mine[i].Name == version {
-			if i == 0 {
-				return "", false, nil // oldest — no baseline
-			}
-			return mine[i-1].Name, true, nil
-		}
-	}
-	return "", false, nil // version not found among this deployment's versions
-}
-
 // actuateRollback reverts the AgentDeployment spec to the target version's snapshot, records
 // the rollback on status.rollback, and clears the rollback annotation so it fires once, along with
 // a promote annotation that approves the version being rolled back from. The
@@ -440,7 +424,8 @@ func (r *AgentDeploymentReconciler) priorVersionOf(
 func (r *AgentDeploymentReconciler) actuateRollback(
 	ctx context.Context,
 	deploy *agentsv1beta1.AgentDeployment,
-	av *agentsv1beta1.AgentVersion,
+	target string,
+	snapshot agentsv1beta1.AgentDeploymentSpec,
 	freeze bool,
 ) (acted bool, err error) {
 	log := logf.FromContext(ctx)
@@ -456,21 +441,21 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 	if err != nil {
 		return false, fmt.Errorf("hashing the live spec: %w", err)
 	}
-	targetHash, err := specHash(av.Spec.Snapshot)
+	targetHash, err := specHash(snapshot)
 	if err != nil {
-		return false, fmt.Errorf("hashing rollback target %q: %w", av.Name, err)
+		return false, fmt.Errorf("hashing rollback target %q: %w", target, err)
 	}
 	// rollbackSpec keeps the live governance fields, so a target that differs from the live spec only
 	// in those fields changes nothing. Recording that as a rollback would start the cooldown, write
 	// flap history and, on the auto path, freeze the deployment for an action that did not happen.
-	next := rollbackSpec(av.Spec.Snapshot, fresh.Spec)
+	next := rollbackSpec(snapshot, fresh.Spec)
 	nextHash, err := specHash(next)
 	if err != nil {
 		return false, fmt.Errorf("hashing the rolled-back spec: %w", err)
 	}
 	if nextHash == liveHash {
 		return false, r.refuseRollback(ctx, deploy, reasonRollbackNoEffect,
-			rollbackNoEffectMessage(av.Name, targetHash == liveHash))
+			rollbackNoEffectMessage(target, targetHash == liveHash))
 	}
 
 	// Revert the serving spec and clear the annotation in the SAME object Update, so the rollback
@@ -485,7 +470,7 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 		}
 	}
 	if err := r.Update(ctx, &fresh); err != nil {
-		return false, fmt.Errorf("reverting spec to rollback target %q: %w", av.Name, err)
+		return false, fmt.Errorf("reverting spec to rollback target %q: %w", target, err)
 	}
 
 	// The version that serves is named by the hash of the spec as stored (after API-server
@@ -500,17 +485,17 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 		// so nothing will roll. The annotation is already cleared by the Update above; record the refusal.
 		return false, r.recordRollbackRefusal(ctx, deploy, reasonRollbackNoEffect, fmt.Sprintf(
 			"rollback target %q was stored identical to the serving spec (API-server defaulting or an admission "+
-				"webhook changed it back); no action taken", av.Name))
+				"webhook changed it back); no action taken", target))
 	}
-	served := av.Name
-	message := fmt.Sprintf("reverted serving spec to AgentVersion %q (from %q)", av.Name, fromVersion)
+	served := target
+	message := fmt.Sprintf("reverted serving spec to version %q (from %q)", target, fromVersion)
 	if servedHash != targetHash {
 		// Kept governance is the usual cause, but not the only one: rollbackSpec also drops an empty
 		// runtime block the snapshot carried.
 		served = deploy.Name + "-" + servedHash
-		message = fmt.Sprintf("reverted serving spec to AgentVersion %q (from %q); the reverted spec is not identical "+
+		message = fmt.Sprintf("reverted serving spec to version %q (from %q); the reverted spec is not identical "+
 			"to that version's snapshot (a rollback keeps the live governance fields), so it serves as %q",
-			av.Name, fromVersion, served)
+			target, fromVersion, served)
 	}
 	if freeze {
 		message += "; automatic rollback, so auto-rollback is frozen until status.rollback.frozenUntilAck is cleared"
@@ -561,7 +546,7 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 	if err := r.Status().Patch(ctx, &withStatus, client.MergeFrom(base)); err != nil {
 		return false, fmt.Errorf("recording rollback status: %w", err)
 	}
-	log.Info("Rolled back serving spec", "to", av.Name, "serving", served, "from", fromVersion)
+	log.Info("Rolled back serving spec", "to", target, "serving", served, "from", fromVersion)
 	// The spec Update above re-enqueues the object; the next reconcile rolls the workload
 	// against the reverted spec. No requeue needed here.
 	return true, nil
@@ -736,7 +721,17 @@ func (r *AgentDeploymentReconciler) recordRollbackRefusal(
 	reason, message string,
 ) error {
 	logf.FromContext(ctx).Info("Rollback refused", "reason", reason, "detail", message)
+	return r.recordRolledBack(ctx, deploy, metav1.ConditionFalse, reason, message)
+}
 
+// recordRolledBack writes the RolledBack condition and nothing else, leaving deploy as the API server
+// returned it. An unchanged condition is not rewritten.
+func (r *AgentDeploymentReconciler) recordRolledBack(
+	ctx context.Context,
+	deploy *agentsv1beta1.AgentDeployment,
+	status metav1.ConditionStatus,
+	reason, message string,
+) error {
 	// Record the refusal condition (status subresource) as a MERGE PATCH off a freshly-fetched
 	// base. The caller's annotation-clear Update wrote to the apiserver and bumped the
 	// resourceVersion, but this re-fetch goes through r.Get, which — in production — reads the
@@ -747,18 +742,21 @@ func (r *AgentDeploymentReconciler) recordRollbackRefusal(
 	// resourceVersion, so the refusal reason persists regardless of cache staleness (m52.N7).
 	var withStatus agentsv1beta1.AgentDeployment
 	if err := r.Get(ctx, client.ObjectKeyFromObject(deploy), &withStatus); err != nil {
-		return fmt.Errorf("re-fetching for refused rollback status: %w", err)
+		return fmt.Errorf("re-fetching for rollback status: %w", err)
 	}
 	base := withStatus.DeepCopy()
-	apimeta.SetStatusCondition(&withStatus.Status.Conditions, metav1.Condition{
+	if !apimeta.SetStatusCondition(&withStatus.Status.Conditions, metav1.Condition{
 		Type:               conditionRolledBack,
-		Status:             metav1.ConditionFalse,
+		Status:             status,
 		Reason:             reason,
 		Message:            message,
 		ObservedGeneration: withStatus.Generation,
-	})
+	}) {
+		withStatus.DeepCopyInto(deploy)
+		return nil
+	}
 	if err := r.Status().Patch(ctx, &withStatus, client.MergeFrom(base)); err != nil {
-		return fmt.Errorf("recording refused rollback status: %w", err)
+		return fmt.Errorf("recording rollback status: %w", err)
 	}
 	withStatus.DeepCopyInto(deploy)
 	return nil

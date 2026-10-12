@@ -54,6 +54,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/alertstore"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/costrollup"
@@ -600,6 +601,9 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		RequireProofOfPossession: requirePoP,
 		ConvStore:                convStore,
 		PromptStore:              promptStore,
+		// Agent version history (ADR 0042): the controller writes it, the detail page and the
+		// version diff read it, each read authorized by a caller-scoped SSAR.
+		AgentVersionStore: agentversion.NewPostgresStore(cpDB),
 		// Production git-pointer prompt resolver (m121.3, ADR 0008) — the drop-in for the
 		// fixture Resolver, so GET /api/promptversions/{ns}/{name}/diff resolves REAL content
 		// from git (github.com raw). PROMPT_GIT_TOKEN (a PAT via a Secret, never committed)

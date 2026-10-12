@@ -283,7 +283,7 @@ func (r *AgentDeploymentReconciler) reconcileCanary(
 
 	if dec.promote {
 		// Auto-promote at 100% reuses the human promote path verbatim (full-candidate traffic +
-		// PhasePromoted) so AgentVersion/gate bookkeeping stays single-pathed; the freeze is NOT set —
+		// PhasePromoted) so version/gate bookkeeping stays single-pathed; the freeze is NOT set —
 		// autoRollback must stay armed at 100%.
 		log.Info("Canary auto-promoted", "candidate", candidateRev)
 		if err := r.setCanaryTraffic(ctx, deploy, hash, namedFullTraffic(candidateRev)); err != nil {
