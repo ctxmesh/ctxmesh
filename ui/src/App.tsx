@@ -1,4 +1,3 @@
-import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes, useParams } from "react-router-dom";
 
 import { AppShell } from "@/components/app-shell";
@@ -60,7 +59,6 @@ import { SharedRunPage } from "@/pages/shared-run-page";
 import { RequireAuth, SessionProvider } from "@/lib/session-provider";
 import { ToastProvider } from "@/components/kit";
 import { NAV_ITEMS } from "@/lib/nav";
-import { DESIGN_GALLERY_ENABLED } from "@/design/flag";
 
 // SoonPage resolves the /soon/:id placeholder for a nav destination the approved
 // IA lists but a later milestone ships (m13.5 keeps the full IA walkable without
@@ -76,21 +74,6 @@ function SoonPage() {
     />
   );
 }
-
-// The design gallery is a REVIEW-only surface (m13.1 design gate) holding
-// static internal wireframes. It renders OUTSIDE the SessionProvider guard, so
-// anything that can reach the route can read it with no login — which is fine
-// on a dev server and was a disclosure hole in production (M151 hardening, A2).
-//
-// The gate is therefore the BUILD, not a runtime check: `lazy()` is called only
-// in the enabled branch of a statically-inlined constant, so a production build
-// folds this to `null`, Rollup drops the dynamic import, and no gallery chunk
-// is emitted at all. `hack/ui-no-internal-routes.sh` asserts that on every
-// build. Keep the ternary — hoisting `lazy()` out of it makes the import
-// unconditional again and the gallery ships even with the route unmounted.
-const DesignGallery = DESIGN_GALLERY_ENABLED
-  ? lazy(() => import("@/design/gallery").then((m) => ({ default: m.DesignGallery })))
-  : null;
 
 // readAgentPin reads the agent this ORIGIN is pinned to (m37.3): when the SPA is served at an agent's
 // OWN hostname, the BFF injects `<meta name="agent-pin" content="namespace/name">` into index.html (a
@@ -143,15 +126,13 @@ function ChatboxApp({ pin }: { pin: { ns: string; name: string } }) {
 
 // App — the SPA route table (ADR 0012 auth routing):
 //   • agent-pinned origin    — the single-agent chatbox ONLY (ChatboxApp, m37.3), no console.
-//   • /design (flag-gated)   — static wireframes, NO auth (outside RequireAuth).
 //   • /login                 — the token login; public. RedirectIfAuthed handled
 //                              inside LoginPage (an authed visit bounces to /).
 //   • everything else        — the console, behind RequireAuth (→ /login with the
 //                              return path preserved when signed out).
 //
 // SessionProvider wraps everything: it registers the api.ts token/401 seams and
-// restores a persisted token before the guards run. The design gallery still
-// mounts under it (so restore() runs) but is NOT wrapped in RequireAuth.
+// restores a persisted token before the guards run.
 export function App() {
   const agentPin = readAgentPin();
   if (agentPin) {
@@ -162,16 +143,6 @@ export function App() {
     <SessionProvider>
       <ToastProvider>
         <Routes>
-          {DESIGN_GALLERY_ENABLED && DesignGallery && (
-            <Route
-              path="design/*"
-              element={
-                <Suspense fallback={null}>
-                  <DesignGallery />
-                </Suspense>
-              }
-            />
-          )}
           <Route path="login" element={<LoginPage />} />
           {/* OIDC redirect target (ADR 0020) — public, completes Auth-Code+PKCE. */}
           <Route path="auth/callback" element={<AuthCallbackPage />} />

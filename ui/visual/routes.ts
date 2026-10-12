@@ -4,9 +4,6 @@
 // resolves to a real render rather than a 404. This list is derived from the
 // route table in src/App.tsx and is asserted against it by a test, so a new
 // route cannot be added to the app without also being swept.
-//
-// `/design/*` is deliberately absent: it is a flag-gated review artifact, not a
-// product surface, and a normal build ships no route for it.
 
 export type Chrome = "shell" | "bare";
 

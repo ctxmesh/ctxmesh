@@ -30,20 +30,14 @@ import {
 import type { LucideIcon } from "lucide-react";
 
 // nav.ts — the ONE source of truth for the console's information architecture
-// (ui-foundation §6 re-housing). Both the REAL app shell (components/app-shell)
-// and the DESIGN wireframes (design/console-chrome re-exports NAV_SECTIONS from
-// here) read this list, so the approved IA and the shipped shell can never drift
-// — approve the IA at the design gate and the shell follows by construction.
-//
-// This module is gallery-free (no design-only imports) so the production shell
-// can consume it without pulling the review-only wireframes into the main chunk.
+// (ui-foundation §6 re-housing). The shell's sidebar, its drawer, the command
+// palette, the breadcrumbs and Home's first-run checklist all read it.
 //
 // Milestone tags mark which arc milestone SHIPS each surface. Only surfaces that
 // exist TODAY carry a `route`; the rest render a PlaceholderPage ("arrives in
 // M<n>") so the full IA is walkable without pulling later features forward.
 
-// Milestone is duplicated from design/scaffold to keep this module independent of
-// the design gallery (the wireframes' own tag type). It is display-only.
+// Milestone is display-only: the placeholder page names it.
 export type Milestone =
   | "M13"
   | "M14"

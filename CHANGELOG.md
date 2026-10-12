@@ -64,6 +64,12 @@ not delivering a hop whose sender has left the registry. A producer publishing s
 registry's Knative Broker must attach its own attestation, fetched from
 `POST /api/internal/amp/attestation` with the sending agent's pod token.
 
+**Removed: the console's design gallery.** `ui/src/design` held the M13 wireframes, served at
+`/design` only by the dev server or a `VITE_DESIGN_GALLERY=1` build. Nothing the console ships used
+them, and every screen they drew has since been built. `VITE_DESIGN_GALLERY` no longer does
+anything, and `make ui-build` no longer runs `hack/ui-no-internal-routes.sh`, which only checked that
+the gallery stayed out of a production build.
+
 **Changed: an `/api` route the server cannot serve answers 501, not 404.** Each route is now
 registered once. When something it needs is missing (the caller-scoped cluster client, as under
 `ctxmesh dev --ui`; the trace store; the agent invoker; the config expander), it answers `501`
