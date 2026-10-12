@@ -666,7 +666,7 @@ func TestCreateMCPToolBinding_ConsoleRequest(t *testing.T) {
 	matchesFixture(t, bindCatalogFixture, pretty.Bytes())
 
 	raw, err := os.ReadFile(bindRequestFixture)
-	require.NoError(t, err, "the console's bind request fixture is written by ui/src/pages/tool-catalog-page.test.tsx")
+	require.NoError(t, err, "the console's bind request fixture is written by ui/src/pages/tool-catalog.test.tsx")
 	rec := postBinding(t, s, raw)
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	created := rec.Body.Bytes()

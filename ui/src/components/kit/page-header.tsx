@@ -101,6 +101,12 @@ export interface PageHeaderProps {
   className?: string;
 }
 
+/**
+ * What one tab of a tabbed page puts in the page's single header. The page owns the
+ * title and the tab strip; the tab says what it is showing and what can be done there.
+ */
+export type TabHeaderProps = Pick<PageHeaderProps, "status" | "meta" | "lede" | "actions" | "actionsSlot">;
+
 // The collapse breakpoint is `lg` (1024). The classes below are written as
 // LITERALS, never composed from a variable — Tailwind's scanner reads source
 // text, so a templated `${bp}:hidden` compiles to nothing at all.

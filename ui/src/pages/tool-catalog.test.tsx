@@ -3,15 +3,15 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 
-import { ToolCatalogPage } from "@/pages/tool-catalog-page";
+import { McpServersPage } from "@/pages/mcp-servers-page";
 import { CapabilitiesProvider } from "@/lib/capabilities";
 import { NamespaceProvider } from "@/lib/namespace";
 import { ToastProvider } from "@/components/kit";
 import type { CatalogTool, MCPToolBindingDetail } from "@/lib/api";
 
-// ToolCatalogPage tests (m17.10):
+// The tool catalog (m17.10), rendered where it lives: the MCP servers page's Tools tab.
 //   1. Renders all three tool state badges (curated / user-added / pending-approval).
 //   2. A pending-approval tool has its "Bind" button DISABLED.
 //   3. Bind wizard: submitting calls createMcpToolBinding with agentRef+toolName.
@@ -159,11 +159,13 @@ function renderPage(
 ) {
   installFetch({ ...setup, caps });
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={["/tools/mcp-servers?tab=tools"]}>
       <ToastProvider>
         <NamespaceProvider>
           <CapabilitiesProvider>
-            <ToolCatalogPage />
+            <Routes>
+              <Route path="/tools/mcp-servers" element={<McpServersPage />} />
+            </Routes>
           </CapabilitiesProvider>
         </NamespaceProvider>
       </ToastProvider>
@@ -186,7 +188,7 @@ afterEach(() => {
 
 // ---- tests ------------------------------------------------------------------
 
-describe("ToolCatalogPage — catalog listing", () => {
+describe("the tool catalog — catalog listing", () => {
   it("renders tool list with all three state badges", async () => {
     renderPage();
 
@@ -242,7 +244,7 @@ describe("ToolCatalogPage — catalog listing", () => {
   });
 });
 
-describe("ToolCatalogPage — bind wizard", () => {
+describe("the tool catalog — bind wizard", () => {
   it("opens the bind wizard when clicking Bind on an approved tool", async () => {
     renderPage();
 
@@ -262,11 +264,13 @@ describe("ToolCatalogPage — bind wizard", () => {
     localStorage.setItem("ctxmesh.namespace", "team-b");
     const calls = installFetch({ caps: EDITOR_CAPS, tools: BIND_CATALOG.tools });
     render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={["/tools/mcp-servers?tab=tools"]}>
         <ToastProvider>
           <NamespaceProvider>
             <CapabilitiesProvider>
-              <ToolCatalogPage />
+              <Routes>
+                <Route path="/tools/mcp-servers" element={<McpServersPage />} />
+              </Routes>
             </CapabilitiesProvider>
           </NamespaceProvider>
         </ToastProvider>
@@ -323,11 +327,13 @@ describe("ToolCatalogPage — bind wizard", () => {
       bindingDetailGet: PROPAGATED_DETAIL,
     });
     render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={["/tools/mcp-servers?tab=tools"]}>
         <ToastProvider>
           <NamespaceProvider>
             <CapabilitiesProvider>
-              <ToolCatalogPage />
+              <Routes>
+                <Route path="/tools/mcp-servers" element={<McpServersPage />} />
+              </Routes>
             </CapabilitiesProvider>
           </NamespaceProvider>
         </ToastProvider>
@@ -370,11 +376,13 @@ describe("ToolCatalogPage — bind wizard", () => {
       bindingDetailGet: PENDING_DETAIL,
     });
     render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={["/tools/mcp-servers?tab=tools"]}>
         <ToastProvider>
           <NamespaceProvider>
             <CapabilitiesProvider>
-              <ToolCatalogPage />
+              <Routes>
+                <Route path="/tools/mcp-servers" element={<McpServersPage />} />
+              </Routes>
             </CapabilitiesProvider>
           </NamespaceProvider>
         </ToastProvider>
@@ -425,11 +433,13 @@ describe("ToolCatalogPage — bind wizard", () => {
       bindStatus: 403,
     });
     render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={["/tools/mcp-servers?tab=tools"]}>
         <ToastProvider>
           <NamespaceProvider>
             <CapabilitiesProvider>
-              <ToolCatalogPage />
+              <Routes>
+                <Route path="/tools/mcp-servers" element={<McpServersPage />} />
+              </Routes>
             </CapabilitiesProvider>
           </NamespaceProvider>
         </ToastProvider>
@@ -452,7 +462,7 @@ describe("ToolCatalogPage — bind wizard", () => {
   });
 });
 
-describe("ToolCatalogPage — the namespace it reads", () => {
+describe("the tool catalog — the namespace it reads", () => {
   // A persona bound by RoleBinding can list registries only in its own namespaces, so the
   // catalog reads the selected workspace; "All workspaces" asks for every namespace the
   // caller may list, which the BFF answers namespace by namespace.
@@ -463,11 +473,13 @@ describe("ToolCatalogPage — the namespace it reads", () => {
     localStorage.setItem("ctxmesh.namespace", selected);
     const calls = installFetch({ caps: EDITOR_CAPS });
     render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={["/tools/mcp-servers?tab=tools"]}>
         <ToastProvider>
           <NamespaceProvider>
             <CapabilitiesProvider>
-              <ToolCatalogPage />
+              <Routes>
+                <Route path="/tools/mcp-servers" element={<McpServersPage />} />
+              </Routes>
             </CapabilitiesProvider>
           </NamespaceProvider>
         </ToastProvider>
@@ -478,7 +490,7 @@ describe("ToolCatalogPage — the namespace it reads", () => {
   });
 });
 
-describe("ToolCatalogPage — RBAC (viewer)", () => {
+describe("the tool catalog — RBAC (viewer)", () => {
   it("a viewer sees all tool rows but all Bind buttons are disabled", async () => {
     renderPage(VIEWER_CAPS);
 
@@ -496,7 +508,7 @@ describe("ToolCatalogPage — RBAC (viewer)", () => {
 });
 
 // ── Provenance: three claims, three renderings (M151 §6.2) ───────────────────
-describe("ToolCatalogPage — provenance states", () => {
+describe("the tool catalog — provenance states", () => {
   it("reads source='curated' as CURATED, not user-added", async () => {
     // `source` is the ORIGIN CLASS ("curated" | "user-added"), not a server
     // name. The old heuristic treated ANY non-empty source as user-added, so

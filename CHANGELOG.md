@@ -99,6 +99,12 @@ a rail beside what the resource does, the same loading, not-found, permission an
 edit drawer at `?edit=1` and the typed-name delete at `?delete=1`. Every field and action each page
 showed is still there, and Edit and Delete are still asked of the item's own namespace.
 
+**Changed: the tool catalog is a tab of MCP servers.** The catalog lists the tools those servers
+expose, and it was a separate nav entry beside them. It is now the Tools tab of the MCP servers page
+(`/tools/mcp-servers?tab=tools`), under the same header, and a server's drawer opens it. Binding a
+tool to an agent works as before. `/tools/catalog` redirects there, keeping its query, so bookmarks
+and the MCP sign-in's return still land on the catalog. The Tool catalog nav entry is removed.
+
 **Security: a registry in one namespace could share another namespace's team scratchpad and
 credential boundary by copying its `registryId`.** A registry's id is chosen by its author and was
 the whole key for what its members share: the shared scratchpad (`sessionMemory.scope: shared`)

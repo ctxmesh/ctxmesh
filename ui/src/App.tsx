@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 
 import { AppShell } from "@/components/app-shell";
 import { AgentChatboxPage } from "@/pages/agent-chatbox-page";
@@ -16,7 +16,6 @@ import { McpServersPage } from "@/pages/mcp-servers-page";
 import { McpApprovalsPage } from "@/pages/mcp-approvals-page";
 import { McpConnectPage } from "@/pages/mcp-connect-page";
 import { TemplateGalleryPage } from "@/pages/template-gallery-page";
-import { ToolCatalogPage } from "@/pages/tool-catalog-page";
 import { ConfigBuilderPage } from "@/pages/config-builder-page";
 import { CostPage } from "@/pages/cost-page";
 import { ConnectProviderPage } from "@/pages/connect-provider-page";
@@ -108,6 +107,15 @@ function ChatboxApp({ pin }: { pin: { ns: string; name: string } }) {
   );
 }
 
+// MovedTo answers a route whose page now lives elsewhere, keeping what a deep link
+// carried (its query, its hash) and adding what selects the page there (a tab, a mode).
+function MovedTo({ path, set }: { path: string; set: Record<string, string> }) {
+  const { search, hash } = useLocation();
+  const params = new URLSearchParams(search);
+  for (const [k, v] of Object.entries(set)) params.set(k, v);
+  return <Navigate to={`${path}?${params.toString()}${hash}`} replace />;
+}
+
 // App — the SPA route table (ADR 0012 auth routing):
 //   • agent-pinned origin    — the single-agent chatbox ONLY (ChatboxApp, m37.3), no console.
 //   • /login                 — the token login; public. RedirectIfAuthed handled
@@ -196,8 +204,8 @@ export function App() {
             <Route path="tools/add-mcp" element={<AddMcpPage />} />
             {/* m17.9: MCP approval queue — operator-only, lists pending MCPs */}
             <Route path="tools/approvals" element={<McpApprovalsPage />} />
-            {/* m17.10: Tool catalog — merged curated + user-added + pending tools */}
-            <Route path="tools/catalog" element={<ToolCatalogPage />} />
+            {/* The tool catalog is the MCP servers page's Tools tab. */}
+            <Route path="tools/catalog" element={<MovedTo path="/tools/mcp-servers" set={{ tab: "tools" }} />} />
             {/* m76.1: /tools/mcp-catalog retired — redirect to Gallery (the single
                 discovery surface, which renders its own inline McpCatalogTab). The old
                 standalone mcp-catalog-page was deleted as dead code. */}

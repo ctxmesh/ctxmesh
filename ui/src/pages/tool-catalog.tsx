@@ -21,16 +21,17 @@ import {
   ErrorState,
   FilterChipRow,
   ForbiddenInline,
-  PageHeader,
   SkeletonCard,
   StatusBadge,
   Wizard,
   useToast,
   type FilterChip,
+  type TabHeaderProps,
   type WizardStep,
 } from "@/components/kit";
 import { useCapabilitiesIn } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
+import { useLoad } from "@/lib/use-load";
 import {
   api,
   ApiError,
@@ -39,7 +40,8 @@ import {
   type MCPToolBindingDetail,
 } from "@/lib/api";
 
-// ToolCatalogPage — archetype A9, the gallery (M151 spec §6.1/§6.2: "curated /
+// ToolCatalog — the MCP servers page's Tools tab (`/tools/mcp-servers?tab=tools`, where
+// /tools/catalog redirects). Archetype A9, the gallery (M151 spec §6.1/§6.2: "curated /
 // user-added / pending as Tag-differentiated cards; pending cards' CTA disabled
 // with the reason line"). Lists ALL tools from GET /api/tools in three distinct
 // states:
@@ -135,13 +137,6 @@ const VIEWS: { id: FilterState; label: string }[] = [
   { id: "pending-approval", label: "Awaiting approval" },
 ];
 
-type PageState =
-  | { kind: "loading" }
-  | { kind: "ready"; tools: CatalogTool[] }
-  | { kind: "empty" }
-  | { kind: "forbidden"; message: string }
-  | { kind: "error"; message: string };
-
 // ---- bind wizard state ------------------------------------------------------
 
 type WizardState =
@@ -185,56 +180,27 @@ export function catalogClosingLine(tools: CatalogTool[]): string | null {
 
 // ---- main page --------------------------------------------------------------
 
-export function ToolCatalogPage() {
-  const [page, setPage] = React.useState<PageState>({ kind: "loading" });
+export function ToolCatalog({ header }: { header: (props: TabHeaderProps) => React.ReactNode }) {
   const [filter, setFilter] = React.useState<FilterState>("all");
   const [q, setQ] = React.useState("");
   const [wizard, setWizard] = React.useState<WizardState>({ kind: "closed" });
 
   // The shell's selection: one workspace, or "" for every namespace the caller may list.
   const { namespace } = useNamespace();
+  const fetchTools = React.useCallback(
+    // An answer without `tools` reads as an empty catalog, never a crash on `.length`.
+    (signal: AbortSignal) => api.listTools(namespace, signal).then((res) => res.tools ?? []),
+    [namespace],
+  );
+  const { state, reload } = useLoad(fetchTools);
 
-  const load = React.useCallback((signal?: AbortSignal) => {
-    setPage({ kind: "loading" });
-    api
-      .listTools(namespace, signal)
-      .then((res) => {
-        if (signal?.aborted) return;
-        if (res.tools.length === 0) {
-          setPage({ kind: "empty" });
-        } else {
-          setPage({ kind: "ready", tools: res.tools });
-        }
-      })
-      .catch((err: unknown) => {
-        if (signal?.aborted) return;
-        if (err instanceof ApiError) {
-          if (err.isForbidden) {
-            setPage({ kind: "forbidden", message: err.message });
-            return;
-          }
-          setPage({ kind: "error", message: err.message });
-          return;
-        }
-        setPage({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-        });
-      });
-  }, [namespace]);
-
-  React.useEffect(() => {
-    const controller = new AbortController();
-    load(controller.signal);
-    return () => controller.abort();
-  }, [load]);
-
-  // Stable across renders while `page` is unchanged — the sort/filter memos
+  // Stable across renders while `state` is unchanged — the sort/filter memos
   // below key off it.
   const tools = React.useMemo(
-    () => (page.kind === "ready" ? page.tools : NO_TOOLS),
-    [page],
+    () => (state.kind === "ready" ? state.data : NO_TOOLS),
+    [state],
   );
+  const ready = state.kind === "ready" && tools.length > 0;
 
   // Sorted once: usable before pending, then by the server that supplies it.
   const sorted = React.useMemo(
@@ -275,12 +241,11 @@ export function ToolCatalogPage() {
 
   return (
     <div className="min-w-0 space-y-6" data-testid="tool-catalog">
-      <PageHeader
-        title="Tool catalog"
-        lede="Every tool this namespace can reach, and who vouched for it. Bind an approved one to an agent to put it in that agent's managed loop."
-      />
+      {header({
+        lede: "Every tool this namespace can reach, and who vouched for it. Bind an approved one to an agent to put it in that agent's managed loop.",
+      })}
 
-      {page.kind === "loading" && (
+      {state.kind === "loading" && (
         <div className="grid auto-rows-fr gap-5 sm:grid-cols-2 xl:grid-cols-3">
           {[0, 1, 2, 3, 4, 5].map((i) => (
             <SkeletonCard key={i} />
@@ -288,23 +253,23 @@ export function ToolCatalogPage() {
         </div>
       )}
 
-      {page.kind === "forbidden" && (
+      {state.kind === "error" && state.forbidden && (
         <ForbiddenInline
           title="Not allowed to view the tool catalog"
           description="Reading the tool catalog requires list permission on tools."
-          detail={page.message}
+          detail={state.message}
         />
       )}
 
-      {page.kind === "error" && (
+      {state.kind === "error" && !state.forbidden && (
         <ErrorState
           title="Couldn't load the tool catalog"
-          description={page.message}
-          onRetry={() => load()}
+          description={state.message}
+          onRetry={() => reload()}
         />
       )}
 
-      {page.kind === "empty" && (
+      {state.kind === "ready" && tools.length === 0 && (
         <EmptyState
           icon={BookOpen}
           title="No tools in the catalog"
@@ -312,7 +277,7 @@ export function ToolCatalogPage() {
         />
       )}
 
-      {page.kind === "ready" && (
+      {ready && (
         <>
           {/* Views, not filters (§5.28) — one question, one answer at a time. */}
           <div className="flex flex-wrap items-center gap-3">
@@ -326,7 +291,7 @@ export function ToolCatalogPage() {
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => load()}
+              onClick={() => reload()}
               aria-label="Refresh catalog"
               data-testid="catalog-refresh"
             >

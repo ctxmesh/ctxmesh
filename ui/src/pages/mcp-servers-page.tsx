@@ -28,11 +28,15 @@ import {
   type DataTableError,
   type NextStepTone,
   type StatusTone,
+  type TabHeaderProps,
 } from "@/components/kit";
 import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_REGISTRIES } from "@/lib/nav";
+import { useLoad } from "@/lib/use-load";
+import { useTabParam } from "@/lib/use-tab-param";
 import { cn } from "@/lib/utils";
+import { ToolCatalog } from "@/pages/tool-catalog";
 import {
   api,
   ApiError,
@@ -40,8 +44,9 @@ import {
   type McpServerSummary,
 } from "@/lib/api";
 
-// McpServersPage — archetype A1 (index/table), resource-list column budget
-// (M151 spec §6.1/§4.4). The LIST of registered BYO-MCP servers, with the
+// McpServersPage — the MCP servers and, on its Tools tab, the tool catalog they feed.
+// The Servers tab is archetype A1 (index/table), resource-list column budget
+// (M151 spec §6.1/§4.4): the LIST of registered BYO-MCP servers, with the
 // "Add MCP server" action IN THE HEADER (not a separate nav item, m25 S8).
 // Read-open so a viewer sees the servers; the Add button is gated on create
 // agentregistries.
@@ -58,12 +63,6 @@ import {
 // and sharing columns below 1280/1024. "Dropped ≠ lost" is only true if the row
 // opens somewhere, so a row-click opens a drawer carrying every field — the URL
 // in a code well, because a URL never belongs in a bare table cell (§4.5).
-
-type PageState =
-  | { kind: "loading" }
-  | { kind: "ready"; servers: McpServerSummary[] }
-  | { kind: "forbidden"; message: string }
-  | { kind: "error"; message: string };
 
 // LocationState carries the highlight anchor from a post-connect navigation (T11).
 interface LocationState {
@@ -149,12 +148,33 @@ function AuthBadge({ server }: { server: McpServerSummary }) {
   return <Badge variant="open">no auth</Badge>;
 }
 
+const TABS = ["servers", "tools"] as const;
+type McpTab = (typeof TABS)[number];
+
+const TAB_LABEL: Record<McpTab, string> = { servers: "Servers", tools: "Tools" };
+
+/**
+ * MCP servers and the tools they expose, one tab each. The tool catalog is `?tab=tools`,
+ * where /tools/catalog redirects.
+ */
 export function McpServersPage() {
+  const [tab, setTab] = useTabParam(TABS);
+  const header = (props: TabHeaderProps) => (
+    <PageHeader
+      title="MCP servers"
+      tabs={TABS.map((t) => ({ id: t, label: TAB_LABEL[t], current: t === tab }))}
+      onTabChange={(id) => setTab(id as McpTab)}
+      {...props}
+    />
+  );
+  return tab === "tools" ? <ToolCatalog header={header} /> : <ServerList header={header} />;
+}
+
+function ServerList({ header }: { header: (props: TabHeaderProps) => React.ReactNode }) {
   const navigate = useNavigate();
   const location = useLocation();
   const { can } = useCapabilities();
   const canAdd = can(RES_REGISTRIES, "create");
-  const [page, setPage] = React.useState<PageState>({ kind: "loading" });
   const [query, setQuery] = React.useState("");
   const [view, setView] = React.useState<View>("all");
   // The server whose drawer is open (row-click) — where the dropped columns live.
@@ -178,36 +198,16 @@ export function McpServersPage() {
 
   // The shell's selection; "" ("All workspaces") lists every namespace the caller works in.
   const { namespace } = useNamespace();
-  const load = React.useCallback((signal?: AbortSignal) => {
-    setPage({ kind: "loading" });
-    api
-      .listMcpServers(namespace, signal)
-      .then((res) => {
-        if (signal?.aborted) return;
-        setPage({ kind: "ready", servers: res.items ?? res.servers ?? [] });
-      })
-      .catch((err: unknown) => {
-        if (signal?.aborted) return;
-        if (err instanceof ApiError && err.isForbidden) {
-          setPage({ kind: "forbidden", message: err.message });
-          return;
-        }
-        setPage({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-        });
-      });
-  }, [namespace]);
-
-  React.useEffect(() => {
-    const c = new AbortController();
-    load(c.signal);
-    return () => c.abort();
-  }, [load]);
+  const fetchServers = React.useCallback(
+    (signal: AbortSignal) =>
+      api.listMcpServers(namespace, signal).then((res) => res.items ?? res.servers ?? []),
+    [namespace],
+  );
+  const { state, reload } = useLoad(fetchServers);
 
   const servers = React.useMemo(
-    () => (page.kind === "ready" ? page.servers : []),
-    [page],
+    () => (state.kind === "ready" ? state.data : []),
+    [state],
   );
 
   // Decorate once — status, next step and sort key from the same resolve.
@@ -245,11 +245,11 @@ export function McpServersPage() {
   const totalTools = decorated.reduce((n, d) => n + d.row.toolCount, 0);
 
   const error: DataTableError | null =
-    page.kind === "forbidden"
-      ? { message: page.message, forbidden: true, resource: "MCP servers" }
-      : page.kind === "error"
-        ? { message: page.message, onRetry: () => load() }
-        : null;
+    state.kind === "error"
+      ? state.forbidden
+        ? { message: state.message, forbidden: true, resource: "MCP servers" }
+        : { message: state.message, onRetry: () => reload() }
+      : null;
 
   // §4.4 resource-list budget. Server / State / Next step are priority 1 and
   // survive 768; URL + Sharing take the p4 slot, Auth + Tools p3.
@@ -395,22 +395,19 @@ export function McpServersPage() {
 
   return (
     <div className="min-w-0 space-y-6">
-      <PageHeader
-        title="MCP servers"
-        lede="The MCP servers this namespace can reach. Each exposes tools you attach to agents — whatever is refused, awaiting a decision, or yielding nothing is at the top."
-        actions={
-          canAdd
-            ? [
-                {
-                  id: "add",
-                  label: "Add MCP server",
-                  onClick: () => navigate("/tools/add-mcp"),
-                  primary: true,
-                },
-              ]
-            : undefined
-        }
-      />
+      {header({
+        lede: "The MCP servers this namespace can reach. Each exposes tools you attach to agents — whatever is refused, awaiting a decision, or yielding nothing is at the top.",
+        actions: canAdd
+          ? [
+              {
+                id: "add",
+                label: "Add MCP server",
+                onClick: () => navigate("/tools/add-mcp"),
+                primary: true,
+              },
+            ]
+          : undefined,
+      })}
 
       {/* Views, not filters (§5.28) — one question, one answer. No counts: the
           chip contract takes backend counts only. */}
@@ -431,7 +428,7 @@ export function McpServersPage() {
         columns={columns}
         rows={rows}
         rowKey={(s) => `${s.namespace}/${s.name}`}
-        loading={page.kind === "loading"}
+        loading={state.kind === "loading"}
         error={error}
         query={query}
         onQueryChange={setQuery}
@@ -454,7 +451,7 @@ export function McpServersPage() {
         empty={emptyState}
       />
 
-      {page.kind === "ready" && decorated.length > 0 && (
+      {state.kind === "ready" && decorated.length > 0 && (
         <ClosingNote>
           {closingNote(decorated.length, needing, totalTools)}
         </ClosingNote>
@@ -474,7 +471,7 @@ export function McpServersPage() {
         }
         footer={
           <Button asChild variant="outline" className="w-full">
-            <Link to="/tools/catalog">
+            <Link to="/tools/mcp-servers?tab=tools">
               <ExternalLink className="h-4 w-4" />
               Browse its tools
             </Link>
@@ -529,7 +526,7 @@ export function McpServersPage() {
           onClose={() => setToDelete(null)}
           onDeleted={() => {
             setToDelete(null);
-            load();
+            reload();
           }}
         />
       )}
@@ -540,7 +537,7 @@ export function McpServersPage() {
           onClose={() => setToShare(null)}
           onDone={() => {
             setToShare(null);
-            load();
+            reload();
           }}
         />
       )}

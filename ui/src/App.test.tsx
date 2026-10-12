@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { App } from "@/App";
 import { forceClear } from "@/lib/session";
@@ -31,11 +31,18 @@ function stubFetch() {
   );
 }
 
+// Where the router ended up, for the redirect cases.
+function Where() {
+  const { pathname, search, hash } = useLocation();
+  return <div data-testid="where">{pathname + search + hash}</div>;
+}
+
 function renderAt(path: string) {
   stubFetch();
   return render(
     <MemoryRouter initialEntries={[path]}>
       <App />
+      <Where />
     </MemoryRouter>,
   );
 }
@@ -68,5 +75,17 @@ describe("App routes — a deep link outlives the first-run nav", () => {
     const nav = screen.getByRole("navigation", { name: "Sections" });
     await waitFor(() => expect(within(nav).getByTestId("nav-first-run-note")).toBeInTheDocument());
     expect(within(nav).queryByRole("link", { name: /Tenants/ })).toBeNull();
+  });
+});
+
+describe("App routes — a page that moved still answers its old link", () => {
+  it.each([
+    ["/tools/catalog", "/tools/mcp-servers?tab=tools", "tool-catalog"],
+    // What the old link carried rides along.
+    ["/tools/catalog?q=lookup#card", "/tools/mcp-servers?q=lookup&tab=tools#card", "tool-catalog"],
+  ])("%s lands on %s", async (from, to, testid) => {
+    renderAt(from);
+    expect(await screen.findByTestId(testid)).toBeInTheDocument();
+    expect(screen.getByTestId("where").textContent).toBe(to);
   });
 });

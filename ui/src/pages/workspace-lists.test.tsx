@@ -24,7 +24,6 @@ import { SecretBindingsPage } from "@/pages/secret-bindings-page";
 import { TeamDetailPage } from "@/pages/team-detail-page";
 import { TeamsPage } from "@/pages/teams-page";
 import { TemplateGalleryPage } from "@/pages/template-gallery-page";
-import { ToolCatalogPage } from "@/pages/tool-catalog-page";
 import { WorkflowsPage } from "@/pages/workflows-page";
 
 // A person bound to one namespace by RoleBinding can read only the namespaces they work in, so
@@ -93,7 +92,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const SHELL_LISTS: [string, string, () => React.ReactElement][] = [
+// The fourth field is the query that opens the page on the tab holding the list.
+const SHELL_LISTS: [string, string, () => React.ReactElement, string?][] = [
   ["Knowledge Bases", "/api/knowledgebases", () => <KnowledgeBasesPage />],
   ["MCP servers", "/api/mcpservers", () => <McpServersPage />],
   ["MCP approvals", "/api/mcp/approvals", () => <McpApprovalsPage />],
@@ -103,18 +103,18 @@ const SHELL_LISTS: [string, string, () => React.ReactElement][] = [
 ];
 
 describe("every list page reads the selected workspace", () => {
-  for (const [page, list, element] of SHELL_LISTS) {
+  for (const [page, list, element, search = ""] of SHELL_LISTS) {
     it(`${page} sends the selected workspace`, async () => {
       selectWorkspace("team-b");
       const urls = installFetch();
-      renderAt("/page", "/page", element());
+      renderAt(`/page${search}`, "/page", element());
       await waitFor(() => expect(urls).toContain(`${list}?namespace=team-b`));
     });
 
     it(`${page} sends no namespace under All workspaces`, async () => {
       selectWorkspace("");
       const urls = installFetch();
-      renderAt("/page", "/page", element());
+      renderAt(`/page${search}`, "/page", element());
       await waitFor(() => expect(urls).toContain(list));
       expect(urls.filter((u) => u.startsWith(`${list}?`))).toEqual([]);
     });
@@ -206,7 +206,7 @@ describe("write gates ask about the resource's namespace", () => {
         },
       },
     });
-    renderAt("/tools", "/tools", <ToolCatalogPage />);
+    renderAt("/tools?tab=tools", "/tools", <McpServersPage />);
 
     const cards = await screen.findAllByTestId("catalog-tool-lookup");
     expect(cards).toHaveLength(2);
@@ -237,6 +237,8 @@ describe("row controls follow the row's namespace under All workspaces", () => {
     page: string;
     list: string;
     element: () => React.ReactElement;
+    /** The query that opens the page on the tab holding the list. */
+    search?: string;
     resource: string;
     rows: (ns: string) => Record<string, unknown>;
     // The controls a row in ns offers to someone who may change it.
@@ -351,7 +353,7 @@ describe("row controls follow the row's namespace under All workspaces", () => {
             },
           },
         });
-        renderAt("/page", "/page", c.element());
+        renderAt(`/page${c.search ?? ""}`, "/page", c.element());
         expect((await screen.findAllByText(name(mayNot))).length).toBeGreaterThan(0);
         await waitFor(() => {
           for (const id of c.controls(may)) expect(screen.queryByTestId(id)).not.toBeNull();

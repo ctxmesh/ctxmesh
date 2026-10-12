@@ -78,7 +78,6 @@ describe("every pre-M151 destination still lands somewhere", () => {
     "evals",
     "mcp-servers",
     "mcp-approvals",
-    "tool-catalog",
     "runs",
     "my-shares",
     "approvals",
@@ -106,6 +105,15 @@ describe("every pre-M151 destination still lands somewhere", () => {
     // The page is the same surface (spec §6.1 A11); only the name changed.
     expect(NAV_ITEMS.find((i) => i.id === "dashboard")).toBeUndefined();
     expect(navRoute("home")).toBe("/");
+  });
+});
+
+// m184.43 folded pages into the page that holds their subject. Each is gone from the nav, and
+// its old route redirects to the tab or mode that holds it (App.test.tsx).
+describe("pages folded into another page (m184.43)", () => {
+  it.each([["tool-catalog", "mcp-servers"]])("%s is reached through %s", (gone, holder) => {
+    expect(NAV_ITEMS.find((i) => i.id === gone)).toBeUndefined();
+    expect(NAV_ITEMS.find((i) => i.id === holder)).toBeDefined();
   });
 });
 
@@ -153,8 +161,8 @@ describe("nav consolidation (m23.7 / m25 S8, carried forward)", () => {
   });
 
   it("groups the MCP/tool surfaces in Library, with the approval queue in Govern", () => {
+    // The tool catalog is MCP servers' Tools tab.
     expect(sectionOf("MCP servers")).toBe("Library");
-    expect(sectionOf("Tool catalog")).toBe("Library");
     // The approval QUEUE is a human gate, so it sits with the other queues.
     expect(sectionOf("MCP approvals")).toBe("Govern");
     expect(NAV_ITEMS.map((i) => i.label)).not.toContain("Add MCP server");
@@ -178,8 +186,8 @@ describe("catalog taxonomy (m76.1)", () => {
     expect(navRoute("mcp-servers")).toBe("/tools/mcp-servers");
   });
 
-  it("tool-catalog nav item stays (bind-time picker, not discovery)", () => {
-    expect(navRoute("tool-catalog")).toBe("/tools/catalog");
+  it("the bind-time picker is the owned list's Tools tab, not a destination of its own", () => {
+    expect(NAV_ITEMS.find((i) => i.id === "tool-catalog")).toBeUndefined();
   });
 });
 

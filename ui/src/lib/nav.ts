@@ -1,6 +1,5 @@
 import {
   Bell,
-  BookOpen,
   Boxes,
   Building2,
   CheckSquare,
@@ -208,20 +207,13 @@ export const NAV_SECTIONS: NavSection[] = [
         route: "/gallery",
       },
       {
-        // MCP Servers LIST page (m25 S10) — every registered BYO MCP server, with
-        // "Add MCP server" as an in-page CTA rather than a second nav item.
+        // MCP Servers (m25 S10) — every registered BYO MCP server, with "Add MCP
+        // server" as an in-page CTA rather than a second nav item, and the tool
+        // catalog those servers feed as its Tools tab.
         id: "mcp-servers",
         label: "MCP servers",
         icon: Wrench,
         route: "/tools/mcp-servers",
-      },
-      {
-        // Tool catalog (m17.10) — the merged curated + user-added + pending
-        // catalog; the bind-time picker, not the discovery surface (m76.1).
-        id: "tool-catalog",
-        label: "Tool catalog",
-        icon: BookOpen,
-        route: "/tools/catalog",
       },
       {
         // KnowledgeBases (m68.13, ADR 0061) — managed RAG corpora. GATED on
