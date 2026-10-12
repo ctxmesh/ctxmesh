@@ -52,24 +52,6 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
 	"github.com/ctxmesh/ctxmesh/internal/bff"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentversion"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/alertstore"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/costrollup"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/dataset"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/enduseragent"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/killscope"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/oauthpending"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/publishedartifact"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/sharedrun"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/spawnbudget"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 	"github.com/ctxmesh/ctxmesh/internal/dbpool"
@@ -454,11 +436,6 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		return fmt.Errorf("open control-plane postgres: %w", cpErr)
 	}
 	defer func() { _ = cpDB.Close() }()
-	promptStore := promptversion.NewPostgresStore(cpDB)
-	toolStore := toolregistry.NewPostgresStore(cpDB)                   // shares the handle + migrations
-	nsTenantStore := namespacetenant.NewPostgresStore(cpDB)            // m73.4: namespace→tenant mirror for catalog
-	publishedArtifactStore := publishedartifact.NewPostgresStore(cpDB) // m74.1: snapshot-at-publish templates
-	sharedRunStore := sharedrun.NewPostgresStore(cpDB)                 // m75.1: single-run capability share links
 	log.Info("control-plane store enabled (ADR 0042/0044): PromptVersions + ToolRegistries served from Postgres")
 
 	// Worker-path dispatch (ADR 0034, m32.2): RUN_WORKER_DISPATCH makes POST /runs leave runs
@@ -498,14 +475,9 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		return fmt.Errorf("init durable KB object store: %w", err)
 	}
 
-	// KB ingestion direct-write path (M68, ADR 0061 governance #8): the run-worker is a TRUSTED control-plane
-	// workload that already holds the controlplane DSN, so the ingestion executor (m68.6) EMBEDS + WRITES
-	// knowledge_chunks DIRECTLY — no token-service proxy hop (agent pods never do this; they read via proxy).
-	//   - the knowledge store rides the already-open cpDB (the same pgvector Postgres as memory).
-	//   - the gateway embedder is built from MODEL_GATEWAY_URL, exactly as the token-service builds its memory
-	//     embedder (the same seam). Absent ⇒ nil ⇒ the ingest endpoint + executor degrade honestly (501 / a
-	//     clear failed-run reason), never a panic.
-	knowledgeStore := knowledge.NewPostgresStore(cpDB)
+	// The ingestion executor embeds through the gateway built from MODEL_GATEWAY_URL, the same seam the
+	// token-service's memory embedder uses. Absent ⇒ nil ⇒ the ingest endpoint and executor degrade
+	// honestly (501, or a clear failed-run reason).
 	ingestEmbedder := newIngestEmbedder(log)
 
 	// The durable async backend for A2A hops (M141.4, ADR 0121). Built once and used for BOTH halves:
@@ -521,34 +493,6 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// PartiallyIngested (strictly additive).
 	ingestOCR := newIngestOCR(log)
 
-	// Dataset store (M69, ADR 0062 Fork 1): rides the same cpDB (migration 0007 applied by controlplane.Migrate).
-	// The dataset-export executor (m69.2) writes it directly (governance #8: the trusted run-worker holds cpDB +
-	// Langfuse creds), copying M66-redacted, traceId-lineaged cases out of Langfuse. Paired with the Langfuse
-	// adapter in `adapters` (built below) as the export read source.
-	datasetStore := dataset.NewPostgresStore(cpDB)
-
-	// Online-score store (M69, ADR 0062 Fork 2): rides the same cpDB (migration 0008 applied by
-	// controlplane.Migrate). The online-scoring worker (m69.5) writes it directly (governance #8: the
-	// trusted off-request worker holds cpDB + Langfuse creds), folding production traces into the
-	// per-(namespace, agent, version, window) online-score vector.
-	onlineStore := onlinescore.NewPostgresStore(cpDB)
-
-	// Cost-rollup store (M70, ADR 0063 D1): rides the same cpDB (migration 0009 applied by
-	// controlplane.Migrate). The cost-rollup worker (m70.2) writes it directly (governance #8: the
-	// trusted off-request worker holds cpDB + Valkey reach), snapshotting the ephemeral per-tenant
-	// Valkey monthly-spend keys into the durable cost_rollups ledger.
-	rollupStore := costrollup.NewPostgresStore(cpDB)
-
-	// Per-agent online-config resolver (M69, ADR 0062 Fork 2; m84.3 completes m69.6): the online-scoring
-	// worker consults it per agent to enable/tune the judge from that agent's EvalSuite.online policy. The
-	// policy is resolved by the CONTROLLER (which legitimately holds evalsuites RBAC) into a per-(ns, agent)
-	// cpDB row; the worker READS that row here (cpDB — the SAME store it writes aggregates to). The BFF
-	// deliberately does NOT read AgentDeployment/EvalSuite via its own SA: ADR 0011 keeps the BFF's SA at
-	// `rules: []` (the confused-deputy blast-radius stance; m69.6 REVERTED a BFF-SA agent-CRD ClusterRole
-	// that broke this). A missing/disabled row ⇒ (nil, nil): the worker falls back to its process defaults
-	// (judge OFF) — the fail-safe. Wired from the SAME cpDB store as onlineStore: no new dep, no agent-CRD RBAC.
-	onlineResolver := bff.NewDBOnlineConfigResolver(onlineStore)
-
 	bindStore := runcapBindStore(log)
 	// Pod identity for the guardrail audit edge (m184.7): TokenReview needs the BFF's
 	// system:auth-delegator binding. A clientset that cannot be built leaves that path off.
@@ -562,7 +506,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	if err != nil {
 		return err
 	}
-	srv := bff.NewServer(bff.Options{
+	opts := bff.Options{
 		TokenServiceURL:        strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")),
 		TokenServiceHTTPClient: tsHTTPClient,
 		GrantStore:             grantStore,
@@ -570,17 +514,9 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		RunControl:             runControl,
 		RunStore:               runStore,
 		DocStore:               docStore,
-		KnowledgeStore:         knowledgeStore,
-		DatasetStore:           datasetStore,
-		OnlineStore:            onlineStore,
-		OnlineResolver:         onlineResolver,
-		RollupStore:            rollupStore,
 		Embedder:               ingestEmbedder,
 		OCR:                    ingestOCR,
-		// Capability discovery (M141, ADR 0120): the registry the discovery edge ranks over (the
-		// CONTROLLER writes it — the BFF only reads, so no new RBAC), plus the offline models it ranks
-		// with. It reuses `ingestEmbedder`: discovery embeds through the SAME gateway seam as ingestion.
-		AgentCapabilities:       agentcapability.NewPostgresStore(cpDB),
+		// Capability discovery (ADR 0120) embeds through the same gateway seam as ingestion.
 		DiscoveryReranker:       discoveryReranker(log),
 		DiscoveryEmbeddingRoute: strings.TrimSpace(os.Getenv("DISCOVERY_EMBEDDING_ROUTE")),
 		// Async A2A backend (M141.4, ADR 0121): the durable bus an agent hands a hop to. nil ⇒ the
@@ -590,35 +526,18 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		// Sender-constrained run capabilities (M142.5, ADR 0124). The bind store rides the shared
 		// state-layer Valkey so "already bound" is the same answer on every replica; without an addr
 		// there is no exchange edge, and capabilities stay bearer.
-		RuncapBind:   bindStore,
-		PodAuth:      podAuth,
-		ProofSpender: proofSpender(log),
-		SpawnBudgets: spawnbudget.NewPostgresStore(cpDB),
-		// The scoped kill switch (M146, ADR 0126). This is the FAIL-CLOSED half: the worker reads it
-		// before claiming and the run-create edge reads it before accepting, and neither consults the
-		// state layer — so an unreachable Valkey cannot resurrect a killed scope.
-		KillScopes:               killscope.NewPostgresStore(cpDB),
+		RuncapBind:               bindStore,
+		PodAuth:                  podAuth,
+		ProofSpender:             proofSpender(log),
 		RequireProofOfPossession: requirePoP,
 		ConvStore:                convStore,
-		PromptStore:              promptStore,
-		// Agent version history (ADR 0042): the controller writes it, the detail page and the
-		// version diff read it, each read authorized by a caller-scoped SSAR.
-		AgentVersionStore: agentversion.NewPostgresStore(cpDB),
 		// Production git-pointer prompt resolver (m121.3, ADR 0008) — the drop-in for the
 		// fixture Resolver, so GET /api/promptversions/{ns}/{name}/diff resolves REAL content
 		// from git (github.com raw). PROMPT_GIT_TOKEN (a PAT via a Secret, never committed)
 		// authorises private repos; empty ⇒ public repos only. Git stays the source of truth.
 		PromptResolver:              prompt.NewHTTPResolver(strings.TrimSpace(os.Getenv("PROMPT_GIT_TOKEN"))),
-		ToolRegistryStore:           toolStore,
-		NamespaceTenantStore:        nsTenantStore,
 		EndUserVerifier:             endUserVerifier,
 		SAIssuer:                    saIssuer,
-		EndUserAgentStore:           enduseragent.NewPostgresStore(cpDB),
-		PublishedArtifactStore:      publishedArtifactStore,
-		SharedRunStore:              sharedRunStore,
-		AgentMemoryStore:            agentmemory.NewPostgresStore(cpDB),
-		AuditStore:                  auditlog.NewPostgresStore(cpDB),
-		AlertStore:                  alertstore.NewPostgresStore(cpDB),
 		CallerClients:               callerClients,
 		Scheme:                      scheme,
 		Auth:                        bff.BearerAuthenticator{},
@@ -639,9 +558,10 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		OIDCIssuer:                  flags.oidcIssuer,
 		OIDCClientID:                flags.oidcClientID,
 		ConsoleURL:                  os.Getenv("CONSOLE_URL"), // ADR 0040: canonical MCP-consent callback + relay origin
-		OAuthPendingStore:           oauthpending.NewPostgresStore(cpDB),
 		Log:                         ctrl.Log.WithName("bff.server"),
-	})
+	}
+	opts.UseControlPlaneDB(cpDB)
+	srv := bff.NewServer(opts)
 
 	// Fail CLOSED on a missing security-critical key (M124/Gate A, ADR 0095 §2): when the operator
 	// intends per-user OBO (MCP_OBO_REQUIRED — the chart wires it from oboEgress.enabled) but run-

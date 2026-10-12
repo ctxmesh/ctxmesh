@@ -59,17 +59,13 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/audit"
 	"github.com/ctxmesh/ctxmesh/internal/controller"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/alertstore"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/costrollup"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/enduseragent"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/killscope"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/spawnbudget"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/ctxmesh/internal/ingestion"
 	"github.com/ctxmesh/ctxmesh/internal/kedatypes"
@@ -571,25 +567,12 @@ func main() {
 			"group", "eventing.knative.dev/v1")
 	}
 
-	if err := (&controller.AgentDeploymentReconciler{
+	deployments := &controller.AgentDeploymentReconciler{
 		EventingAvailable: eventingAvailable,
 		Client:            mgr.GetClient(),
 		APIReader:         mgr.GetAPIReader(), // uncached telemetry-Secret read (collector env stability)
 		Scheme:            mgr.GetScheme(),
 		OBOEgress:         oboEgress,
-		// End-user AGENT exposure mirror (M137/EU1b, ADR 0107): the reconciler writes an endUserAccess
-		// agent's endpoint + spec here so the BFF resolves an end-user run without a K8s read.
-		EndUserAgentStore: enduseragent.NewPostgresStore(cpDB),
-		// Capability registry (M141, ADR 0120): the reconciler registers an agent's capability descriptor
-		// here so the BFF's discovery path can rank a registry's agents against a capability query — again
-		// with no K8s read on the BFF SA.
-		AgentCapabilityStore: agentcapability.NewPostgresStore(cpDB),
-		// Declared per-team spawn budget (M142.6, m52.C19b): the controller can read AgentTeam, the BFF
-		// cannot (ADR 0011), so the number the BFF's authoritative gate enforces is projected here.
-		SpawnBudgetStore: spawnbudget.NewPostgresStore(cpDB),
-		// spec.suspend projection (M146.6, ADR 0126 §4): the BFF cannot read AgentDeployment, so the
-		// declarative halt reaches the worker + the run-create edge through this mirror.
-		KillScopeStore: killscope.NewPostgresStore(cpDB),
 		// M146.7 (m52.M143-knobs): how long to wait for a referenced KnowledgeBase to appear before
 		// deploying without it. Zero ⇒ the 30s default; NEGATIVE disables the settle gate entirely
 		// (pre-M143 behaviour, accepting the revision churn) — an escape hatch, not a setting to reach
@@ -630,19 +613,9 @@ func main() {
 		// ToolRegistry is retired (RETIRE_TR). MUST be the SAME instance the
 		// MCPToolBinding reconciler uses (below), or the two drift.
 		Registry: registryReader,
-		// Online-score store (m69.8, ADR 0062 Fork 4): the SAME cpDB store the regression
-		// detector reads (below). The human rollback actuator's healthy-target damping guard
-		// reads it to refuse a rollback to a version that itself regressed. nil-safe (dev
-		// without cpDB ⇒ the store-backed half of the guard is skipped; the auto-trigger is
-		// deferred, so this is guard-side only).
-		OnlineScore: onlinescore.NewPostgresStore(cpDB),
-		// Online-scoring config writer (m84.3, ADR 0062 Fork 2 / ADR 0011): the controller resolves each
-		// agent's evalSuiteRef → EvalSuite.spec.online and UPSERTS/CLEARS the per-(ns, agent) config row the
-		// BFF online-scoring worker reads (cpDB, no agent-CRD RBAC on the BFF SA). Same cpDB store; nil-safe.
-		OnlineConfig: onlinescore.NewPostgresStore(cpDB),
-		// Version history (ADR 0042): the SAME store the regression detector reads its baseline from.
-		Versions: versionStore,
-	}).SetupWithManager(mgr); err != nil {
+	}
+	deployments.UseControlPlaneDB(cpDB, versionStore)
+	if err := deployments.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agentdeployment")
 		os.Exit(1)
 	}

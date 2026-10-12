@@ -151,6 +151,12 @@ everyone. The `developer` and `operator` roles now grant `get` and `list` on `po
 `viewer` role now grants `get`, `list` and `watch` on `skills`, and the `developer` and `operator`
 roles grant the same verbs they hold on `promptversions`, in the namespaces they are bound in.
 
+**Fixed: skills did not work on any install.** Neither the BFF nor the controller created the
+skills store, so `/api/skills` answered 501 and an agent with `skillRefs` was never deployed: the
+controller failed every reconcile with "this install has no skill store". Both now use the
+control-plane database. A skill a developer creates in the console resolves for an agent in the
+same namespace, pinned to its digest. Skill bodies are still not mounted, so `load()` answers 501.
+
 **Fixed: creating an agent on a connection that does not exist made an agent that could never
 answer.** A model-first create (`POST /api/agents` with `model.connection`) naming a connection the
 namespace does not have built a model route from the connection's name, with a provider guessed
