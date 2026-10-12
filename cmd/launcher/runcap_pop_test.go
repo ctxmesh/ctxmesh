@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -335,12 +336,11 @@ func TestRuncapProof_AnAMPCalleeCannotSpendItsCallersCapability(t *testing.T) {
 
 // A BFF that cannot be reached is asked once per back-off, not once per invoke.
 func TestRuncapBinder_UnreachableBFFBacksOff(t *testing.T) {
-	var mu sync.Mutex
-	attempts := 0
+	// Atomic: the handler runs on the server's goroutine, and a dropped connection gives the test no
+	// happens-before edge back to it.
+	var attempts atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		attempts++
-		mu.Unlock()
+		attempts.Add(1)
 		hj, ok := w.(http.Hijacker)
 		if !ok {
 			t.Fatal("no hijacker")
@@ -358,7 +358,7 @@ func TestRuncapBinder_UnreachableBFFBacksOff(t *testing.T) {
 			t.Fatalf("Bind %d: changed=%v err=%v; want the bearer back", i, got != bearer, err)
 		}
 	}
-	if attempts != 1 {
-		t.Errorf("tried an unreachable BFF %d times, want once per back-off", attempts)
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("tried an unreachable BFF %d times, want once per back-off", got)
 	}
 }
