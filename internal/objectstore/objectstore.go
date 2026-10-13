@@ -20,7 +20,7 @@ limitations under the License.
 // launcher store is content-addressed, GC'd, and carries async AMP payloads;
 // this store is durable, never-GC'd, and carries KB source documents.
 //
-// M13 (ADR 0085): the two stores share the MinIO CLIENT boilerplate (NewMinioClient
+// M13 (ADR 0085): the two stores share the minio-go CLIENT boilerplate (NewMinioClient
 // + EnsureBucket, below) but keep SEPARATE Put/Get SPIs by design — byte-blobs for
 // the memory-bounded async offload vs streamed objects + List/DeletePrefix for the
 // durable corpus (the shapes reflect the payloads, not an oversight). They use a
@@ -53,7 +53,7 @@ const (
 	knowledgeKeyPrefix = "knowledge"
 
 	// opTimeout bounds a single object-store round-trip (PUT, GET, List). Same
-	// discipline as the launcher's objectStoreOpTimeout — a slow/hung MinIO must
+	// discipline as the launcher's objectStoreOpTimeout — a slow/hung object store must
 	// never wedge the BFF request path.
 	opTimeout = 10 * time.Second
 )
@@ -66,7 +66,7 @@ type ObjectInfo struct {
 }
 
 // ObjectStore is the durable KB object store SPI. It is satisfied by:
-//   - minioStore (production — MinIO/S3 via OBJECT_STORE_ADDR)
+//   - minioKBStore (production — S3 via OBJECT_STORE_ADDR)
 //   - memObjectStore (tests — map-backed, no external dependency)
 //
 // All implementations must be safe for concurrent use.
@@ -177,18 +177,18 @@ func sanitizeName(name string) string {
 }
 
 // -------------------------------------------------------------------------
-// MinIO/S3 implementation
+// S3 implementation (minio-go)
 // -------------------------------------------------------------------------
 
-// minioKBStore is the production ObjectStore backed by a MinIO/S3 client.
-// Bucket creation is lazy (first PUT) and idempotent — a fresh MinIO with no
+// minioKBStore is the production ObjectStore backed by a minio-go S3 client.
+// Bucket creation is lazy (first PUT) and idempotent — a fresh object store with no
 // init creates the KB bucket on the first upload rather than failing the call.
 type minioKBStore struct {
 	client *minio.Client
 	bucket string
 }
 
-// NewMinioClient builds a MinIO client for the in-cluster dev object store: plain HTTP (Secure:false —
+// NewMinioClient builds a minio-go client for the in-cluster dev object store: plain HTTP (Secure:false —
 // the same no-TLS posture as the dev Valkey) with static V4 credentials. It is the SHARED construction both
 // object stores use — the durable KB store here (NewMinioStore) AND the launcher's ephemeral AMP-offload store
 // (cmd/launcher/minioStore) — so the client config lives in ONE place (M13). minio.New does not dial, so a bad
@@ -233,8 +233,8 @@ func EnsureBucket(ctx context.Context, client *minio.Client, bucket string) erro
 //
 // The credential resolution mirrors the launcher's newMinioStore:
 //   - OBJECT_STORE_ADDR → host:port (e.g. ctxmesh-objectstore.ctxmesh.svc:9000)
-//   - OBJECT_STORE_ACCESS_KEY / OBJECT_STORE_SECRET_KEY → MinIO root credentials
-//   - Secure:false — dev in-cluster MinIO uses plain HTTP, same posture as the launcher
+//   - OBJECT_STORE_ACCESS_KEY / OBJECT_STORE_SECRET_KEY → the store's S3 credentials
+//   - Secure:false — the dev in-cluster object store uses plain HTTP, same posture as the launcher
 //
 // A construction error (bad addr) is returned so the caller can log it and
 // surface 501 rather than crash. No credentials are hardcoded.
@@ -278,7 +278,7 @@ func (s *minioKBStore) Put(ctx context.Context, key string, r io.Reader, size in
 }
 
 func (s *minioKBStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
-	// MinIO GetObject returns a LAZY reader: the HTTP body is fetched on the caller's first Read,
+	// minio-go's GetObject returns a LAZY reader: the HTTP body is fetched on the caller's first Read,
 	// which happens AFTER this function returns. So the op-timeout context must stay alive until the
 	// returned reader is CLOSED — a `defer cancel()` here would cancel that context on return and the
 	// caller's io.ReadAll would fail with "context canceled" (the bug the m68.14 live tier caught;
@@ -290,7 +290,7 @@ func (s *minioKBStore) Get(ctx context.Context, key string) (io.ReadCloser, erro
 		cancel()
 		return nil, fmt.Errorf("get KB object %q: %w", key, err)
 	}
-	// Trigger a stat to surface a missing key eagerly (MinIO GetObject is lazy
+	// Trigger a stat to surface a missing key eagerly (minio-go's GetObject is lazy
 	// — a missing key errors only on first Read).
 	if _, statErr := obj.Stat(); statErr != nil {
 		_ = obj.Close()
@@ -300,7 +300,7 @@ func (s *minioKBStore) Get(ctx context.Context, key string) (io.ReadCloser, erro
 	return &cancelOnCloseReader{ReadCloser: obj, cancel: cancel}, nil
 }
 
-// cancelOnCloseReader ties a context's cancel func to a reader's Close, so a lazily-read MinIO
+// cancelOnCloseReader ties a context's cancel func to a reader's Close, so a lazily-read minio-go
 // object's op-timeout context outlives the Get call that created it (until the caller finishes
 // reading + closes). Without this, a `defer cancel()` in Get cancels the read (see Get above).
 type cancelOnCloseReader struct {
@@ -342,7 +342,7 @@ func (s *minioKBStore) DeletePrefix(ctx context.Context, prefix string) error {
 	opCtx, cancel := context.WithTimeout(ctx, opTimeout)
 	defer cancel()
 
-	// Collect all keys under the prefix then batch-remove them. MinIO's
+	// Collect all keys under the prefix then batch-remove them. minio-go's
 	// RemoveObjects takes a channel; we close it after sending all keys.
 	objectsCh := make(chan minio.ObjectInfo)
 	go func() {

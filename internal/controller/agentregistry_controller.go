@@ -116,7 +116,7 @@ const (
 	//     breaking it breaks every LLM call.
 	//   - the Valkey state layer (ctxmesh-statelayer :6379) —
 	//     MEMORY_BACKEND_ADDR; the PROXY-LESS (pre-cutover) memory + async-dedupe path.
-	//   - the MinIO object store (ctxmesh-objectstore :9000) —
+	//   - the object store (ctxmesh-objectstore :9000) —
 	//     OBJECT_STORE_ADDR; breaking it breaks m7.6b blob offload.
 	//   - the state-layer proxy (ctxmesh-statelayer-proxy :8080) — the m53.7
 	//     cutover DEFAULT for memory + quota + async-dedup (STATELAYER_PROXY_URL); with
@@ -494,7 +494,7 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 				},
 				{
 					// Platform backends in ctxmesh: the LiteLLM model
-					// gateway (:4000), the MinIO object store (:9000), the state-layer
+					// gateway (:4000), the object store (:9000), the state-layer
 					// PROXY (:8080, the m53.7 cutover default for memory/quota/dedup/
 					// spawn), the token-service (:8443, long-term memory OBO), and the
 					// BFF. One namespace peer, scoped to these ports.

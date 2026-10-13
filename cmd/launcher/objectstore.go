@@ -23,7 +23,7 @@ package main
 // and the launcher's inbound CloudEvent body is capped at maxAsyncBody (1MiB).
 // So when an envelope's serialized payload exceeds offloadThreshold (256KiB),
 // the PUBLISHING launcher stores the payload verbatim in the dev object store
-// (MinIO, config/objectstore/) under a CONTENT-ADDRESSED key (sha256 of the
+// (config/objectstore/) under a CONTENT-ADDRESSED key (sha256 of the
 // bytes) and replaces the envelope payload with a tiny reference:
 //
 //	{"$ref":"<bucket>/<key>","$size":<n>}
@@ -43,7 +43,7 @@ package main
 // than duplicates, and the seen-set dedupe (async.go) is unaffected.
 //
 // Failure posture (specs/eventing-scaling.md §"Edge cases: Oversize payload"):
-//   - PUBLISH: MinIO down → publishEnvelope returns a TYPED error (best-effort,
+//   - PUBLISH: object store down → publishEnvelope returns a TYPED error (best-effort,
 //     like memory/tools) — the event is NOT emitted with a half-offloaded body.
 //   - CONSUME: a dangling / failed $ref GET → rehydrate returns an error →
 //     consume NACKs (502) so the broker retries and eventually DLQs it. A broken
@@ -73,12 +73,12 @@ const (
 
 	// objectStoreBucket is the single dev bucket every offloaded blob lands in.
 	// One bucket keeps the reference format ("<bucket>/<key>") self-describing
-	// and the dev MinIO trivially inspectable; content-addressing (sha256 key)
+	// and the dev object store trivially inspectable; content-addressing (sha256 key)
 	// gives collision-free coexistence across agents/registries in dev.
 	objectStoreBucket = "ctxmesh-blobs"
 
 	// objectStoreOpTimeout bounds a single object-store round-trip (PUT on
-	// publish, GET on consume, bucket ensure). A slow/hung MinIO must never wedge
+	// publish, GET on consume, bucket ensure). A slow/hung object store must never wedge
 	// the publish or consume path beyond this — same discipline as the memory
 	// endpoint's per-op bound (memoryOpTimeout).
 	objectStoreOpTimeout = 5 * time.Second
@@ -98,7 +98,7 @@ type blobRef struct {
 // ObjectStore is the minimal object-store surface the offloader needs. It is an
 // interface (not *minio.Client) so unit tests drive publish/consume against an
 // in-memory fake — including one that ERRORS, to prove the publish-typed-error
-// and dangling-$ref→NACK behaviours — without a real MinIO.
+// and dangling-$ref→NACK behaviours — without a real object store.
 type ObjectStore interface {
 	// Put stores data under key (idempotent for content-addressed keys: the same
 	// bytes overwrite rather than duplicate). An error means the store is
@@ -110,7 +110,7 @@ type ObjectStore interface {
 	Get(ctx context.Context, key string) ([]byte, error)
 }
 
-// minioStore is the production ObjectStore backed by the MinIO S3 client. The
+// minioStore is the production ObjectStore backed by the minio-go S3 client. The
 // client is constructed lazily (minio.New does not dial), so building it when
 // the store is down is cheap and non-fatal — the first op surfaces the error.
 // bucketReady guards a one-time lazy bucket creation so the FIRST offload PUT
@@ -123,7 +123,7 @@ type minioStore struct {
 
 // newMinioStore builds the production ObjectStore from OBJECT_STORE_ADDR and the
 // injected dev credentials. addr is a host:port (e.g.
-// ctxmesh-objectstore.ctxmesh.svc:9000); dev MinIO is plain
+// ctxmesh-objectstore.ctxmesh.svc:9000); the dev object store is plain
 // HTTP in-cluster (Secure:false) — there is no TLS on the dev object store, same
 // posture as the dev Valkey. A construction error (bad addr) is returned so the
 // caller can log it and run WITHOUT offload rather than crash the launcher.
@@ -137,7 +137,7 @@ func newMinioStore(addr, accessKey, secretKey string) (*minioStore, error) {
 
 // ensureBucket creates the dev bucket if it does not exist. It is idempotent
 // (BucketExists → skip) and bounded by the caller's context. Called lazily on
-// the first PUT so a fresh dev MinIO with no init still gets the bucket.
+// the first PUT so a fresh dev object store with no init still gets the bucket.
 func (s *minioStore) ensureBucket(ctx context.Context) error {
 	return objectstore.EnsureBucket(ctx, s.client, s.bucket) // M13: shared idempotent-create logic.
 }
@@ -160,7 +160,7 @@ func (s *minioStore) Get(ctx context.Context, key string) ([]byte, error) {
 		return nil, fmt.Errorf("get object %q: %w", key, err)
 	}
 	defer func() { _ = obj.Close() }()
-	// ReadAll surfaces a dangling key here: MinIO GetObject is lazy, so a missing
+	// ReadAll surfaces a dangling key here: minio-go's GetObject is lazy, so a missing
 	// object errors on the first Read, not on GetObject. Cap the read at
 	// maxAsyncBody+1 so a corrupt/oversize object cannot exhaust memory (a
 	// well-formed offloaded payload is always < maxAsyncBody by construction).

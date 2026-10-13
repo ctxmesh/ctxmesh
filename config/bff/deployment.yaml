@@ -266,7 +266,7 @@ spec:
             # OBJECT_STORE_* (M78/ADR 0071 §2): the durable object store the BFF reads recorded
             # fixtures from (GET /api/runs/{id}/fixture — the O10a console stepper) and writes KB
             # documents to (M68). Unset ⇒ docStore nil ⇒ those endpoints 501 (honest feature-off).
-            # The addr points at the in-cluster MinIO (config/objectstore, which config/default ships);
+            # The addr points at the in-cluster object store (config/objectstore, which config/default ships);
             # the creds come from the objectstore-dev Secret via secretKeyRef, OPTIONAL so a
             # no-object-store install still starts cleanly. A production install points these at its own
             # object store (a values override / overlay). The Helm chart carries the SAME env (the
@@ -346,7 +346,7 @@ spec:
               cpu: 500m
               # 512Mi limit — right-sized for the ingestion executor (ADR 0061), NOT picked
               # blindly. The m68.14 OOM (even 512Mi OOMed on 3 tiny docs) was the M3 artifact
-              # (c0bf933: the MinIO lazy reader's context was cancelled on Get return, so every
+              # (c0bf933: the minio-go lazy reader's context was cancelled on Get return, so every
               # ingestion spun/failed on doc 1); that is FIXED. Post-fix + m80.2, the peak is
               # BOUNDED and independent of corpus/doc-chunk count:
               #   base BFF                                        ~100Mi

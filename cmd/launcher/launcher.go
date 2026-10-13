@@ -216,7 +216,7 @@ func loadConfig(lookup func(string) string) (Config, error) {
 // objectStoreConfig is the blob-offload configuration for the async path
 // (m7.6b). Parsed from env alongside the launcher Config.
 type objectStoreConfig struct {
-	// Addr is OBJECT_STORE_ADDR — the MinIO host:port. Empty ⇒ offload is
+	// Addr is OBJECT_STORE_ADDR — the object store's S3 host:port. Empty ⇒ offload is
 	// DISABLED (no offloader constructed): oversize async payloads are not
 	// offloaded and pass through capped, exactly as before this feature.
 	Addr string
@@ -232,7 +232,7 @@ type objectStoreConfig struct {
 //
 // Environment variables:
 //
-//	OBJECT_STORE_ADDR (gate): the MinIO host:port. Empty ⇒ offload is disabled
+//	OBJECT_STORE_ADDR (gate): the object store's S3 host:port. Empty ⇒ offload is disabled
 //	  (no offloader is built); every other object-store env is then irrelevant.
 //	OBJECT_STORE_ACCESS_KEY / OBJECT_STORE_SECRET_KEY: the dev credentials.
 //
@@ -386,8 +386,8 @@ func shouldSpan(path string) bool {
 // launcher's local ports; MEMORY_PORT — always injected — carries the "memory wired" signal). The Langfuse
 // scores keys arrive by secretKeyRef (ADR 0148) but are still env on this container, so they are scrubbed too.
 var platformSecretEnv = map[string]bool{
-	"OBJECT_STORE_ACCESS_KEY":    true, // dev MinIO credential (launcher-only: blob offload)
-	"OBJECT_STORE_SECRET_KEY":    true, // dev MinIO credential
+	"OBJECT_STORE_ACCESS_KEY":    true, // dev object-store credential (launcher-only: blob offload)
+	"OBJECT_STORE_SECRET_KEY":    true, // dev object-store credential
 	"LANGFUSE_SCORES_PUBLIC_KEY": true, // Langfuse scores keypair (launcher-only: feedback submission)
 	"LANGFUSE_SCORES_SECRET_KEY": true, // Langfuse scores secret
 	// paths to the pod's projected SA tokens — pod identity is the launcher's, not the child's:

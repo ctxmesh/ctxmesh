@@ -483,7 +483,7 @@ func publishEnvelope(
 	if off != nil {
 		offloaded, wasOffloaded, err := off.maybeOffload(ctx, env.Payload)
 		if err != nil {
-			// MinIO down / refused on publish: best-effort typed error, no
+			// Object store down / refused on publish: best-effort typed error, no
 			// half-offloaded event emitted.
 			return fmt.Errorf("offload oversize payload: %w", err)
 		}

@@ -104,15 +104,15 @@ const ceTypeAttribute = "type"
 
 // Blob-offload object store (m7.6b, specs/eventing-scaling.md §"Blob offload").
 // A registry member's launcher offloads a >256KiB async payload to the dedicated
-// dev MinIO (config/objectstore/) and rehydrates it on consume. The address and
+// dev object store (config/objectstore/) and rehydrates it on consume. The address and
 // the DEV-ONLY deterministic credentials are injected as STATIC env: they are public
 // constants (ADR 0083), so a Secret reference would hide nothing.
 const (
 	// objectStoreDevAccessKey / objectStoreDevSecretKey are the DETERMINISTIC
-	// DEV-ONLY credentials for the dev MinIO — fixed values committed as such
+	// DEV-ONLY credentials for the dev object store — fixed values committed as such
 	// (identical posture to the dev Langfuse / Valkey: NOT a real credential,
-	// never rotated, only ever meaningful against the in-cluster dev MinIO). They
-	// MUST match the values the config/objectstore/ MinIO Deployment is seeded
+	// never rotated, only ever meaningful against the in-cluster dev object store). They
+	// MUST match the values the config/objectstore/ Deployment is seeded
 	// with. Injected as static env so the launcher authenticates to the dev store.
 	objectStoreDevAccessKey = "ctxmesh-dev"
 	objectStoreDevSecretKey = "ctxmesh-dev-secret" //nolint:gosec // dev-only fixed value, not a real credential (see comment).
@@ -1176,7 +1176,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// the launcher gateway's record-mode on (GatewayProxyEnabled + the per-run capture path). Its
 	// presence — combined with GATEWAY_UPSTREAM_URL forced above — is the interposition reason. The
 	// fixture is a DURABLE object-store blob (internal/objectstore, keyed fixtures/{runId}/…), so the
-	// record-capable agent also needs OBJECT_STORE_ADDR + the dev creds to reach MinIO — a
+	// record-capable agent also needs OBJECT_STORE_ADDR + the dev creds to reach the object store — a
 	// record-capable non-member would otherwise have no store to write the fixture to. The membership
 	// block below guards on the same name, so a record-capable member gets them once. STATIC env,
 	// NEVER valueFrom (the m5.7 Knative landmine). All values are reconcile-time constants.
@@ -1661,7 +1661,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// path — as a publisher (offload a >256KiB payload) and/or a consumer
 		// (rehydrate a $ref before invoke). Inject the dedicated dev object store's
 		// address + the deterministic DEV-ONLY credentials so the launcher's
-		// publish/consume path can reach MinIO. Scope: EVERY registry member, not
+		// publish/consume path can reach the object store. Scope: EVERY registry member, not
 		// only executionModel=eventing — a member's launcher wires offload on the
 		// same gate the async consumer/publisher use (registry membership /
 		// AMPEnabled), independent of its own workload KIND, so a producer that

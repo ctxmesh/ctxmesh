@@ -433,7 +433,7 @@ devDataPlane:
 #
 # DEV/TRIAL (default): a single-node pgvector Deployment + PVC is rendered under
 # `devDataPlane.enabled`, with deterministic dev credentials (PRD §23) — the same
-# posture as the bundled Valkey and MinIO.
+# posture as the bundled Valkey and object store.
 #
 # PRODUCTION: set `devDataPlane.enabled=false` and point `externalDsn` at an
 # operator-managed PostgreSQL. `profile: production` REQUIRES externalDsn and

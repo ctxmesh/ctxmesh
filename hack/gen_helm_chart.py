@@ -467,7 +467,7 @@ TOKEN_SERVICE_URL_ENV_HELM = (
 # dev posture, so the DEFAULT render matches, no drift); the chart templates it from
 # devDataPlane.enabled so a `profile: production` render sets it "false" and the controller injects
 # NO dev-only object-store / Langfuse feedback creds into agent pods (OPS-2). One source of truth
-# with the bundled dev Valkey/MinIO, which are gated on the same value.
+# with the bundled dev Valkey/object store, which are gated on the same value.
 DEV_DATA_PLANE_ENV_KUSTOMIZE = (
     '        - name: DEV_DATA_PLANE\n' '          value: "true"'
 )
@@ -590,7 +590,7 @@ ENABLE_TENANT_LABEL_WEBHOOK_ENV_HELM = (
 )
 
 # Resources whose `control-plane:` label marks them as the bundled DEV data
-# plane (in-cluster Valkey/MinIO). Production supplies its own — PRD §23 — so
+# plane (in-cluster Valkey/object store). Production supplies its own — PRD §23 — so
 # these are gated behind .Values.devDataPlane.enabled.
 DEV_DATA_PLANE_LABELS = {"statelayer", "objectstore", "postgres", "nats"}
 
@@ -1052,7 +1052,7 @@ def main() -> None:
 
     # --- dev-data-plane.yaml -------------------------------------------------
     # Gated: dev/trial ONLY (PRD §23). Production disables it and points the
-    # controller at an externally-managed Valkey/MinIO (values seam).
+    # controller at an externally-managed Valkey/object store (values seam).
     with open(os.path.join(out_dir, "dev-data-plane.yaml"), "w") as f:
         f.write(GEN_BANNER)
         f.write(

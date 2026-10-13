@@ -1,4 +1,4 @@
-# MinIO Object Store — dedicated blob-offload backend for the async A2A path
+# Object Store (SeaweedFS, S3 API) — dedicated blob-offload backend for the async A2A path
 # (specs/eventing-scaling.md §"Blob offload"; PRD §12.6 "Large payloads"). A
 # registry member's launcher offloads a >256KiB async payload here under a
 # content-addressed key and rehydrates it on consume.
@@ -32,15 +32,12 @@
 # the 300s startup budget below stays as it was.
 #
 # Dev posture: emptyDir (blobs are dev-ephemeral — an async payload lives only
-# for its delivery window; losing offloaded blobs on a MinIO restart is accepted,
+# for its delivery window; losing offloaded blobs on an object-store restart is accepted,
 # same as losing dev Valkey sessions). Memory limit per the leak policy: a
 # runaway object set OOMs the pod, not the node. Credentials are the dev-only
 # fixed values from the objectstore-dev Secret (secret.yaml) — the ONE place
-# valueFrom is fine, because MinIO is a plain Deployment, NOT a Knative ksvc, so
+# valueFrom is fine, because the object store is a plain Deployment, NOT a Knative ksvc, so
 # the m5.7 no-valueFrom constraint does not apply here.
-#
-# Probes: MinIO exposes /minio/health/live (liveness) and /minio/health/ready
-# (readiness) on the S3 API port — cheap HTTP health endpoints, no auth.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -124,7 +124,7 @@ jobs:
     if: ${{ !inputs.stranger_only }}
     runs-on: ubuntu-latest
     # Bumped 45→60 (m5-memory), 60→75 (m6-mesh), 75→120 (m7-eventing + the
-    # heavier M=7 stack: Calico + KEDA + Eventing + MinIO install on top of m3-m6),
+    # heavier M=7 stack: Calico + KEDA + Eventing + object store install on top of m3-m6),
     # 120→150 (m12-helm + m12-ui: helm install + kind-load bff/echo + a headless
     # Playwright browser run + a live Playground agent invocation).
     timeout-minutes: 150
@@ -152,10 +152,10 @@ jobs:
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
           kind version
-      - name: Bring up the harness cluster (M=7 full stack — Calico + Knative Serving/Eventing + KEDA + MinIO + Langfuse)
+      - name: Bring up the harness cluster (M=7 full stack — Calico + Knative Serving/Eventing + KEDA + object store + Langfuse)
         id: devup
         # M=7 ⊇ M=1..M6: the m7-eventing slice needs KEDA + Knative Eventing +
-        # MinIO, so the whole nightly runs on the M=7 stack. The earlier slices
+        # the object store, so the whole nightly runs on the M=7 stack. The earlier slices
         # tolerate it (Calico enforces the m6 NetworkPolicy as a bonus). Heavy
         # for one CI job — split at the CI-revisit pass if the runner can't fit it.
         run: make -C agent-brain/harness dev-up M=7
@@ -206,7 +206,7 @@ jobs:
         if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
-        # Needs the M=7 stack (KEDA + Knative Eventing + MinIO). Deploys an
+        # Needs the M=7 stack (KEDA + Knative Eventing + object store). Deploys an
         # eventing agent (plain Deployment + Trigger), a job + a CronJob batch
         # agent, and a queue-depth AgentScalingPolicy. Asserts: CloudEvent →
         # trigger (agent.invoke span), poison → per-registry DLQ, CronJob/Job

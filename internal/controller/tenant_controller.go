@@ -317,7 +317,7 @@ func (r *TenantReconciler) stampNamespace(ctx context.Context, tenant *agentsv1b
 // reconcileNetworkPolicy stamps (or removes) the opt-in cross-tenant-deny NetworkPolicy on a member
 // namespace. When spec.networkIsolation is off it ensures none exists. The policy is SERVING-SAFE: it
 // default-denies but explicitly allows same-tenant namespaces + the knative/kourier data plane + the
-// platform egress (DNS, langfuse, gateway/valkey/minio) — the exact allowlist the AgentRegistry NP uses,
+// platform egress (DNS, langfuse, gateway/valkey/objectstore) — the exact allowlist the AgentRegistry NP uses,
 // scoped by the tenant namespace-label instead of the registry-id pod-label. A missing allowance would
 // sever /invoke (an m5.7-class landmine — proven live in m47.8, not envtest which has no CNI).
 func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *agentsv1beta1.Tenant, ns string) error {
@@ -377,7 +377,7 @@ func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *a
 					To:    []networkingv1.NetworkPolicyPeer{platformNS(langfuseNamespace)},
 					Ports: []networkingv1.NetworkPolicyPort{{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(langfusePort)}},
 				},
-				{ // platform backends in ctxmesh: gateway :4000, minio :9000, state-layer PROXY
+				{ // platform backends in ctxmesh: gateway :4000, object store :9000, state-layer PROXY
 					// :8080 (memory/quota/dedup/control/spawn — the pod-authed, per-tenant choke
 					// point) and token-service :8443 (long-term-memory OBO). Omitting :8080 makes a
 					// member's quota fail closed (402) post-cutover.
