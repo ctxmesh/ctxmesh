@@ -63,8 +63,8 @@ type errKBString string
 
 func (e errKBString) Error() string { return string(e) }
 
-// Forwarded-payload JSON keys — they MUST match the token-service knowledgeSearchRequest tags
-// (internal/credplane/knowledge.go): the launcher builds this request, the token-service decodes it.
+// Forwarded-payload JSON keys — they MUST match the token-service's retrieval.SearchRequest tags
+// (internal/controlplane/knowledge/retrieval): the launcher builds this request, the token-service decodes it.
 const (
 	wireKeyNamespace      = "namespace"
 	wireKeyEmbeddingModel = "embeddingModel"

@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory/recall"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
@@ -63,7 +64,8 @@ func (v vecEmbedder) EmbedBatch(ctx context.Context, model string, texts []strin
 
 func memServer(t *testing.T) *Server {
 	t.Helper()
-	return NewServer(nil, testAuth.Auth, logr.Discard()).WithMemory(agentmemory.NewMemStore(), vecEmbedder{})
+	return NewServer(nil, testAuth.Auth, logr.Discard()).
+		WithMemory(recall.New(agentmemory.NewMemStore(), vecEmbedder{}, logr.Discard()))
 }
 
 // postJSON posts body as agent prod/asst's container would.
@@ -100,7 +102,7 @@ func asAgentFor(user string) map[string]string {
 func TestMemory_RememberThenSearch(t *testing.T) {
 	s := memServer(t)
 
-	rec := postJSON(t, s, pathMemoryRemember, memoryRememberRequest{
+	rec := postJSON(t, s, pathMemoryRemember, recall.RememberRequest{
 		Namespace: "prod", AgentName: "asst", Scope: agentmemory.ScopeAgent,
 		Content: "north", EmbeddingModel: "embed-v1",
 	})
@@ -109,7 +111,7 @@ func TestMemory_RememberThenSearch(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rr))
 	assert.Empty(t, rr.Error)
 
-	rec = postJSON(t, s, pathMemorySearch, memorySearchRequest{
+	rec = postJSON(t, s, pathMemorySearch, recall.SearchRequest{
 		Namespace: "prod", AgentName: "asst", Scope: agentmemory.ScopeAgent,
 		Query: "north", EmbeddingModel: "embed-v1", TopK: 3,
 	})
@@ -124,12 +126,12 @@ func TestMemory_RememberThenSearch(t *testing.T) {
 // A per-user (scope agent_user) memory is isolated by subject: user B never retrieves user A's memory.
 func TestMemory_PerUserIsolationOverWire(t *testing.T) {
 	s := memServer(t)
-	require.Equal(t, http.StatusOK, postJSONWith(t, s, pathMemoryRemember, memoryRememberRequest{
+	require.Equal(t, http.StatusOK, postJSONWith(t, s, pathMemoryRemember, recall.RememberRequest{
 		Namespace: "prod", AgentName: "asst", Scope: agentmemory.ScopeAgentUser, Subject: "hash-alice",
 		Content: "north", EmbeddingModel: "embed-v1",
 	}, asAgentFor("hash-alice")).Code)
 
-	rec := postJSONWith(t, s, pathMemorySearch, memorySearchRequest{
+	rec := postJSONWith(t, s, pathMemorySearch, recall.SearchRequest{
 		Namespace: "prod", AgentName: "asst", Scope: agentmemory.ScopeAgentUser, Subject: "hash-bob",
 		Query: "north", EmbeddingModel: "embed-v1", TopK: 3,
 	}, asAgentFor("hash-bob"))
@@ -143,7 +145,7 @@ func TestMemory_PerUserIsolationOverWire(t *testing.T) {
 // with a subject, the case this used to send, is now refused before the store (TestMemory_Scope).
 func TestMemory_InvalidWrite(t *testing.T) {
 	s := memServer(t)
-	rec := postJSON(t, s, pathMemoryRemember, memoryRememberRequest{
+	rec := postJSON(t, s, pathMemoryRemember, recall.RememberRequest{
 		Namespace: "prod", AgentName: "asst", Scope: "bogus",
 		Content: "north", EmbeddingModel: "embed-v1",
 	})
@@ -155,7 +157,7 @@ func TestMemory_InvalidWrite(t *testing.T) {
 // Without WithMemory the endpoints answer errCodeUnsupported (token-service started without DSN/gateway).
 func TestMemory_UnsupportedWhenNotWired(t *testing.T) {
 	s := NewServer(nil, testAuth.Auth, logr.Discard())
-	rec := postJSON(t, s, pathMemorySearch, memorySearchRequest{Namespace: "prod", AgentName: "asst", Query: "x"})
+	rec := postJSON(t, s, pathMemorySearch, recall.SearchRequest{Namespace: "prod", AgentName: "asst", Query: "x"})
 	var sr memorySearchResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &sr))
 	assert.Equal(t, errCodeUnsupported, sr.Error)

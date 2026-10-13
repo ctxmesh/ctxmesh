@@ -205,8 +205,8 @@ func (s *Server) discoveryCandidates(
 	return out, nil
 }
 
-// discoveryRerankFunc adapts the configured credplane.Reranker to the ranking package's function seam, so
-// internal/discovery stays free of a credplane dependency. nil ⇒ cosine-only ranking.
+// discoveryRerankFunc adapts the configured retrieval.Reranker to the ranking package's function seam, so
+// internal/discovery stays free of a retrieval dependency. nil ⇒ cosine-only ranking.
 func (s *Server) discoveryRerankFunc() discovery.Reranker {
 	if s.discoveryReranker == nil {
 		return nil

@@ -31,9 +31,10 @@ import (
 const controlPlanePkg = "github.com/ctxmesh/ctxmesh/internal/controlplane/"
 
 // notStores are the packages under controlPlanePkg that back no store, so an Options field they type is
-// not set from the database: the model gateway's embeddings client.
+// not set from the database: the model gateway's embeddings client, and knowledge retrieval's stages.
 var notStores = []string{
 	controlPlanePkg + "embedding",
+	controlPlanePkg + "knowledge/retrieval",
 }
 
 // TestUseControlPlaneDBSetsEveryStore: an Options field typed by a control-plane package is a

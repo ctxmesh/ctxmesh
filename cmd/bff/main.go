@@ -53,6 +53,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/bff"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge/retrieval"
 	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 	"github.com/ctxmesh/ctxmesh/internal/dbpool"
@@ -792,7 +793,7 @@ func newDocStore() (objectstore.ObjectStore, error) {
 // KNOWLEDGE_RERANK_URL, so an operator running ONE offline rerank service gets discovery reranking for
 // free rather than having to point a second variable at the same pod. Unset ⇒ nil ⇒ cosine-only ranking,
 // which is a complete answer, just a coarser one — rerank is fail-open by construction.
-func discoveryReranker(log logr.Logger) credplane.Reranker {
+func discoveryReranker(log logr.Logger) retrieval.Reranker {
 	rerankURL := strings.TrimSpace(os.Getenv("DISCOVERY_RERANK_URL"))
 	if rerankURL == "" {
 		rerankURL = strings.TrimSpace(os.Getenv("KNOWLEDGE_RERANK_URL"))
@@ -802,7 +803,7 @@ func discoveryReranker(log logr.Logger) credplane.Reranker {
 		return nil
 	}
 	log.Info("capability discovery: cross-encoder rerank wired (ADR 0117)", "reranker", rerankURL)
-	return credplane.NewHTTPReranker(rerankURL, nil)
+	return retrieval.NewHTTPReranker(rerankURL, nil)
 }
 
 // defaultRunWorkerConcurrency is what a BFF runs when RUN_WORKER_CONCURRENCY is unset. Small on purpose:

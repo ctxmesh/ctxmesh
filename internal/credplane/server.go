@@ -25,9 +25,8 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory/recall"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge/retrieval"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
@@ -46,24 +45,27 @@ type Server struct {
 	log      logr.Logger
 	// Long-term memory (ADR 0045), optional — enabled via WithMemory. nil ⇒ the /v1/memory endpoints
 	// answer errCodeUnsupported (started without CONTROLPLANE_DSN / a gateway).
-	memStore agentmemory.Store
-	embedder embedding.Embedder
+	memory *recall.Service
 	// Managed-RAG retrieval (ADR 0061 Fork 3), optional — enabled via WithKnowledge. nil ⇒ the
-	// /v1/knowledge endpoint answers errCodeUnsupported. Shares the embedder with the memory endpoints.
-	knowledgeStore knowledge.Store
-	// Cross-encoder reranker (M140.2, ADR 0117), optional — enabled via WithReranker. nil OR
-	// KNOWLEDGE_RERANK != "true" ⇒ retrieval returns the store's fusion order unchanged. An
-	// ENHANCEMENT over retrieval: a rerank failure falls back to the store order.
-	reranker Reranker
-	// LLM query-rewriter (M140.3), optional — enabled via WithRewriter. nil OR
-	// KNOWLEDGE_QUERY_REWRITE != "true" ⇒ the raw query is used unchanged. An ENHANCEMENT: a
-	// rewrite failure falls back to the original query.
-	rewriter QueryRewriter
+	// /v1/knowledge endpoint answers errCodeUnsupported.
+	knowledge *retrieval.Searcher
 }
 
 // NewServer builds a Server over the given (single, shared) resolver, authenticating callers with auth.
 func NewServer(resolver credresolve.CredentialResolver, auth CallerAuth, log logr.Logger) *Server {
 	return &Server{resolver: resolver, auth: auth, log: log}
+}
+
+// WithMemory serves the long-term-memory endpoints from svc. Returns the Server for chaining.
+func (s *Server) WithMemory(svc *recall.Service) *Server {
+	s.memory = svc
+	return s
+}
+
+// WithKnowledge serves knowledge search from searcher. Returns the Server for chaining.
+func (s *Server) WithKnowledge(searcher *retrieval.Searcher) *Server {
+	s.knowledge = searcher
+	return s
 }
 
 // Handler returns the HTTP mux for the internal API + health probes.
@@ -220,6 +222,92 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, storeResponse{})
+}
+
+func (s *Server) handleMemoryRemember(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if s.memory == nil {
+		writeJSON(w, memoryRememberResponse{Error: errCodeUnsupported})
+		return
+	}
+	c, ok := s.authenticate(w, r, runcap.TokenServiceAgentAudience)
+	if !ok {
+		return
+	}
+	var req recall.RememberRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if !s.memoryScopeAllowed(w, r, c, req.Namespace, req.AgentName, req.Scope, req.Subject) {
+		return
+	}
+	switch err := s.memory.Remember(r.Context(), req); {
+	case err == nil:
+		writeJSON(w, memoryRememberResponse{})
+	case errors.Is(err, recall.ErrInvalid):
+		writeJSON(w, memoryRememberResponse{Error: errCodeInvalid})
+	default:
+		writeJSON(w, memoryRememberResponse{Error: errCodeInternal})
+	}
+}
+
+func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if s.memory == nil {
+		writeJSON(w, memorySearchResponse{Results: []recall.Hit{}, Error: errCodeUnsupported})
+		return
+	}
+	c, ok := s.authenticate(w, r, runcap.TokenServiceAgentAudience)
+	if !ok {
+		return
+	}
+	var req recall.SearchRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if !s.memoryScopeAllowed(w, r, c, req.Namespace, req.AgentName, req.Scope, req.Subject) {
+		return
+	}
+	hits, err := s.memory.Search(r.Context(), req)
+	if err != nil {
+		writeJSON(w, memorySearchResponse{Results: []recall.Hit{}, Error: errCodeInternal})
+		return
+	}
+	writeJSON(w, memorySearchResponse{Results: hits})
+}
+
+func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if s.knowledge == nil {
+		writeJSON(w, knowledgeSearchResponse{Results: []retrieval.Hit{}, Error: errCodeUnsupported})
+		return
+	}
+	c, ok := s.authenticate(w, r, runcap.TokenServiceAgentAudience, runcap.TokenServicePodAudience)
+	if !ok {
+		return
+	}
+	var req retrieval.SearchRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if !s.knowledgeScopeAllowed(w, r, c, req.Namespace, req.Subject) {
+		return
+	}
+	hits, err := s.knowledge.Search(r.Context(), req)
+	if err != nil {
+		writeJSON(w, knowledgeSearchResponse{Results: []retrieval.Hit{}, Error: errCodeInternal})
+		return
+	}
+	writeJSON(w, knowledgeSearchResponse{Results: hits})
 }
 
 // decode reads a bounded JSON body into v, writing a 400 and returning false on failure.

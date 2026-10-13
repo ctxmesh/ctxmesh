@@ -14,25 +14,25 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package credplane is the CENTRAL TOKEN SERVICE + its client (ADR 0030 §1, increment 5 —
-// the scaling split). One central Deployment in the locked credential namespace runs the
-// credresolve backend behind an internal mTLS API; the per-pod egress sidecars DELEGATE
-// cache-miss resolution to it instead of each embedding the backend. This consolidates the
-// two operations that hit ceilings — grant-Secret reads and OAuth refresh — behind ONE
-// global singleflight, so a busy multi-user fleet does N-sidecar work as one refresh, and
-// the rotating-refresh-token race across pods (ADR 0029 §6 R3) disappears.
-//
-// The wire protocol is a tiny JSON request/response, over TLS when the service has a serving
-// certificate. Every caller authenticates with a projected ServiceAccount token and the service
-// derives who it acts for from that token and the forwarded run capability (ADR 0154). The Client
-// implements credresolve.CredentialResolver; it is the egress sidecar's only resolver.
 package credplane
+
+import (
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory/recall"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge/retrieval"
+)
 
 // The internal API paths.
 const (
 	pathResolve = "/v1/resolve"
 	pathRevoke  = "/v1/revoke"
 	pathStore   = "/v1/store"
+	// Long-term memory (ADR 0045) and managed-RAG retrieval (ADR 0061 Fork 3). The token service is the ONLY
+	// holder of CONTROLPLANE_DSN + the pgvector stores — agent pods never get DB credentials; their launcher
+	// proxies here with the agent's own projected token, and the namespace and agent come from that token
+	// (ADR 0154). The ingestion WRITE path is the run-worker holding the knowledge store directly (m68.6).
+	pathMemoryRemember  = "/v1/memory/remember"
+	pathMemorySearch    = "/v1/memory/search"
+	pathKnowledgeSearch = "/v1/knowledge/search"
 )
 
 // resolveRequest asks the central service to resolve the OBO credential for one
@@ -94,6 +94,25 @@ type storeRequest struct {
 // else "internal").
 type storeResponse struct {
 	Error string `json:"error,omitempty"`
+}
+
+// memoryRememberResponse reports a remember outcome ("" ok, "invalid", "unsupported" or "internal"). The
+// request is recall.RememberRequest.
+type memoryRememberResponse struct {
+	Error string `json:"error,omitempty"`
+}
+
+// memorySearchResponse carries the nearest memories, or an error code. The request is recall.SearchRequest.
+type memorySearchResponse struct {
+	Results []recall.Hit `json:"results"`
+	Error   string       `json:"error,omitempty"`
+}
+
+// knowledgeSearchResponse carries the retrieved chunks, or an error code. The request is
+// retrieval.SearchRequest.
+type knowledgeSearchResponse struct {
+	Results []retrieval.Hit `json:"results"`
+	Error   string          `json:"error,omitempty"`
 }
 
 // Stable error codes on the wire (never a raw error string — that could leak internals).

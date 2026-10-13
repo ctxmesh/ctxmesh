@@ -81,7 +81,7 @@ type RerankHit struct {
 }
 
 // Reranker re-scores (query, docs) with the cross-encoder (ADR 0117). Optional — nil ⇒ cosine only. A
-// function type rather than an interface so the caller adapts credplane's Reranker without this package
+// function type rather than an interface so the caller adapts retrieval.Reranker without this package
 // taking a dependency on it.
 type Reranker func(ctx context.Context, query string, docs []string) ([]RerankHit, error)
 

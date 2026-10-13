@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package credplane
+package retrieval
 
 import (
 	"context"
@@ -60,7 +60,7 @@ func TestApplyRerank_ReordersAndTruncates(t *testing.T) {
 	rr := fakeReranker{fn: func(docs []string) ([]RerankResult, error) {
 		return []RerankResult{{Index: 3, Score: 0.9}, {Index: 1, Score: 0.8}, {Index: 0, Score: 0.5}, {Index: 2, Score: 0.1}}, nil
 	}}
-	s := NewServer(nil, testAuth.Auth, logr.Discard()).WithReranker(rr)
+	s := NewSearcher(nil, nil, logr.Discard()).WithReranker(rr)
 
 	out := s.applyRerank(context.Background(), "q", scored, 3)
 	if got, want := contentsOf(out), []string{"D", "B", "A"}; !equalStrings(got, want) {
@@ -74,7 +74,7 @@ func TestApplyRerank_ReordersAndTruncates(t *testing.T) {
 func TestApplyRerank_FailOpenKeepsStoreOrder(t *testing.T) {
 	scored := scoredWith("A", "B", "C", "D")
 	rr := fakeReranker{fn: func([]string) ([]RerankResult, error) { return nil, errors.New("reranker down") }}
-	s := NewServer(nil, testAuth.Auth, logr.Discard()).WithReranker(rr)
+	s := NewSearcher(nil, nil, logr.Discard()).WithReranker(rr)
 
 	// Fail open: retrieval still returns results, in store order, truncated to topK.
 	out := s.applyRerank(context.Background(), "q", scored, 2)
@@ -89,7 +89,7 @@ func TestApplyRerank_IgnoresOutOfRangeIndices(t *testing.T) {
 	rr := fakeReranker{fn: func([]string) ([]RerankResult, error) {
 		return []RerankResult{{Index: 2, Score: 0.9}, {Index: 99, Score: 0.8}, {Index: 0, Score: 0.1}}, nil
 	}}
-	s := NewServer(nil, testAuth.Auth, logr.Discard()).WithReranker(rr)
+	s := NewSearcher(nil, nil, logr.Discard()).WithReranker(rr)
 
 	out := s.applyRerank(context.Background(), "q", scored, 5)
 	if got, want := contentsOf(out), []string{"C", "A"}; !equalStrings(got, want) {

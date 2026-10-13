@@ -18,7 +18,7 @@ import (
 
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
-	"github.com/ctxmesh/ctxmesh/internal/credplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge/retrieval"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
@@ -259,7 +259,7 @@ func TestDiscover_RerankFailureStillAnswers(t *testing.T) {
 
 type deadReranker struct{}
 
-func (deadReranker) Rerank(context.Context, string, []string) ([]credplane.RerankResult, error) {
+func (deadReranker) Rerank(context.Context, string, []string) ([]retrieval.RerankResult, error) {
 	return nil, errors.New("reranker unreachable")
 }
 

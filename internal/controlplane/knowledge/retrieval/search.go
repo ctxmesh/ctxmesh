@@ -14,37 +14,29 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package credplane
+package retrieval
 
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"math"
-	"net/http"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
-	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
-// The managed-RAG retrieval read path (ADR 0061 Fork 3 + governance #8). The token-service is the ONLY holder of
-// CONTROLPLANE_DSN + the pgvector knowledge store — agent pods never get DB credentials; their launcher proxies
-// here with the agent's own projected token, scoped to the agent's namespace (ADR 0154). This mirrors the
-// long-term-memory read seam (memory.go): the READ goes via this proxy; the WRITE path (ingestion) is the
-// run-worker holding the store directly (m68.6). Verification #4 in ADR 0061: memory search already does exactly
-// this shape.
-const pathKnowledgeSearch = "/v1/knowledge/search"
-
 // Retrieval-governance caps (ADR 0061 governance #5 — context-window blowup protection).
-// These are applied in handleKnowledgeSearch — the SINGLE choke point for all retrieval.
+// These are applied in Searcher.Search — the SINGLE choke point for all retrieval.
 //
 // All three are configurable via env; the defaults are:
 //
@@ -129,8 +121,7 @@ func resolveIntEnv(name string, defVal int) int {
 }
 
 // sanitizeScore clamps a non-JSON-encodable similarity score (NaN / ±Inf — e.g. a cosine over a zero-norm
-// stored embedding) to 0. Without this, json.Encode fails on the response; the handler's writeJSON used to
-// swallow that error and send a silent 200 + empty body (m52.G7 — knowledge search returned 200/0-bytes).
+// stored embedding) to 0, so the search response always encodes (m52.G7).
 func sanitizeScore(s float64) float64 {
 	if math.IsNaN(s) || math.IsInf(s, 0) {
 		return 0
@@ -138,45 +129,53 @@ func sanitizeScore(s float64) float64 {
 	return s
 }
 
-// WithKnowledge enables the managed-RAG retrieval endpoint over the given knowledge store + embedder. When either
-// is nil the endpoint answers errCodeUnsupported (the token-service was started without CONTROLPLANE_DSN / a
-// gateway). Returns the Server for chaining. The embedder is shared with the memory endpoints (same gateway).
-func (s *Server) WithKnowledge(store knowledge.Store, embedder embedding.Embedder) *Server {
-	s.knowledgeStore = store
-	if s.embedder == nil {
-		s.embedder = embedder
-	}
-	return s
+// Searcher answers knowledge-search requests over one knowledge store, embedding each query through the model
+// gateway. The token service mounts it at /v1/knowledge/search behind its caller authentication.
+type Searcher struct {
+	store    knowledge.Store
+	embedder embedding.Embedder
+	// reranker is the optional cross-encoder stage (M140.2, ADR 0117). nil OR KNOWLEDGE_RERANK != "true" ⇒
+	// retrieval returns the store's fusion order unchanged; a rerank failure falls back to the store order.
+	reranker Reranker
+	// rewriter is the optional LLM query-rewrite stage (M140.3). nil OR KNOWLEDGE_QUERY_REWRITE != "true" ⇒ the
+	// raw query is used unchanged; a rewrite failure falls back to the original query.
+	rewriter QueryRewriter
+	log      logr.Logger
+}
+
+// NewSearcher builds a Searcher over store, embedding queries with embedder. Both are required.
+func NewSearcher(store knowledge.Store, embedder embedding.Embedder, log logr.Logger) *Searcher {
+	return &Searcher{store: store, embedder: embedder, log: log}
 }
 
 // WithReranker wires a cross-encoder reranker (M140.2, ADR 0117). Retrieval only reranks when this is set
-// AND KNOWLEDGE_RERANK="true"; otherwise the store's fusion order is returned unchanged. Returns the Server
+// AND KNOWLEDGE_RERANK="true"; otherwise the store's fusion order is returned unchanged. Returns the Searcher
 // for chaining.
-func (s *Server) WithReranker(r Reranker) *Server {
+func (s *Searcher) WithReranker(r Reranker) *Searcher {
 	s.reranker = r
 	return s
 }
 
 // rerankEnabled reports whether the rerank stage should run: a reranker is wired AND the opt-in env is on.
-func (s *Server) rerankEnabled() bool {
+func (s *Searcher) rerankEnabled() bool {
 	return s.reranker != nil && strings.TrimSpace(os.Getenv(envRerank)) == envValueTrue
 }
 
 // WithRewriter wires an LLM query-rewriter (M140.3). Retrieval only rewrites when this is set AND
-// KNOWLEDGE_QUERY_REWRITE="true"; otherwise the raw query is used unchanged. Returns the Server for chaining.
-func (s *Server) WithRewriter(r QueryRewriter) *Server {
+// KNOWLEDGE_QUERY_REWRITE="true"; otherwise the raw query is used unchanged. Returns the Searcher for chaining.
+func (s *Searcher) WithRewriter(r QueryRewriter) *Searcher {
 	s.rewriter = r
 	return s
 }
 
 // rewriteEnabled reports whether the query-rewrite stage should run: a rewriter is wired AND the opt-in env is on.
-func (s *Server) rewriteEnabled() bool {
+func (s *Searcher) rewriteEnabled() bool {
 	return s.rewriter != nil && strings.TrimSpace(os.Getenv(envQueryRewrite)) == envValueTrue
 }
 
 // applyRewrite returns an LLM-rewritten query, or the original on any failure (fail open — a rewrite must never
 // break search). An empty result is treated as a failure by the rewriter.
-func (s *Server) applyRewrite(ctx context.Context, query string) string {
+func (s *Searcher) applyRewrite(ctx context.Context, query string) string {
 	rewritten, err := s.rewriter.Rewrite(ctx, query)
 	if err != nil || strings.TrimSpace(rewritten) == "" {
 		if err != nil {
@@ -191,7 +190,7 @@ func (s *Server) applyRewrite(ctx context.Context, query string) string {
 // ENHANCEMENT, never a gate: on any rerank error (or a length mismatch) it logs and falls back to the store's
 // order truncated to topK — the search still returns results. Stable-sorts by descending rerank score so equal
 // scores keep the store's (fusion) order.
-func (s *Server) applyRerank(ctx context.Context, query string, scored []knowledge.ScoredChunk, topK int) []knowledge.ScoredChunk {
+func (s *Searcher) applyRerank(ctx context.Context, query string, scored []knowledge.ScoredChunk, topK int) []knowledge.ScoredChunk {
 	fallback := func() []knowledge.ScoredChunk {
 		if len(scored) > topK {
 			return scored[:topK]
@@ -237,18 +236,18 @@ func (s *Server) applyRerank(ctx context.Context, query string, scored []knowled
 	return out
 }
 
-// knowledgeSearchRequest retrieves the top-k corpus chunks most similar to Query within one KnowledgeBase.
+// SearchRequest retrieves the top-k corpus chunks most similar to Query within one KnowledgeBase.
 //
 // EmbeddingModel is LOAD-BEARING and one-way (ADR 0061 Fork 3): the query MUST be embedded with the SAME model the
 // corpus was ingested with. The store's Search filters by embedding_model, so a mismatched model returns nothing —
 // a fail-safe (never silently-wrong cross-model similarity), never a wrong answer.
 //
-// Subject is the already-hashed invoking user for a per-user corpus, or "" for an org-wide one — mirroring
-// memory.go's subject discipline: the raw username never crosses this API. v1 ingests org-wide corpora only, so
-// Subject is "" in practice; the field is kept so per-user recall is correct by construction when a per-user KB
-// lands. A client MUST NOT be trusted to supply a raw user id here — the launcher derives Subject from its verified
+// Subject is the already-hashed invoking user for a per-user corpus, or "" for an org-wide one — mirroring the
+// memory requests' subject discipline (agentmemory/recall): the raw username never crosses this API. v1 ingests
+// org-wide corpora only, so Subject is "" in practice; the field is kept so per-user recall is correct by
+// construction when a per-user KB lands. A client MUST NOT be trusted to supply a raw user id here — the launcher derives Subject from its verified
 // run capability before forwarding (mirroring longTermProxy.subjectFor), the same way memory search does.
-type knowledgeSearchRequest struct {
+type SearchRequest struct {
 	Namespace      string  `json:"namespace"`
 	KnowledgeBase  string  `json:"knowledgeBase"`
 	Subject        string  `json:"subject,omitempty"`
@@ -258,11 +257,11 @@ type knowledgeSearchRequest struct {
 	EmbeddingModel string  `json:"embeddingModel"`
 }
 
-// knowledgeHit is one retrieved chunk + its cosine similarity in [0,1], carrying the provenance a caller cites
+// Hit is one retrieved chunk + its cosine similarity in [0,1], carrying the provenance a caller cites
 // (ADR 0061 governance #4 — the citation surface m68.11 renders). The raw embedding is internal, never echoed.
 // Truncated is set to true when the chunk's Content was trimmed to KNOWLEDGE_MAX_CHUNK_CHARS so the caller can
 // tell that the model saw an incomplete chunk (governance #5 — per-chunk size cap).
-type knowledgeHit struct {
+type Hit struct {
 	Content     string  `json:"content"`
 	DocumentRef string  `json:"documentRef"`
 	ChunkIndex  int     `json:"chunkIndex"`
@@ -273,44 +272,23 @@ type knowledgeHit struct {
 	Truncated   bool    `json:"truncated,omitempty"`
 }
 
-type knowledgeSearchResponse struct {
-	Results []knowledgeHit `json:"results"`
-	Error   string         `json:"error,omitempty"`
-}
-
-func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	if s.knowledgeStore == nil || s.embedder == nil {
-		writeJSON(w, knowledgeSearchResponse{Results: []knowledgeHit{}, Error: errCodeUnsupported})
-		return
-	}
-	c, ok := s.authenticate(w, r, runcap.TokenServiceAgentAudience, runcap.TokenServicePodAudience)
-	if !ok {
-		return
-	}
-	var req knowledgeSearchRequest
-	if !decode(w, r, &req) {
-		return
-	}
-	if !s.knowledgeScopeAllowed(w, r, c, req) {
-		return
-	}
-
+// Search retrieves the chunks req asks for, in score order, within the governance caps. The caller has already
+// established that the request's namespace and subject are the caller's to search. An error has been logged
+// here; the caller answers it with a stable code and never echoes it.
+func (s *Searcher) Search(ctx context.Context, req SearchRequest) ([]Hit, error) {
 	// ── knowledge.search trace span (ADR 0061 governance #4 — the M46 mandate) ───────────────────
 	// Mirrors the memory.agent_recall span (cmd/launcher/memory_longterm.go handleSearch): a wrong
 	// retrieval must be debuggable. PII discipline: the memory span does NOT log the raw query text
 	// (it records only scope, top_k, threshold, hits, top_score — never the query). We match that
 	// choice exactly here: no raw query text on the span. We record knowledge_base, topk, threshold,
 	// retrieved_count, top_score, and document_refs (a bounded list — provenance, never PII).
+	// The instrumentation scope keeps the token service's name, so traces filtered on it still find this span.
 	tracer := otel.Tracer("ctxmesh/credplane")
-	ctx, span := tracer.Start(r.Context(), "knowledge.search")
+	ctx, span := tracer.Start(ctx, "knowledge.search")
 	defer span.End()
 
 	// ── k cap (governance #5) ─────────────────────────────────────────────────────────────────────
-	// The store already applies resolveTopK (≤100, ADR 0061 governance #5); this handler applies a
+	// The store already applies resolveTopK (≤100, ADR 0061 governance #5); Search applies a
 	// configurable hard max (KNOWLEDGE_MAX_TOPK, default 50) as an additional ceiling. Together they
 	// ensure: unset → default 10 (store), > KNOWLEDGE_MAX_TOPK → capped to max, ≤100 store max.
 	maxTopK := resolveIntEnv(envMaxTopK, defaultMaxTopK)
@@ -354,10 +332,9 @@ func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, err.Error())
 		s.log.Error(err, "credplane: knowledge embed on search failed",
 			"namespace", req.Namespace, "knowledgeBase", req.KnowledgeBase)
-		writeJSON(w, knowledgeSearchResponse{Results: []knowledgeHit{}, Error: errCodeInternal})
-		return
+		return nil, fmt.Errorf("embed the query: %w", err)
 	}
-	scored, err := s.knowledgeStore.Search(ctx, knowledge.SearchQuery{
+	scored, err := s.store.Search(ctx, knowledge.SearchQuery{
 		Namespace: req.Namespace, KnowledgeBase: req.KnowledgeBase, Subject: req.Subject,
 		EmbeddingModel: req.EmbeddingModel, Vector: vec, TopK: searchK, Threshold: req.Threshold,
 		// M12 (ADR 0084): opt-in hybrid retrieval. QueryText is the same raw query already embedded above;
@@ -370,8 +347,7 @@ func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, err.Error())
 		s.log.Error(err, "credplane: knowledge search failed",
 			"namespace", req.Namespace, "knowledgeBase", req.KnowledgeBase)
-		writeJSON(w, knowledgeSearchResponse{Results: []knowledgeHit{}, Error: errCodeInternal})
-		return
+		return nil, fmt.Errorf("search the store: %w", err)
 	}
 
 	// Rerank the over-fetched candidates down to topK by cross-encoder relevance (no-op when off; falls back
@@ -389,7 +365,7 @@ func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
 	// Citation/provenance (documentRef, chunkIndex, offsets, mimeType, score) is NEVER trimmed.
 	maxChunk := resolveIntEnv(envMaxChunkChars, defaultMaxChunk)
 	maxTotal := resolveIntEnv(envMaxTotalChars, defaultMaxTotal)
-	hits := make([]knowledgeHit, 0, len(scored))
+	hits := make([]Hit, 0, len(scored))
 	docRefsSeen := make(map[string]bool, len(scored))
 	var totalChars int
 	for _, sc := range scored {
@@ -410,7 +386,7 @@ func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		totalChars += len(content)
-		hits = append(hits, knowledgeHit{
+		hits = append(hits, Hit{
 			Content:     content,
 			DocumentRef: sc.Chunk.DocumentRef,
 			ChunkIndex:  sc.Chunk.ChunkIndex,
@@ -418,8 +394,7 @@ func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
 			EndOffset:   sc.Chunk.EndOffset,
 			MimeType:    sc.Chunk.MimeType,
 			// Sanitize the score: a NaN/Inf cosine (e.g. a zero-norm stored embedding) is not JSON-encodable,
-			// and json.Encode would fail — previously swallowed by writeJSON → a silent 200 + empty body
-			// (m52.G7). Clamp to 0 so the response always encodes; writeJSON now also surfaces encode errors.
+			// so the response would fail to encode (m52.G7). Clamp to 0 so it always encodes.
 			Score:     sanitizeScore(sc.Score),
 			Truncated: truncated,
 		})
@@ -438,33 +413,5 @@ func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(attribute.StringSlice("knowledge.document_refs", docRefs))
 
-	writeJSON(w, knowledgeSearchResponse{Results: hits})
-}
-
-// knowledgeScopeAllowed refuses a search outside the caller's reach. An agent searches only its own
-// namespace, and a per-user subject only as the user of a run capability whose agent is in that
-// namespace. The BFF's test query may search any namespace; it derives the subject itself.
-func (s *Server) knowledgeScopeAllowed(w http.ResponseWriter, r *http.Request, c caller, req knowledgeSearchRequest) bool {
-	if c.platform {
-		return true
-	}
-	switch {
-	case c.audience != runcap.TokenServiceAgentAudience || c.agentName() == "":
-		s.forbid(w, r, c, "only an agent or the platform may search knowledge")
-		return false
-	case req.Namespace != c.Namespace:
-		s.forbid(w, r, c, "an agent searches only its own namespace's knowledge")
-		return false
-	case req.Subject == "":
-		return true
-	}
-	cp, ok := s.capability(w, r)
-	if !ok {
-		return false
-	}
-	if why := userScopeError(c, cp, req.Subject); why != "" {
-		s.forbid(w, r, c, why)
-		return false
-	}
-	return true
+	return hits, nil
 }

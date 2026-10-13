@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
@@ -248,6 +249,70 @@ func userScopeError(c caller, cp runcap.Capability, subject string) string {
 		return "the request names another user than the run capability"
 	}
 	return ""
+}
+
+// memoryScopeAllowed refuses a memory request outside the calling agent's own partition: the namespace and
+// agent are the reviewed token's, and a per-user subject is the user of a run capability whose agent is in
+// the caller's namespace. Agent-wide memory has no subject.
+func (s *Server) memoryScopeAllowed(
+	w http.ResponseWriter, r *http.Request, c caller, namespace, agentName, scope, subject string,
+) bool {
+	agent := c.agentName()
+	switch {
+	case agent == "":
+		s.forbid(w, r, c, "only an agent may use long-term memory")
+		return false
+	case namespace != c.Namespace:
+		s.forbid(w, r, c, "the request names another namespace than the caller's")
+		return false
+	case agentName != agent:
+		s.forbid(w, r, c, "the request names another agent than the caller")
+		return false
+	}
+	if scope != agentmemory.ScopeAgentUser {
+		if subject != "" {
+			s.forbid(w, r, c, "agent-wide memory has no subject")
+			return false
+		}
+		return true
+	}
+	cp, ok := s.capability(w, r)
+	if !ok {
+		return false
+	}
+	if why := userScopeError(c, cp, subject); why != "" {
+		s.forbid(w, r, c, why)
+		return false
+	}
+	return true
+}
+
+// knowledgeScopeAllowed refuses a search outside the caller's reach. An agent searches only its own
+// namespace, and a per-user subject only as the user of a run capability whose agent is in that
+// namespace. The BFF's test query may search any namespace; it derives the subject itself.
+func (s *Server) knowledgeScopeAllowed(w http.ResponseWriter, r *http.Request, c caller, namespace, subject string) bool {
+	if c.platform {
+		return true
+	}
+	switch {
+	case c.audience != runcap.TokenServiceAgentAudience || c.agentName() == "":
+		s.forbid(w, r, c, "only an agent or the platform may search knowledge")
+		return false
+	case namespace != c.Namespace:
+		s.forbid(w, r, c, "an agent searches only its own namespace's knowledge")
+		return false
+	case subject == "":
+		return true
+	}
+	cp, ok := s.capability(w, r)
+	if !ok {
+		return false
+	}
+	if why := userScopeError(c, cp, subject); why != "" {
+		s.forbid(w, r, c, why)
+		return false
+	}
+	return true
 }
 
 // actorNamespace is the namespace of a capability's acting agent ("<namespace>/<agent>").

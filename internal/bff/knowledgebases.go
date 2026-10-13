@@ -882,7 +882,7 @@ func (s *Server) handleSearchKB(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build the token-service search request, using the KB's embeddingRoute as the embedding model.
-	// This mirrors the knowledgeSearchRequest shape in internal/credplane/knowledge.go.
+	// This mirrors retrieval.SearchRequest (internal/controlplane/knowledge/retrieval).
 	tsReq := struct {
 		Namespace      string  `json:"namespace"`
 		KnowledgeBase  string  `json:"knowledgeBase"`

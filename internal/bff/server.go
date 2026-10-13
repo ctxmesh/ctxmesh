@@ -45,6 +45,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/enduseragent"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/killscope"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge/retrieval"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/oauthpending"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
@@ -54,7 +55,6 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/skill"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/spawnbudget"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
-	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 	"github.com/ctxmesh/ctxmesh/internal/objectstore"
 	"github.com/ctxmesh/ctxmesh/internal/ocr"
@@ -191,7 +191,7 @@ type Server struct {
 	agentCapabilities agentcapability.Store
 	// discoveryReranker optionally re-scores discovery candidates with the cross-encoder (ADR 0117). nil ⇒
 	// cosine-only ranking. Fail-open by construction — a dead reranker never breaks discovery.
-	discoveryReranker credplane.Reranker
+	discoveryReranker retrieval.Reranker
 	// discoveryEmbeddingRoute names the ModelRoute the capability query + descriptors embed through (the
 	// offline embedder, ADR 0116). Empty ⇒ discovery cannot embed and the edge serves an honest 501.
 	discoveryEmbeddingRoute string
@@ -665,8 +665,8 @@ type Options struct {
 	// cpDB; the CONTROLLER writes it, the BFF only reads (ADR 0011 — no new RBAC).
 	AgentCapabilities agentcapability.Store
 	// DiscoveryReranker optionally re-scores discovery candidates with the cross-encoder (ADR 0117).
-	// Optional — nil ⇒ cosine-only. Constructed in cmd/bff/main.go via credplane.NewHTTPReranker.
-	DiscoveryReranker credplane.Reranker
+	// Optional — nil ⇒ cosine-only. Constructed in cmd/bff/main.go via retrieval.NewHTTPReranker.
+	DiscoveryReranker retrieval.Reranker
 	// DiscoveryEmbeddingRoute names the ModelRoute discovery embeds through (DISCOVERY_EMBEDDING_ROUTE).
 	// Empty ⇒ the discovery edge answers 501 rather than guessing a model.
 	DiscoveryEmbeddingRoute string

@@ -47,8 +47,10 @@ import (
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory/recall"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge/retrieval"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
@@ -149,21 +151,22 @@ func wireMemoryAndKnowledge(tsServer *credplane.Server, cpDB *sql.DB, log logr.L
 	if gwURL := strings.TrimSpace(os.Getenv("MODEL_GATEWAY_URL")); gwURL != "" {
 		embedder := embedding.NewGatewayEmbedder(
 			gwURL, os.Getenv("MODEL_GATEWAY_KEY"), &http.Client{Timeout: 30 * time.Second})
-		tsServer.WithMemory(agentmemory.NewPostgresStore(cpDB), embedder)
+		tsServer.WithMemory(recall.New(agentmemory.NewPostgresStore(cpDB), embedder, log))
 		log.Info("long-term memory enabled (ADR 0045): pgvector store + gateway embeddings", "gateway", gwURL)
 		// Managed-RAG retrieval (ADR 0061 Fork 3 + governance #8): the token-service is the sole holder of the
 		// pgvector knowledge store; agent launchers proxy the READ path here (no DB creds in agent pods). The
 		// ingestion WRITE path is the run-worker holding its own store (m68.6). Reuses the same control-plane DB
 		// (cpDB) + gateway embedder as long-term memory — enabled on the same gateway-reachable condition.
-		tsServer.WithKnowledge(knowledge.NewPostgresStore(cpDB), embedder)
+		searcher := retrieval.NewSearcher(knowledge.NewPostgresStore(cpDB), embedder, log)
+		tsServer.WithKnowledge(searcher)
 		log.Info("managed-RAG retrieval enabled (ADR 0061): pgvector knowledge store + gateway embeddings", "gateway", gwURL)
 
 		// Cross-encoder rerank (M140.2, ADR 0117): an OPTIONAL retrieval-quality stage. Wired when a rerank
 		// service URL is set; only ACTIVATES per request when KNOWLEDGE_RERANK="true". Called directly (not via
 		// the gateway) — an internal pipeline stage, not a model call. Fail-open: a dead reranker never breaks
-		// retrieval (2s timeout + store-order fallback in the handler).
+		// retrieval (2s timeout + store-order fallback in the Searcher).
 		if rerankURL := strings.TrimSpace(os.Getenv("KNOWLEDGE_RERANK_URL")); rerankURL != "" {
-			tsServer.WithReranker(credplane.NewHTTPReranker(rerankURL, nil))
+			searcher.WithReranker(retrieval.NewHTTPReranker(rerankURL, nil))
 			log.Info("cross-encoder rerank wired (M140.2, ADR 0117): rerank service reachable", "reranker", rerankURL)
 		}
 
@@ -171,7 +174,7 @@ func wireMemoryAndKnowledge(tsServer *credplane.Server, cpDB *sql.DB, log logr.L
 		// Wired when a rewrite model is set; only ACTIVATES per request when KNOWLEDGE_QUERY_REWRITE="true".
 		// Fail-open: a rewrite failure falls back to the raw query.
 		if rewriteModel := strings.TrimSpace(os.Getenv("KNOWLEDGE_REWRITE_MODEL")); rewriteModel != "" {
-			tsServer.WithRewriter(credplane.NewGatewayRewriter(gwURL, os.Getenv("MODEL_GATEWAY_KEY"), rewriteModel, nil))
+			searcher.WithRewriter(retrieval.NewGatewayRewriter(gwURL, os.Getenv("MODEL_GATEWAY_KEY"), rewriteModel, nil))
 			log.Info("LLM query-rewrite wired (M140.3): gateway rewriter reachable", "model", rewriteModel)
 		}
 	}

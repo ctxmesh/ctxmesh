@@ -31,7 +31,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory/recall"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge/retrieval"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
@@ -68,8 +70,8 @@ func fullServer(t *testing.T, f *authFixture) (*Server, *recordingResolver) {
 	store := knowledge.NewMemStore()
 	require.NoError(t, store.EnsureCorpus(context.Background(), testAgentNS, "docs"))
 	s := NewServer(res, f.Auth, logr.Discard()).
-		WithMemory(agentmemory.NewMemStore(), vecEmbedder{}).
-		WithKnowledge(store, dirEmbedder{})
+		WithMemory(recall.New(agentmemory.NewMemStore(), vecEmbedder{}, logr.Discard())).
+		WithKnowledge(retrieval.NewSearcher(store, dirEmbedder{}, logr.Discard()))
 	return s, res
 }
 
@@ -83,15 +85,15 @@ func everyEndpoint() map[string]any {
 		},
 		pathRevoke: revokeRequest{Namespace: testAgentNS, Server: "weather", UserHash: user},
 		pathStore:  storeRequest{Namespace: testAgentNS, Server: "weather", UserHash: user, AccessToken: "at"},
-		pathMemoryRemember: memoryRememberRequest{
+		pathMemoryRemember: recall.RememberRequest{
 			Namespace: testAgentNS, AgentName: testAgent,
 			Scope: agentmemory.ScopeAgent, Content: "north", EmbeddingModel: "m",
 		},
-		pathMemorySearch: memorySearchRequest{
+		pathMemorySearch: recall.SearchRequest{
 			Namespace: testAgentNS, AgentName: testAgent,
 			Scope: agentmemory.ScopeAgent, Query: "north", EmbeddingModel: "m",
 		},
-		pathKnowledgeSearch: knowledgeSearchRequest{
+		pathKnowledgeSearch: retrieval.SearchRequest{
 			Namespace: testAgentNS, KnowledgeBase: "docs", Query: "q",
 			EmbeddingModel: "m",
 		},
@@ -331,13 +333,13 @@ func TestAuth_StoreAndRevokeArePlatformOnly(t *testing.T) {
 func TestAuth_Memory(t *testing.T) {
 	f := newAuthFixture()
 	agent := func() map[string]string { return bearer(f.AgentToken(testAgentNS, testAgent)) }
-	perUser := func(user string) memorySearchRequest {
-		return memorySearchRequest{
+	perUser := func(user string) recall.SearchRequest {
+		return recall.SearchRequest{
 			Namespace: testAgentNS, AgentName: testAgent, Scope: agentmemory.ScopeAgentUser,
 			Subject: user, Query: "north", EmbeddingModel: "m",
 		}
 	}
-	agentWide := memorySearchRequest{
+	agentWide := recall.SearchRequest{
 		Namespace: testAgentNS, AgentName: testAgent, Scope: agentmemory.ScopeAgent,
 		Query: "north", EmbeddingModel: "m",
 	}
@@ -345,7 +347,7 @@ func TestAuth_Memory(t *testing.T) {
 	cases := []struct {
 		name    string
 		headers map[string]string
-		body    memorySearchRequest
+		body    recall.SearchRequest
 		want    int
 	}{
 		{"agent-wide, its own", agent(), agentWide, http.StatusOK},
@@ -353,15 +355,15 @@ func TestAuth_Memory(t *testing.T) {
 			"per-user, the capability's user", withCapability(agent(), f.StandaloneCapability("hash-alice", testAgentNS, testAgent)),
 			perUser("hash-alice"), http.StatusOK,
 		},
-		{"another namespace", agent(), memorySearchRequest{
+		{"another namespace", agent(), recall.SearchRequest{
 			Namespace: "other", AgentName: testAgent,
 			Scope: agentmemory.ScopeAgent, Query: "north", EmbeddingModel: "m",
 		}, http.StatusForbidden},
-		{"another agent", agent(), memorySearchRequest{
+		{"another agent", agent(), recall.SearchRequest{
 			Namespace: testAgentNS, AgentName: "other",
 			Scope: agentmemory.ScopeAgent, Query: "north", EmbeddingModel: "m",
 		}, http.StatusForbidden},
-		{"agent-wide with a subject", agent(), memorySearchRequest{
+		{"agent-wide with a subject", agent(), recall.SearchRequest{
 			Namespace: testAgentNS, AgentName: testAgent,
 			Scope: agentmemory.ScopeAgent, Subject: "hash-alice", Query: "north", EmbeddingModel: "m",
 		}, http.StatusForbidden},
@@ -391,7 +393,7 @@ func TestAuth_Memory(t *testing.T) {
 			s, _ := fullServer(t, f)
 			rec := postJSONWith(t, s, pathMemorySearch, tc.body, tc.headers)
 			assert.Equal(t, tc.want, rec.Code, rec.Body.String())
-			remember := memoryRememberRequest{
+			remember := recall.RememberRequest{
 				Namespace: tc.body.Namespace, AgentName: tc.body.AgentName,
 				Scope: tc.body.Scope, Subject: tc.body.Subject, Content: "north", EmbeddingModel: "m",
 			}
@@ -422,16 +424,16 @@ func TestAuth_MemoryAndKnowledgeRefuseACallerThatIsNoAgent(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code, path)
 	}
 	// Naming no agent does not make a pod that is no agent one: there is no memory partition of "".
-	nameless := memorySearchRequest{Namespace: testAgentNS, Scope: agentmemory.ScopeAgent, Query: "q", EmbeddingModel: "m"}
+	nameless := recall.SearchRequest{Namespace: testAgentNS, Scope: agentmemory.ScopeAgent, Query: "q", EmbeddingModel: "m"}
 	rec := postJSONWith(t, s, pathMemorySearch, nameless, bearer(nonAgentToken(f, runcap.TokenServiceAgentAudience)))
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 func TestAuth_Knowledge(t *testing.T) {
 	f := newAuthFixture()
-	own := knowledgeSearchRequest{Namespace: testAgentNS, KnowledgeBase: "docs", Query: "q", EmbeddingModel: "m"}
-	other := knowledgeSearchRequest{Namespace: "other", KnowledgeBase: "docs", Query: "q", EmbeddingModel: "m"}
-	perUser := func(user string) knowledgeSearchRequest {
+	own := retrieval.SearchRequest{Namespace: testAgentNS, KnowledgeBase: "docs", Query: "q", EmbeddingModel: "m"}
+	other := retrieval.SearchRequest{Namespace: "other", KnowledgeBase: "docs", Query: "q", EmbeddingModel: "m"}
+	perUser := func(user string) retrieval.SearchRequest {
 		r := own
 		r.Subject = user
 		return r
@@ -441,7 +443,7 @@ func TestAuth_Knowledge(t *testing.T) {
 	cases := []struct {
 		name    string
 		headers map[string]string
-		body    knowledgeSearchRequest
+		body    retrieval.SearchRequest
 		want    int
 	}{
 		{"an agent, its own namespace", agent(), own, http.StatusOK},
