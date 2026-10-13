@@ -175,6 +175,43 @@ controller reads `ASYNC_BACKEND` and `NATS_URL`, which the chart sets from `bff.
 NATS now admits the KEDA operator (namespace `keda`, label `app=keda-operator`) to that port only.
 Nothing changes on an install without these values.
 
+**Security: one async publish could cut the BFF off from NATS until it restarted.** The publish edge
+put the CloudEvent type into the NATS subject unchecked. A type of about 4 KB pushed the subject past
+the server's control-line limit, the server closed the BFF's only connection, and the client does not
+reconnect after that: every later publish failed with 502 and every queue stopped delivering, silently.
+The edge now refuses with 400 a type that cannot be an agent's name (a DNS-1123 name of at most 44
+characters), the bus refuses any subject over 512 bytes before sending it, and the BFF's
+`/api/health` answers 503 once the NATS connection is closed for good, so its liveness probe restarts
+the pod. A broker that is only unreachable leaves the connection reconnecting and the probe passing.
+The edge also refuses with 403 a hop to an agent in another registry, which used to be accepted,
+published, and refused only at delivery, and which counted meanwhile as work waiting for that agent.
+
+**Fixed: an async hop that took longer than 5 seconds was delivered again while still running.** The
+JetStream consumer's redelivery schedule doubled as its ack wait, so any delivery slower than its first
+step, 5 seconds, was handed out again, answered 503 by the agent's launcher and retried, spending the
+hop's delivery budget. The ack wait is now 2 minutes with no schedule, the dispatcher reports progress
+while a delivery is in flight, and it bounds a delivery at 105 seconds, longer than the launcher's own
+90 seconds for processing one, where it gave up at 60. Retries after a refusal keep their 5s, 15s, 60s
+and 300s backoff.
+
+**Changed: hops to one agent are delivered up to 8 at once.** They were delivered one at a time, so the
+replicas a queue-depth policy added received no work. `bff.asyncDeliveryConcurrency` sets the number, and
+the broker holds no more unacknowledged hops for an agent than that.
+
+**Fixed: on the JetStream backend, eventing agents in a registry received no async hops on a cluster
+that enforces NetworkPolicy.** The registry's policy admits a member's ingress only from its own
+registry and the Knative data plane, and the dispatcher delivers from the BFF. Each registry with an
+eventing member now has a second policy, `<registry>-async-delivery`, admitting the BFF's pods (label
+`control-plane=bff` in the platform namespace) to its eventing members on the ports their agents listen
+on, only while the async backend is JetStream.
+
+**Changed: the NATS account and KEDA's location are settings.** `bff.natsAccount` names the account the
+stream lives in for KEDA's scaler, `$G` when empty. With `bff.natsCredentialsFile` set and no account, a
+queue-depth policy reports `Ready=False` with reason `QueueDepthNeedsNATSAccount` rather than a scaler
+that finds no stream. `devDataPlane.nats.kedaOperator.namespace` and `.podLabels`, `keda` and
+`app: keda-operator` by default, say which pods the bundled NATS admits to its monitoring port. An
+existing durable's filter can be moved only on NATS 2.10 or newer, and the error says so.
+
 **Fixed: the controller reset an eventing agent's replicas on every reconcile.** It wrote
 `spec.replicas` on the agent's Deployment each time, so any scale-up by KEDA was undone at the next
 reconcile, which the scale-up itself triggered. While a queue-depth ScaledObject is in effect the
