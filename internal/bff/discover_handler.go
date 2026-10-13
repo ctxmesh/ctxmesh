@@ -22,7 +22,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/ctxmesh/ctxmesh/internal/credplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
 	"github.com/ctxmesh/ctxmesh/internal/discovery"
 )
 
@@ -233,4 +233,4 @@ func clampDiscoverTopK(topK int) int {
 }
 
 // compile-time assertion that the BFF's embedder satisfies the ranking seam.
-var _ discovery.Embedder = (credplane.Embedder)(nil)
+var _ discovery.Embedder = (embedding.Embedder)(nil)

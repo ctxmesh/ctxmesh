@@ -52,6 +52,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
 	"github.com/ctxmesh/ctxmesh/internal/bff"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
 	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 	"github.com/ctxmesh/ctxmesh/internal/dbpool"
@@ -923,7 +924,7 @@ func newAsyncBus(log logr.Logger) *asyncbus.JetStreamBus {
 // (M68, ADR 0061 Fork 2 / governance #8 — the trusted worker embeds + writes, agent pods do not). It reads the
 // gateway base URL from MODEL_GATEWAY_URL (the same seam the token-service memory embedder uses) + the optional
 // MODEL_GATEWAY_KEY. Unset ⇒ nil, so the ingest endpoint + executor degrade honestly (501 / a failed-run reason).
-func newIngestEmbedder(log logr.Logger) credplane.Embedder {
+func newIngestEmbedder(log logr.Logger) embedding.Embedder {
 	gwURL := strings.TrimSpace(os.Getenv("MODEL_GATEWAY_URL"))
 	if gwURL == "" {
 		log.Info("KB ingestion embedder DISABLED: MODEL_GATEWAY_URL unset — the ingest endpoint returns 501")
@@ -931,7 +932,7 @@ func newIngestEmbedder(log logr.Logger) credplane.Embedder {
 	}
 	log.Info("KB ingestion embedder enabled (ADR 0061 Fork 2): gateway embeddings, direct-write from worker",
 		"gateway", gwURL)
-	return credplane.NewGatewayEmbedder(gwURL, os.Getenv("MODEL_GATEWAY_KEY"),
+	return embedding.NewGatewayEmbedder(gwURL, os.Getenv("MODEL_GATEWAY_KEY"),
 		&http.Client{Timeout: 60 * time.Second})
 }
 

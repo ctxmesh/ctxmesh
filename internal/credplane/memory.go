@@ -17,12 +17,12 @@ limitations under the License.
 package credplane
 
 import (
-	"context"
 	"errors"
 	"net/http"
 
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
@@ -34,20 +34,10 @@ const (
 	pathMemorySearch   = "/v1/memory/search"
 )
 
-// Embedder turns text into a vector via the model gateway's embeddings endpoint (ADR 0045). Mockable so the
-// handlers unit-test without a live gateway. Returns the vector + its dimension (stored as provenance).
-//
-// EmbedBatch is the batch form used by corpus ingestion (m68.6): one HTTP call for a slice of texts, results
-// aligned 1:1 with input order. See gatewayEmbedder.EmbedBatch for caller batch-size policy.
-type Embedder interface {
-	Embed(ctx context.Context, model, text string) (vec []float32, dim int, err error)
-	EmbedBatch(ctx context.Context, model string, texts []string) (vecs [][]float32, dim int, err error)
-}
-
 // WithMemory enables the long-term-memory endpoints over the given pgvector store + embedder. When either is
 // nil the endpoints answer errCodeUnsupported (the token-service was started without CONTROLPLANE_DSN / a
 // gateway). Returns the Server for chaining.
-func (s *Server) WithMemory(store agentmemory.Store, embedder Embedder) *Server {
+func (s *Server) WithMemory(store agentmemory.Store, embedder embedding.Embedder) *Server {
 	s.memStore = store
 	s.embedder = embedder
 	return s

@@ -26,6 +26,7 @@ import (
 	"github.com/go-logr/logr"
 
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
@@ -46,7 +47,7 @@ type Server struct {
 	// Long-term memory (ADR 0045), optional — enabled via WithMemory. nil ⇒ the /v1/memory endpoints
 	// answer errCodeUnsupported (started without CONTROLPLANE_DSN / a gateway).
 	memStore agentmemory.Store
-	embedder Embedder
+	embedder embedding.Embedder
 	// Managed-RAG retrieval (ADR 0061 Fork 3), optional — enabled via WithKnowledge. nil ⇒ the
 	// /v1/knowledge endpoint answers errCodeUnsupported. Shares the embedder with the memory endpoints.
 	knowledgeStore knowledge.Store

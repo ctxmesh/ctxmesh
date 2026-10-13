@@ -41,6 +41,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/costrollup"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/dataset"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/enduseragent"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/killscope"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
@@ -176,8 +177,8 @@ type Server struct {
 	// embedder embeds chunk texts via the model gateway (M68, ADR 0061 Fork 2) for the ingestion executor's
 	// direct write path (governance #8 — the trusted worker embeds + writes, agent pods do not). nil when
 	// MODEL_GATEWAY_URL is unset ⇒ the ingest endpoint + executor degrade honestly. Constructed in
-	// cmd/bff/main.go via credplane.NewGatewayEmbedder (the same gateway seam the token-service memory uses).
-	embedder credplane.Embedder
+	// cmd/bff/main.go via embedding.NewGatewayEmbedder (the same gateway seam the token-service memory uses).
+	embedder embedding.Embedder
 	// ocr extracts text from a scanned (image-only) PDF via the offline OCR service (M140.5, ADR 0119). The
 	// ingestion executor calls it as a FALLBACK when a PDF's born-digital text is insufficient. nil (INGEST_OCR_URL
 	// unset) ⇒ a scanned PDF stays honestly PartiallyIngested (today's behaviour) — strictly additive.
@@ -651,8 +652,8 @@ type Options struct {
 	RollupStore costrollup.Store
 	// Embedder embeds chunk texts via the model gateway for the ingestion executor (M68, ADR 0061 Fork 2).
 	// Optional — nil when MODEL_GATEWAY_URL is unset ⇒ the ingest endpoint + executor degrade honestly.
-	// Constructed in cmd/bff/main.go via credplane.NewGatewayEmbedder.
-	Embedder credplane.Embedder
+	// Constructed in cmd/bff/main.go via embedding.NewGatewayEmbedder.
+	Embedder embedding.Embedder
 
 	// OCR is the offline OCR service client for scanned-PDF ingestion (M140.5, ADR 0119). Optional — nil
 	// (INGEST_OCR_URL unset) ⇒ a scanned PDF stays PartiallyIngested. Constructed in cmd/bff/main.go via

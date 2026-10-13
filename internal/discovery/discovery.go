@@ -68,7 +68,7 @@ type Query struct {
 }
 
 // Embedder embeds text via the offline embedder behind the model gateway (ADR 0116). The interface matches
-// credplane.Embedder exactly, so a caller passes its existing embedder straight in.
+// embedding.Embedder exactly, so a caller passes its existing embedder straight in.
 type Embedder interface {
 	Embed(ctx context.Context, model, text string) (vec []float32, dim int, err error)
 	EmbedBatch(ctx context.Context, model string, texts []string) (vecs [][]float32, dim int, err error)

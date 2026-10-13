@@ -30,6 +30,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
@@ -140,7 +141,7 @@ func sanitizeScore(s float64) float64 {
 // WithKnowledge enables the managed-RAG retrieval endpoint over the given knowledge store + embedder. When either
 // is nil the endpoint answers errCodeUnsupported (the token-service was started without CONTROLPLANE_DSN / a
 // gateway). Returns the Server for chaining. The embedder is shared with the memory endpoints (same gateway).
-func (s *Server) WithKnowledge(store knowledge.Store, embedder Embedder) *Server {
+func (s *Server) WithKnowledge(store knowledge.Store, embedder embedding.Embedder) *Server {
 	s.knowledgeStore = store
 	if s.embedder == nil {
 		s.embedder = embedder

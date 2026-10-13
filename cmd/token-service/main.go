@@ -47,6 +47,7 @@ import (
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/ctxmesh/internal/credplane"
@@ -146,7 +147,7 @@ func wireMemoryAndKnowledge(tsServer *credplane.Server, cpDB *sql.DB, log logr.L
 	// the gateway; agent launchers proxy memory.remember/search_agent here (no DB creds in agent pods). Enabled
 	// when the model gateway is reachable — reuses the already-open control-plane DB (cpDB).
 	if gwURL := strings.TrimSpace(os.Getenv("MODEL_GATEWAY_URL")); gwURL != "" {
-		embedder := credplane.NewGatewayEmbedder(
+		embedder := embedding.NewGatewayEmbedder(
 			gwURL, os.Getenv("MODEL_GATEWAY_KEY"), &http.Client{Timeout: 30 * time.Second})
 		tsServer.WithMemory(agentmemory.NewPostgresStore(cpDB), embedder)
 		log.Info("long-term memory enabled (ADR 0045): pgvector store + gateway embeddings", "gateway", gwURL)

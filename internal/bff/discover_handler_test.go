@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
 	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
@@ -51,7 +52,7 @@ func (w wordEmbedder) EmbedBatch(_ context.Context, _ string, texts []string) ([
 	return out, len(w.vocab), nil
 }
 
-func testEmbedder() credplane.Embedder {
+func testEmbedder() embedding.Embedder {
 	return wordEmbedder{vocab: []string{"summarizes", "documents", "translates", "text", "sql", "invoices"}}
 }
 

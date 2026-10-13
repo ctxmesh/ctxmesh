@@ -19,6 +19,7 @@ package bff
 import (
 	"database/sql"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -28,6 +29,12 @@ import (
 
 // controlPlanePkg prefixes every package whose Store the control-plane database backs.
 const controlPlanePkg = "github.com/ctxmesh/ctxmesh/internal/controlplane/"
+
+// notStores are the packages under controlPlanePkg that back no store, so an Options field they type is
+// not set from the database: the model gateway's embeddings client.
+var notStores = []string{
+	controlPlanePkg + "embedding",
+}
 
 // TestUseControlPlaneDBSetsEveryStore: an Options field typed by a control-plane package is a
 // store this database backs, and the binary only sets what UseControlPlaneDB sets. Skills shipped
@@ -47,7 +54,8 @@ func TestUseControlPlaneDBSetsEveryStore(t *testing.T) {
 	var stores []string
 	for i := range v.NumField() {
 		f := v.Type().Field(i)
-		if f.Type.Kind() != reflect.Interface || !strings.HasPrefix(f.Type.PkgPath(), controlPlanePkg) {
+		if f.Type.Kind() != reflect.Interface || !strings.HasPrefix(f.Type.PkgPath(), controlPlanePkg) ||
+			slices.Contains(notStores, f.Type.PkgPath()) {
 			continue
 		}
 		stores = append(stores, f.Name)

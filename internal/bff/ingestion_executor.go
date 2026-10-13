@@ -25,8 +25,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
-	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/ingest"
 	"github.com/ctxmesh/ctxmesh/internal/ingestion"
 	"github.com/ctxmesh/ctxmesh/internal/run"
@@ -445,7 +445,7 @@ func (s *Server) embedAndUpsertChunks(
 
 		vecs, dim, err := s.embedBatchWithRetry(ctx, spec.EmbeddingRoute, texts)
 		if err != nil {
-			switch credplane.EmbedStatus(err) {
+			switch embedding.EmbedStatus(err) {
 			case 402:
 				// BUDGET exhausted → fail-soft, resumable (the cursor is preserved). ADR 0061 Fork 2.
 				s.failIngestion(ctx, runID, ingestionBudgetExceeded,
@@ -517,7 +517,7 @@ func (s *Server) embedBatchWithRetry(ctx context.Context, model string, texts []
 			return vecs, dim, nil
 		}
 		lastErr = err
-		if credplane.EmbedStatus(err) != 429 {
+		if embedding.EmbedStatus(err) != 429 {
 			return nil, 0, err // 402 / a genuine error → do not retry; the caller branches.
 		}
 		if attempt == embedRateRetries {

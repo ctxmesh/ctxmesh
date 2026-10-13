@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package credplane
+package embedding
 
 import (
 	"bytes"
@@ -26,6 +26,16 @@ import (
 	"net/http"
 	"strings"
 )
+
+// Embedder turns text into a vector via the model gateway's embeddings endpoint (ADR 0045). Mockable so
+// its callers unit-test without a live gateway. Returns the vector + its dimension (stored as provenance).
+//
+// EmbedBatch is the batch form used by corpus ingestion (m68.6): one HTTP call for a slice of texts, results
+// aligned 1:1 with input order. See gatewayEmbedder.EmbedBatch for caller batch-size policy.
+type Embedder interface {
+	Embed(ctx context.Context, model, text string) (vec []float32, dim int, err error)
+	EmbedBatch(ctx context.Context, model string, texts []string) (vecs [][]float32, dim int, err error)
+}
 
 // EmbedError is a typed, coded error returned by Embed/EmbedBatch when the gateway responds with a non-200
 // status. It carries the HTTP Status so a caller can branch on the transport outcome WITHOUT parsing error
@@ -53,7 +63,7 @@ func EmbedStatus(err error) int {
 }
 
 // gatewayEmbedder embeds text via the model gateway's OpenAI-compatible /v1/embeddings endpoint (ADR 0045).
-// The gateway (LiteLLM) resolves the model's provider credential server-side, so the token-service holds no
+// The gateway (LiteLLM) resolves the model's provider credential server-side, so a caller holds no
 // provider key — it only reaches the in-cluster gateway (the same trust model as the launcher's model calls).
 type gatewayEmbedder struct {
 	baseURL string // e.g. http://ctxmesh-gateway.ctxmesh.svc:4000

@@ -33,8 +33,8 @@ import (
 )
 
 // vecEmbedder maps a text to a fixed vector so search is deterministic: "north" → (1,0), else → (0,1).
-// EmbedBatch loops over texts calling the single-embed logic so tests that use the memory handlers still compile
-// and pass without needing a real gateway batch endpoint.
+// EmbedBatch loops over texts calling the single-embed logic, so it satisfies embedding.Embedder without a real
+// gateway batch endpoint.
 type vecEmbedder struct{}
 
 func (v vecEmbedder) Embed(_ context.Context, _, text string) ([]float32, int, error) {
